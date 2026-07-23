@@ -74,8 +74,11 @@ func findContact(store *contacts.Store, email string) (contacts.Contact, bool) {
 
 // pin writes a discovered key + provenance to the matching contact,
 // creating a minimal contact if none exists yet. Upsert assigns a UID when
-// c.UID is empty. Always marks the key unverified — WKD/keyserver discovery
-// is TOFU, not eyeball verification.
+// c.UID is empty. Marks the key unverified — WKD/keyserver discovery is
+// TOFU, not eyeball verification — unless the discovered fingerprint matches
+// the fingerprint already pinned to the contact, in which case this is just
+// a refresh of the same key and any existing source/verified provenance
+// (e.g. a manual, eyeball-verified pin) is preserved rather than downgraded.
 func (kr *keyResolver) pin(email, armored, fingerprint, source string) {
 	c, ok := findContact(kr.store, email)
 	if !ok {
@@ -84,10 +87,15 @@ func (kr *keyResolver) pin(email, armored, fingerprint, source string) {
 			Emails:        []contacts.ContactValue{{Value: email}},
 		}
 	}
+	sameKey := ok && c.PGPKeyFingerprint != "" && strings.EqualFold(c.PGPKeyFingerprint, fingerprint)
 	c.PGPKey = armored
-	c.PGPKeySource = source
 	c.PGPKeyFingerprint = fingerprint
-	c.PGPKeyVerified = false
+	if !sameKey {
+		c.PGPKeySource = source
+		c.PGPKeyVerified = false
+	}
+	// best-effort pin; a valid key still encrypts this send even if
+	// persistence fails
 	_, _ = kr.store.Upsert(c)
 }
 
