@@ -1,9 +1,14 @@
 package api
 
 import (
+	"context"
 	"crypto/sha1"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"kypost-server/backend/internal/pgpmail"
@@ -59,4 +64,77 @@ func validateDiscoveredKey(armored, email string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("discovered key does not carry %s as a user ID", email)
+}
+
+// wkdBaseURLOverride, when set (tests only), replaces the derived
+// scheme+host so lookups hit an httptest.Server. Mirrors keyserverBaseURL.
+var wkdBaseURLOverride string
+
+// wkdCandidateURLs returns the advanced-method URL first, then the
+// direct-method URL, for the given local-part/domain.
+func wkdCandidateURLs(localPart, domain string) []string {
+	hu := wkdHashLocalPart(localPart)
+	l := url.QueryEscape(localPart)
+	if wkdBaseURLOverride != "" {
+		// Tests: single host serves the direct-method path.
+		return []string{
+			wkdBaseURLOverride + "/.well-known/openpgpkey/hu/" + hu + "?l=" + l,
+		}
+	}
+	return []string{
+		"https://openpgpkey." + domain + "/.well-known/openpgpkey/" + domain + "/hu/" + hu + "?l=" + l,
+		"https://" + domain + "/.well-known/openpgpkey/hu/" + hu + "?l=" + l,
+	}
+}
+
+// fetchWKDKey attempts Web Key Directory discovery for email, trying the
+// advanced method then the direct method. It returns an armored public key
+// validated to carry email as a UID and to be currently usable.
+func fetchWKDKey(ctx context.Context, email string) (string, string, error) {
+	at := strings.LastIndex(email, "@")
+	if at <= 0 || at == len(email)-1 {
+		return "", "", fmt.Errorf("invalid email %q", email)
+	}
+	localPart, domain := email[:at], email[at+1:]
+	client := newSSRFSafeHTTPClient(10 * time.Second)
+
+	var lastErr error
+	for _, u := range wkdCandidateURLs(localPart, domain) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || readErr != nil {
+			lastErr = fmt.Errorf("wkd %s: status %d", u, resp.StatusCode)
+			continue
+		}
+		key, err := crypto.NewKey(body) // WKD serves binary keys
+		if err != nil {
+			lastErr = fmt.Errorf("wkd %s: parse: %w", u, err)
+			continue
+		}
+		armored, err := key.GetArmoredPublicKey()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		fp, err := validateDiscoveredKey(armored, email)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return armored, fp, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no WKD key for %s", email)
+	}
+	return "", "", lastErr
 }
