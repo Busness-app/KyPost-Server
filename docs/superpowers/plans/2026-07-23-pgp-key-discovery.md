@@ -404,8 +404,8 @@ git commit -m "feat(pgp): add WKD fetch (advanced then direct method)"
 - Test: `backend/internal/api/pgp_keyserver_test.go`
 
 **Interfaces:**
-- Produces: `func keyserverLookup(ctx context.Context, email string) (armored, fingerprint string, err error)` — the core of `handlePGPKeyserverLookup`, returning a validated armored key.
-- `handlePGPKeyserverLookup` is refactored to call it.
+- Produces: `func keyserverLookup(ctx context.Context, email string) (armored, fingerprint string, status pgpmail.KeyStatus, err error)` — fetches/parses the key and returns its status; errors only on network/404/parse. Does NOT gate on usability (each caller decides): the manual handler reports `revoked`/`expired`, the ladder checks `status.Usable()`.
+- `handlePGPKeyserverLookup` is refactored to call it and restores its original `200` response carrying `revoked`/`expired` flags; 404→not-found and network→bad-gateway mapping preserved.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -883,7 +883,7 @@ func (kr *keyResolver) resolve(ctx context.Context, email string) resolvedKey {
 		return resolvedKey{Armored: armored, Fingerprint: fp, Tier: tierWKD, Usable: true}
 	}
 
-	if _, fp, err := keyserverLookup(ctx, email); err == nil {
+	if _, fp, st, err := keyserverLookup(ctx, email); err == nil && st.Usable() {
 		if pinnedFP != "" && !strings.EqualFold(pinnedFP, fp) {
 			return resolvedKey{Tier: tierKeyChanged}
 		}

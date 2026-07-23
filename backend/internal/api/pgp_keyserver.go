@@ -24,36 +24,45 @@ var keyserverBaseURL = "https://keys.openpgp.org"
 // callers can distinguish "no key" from other lookup failures.
 var errKeyserverKeyNotFound = errors.New("no key found for this address")
 
-// keyserverLookup queries keys.openpgp.org for email and returns a validated
-// armored key. Shared by handlePGPKeyserverLookup and the send-time ladder.
-func keyserverLookup(ctx context.Context, email string) (string, string, error) {
+// keyserverLookup queries keys.openpgp.org for email and returns the
+// armored key it finds, along with its fingerprint and usability status.
+// It only handles fetch/parse — it does not gate on key usability (revoked,
+// expired, or UID mismatch); keys.openpgp.org is looked up by-email, so
+// there's no UID to check here. Callers (handlePGPKeyserverLookup and the
+// send-time ladder) apply their own usability policy.
+func keyserverLookup(ctx context.Context, email string) (armored, fingerprint string, status pgpmail.KeyStatus, err error) {
 	lookupURL := keyserverBaseURL + "/vks/v1/by-email/" + url.PathEscape(email)
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, lookupURL, nil)
 	if err != nil {
-		return "", "", err
+		return "", "", pgpmail.KeyStatus{}, err
 	}
 	resp, err := newSSRFSafeHTTPClient(10 * time.Second).Do(req)
 	if err != nil {
-		return "", "", err
+		return "", "", pgpmail.KeyStatus{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
-		return "", "", errKeyserverKeyNotFound
+		return "", "", pgpmail.KeyStatus{}, errKeyserverKeyNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("keyserver status %d", resp.StatusCode)
+		return "", "", pgpmail.KeyStatus{}, fmt.Errorf("keyserver status %d", resp.StatusCode)
 	}
-	armored, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "", "", err
+		return "", "", pgpmail.KeyStatus{}, err
 	}
-	fp, err := validateDiscoveredKey(string(armored), email)
+	armored = string(body)
+	key, err := crypto.NewKeyFromArmored(armored)
 	if err != nil {
-		return "", "", err
+		return "", "", pgpmail.KeyStatus{}, err
 	}
-	return string(armored), fp, nil
+	status, err = pgpmail.CheckKeyStatus(armored)
+	if err != nil {
+		return "", "", pgpmail.KeyStatus{}, err
+	}
+	return armored, key.GetFingerprint(), status, nil
 }
 
 // handlePGPKeyserverLookup queries keys.openpgp.org's Verifying Keyserver
@@ -68,7 +77,7 @@ func (s *Server) handlePGPKeyserverLookup(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	armored, fingerprint, err := keyserverLookup(r.Context(), email)
+	armored, fingerprint, status, err := keyserverLookup(r.Context(), email)
 	if err != nil {
 		if errors.Is(err, errKeyserverKeyNotFound) {
 			http.Error(w, "no key found for this address", http.StatusNotFound)
@@ -84,14 +93,13 @@ func (s *Server) handlePGPKeyserverLookup(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	now := time.Now().Unix()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"email":       email,
 		"fingerprint": fingerprint,
 		"keyId":       key.GetHexKeyID(),
 		"publicKey":   armored,
-		"revoked":     key.IsRevoked(now),
-		"expired":     key.IsExpired(now),
+		"revoked":     status.Revoked,
+		"expired":     status.Expired,
 	})
 }
 

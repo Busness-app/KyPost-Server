@@ -27,12 +27,15 @@ func TestKeyserverLookupReturnsKey(t *testing.T) {
 	keyserverBaseURL = srv.URL
 	defer func() { keyserverBaseURL = old }()
 
-	armored, fp, err := keyserverLookup(context.Background(), "carol@example.com")
+	armored, fp, status, err := keyserverLookup(context.Background(), "carol@example.com")
 	if err != nil {
 		t.Fatalf("keyserverLookup: %v", err)
 	}
 	if fp == "" || !strings.Contains(armored, "BEGIN PGP PUBLIC KEY BLOCK") {
 		t.Fatalf("unexpected result fp=%q", fp)
+	}
+	if !status.Usable() {
+		t.Fatalf("expected a freshly generated key to be usable, got %+v", status)
 	}
 }
 
