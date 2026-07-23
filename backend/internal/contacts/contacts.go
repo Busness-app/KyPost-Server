@@ -5,6 +5,13 @@ package contacts
 
 import "fmt"
 
+const (
+	PGPSourceManual    = "manual"
+	PGPSourceQR        = "qr"
+	PGPSourceWKD       = "wkd"
+	PGPSourceKeyserver = "keyserver"
+)
+
 func etagForRev(rev int64) string {
 	return fmt.Sprintf("rev-%d", rev)
 }
@@ -42,7 +49,10 @@ type Contact struct {
 
 	PhotoRef           string               `json:"photoRef,omitempty"` // "<sha256hex>.<ext>", servable filename under contact-photos/
 	GroupIDs           []string             `json:"groupIDs,omitempty"`
-	PGPKey             string               `json:"pgpKey,omitempty"` // opaque armored ASCII public key text
+	PGPKey             string               `json:"pgpKey,omitempty"`            // opaque armored ASCII public key text
+	PGPKeySource       string               `json:"pgpKeySource,omitempty"`      // manual|qr|wkd|keyserver
+	PGPKeyFingerprint  string               `json:"pgpKeyFingerprint,omitempty"` // TOFU pin (first-seen fingerprint)
+	PGPKeyVerified     bool                 `json:"pgpKeyVerified,omitempty"`    // user eyeballed the fingerprint / came via QR
 	IMs                []ContactIM          `json:"ims,omitempty"`
 	Websites           []ContactURL         `json:"websites,omitempty"`
 	Relations          []ContactRelation    `json:"relations,omitempty"`
