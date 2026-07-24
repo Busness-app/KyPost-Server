@@ -5,16 +5,14 @@ import (
 	"time"
 
 	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
 )
 
 // newTestPollerForWKDRecheck builds a minimal *Poller sufficient to exercise
-// recheckWKDDomains: a logger, a stateDir (so userStateDir works), and a real
-// users.Store (so p.users.List() resolves) seeded with one active user via
-// LoadOrMigrate's fresh-install path, mirroring newTestPollerForHarvest /
-// newTestPollerForSendAs in this package.
-func newTestPollerForWKDRecheck(t *testing.T) (*Poller, string) {
+// recheckWKDDomains: a logger and a stateDir pointing at the instance-level
+// WKD domain store, mirroring newTestPollerForHarvest / newTestPollerForSendAs
+// in this package.
+func newTestPollerForWKDRecheck(t *testing.T) *Poller {
 	t.Helper()
 	logger, err := logging.New(t.TempDir())
 	if err != nil {
@@ -22,32 +20,16 @@ func newTestPollerForWKDRecheck(t *testing.T) (*Poller, string) {
 	}
 	t.Cleanup(func() { _ = logger.Close() })
 
-	usersStore, err := users.LoadOrMigrate(t.TempDir(), "")
-	if err != nil {
-		t.Fatalf("LoadOrMigrate: %v", err)
-	}
-	all, err := usersStore.List()
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(all) != 1 {
-		t.Fatalf("expected exactly one seeded user, got %d", len(all))
-	}
-	if !all[0].Active {
-		t.Fatalf("seeded user must be Active")
-	}
-
 	p := &Poller{
 		log:      logger,
-		users:    usersStore,
 		stateDir: t.TempDir(),
 	}
-	return p, all[0].ID
+	return p
 }
 
 func TestRecheckSuspendsWhenTXTGone(t *testing.T) {
-	p, userID := newTestPollerForWKDRecheck(t)
-	store, err := wkdpublish.New(p.userStateDir(userID))
+	p := newTestPollerForWKDRecheck(t)
+	store, err := wkdpublish.New(p.stateDir)
 	if err != nil {
 		t.Fatalf("wkdpublish.New: %v", err)
 	}
@@ -76,8 +58,8 @@ func TestRecheckSuspendsWhenTXTGone(t *testing.T) {
 // lifecycle: a suspended claim whose TXT proof is present again on the next
 // check must flip back to verified.
 func TestRecheckReVerifiesWhenTXTReappears(t *testing.T) {
-	p, userID := newTestPollerForWKDRecheck(t)
-	store, err := wkdpublish.New(p.userStateDir(userID))
+	p := newTestPollerForWKDRecheck(t)
+	store, err := wkdpublish.New(p.stateDir)
 	if err != nil {
 		t.Fatalf("wkdpublish.New: %v", err)
 	}
@@ -108,8 +90,8 @@ func TestRecheckReVerifiesWhenTXTReappears(t *testing.T) {
 // claim checked well within recheckWKDInterval must not be re-queried, even
 // if the stubbed lookup would have flipped it.
 func TestRecheckSkipsRecentlyCheckedClaims(t *testing.T) {
-	p, userID := newTestPollerForWKDRecheck(t)
-	store, err := wkdpublish.New(p.userStateDir(userID))
+	p := newTestPollerForWKDRecheck(t)
+	store, err := wkdpublish.New(p.stateDir)
 	if err != nil {
 		t.Fatalf("wkdpublish.New: %v", err)
 	}
@@ -142,8 +124,8 @@ func TestRecheckSkipsRecentlyCheckedClaims(t *testing.T) {
 // transient DNS/lookup error must never flip a verified claim to
 // unverified, only a successful lookup that fails to find the token does.
 func TestRecheckDoesNotSuspendOnLookupError(t *testing.T) {
-	p, userID := newTestPollerForWKDRecheck(t)
-	store, err := wkdpublish.New(p.userStateDir(userID))
+	p := newTestPollerForWKDRecheck(t)
+	store, err := wkdpublish.New(p.stateDir)
 	if err != nil {
 		t.Fatalf("wkdpublish.New: %v", err)
 	}
@@ -180,8 +162,8 @@ func TestRecheckDoesNotSuspendOnLookupError(t *testing.T) {
 // eager first call, a host that restarts more often than every
 // recheckWKDInterval would never run the revocation check at all.
 func TestRunRechecksWKDDomainsOnStartup(t *testing.T) {
-	p, userID := newTestPollerForWKDRecheck(t)
-	store, err := wkdpublish.New(p.userStateDir(userID))
+	p := newTestPollerForWKDRecheck(t)
+	store, err := wkdpublish.New(p.stateDir)
 	if err != nil {
 		t.Fatalf("wkdpublish.New: %v", err)
 	}

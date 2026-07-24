@@ -1,10 +1,11 @@
-// Package wkdpublish holds one user's set of WKD domain-publishing claims —
-// domains the user has proven they control (via a DNS TXT record) and for
-// which this instance may serve their public key at the Web Key Directory
-// well-known paths. Persisted as wkd-domains.json in the user's state dir.
-// The api process (management + serving) and the poller process (periodic
-// re-check) construct independent Stores over the same file and refresh from
-// disk on every read, mirroring internal/sendas and internal/contacts.
+// Package wkdpublish holds the instance's set of WKD domain-publishing
+// claims — domains an admin has proven control over (via a DNS TXT record)
+// and for which this instance may serve public keys at the Web Key
+// Directory well-known paths, one claim/TXT record per domain. Persisted as
+// a single wkd-domains.json at the instance's state root. The api process
+// (management + serving) and the poller process (periodic re-check)
+// construct independent Stores over the same file and refresh from disk on
+// every read, mirroring internal/sendas and internal/contacts.
 package wkdpublish
 
 import (
@@ -30,10 +31,10 @@ type Claim struct {
 	LastCheckedAt string `json:"lastCheckedAt,omitempty"`
 }
 
-// Store is one user's set of WKD domain claims, persisted as
-// wkd-domains.json in the user's state directory. The API and poller
-// processes share no memory, so every read and mutation re-reads the file
-// from disk first, matching sendas.Store's convention.
+// Store is the instance's set of WKD domain claims, admin-managed and
+// persisted as a single wkd-domains.json at the instance's state root. The
+// API and poller processes share no memory, so every read and mutation
+// re-reads the file from disk first, matching sendas.Store's convention.
 type Store struct {
 	mu      sync.Mutex
 	baseDir string
