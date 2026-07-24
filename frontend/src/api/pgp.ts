@@ -25,6 +25,7 @@ export type PGPRecipientStatus = {
 export type DiscoverySettings = {
   autoEncryptWhenKeyKnown: boolean;
   storeDiscoveredKeys: boolean;
+  advertiseAutocrypt: boolean;
 };
 
 export function getPGPIdentity(): Promise<PGPIdentity> {

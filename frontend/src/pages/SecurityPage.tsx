@@ -651,6 +651,19 @@ export function SecurityPage() {
                 />
                 Save keys I discover to my contacts
               </label>
+              <label className="security-check">
+                <input
+                  type="checkbox"
+                  checked={discoverySettings.advertiseAutocrypt}
+                  disabled={discoveryBusy}
+                  onChange={(e) => void updateDiscoverySetting({ advertiseAutocrypt: e.target.checked })}
+                />
+                Advertise my public key on outgoing mail (Autocrypt)
+              </label>
+              <p className="security-muted">
+                Adds an Autocrypt header so people you email can automatically discover your key. On by
+                default.
+              </p>
               {discoveryStatus ? <p className="contacts-muted">{discoveryStatus}</p> : null}
               {suppressions.length > 0 ? (
                 <div className="security-subsection">
