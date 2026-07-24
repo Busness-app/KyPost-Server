@@ -21,7 +21,9 @@ import (
 	"kypost-server/backend/internal/fsutil"
 )
 
-// Claim is one domain the user is (or is trying to be) authoritative for.
+// Claim is one domain this instance is (or is trying to be) authoritative
+// for, proven via a single admin-managed DNS TXT record shared by all users
+// on that domain.
 type Claim struct {
 	Domain        string `json:"domain"`
 	Token         string `json:"token"`
