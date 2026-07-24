@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/fsutil"
 	"kypost-server/backend/internal/users"
@@ -34,18 +35,18 @@ type contactPayload struct {
 
 	// PhotoRef is read-only in practice — set via POST /api/contacts/{id}/photo
 	// — but accepted/echoed here so it round-trips through GET/PUT unchanged.
-	PhotoRef           string                       `json:"photoRef,omitempty"`
-	GroupIDs           []string                     `json:"groupIDs,omitempty"`
-	PGPKey             string                       `json:"pgpKey,omitempty"`
-	IMs                []contacts.ContactIM         `json:"ims,omitempty"`
-	Websites           []contacts.ContactURL        `json:"websites,omitempty"`
-	Relations          []contacts.ContactRelation   `json:"relations,omitempty"`
-	Events             []contacts.ContactEvent      `json:"events,omitempty"`
-	PhoneticGivenName  string                       `json:"phoneticGivenName,omitempty"`
-	PhoneticFamilyName string                       `json:"phoneticFamilyName,omitempty"`
-	Department         string                       `json:"department,omitempty"`
+	PhotoRef           string                        `json:"photoRef,omitempty"`
+	GroupIDs           []string                      `json:"groupIDs,omitempty"`
+	PGPKey             string                        `json:"pgpKey,omitempty"`
+	IMs                []contacts.ContactIM          `json:"ims,omitempty"`
+	Websites           []contacts.ContactURL         `json:"websites,omitempty"`
+	Relations          []contacts.ContactRelation    `json:"relations,omitempty"`
+	Events             []contacts.ContactEvent       `json:"events,omitempty"`
+	PhoneticGivenName  string                        `json:"phoneticGivenName,omitempty"`
+	PhoneticFamilyName string                        `json:"phoneticFamilyName,omitempty"`
+	Department         string                        `json:"department,omitempty"`
 	CustomFields       []contacts.ContactCustomField `json:"customFields,omitempty"`
-	Pronouns           string                       `json:"pronouns,omitempty"`
+	Pronouns           string                        `json:"pronouns,omitempty"`
 }
 
 func (p contactPayload) toContact(uid string) contacts.Contact {
@@ -80,6 +81,26 @@ func (p contactPayload) toContact(uid string) contacts.Contact {
 	}
 }
 
+// backfillPGPKeyFingerprint gives a TOFU pin to manually/legacy-entered
+// contact keys that don't have one yet, so the resolver's key_changed guard
+// (gated on pinnedFP != "") protects them too — otherwise an unpinned manual
+// key can be silently overwritten by a later WKD lookup once it expires. It
+// only fills in the fingerprint; PGPKeySource/PGPKeyVerified are left alone
+// so a discovery-set key's provenance isn't relabeled by an unrelated edit.
+// An unparseable key is left with an empty fingerprint rather than failing
+// the write — the armored text itself is still stored as-is.
+func backfillPGPKeyFingerprint(c contacts.Contact) contacts.Contact {
+	if c.PGPKey == "" || c.PGPKeyFingerprint != "" {
+		return c
+	}
+	key, err := crypto.NewKeyFromArmored(c.PGPKey)
+	if err != nil {
+		return c
+	}
+	c.PGPKeyFingerprint = key.GetFingerprint()
+	return c
+}
+
 // handleContacts serves the caller's own address book list and creates new
 // contacts.
 func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +129,7 @@ func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
 		if ac, ok := authFromContext(r); ok {
 			payload.GroupIDs = s.sanitizeGroupIDsForUser(ac.UserID, payload.GroupIDs)
 		}
-		created, err := store.Upsert(payload.toContact(""))
+		created, err := store.Upsert(backfillPGPKeyFingerprint(payload.toContact("")))
 		if err != nil {
 			http.Error(w, "failed to create contact", http.StatusInternalServerError)
 			return
@@ -175,7 +196,7 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 		if ac, ok := authFromContext(r); ok {
 			payload.GroupIDs = s.sanitizeGroupIDsForUser(ac.UserID, payload.GroupIDs)
 		}
-		updated, err := store.Upsert(payload.toContact(uid))
+		updated, err := store.Upsert(backfillPGPKeyFingerprint(payload.toContact(uid)))
 		if err != nil {
 			http.Error(w, "failed to update contact", http.StatusInternalServerError)
 			return

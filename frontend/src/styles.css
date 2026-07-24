@@ -2881,6 +2881,12 @@ pre {
   font-size: 0.85rem;
 }
 
+.compose-token-pill-badge {
+  font-size: 0.75rem;
+  white-space: nowrap;
+  color: color-mix(in srgb, var(--ink) 80%, var(--ink-strong));
+}
+
 .inbox-keyword-chip {
   display: inline-flex;
   align-items: center;

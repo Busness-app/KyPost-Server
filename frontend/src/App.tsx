@@ -3,7 +3,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 import Quill from "quill";
 import "quill/dist/quill.snow.css";
 import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "./api/client";
-import { checkPGPRecipients } from "./api/pgp";
+import { checkPGPRecipients, getPGPDiscoverySettings, type DiscoverySettings, type PGPRecipientTier } from "./api/pgp";
 import { listSendAsAliases, type SendAsAlias } from "./api/sendas";
 import { AuthContext, type AuthState } from "./auth";
 import { ContactPickerModal } from "./components/ContactPickerModal";
@@ -173,6 +173,9 @@ export function App() {
   const [composeEncrypt, setComposeEncrypt] = useState(false);
   const [composeSign, setComposeSign] = useState(false);
   const [composeRecipientKeyWarning, setComposeRecipientKeyWarning] = useState("");
+  const [composeRecipientTiers, setComposeRecipientTiers] = useState<Record<string, PGPRecipientTier>>({});
+  const [pgpDiscoverySettings, setPgpDiscoverySettings] = useState<DiscoverySettings | null>(null);
+  const [composeEncryptOverridden, setComposeEncryptOverridden] = useState(false);
   const quillEditorRef = useRef<HTMLDivElement | null>(null);
   const quillInstanceRef = useRef<Quill | null>(null);
   const composeDialogRef = useRef<HTMLDialogElement | null>(null);
@@ -462,8 +465,10 @@ export function App() {
     setComposeNotice("");
     setComposeAttachments([]);
     setComposeEncrypt(false);
+    setComposeEncryptOverridden(false);
     setComposeSign(false);
     setComposeRecipientKeyWarning("");
+    setComposeRecipientTiers({});
     if (attachmentInputRef.current) {
       attachmentInputRef.current.value = "";
     }
@@ -551,8 +556,59 @@ export function App() {
   }
 
   useEffect(() => {
+    if (!composeOpen) return;
+    let cancelled = false;
+    getPGPDiscoverySettings()
+      .then((settings) => {
+        if (!cancelled) setPgpDiscoverySettings(settings);
+      })
+      .catch(() => {
+        if (!cancelled) setPgpDiscoverySettings(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [composeOpen]);
+
+  // Spec §6: when autoEncryptWhenKeyKnown is on, silently flip Encrypt on once
+  // every current recipient already has a usable pinned key. Uses only the
+  // contact-data-only recipients-check (no network discovery), never
+  // auto-disables, and backs off entirely once the user has touched the
+  // checkbox themselves this compose.
+  useEffect(() => {
+    if (!pgpDiscoverySettings?.autoEncryptWhenKeyKnown) return;
+    if (composeEncrypt) return;
+    if (composeEncryptOverridden) return;
+    const addresses = [composeTo, composeCc, composeBcc]
+      .flatMap((f) => [...f.tokens.map((t) => t.email), f.draft])
+      .map((a) => a.trim())
+      .filter(Boolean);
+    if (addresses.length === 0) return;
+    let cancelled = false;
+    const timeoutId = setTimeout(() => {
+      checkPGPRecipients(addresses)
+        .then(({ results }) => {
+          if (cancelled) return;
+          const byAddress = new Map(results.map((r) => [r.address.toLowerCase(), r]));
+          const allVerified = addresses.every((addr) => byAddress.get(addr.toLowerCase())?.tier === "verified");
+          if (allVerified) {
+            setComposeEncrypt(true);
+          }
+        })
+        .catch(() => {
+          // Non-fatal: leave encryption off, user can still enable manually.
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [pgpDiscoverySettings, composeEncrypt, composeEncryptOverridden, composeTo, composeCc, composeBcc]);
+
+  useEffect(() => {
     if (!composeEncrypt) {
       setComposeRecipientKeyWarning("");
+      setComposeRecipientTiers({});
       return;
     }
     const addresses = [composeTo, composeCc, composeBcc]
@@ -561,6 +617,7 @@ export function App() {
       .filter(Boolean);
     if (addresses.length === 0) {
       setComposeRecipientKeyWarning("");
+      setComposeRecipientTiers({});
       return;
     }
     let cancelled = false;
@@ -574,9 +631,15 @@ export function App() {
               ? `No PGP key on file for: ${missing.join(", ")} — they'll receive a secure link instead.`
               : ""
           );
+          setComposeRecipientTiers(
+            Object.fromEntries(results.map((r) => [r.address.toLowerCase(), r.tier ?? "none"]))
+          );
         })
         .catch(() => {
-          if (!cancelled) setComposeRecipientKeyWarning("");
+          if (!cancelled) {
+            setComposeRecipientKeyWarning("");
+            setComposeRecipientTiers({});
+          }
         });
     }, 300);
     return () => {
@@ -1002,7 +1065,14 @@ export function App() {
                 <button type="button" className="compose-attach" onClick={() => setContactPickerOpen(true)} disabled={composeSending || composeSavingDraft}>📇 Contacts</button>
                 <button type="button" className="compose-trash" onClick={trashComposeDraft} disabled={composeSending || composeSavingDraft}>Trash</button>
                 <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.85rem" }}>
-                  <input type="checkbox" checked={composeEncrypt} onChange={(e) => setComposeEncrypt(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={composeEncrypt}
+                    onChange={(e) => {
+                      setComposeEncryptOverridden(true);
+                      setComposeEncrypt(e.target.checked);
+                    }}
+                  />
                   Encrypt
                 </label>
                 <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.85rem" }}>
@@ -1053,6 +1123,7 @@ export function App() {
                   onDraftChange={(draft) => setComposeTo((prev) => ({ ...prev, draft }))}
                   onAddToken={(token) => addTokenToField("to", token)}
                   onRemoveToken={(index) => setComposeTo((prev) => ({ ...prev, tokens: prev.tokens.filter((_, i) => i !== index) }))}
+                  tiers={composeRecipientTiers}
                 />
               </div>
               <div className="compose-field-row">
@@ -1063,6 +1134,7 @@ export function App() {
                   onDraftChange={(draft) => setComposeCc((prev) => ({ ...prev, draft }))}
                   onAddToken={(token) => addTokenToField("cc", token)}
                   onRemoveToken={(index) => setComposeCc((prev) => ({ ...prev, tokens: prev.tokens.filter((_, i) => i !== index) }))}
+                  tiers={composeRecipientTiers}
                 />
               </div>
               <div className="compose-field-row">
@@ -1073,6 +1145,7 @@ export function App() {
                   onDraftChange={(draft) => setComposeBcc((prev) => ({ ...prev, draft }))}
                   onAddToken={(token) => addTokenToField("bcc", token)}
                   onRemoveToken={(index) => setComposeBcc((prev) => ({ ...prev, tokens: prev.tokens.filter((_, i) => i !== index) }))}
+                  tiers={composeRecipientTiers}
                 />
               </div>
               <label className="compose-field-row">

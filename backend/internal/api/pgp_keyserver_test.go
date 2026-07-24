@@ -2,14 +2,42 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/pgpmail"
 )
+
+func TestKeyserverLookupReturnsKey(t *testing.T) {
+	allowLoopbackOutboundForTest(t)
+	id, err := pgpmail.GenerateIdentity("Carol", "carol@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(id.ArmoredPublicKey))
+	}))
+	defer srv.Close()
+	old := keyserverBaseURL
+	keyserverBaseURL = srv.URL
+	defer func() { keyserverBaseURL = old }()
+
+	armored, fp, status, err := keyserverLookup(context.Background(), "carol@example.com")
+	if err != nil {
+		t.Fatalf("keyserverLookup: %v", err)
+	}
+	if fp == "" || !strings.Contains(armored, "BEGIN PGP PUBLIC KEY BLOCK") {
+		t.Fatalf("unexpected result fp=%q", fp)
+	}
+	if !status.Usable() {
+		t.Fatalf("expected a freshly generated key to be usable, got %+v", status)
+	}
+}
 
 func TestPGPKeyserverLookupSuccess(t *testing.T) {
 	allowLoopbackOutboundForTest(t)

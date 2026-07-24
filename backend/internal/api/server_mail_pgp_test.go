@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"mime"
@@ -219,11 +220,13 @@ func TestBuildPGPRecipientPlanSplitsToCCFromBCCAndFiltersUnusableKeys(t *testing
 		}
 	}
 
+	resolver := &keyResolver{store: store, discover: false}
 	plan := buildPGPRecipientPlan(
+		context.Background(),
 		[]string{"bob@example.com"},
 		[]string{"revoked@example.com"},
 		[]string{"dave@example.com", "expired@example.com", "nokey@example.com"},
-		store,
+		resolver,
 	)
 
 	if len(plan.toCCEmails) != 1 || plan.toCCEmails[0] != "bob@example.com" || len(plan.toCCKeys) != 1 || plan.toCCKeys[0] != bobID.ArmoredPublicKey {
@@ -423,11 +426,13 @@ func TestBuildPGPRecipientPlanDedupesAcrossToCcBccKeepingFirstOccurrence(t *test
 
 	// bob@example.com appears in both To and BCC (different case) — must be
 	// counted once as a To recipient, never duplicated into bccEmails too.
+	resolver := &keyResolver{store: store, discover: false}
 	plan := buildPGPRecipientPlan(
+		context.Background(),
 		[]string{"bob@example.com"},
 		nil,
 		[]string{"Bob@Example.com"},
-		store,
+		resolver,
 	)
 
 	if len(plan.toCCEmails) != 1 || len(plan.bccEmails) != 0 {
