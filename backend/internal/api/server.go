@@ -40,6 +40,7 @@ import (
 	"kypost-server/backend/internal/mailcache"
 	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/mfa"
+	"kypost-server/backend/internal/pgpdiscovery"
 	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/processor"
 	"kypost-server/backend/internal/rules"
@@ -801,20 +802,13 @@ type pgpRecipientPlan struct {
 // builds a pgpRecipientPlan. Recipients are deduplicated case-insensitively
 // across To+CC+BCC combined, keeping only the first occurrence — an address
 // listed in both To and BCC is treated as a To recipient.
-func buildPGPRecipientPlan(toList, ccList, bccList []string, contactsStore *contacts.Store) pgpRecipientPlan {
+func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string, resolver *keyResolver) pgpRecipientPlan {
 	var plan pgpRecipientPlan
 	seen := map[string]bool{}
 
 	resolve := func(recipient string) (armoredKey string, usable bool) {
-		key, ok := findContactPGPKey(contactsStore, recipient)
-		if !ok {
-			return "", false
-		}
-		status, err := pgpmail.CheckKeyStatus(key)
-		if err != nil || !status.Usable() {
-			return "", false
-		}
-		return key, true
+		rk := resolver.resolve(ctx, recipient)
+		return rk.Armored, rk.Usable
 	}
 
 	toCC := append(append([]string{}, toList...), ccList...)
@@ -1028,7 +1022,13 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)
 		return
 	}
-	plan := buildPGPRecipientPlan(toList, ccList, bccList, contactsStore)
+	discoverySettings, derr := pgpdiscovery.Load(s.userStateDir(ac.UserID))
+	if derr != nil {
+		http.Error(w, "failed to load pgp discovery settings", http.StatusInternalServerError)
+		return
+	}
+	resolver := &keyResolver{store: contactsStore, settings: discoverySettings, discover: req.Encrypt}
+	plan := buildPGPRecipientPlan(r.Context(), toList, ccList, bccList, resolver)
 	if len(plan.toCCEmails) == 0 && len(plan.bccEmails) == 0 {
 		http.Error(w, "none of the recipients have a known pgp key — disable encryption or add keys to your contacts first", http.StatusBadRequest)
 		return
