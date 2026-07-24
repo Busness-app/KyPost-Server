@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/mail"
 	"strconv"
@@ -64,7 +65,13 @@ func harvestPinAutocryptKey(store *contacts.Store, addr, armored, fingerprint st
 		c.PGPKeyFingerprint = fingerprint
 		c.PGPKeySource = contacts.PGPSourceAutocrypt
 		c.PGPKeyVerified = false
-		_, err := store.Upsert(c)
+		_, err := store.UpsertWithPrecondition(c, contacts.ContactPrecondition{RequireETag: c.ETag()})
+		if errors.Is(err, contacts.ErrPreconditionFailed) {
+			// The contact changed between our read and our write (e.g. the
+			// api process pinned a key). Abort rather than clobber it; the
+			// next poll tick re-evaluates.
+			return harvestSkipped, nil
+		}
 		return harvestPinned, err
 	}
 	if c.PGPKeySource != contacts.PGPSourceAutocrypt {
@@ -76,7 +83,13 @@ func harvestPinAutocryptKey(store *contacts.Store, addr, armored, fingerprint st
 	c.PGPKey = armored
 	c.PGPKeyFingerprint = fingerprint
 	c.PGPKeyVerified = false
-	_, err := store.Upsert(c)
+	_, err := store.UpsertWithPrecondition(c, contacts.ContactPrecondition{RequireETag: c.ETag()})
+	if errors.Is(err, contacts.ErrPreconditionFailed) {
+		// The contact changed between our read and our write (e.g. the api
+		// process pinned a key). Abort rather than clobber it; the next poll
+		// tick re-evaluates.
+		return harvestSkipped, nil
+	}
 	return harvestUpdated, err
 }
 
