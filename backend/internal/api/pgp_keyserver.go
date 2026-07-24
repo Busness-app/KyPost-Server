@@ -131,15 +131,19 @@ func (s *Server) handlePGPRecipientsCheck(w http.ResponseWriter, r *http.Request
 		HasKey  bool   `json:"hasKey"`
 		Revoked bool   `json:"revoked"`
 		Expired bool   `json:"expired"`
+		Tier    string `json:"tier"`
 	}
 	statuses := make([]addressStatus, 0, len(req.Addresses))
 	for _, addr := range req.Addresses {
-		status := addressStatus{Address: addr}
+		status := addressStatus{Address: addr, Tier: string(tierNone)}
 		if key, ok := findContactPGPKey(contactsStore, addr); ok {
 			if ks, err := pgpmail.CheckKeyStatus(key); err == nil {
 				status.Revoked = ks.Revoked
 				status.Expired = ks.Expired
 				status.HasKey = ks.Usable()
+				if status.HasKey {
+					status.Tier = string(tierContactVerified)
+				}
 			}
 		}
 		statuses = append(statuses, status)

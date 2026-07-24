@@ -344,6 +344,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
 	mux.HandleFunc("GET /api/pgp/keyserver/lookup", s.withAuth(s.handlePGPKeyserverLookup))
 	mux.HandleFunc("POST /api/pgp/recipients/check", s.withAuth(s.handlePGPRecipientsCheck))
+	mux.HandleFunc("GET /api/pgp/discovery/settings", s.withAuth(s.handlePGPDiscoverySettings))
+	mux.HandleFunc("PUT /api/pgp/discovery/settings", s.withAuth(s.handlePGPDiscoverySettings))
 	mux.HandleFunc("GET /api/pgp/qr/token", s.withMailAuth(s.handlePGPQRToken))
 	mux.HandleFunc("GET /api/pgp/qr/key", s.handlePGPQRKey)
 	mux.HandleFunc("GET /api/groups", s.withMailAuth(s.handleGroups))
