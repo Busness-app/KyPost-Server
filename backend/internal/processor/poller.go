@@ -248,6 +248,16 @@ func (p *Poller) Run() {
 	wkdTicker := time.NewTicker(recheckWKDInterval)
 	defer wkdTicker.Stop()
 
+	// time.NewTicker only fires after the first full interval elapses, so
+	// without this, a host that restarts more often than every
+	// recheckWKDInterval (12h) would never actually run recheckWKDDomains —
+	// silently disabling the revocation half of the WKD DNS-proof control.
+	// recheckWKDDomains is idempotent and cheap (its per-claim LastCheckedAt
+	// due-guard skips anything checked recently), so running it once eagerly
+	// here is safe. Backgrounded so it never delays the tick/select loop
+	// below from starting.
+	go p.recheckWKDDomains()
+
 	for {
 		select {
 		case <-ctx.Done():
