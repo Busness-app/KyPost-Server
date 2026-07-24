@@ -26,6 +26,10 @@ export type DiscoverySettings = {
   autoEncryptWhenKeyKnown: boolean;
   storeDiscoveredKeys: boolean;
   advertiseAutocrypt: boolean;
+  // publishWKD controls whether this user's key is published at their mail
+  // domain's Web Key Directory location, once an admin has verified that
+  // domain via the (admin-only) WKD domain endpoints below. Default true.
+  publishWKD: boolean;
 };
 
 export function getPGPIdentity(): Promise<PGPIdentity> {
@@ -99,6 +103,12 @@ export type WKDDomainClaimResponse = WKDDomainClaim & {
   recordName: string;
   recordValue: string;
 };
+
+// The WKD domain-management calls below (list/claim/verify/delete) hit
+// admin-only endpoints (`s.withAdmin` on the backend) — they manage the
+// instance-wide DNS verification for a mail domain, not any one user's
+// key. A non-admin caller gets a 403. See ConfigPage's "WKD key
+// publishing (domains)" admin section.
 
 export function listWKDDomains(): Promise<{ domains: WKDDomainClaim[] }> {
   return getJSON<{ domains: WKDDomainClaim[] }>("/api/pgp/wkd/domains");

@@ -11,15 +11,9 @@ import {
   updatePGPDiscoverySettings,
   listDiscoverySuppressions,
   removeDiscoverySuppression,
-  listWKDDomains,
-  claimWKDDomain,
-  verifyWKDDomain,
-  deleteWKDDomain,
-  wkdDomainRecord,
   type PGPIdentity,
   type DiscoverySettings,
-  type DiscoverySuppression,
-  type WKDDomainClaim
+  type DiscoverySuppression
 } from "../api/pgp";
 import { listContacts, type Contact } from "../api/contacts";
 
@@ -83,13 +77,6 @@ export function SecurityPage() {
   const [discoveryStatus, setDiscoveryStatus] = useState("");
   const [suppressions, setSuppressions] = useState<DiscoverySuppression[]>([]);
 
-  // WKD (Web Key Directory) domain publishing.
-  const [wkdDomains, setWkdDomains] = useState<WKDDomainClaim[]>([]);
-  const [wkdLoading, setWkdLoading] = useState(true);
-  const [wkdBusy, setWkdBusy] = useState(false);
-  const [wkdStatus, setWkdStatus] = useState("");
-  const [wkdNewDomain, setWkdNewDomain] = useState("");
-
   useEffect(() => {
     let cancelled = false;
     getPGPDiscoverySettings()
@@ -142,74 +129,6 @@ export function SecurityPage() {
     } finally {
       setDiscoveryBusy(false);
     }
-  }
-
-  async function refreshWKDDomains() {
-    try {
-      const res = await listWKDDomains();
-      setWkdDomains(res.domains);
-    } catch (e) {
-      setWkdStatus(`Failed to load domains: ${toErrorMessage(e, "unknown error")}`);
-    } finally {
-      setWkdLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void refreshWKDDomains();
-  }, []);
-
-  async function handleAddWKDDomain(e: FormEvent) {
-    e.preventDefault();
-    const domain = wkdNewDomain.trim().toLowerCase();
-    if (!domain) return;
-    setWkdBusy(true);
-    setWkdStatus("");
-    try {
-      await claimWKDDomain(domain);
-      setWkdNewDomain("");
-      await refreshWKDDomains();
-    } catch (e) {
-      setWkdStatus(`Failed to add domain: ${toErrorMessage(e, "unknown error")}`);
-    } finally {
-      setWkdBusy(false);
-    }
-  }
-
-  async function handleVerifyWKDDomain(domain: string) {
-    setWkdBusy(true);
-    setWkdStatus("");
-    try {
-      const res = await verifyWKDDomain(domain);
-      await refreshWKDDomains();
-      setWkdStatus(
-        res.verified
-          ? `${domain} verified. Also point openpgpkey.${domain} at this server (DNS or a tunnel) so key lookups can actually resolve.`
-          : `${domain} is not verified yet — make sure the DNS TXT record is in place and has propagated, then try again.`
-      );
-    } catch (e) {
-      setWkdStatus(`Failed to verify domain: ${toErrorMessage(e, "unknown error")}`);
-    } finally {
-      setWkdBusy(false);
-    }
-  }
-
-  async function handleRemoveWKDDomain(domain: string) {
-    if (!window.confirm(`Stop publishing your key for ${domain}?`)) return;
-    setWkdBusy(true);
-    setWkdStatus("");
-    try {
-      await deleteWKDDomain(domain);
-      await refreshWKDDomains();
-    } catch (e) {
-      setWkdStatus(`Failed to remove domain: ${toErrorMessage(e, "unknown error")}`);
-    } finally {
-      setWkdBusy(false);
-    }
-  }
-
-  function copyWKDText(text: string) {
-    void navigator.clipboard?.writeText(text);
   }
 
   useEffect(() => {
@@ -745,6 +664,19 @@ export function SecurityPage() {
                 Adds an Autocrypt header so people you email can automatically discover your key. On by
                 default.
               </p>
+              <label className="security-check">
+                <input
+                  type="checkbox"
+                  checked={discoverySettings.publishWKD}
+                  disabled={discoveryBusy}
+                  onChange={(e) => void updateDiscoverySetting({ publishWKD: e.target.checked })}
+                />
+                Publish my public key via Web Key Directory (WKD)
+              </label>
+              <p className="security-muted">
+                Lets people look up your key at your mail domain. Requires an administrator to have set up
+                WKD for that domain. On by default.
+              </p>
               {discoveryStatus ? <p className="contacts-muted">{discoveryStatus}</p> : null}
               {suppressions.length > 0 ? (
                 <div className="security-subsection">
@@ -765,91 +697,6 @@ export function SecurityPage() {
               ) : null}
             </div>
           ) : null}
-        </div>
-
-        <div className="security-card">
-          <div className="security-card-head">
-            <h3>Publish my key (Web Key Directory)</h3>
-          </div>
-          <p className="security-muted">
-            Publish your PGP key at the standard Web Key Directory (WKD) location for a domain you send from,
-            so other mail clients can find it automatically without you sharing it directly.
-          </p>
-
-          {wkdLoading ? (
-            <p className="contacts-muted">Loading...</p>
-          ) : wkdDomains.length > 0 ? (
-            <ul className="security-list">
-              {wkdDomains.map((d) => {
-                const record = wkdDomainRecord(d);
-                return (
-                  <li key={d.domain} className="security-subsection">
-                    <div className="security-card-head">
-                      <span>{d.domain}</span>
-                      <span className={`security-badge ${d.verified ? "security-badge-on" : "security-badge-off"}`}>
-                        <span className="security-dot" aria-hidden="true" />
-                        {d.verified ? "verified" : "unverified"}
-                      </span>
-                    </div>
-                    {d.verified ? (
-                      <p className="security-muted">
-                        Also make sure <code>openpgpkey.{d.domain}</code> points at this server (DNS or a
-                        tunnel) so key lookups actually resolve.
-                      </p>
-                    ) : (
-                      <>
-                        <p className="security-muted">Add this DNS TXT record to prove you own {d.domain}:</p>
-                        <p className="security-muted">
-                          Name: <code>{record.name}</code>{" "}
-                          <button type="button" onClick={() => copyWKDText(record.name)}>
-                            Copy
-                          </button>
-                        </p>
-                        <p className="security-muted">
-                          Value: <code>{record.value}</code>{" "}
-                          <button type="button" onClick={() => copyWKDText(record.value)}>
-                            Copy
-                          </button>
-                        </p>
-                      </>
-                    )}
-                    <div className="security-actions">
-                      {!d.verified ? (
-                        <button type="button" disabled={wkdBusy} onClick={() => void handleVerifyWKDDomain(d.domain)}>
-                          Verify
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        className="security-action-danger"
-                        disabled={wkdBusy}
-                        onClick={() => void handleRemoveWKDDomain(d.domain)}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <p className="security-muted">No domains published yet.</p>
-          )}
-
-          <form onSubmit={(e) => void handleAddWKDDomain(e)} className="auth-form security-inline-form">
-            <label>
-              <div>Domain you send from</div>
-              <input
-                value={wkdNewDomain}
-                onChange={(e) => setWkdNewDomain(e.target.value)}
-                placeholder="example.com"
-              />
-            </label>
-            <button type="submit" disabled={wkdBusy || wkdNewDomain.trim() === ""}>
-              {wkdBusy ? "Working..." : "Add domain"}
-            </button>
-          </form>
-          {wkdStatus ? <p className="contacts-muted">{wkdStatus}</p> : null}
         </div>
       </div>
     </section>
