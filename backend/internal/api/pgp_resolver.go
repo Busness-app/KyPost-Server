@@ -83,8 +83,9 @@ func (kr *keyResolver) pin(email, armored, fingerprint, source string) {
 	c, ok := findContact(kr.store, email)
 	if !ok {
 		c = contacts.Contact{
-			FormattedName: email,
-			Emails:        []contacts.ContactValue{{Value: email}},
+			FormattedName:    email,
+			Emails:           []contacts.ContactValue{{Value: email}},
+			DiscoveryCreated: true,
 		}
 	}
 	sameKey := ok && c.PGPKeyFingerprint != "" && strings.EqualFold(c.PGPKeyFingerprint, fingerprint)

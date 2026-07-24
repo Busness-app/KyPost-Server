@@ -69,6 +69,14 @@ type Contact struct {
 	// plain JSON; clients that don't understand them ignore them.
 	MergedUIDs []string `json:"mergedUIDs,omitempty"`
 	MergedInto string   `json:"mergedInto,omitempty"`
+
+	// DiscoveryCreated marks a contact the send-time key-discovery ladder
+	// created from scratch (no prior contact for the address) when it pinned a
+	// WKD/keyserver key — distinct from PGPKeySource, which describes the key,
+	// not the contact. Drives the "added automatically" badge and the implicit
+	// discovery-suppression-on-delete trigger. Rides existing CardDAV/mobile
+	// sync as plain JSON; clients that don't understand it ignore it.
+	DiscoveryCreated bool `json:"discoveryCreated,omitempty"`
 }
 
 // ETag is the CardDAV entity tag / mobile-sync change marker for this
@@ -164,6 +172,7 @@ func (c *Contact) tombstone() {
 	c.Pronouns = ""
 	c.IsSelf = false
 	c.MergedUIDs = nil
+	c.DiscoveryCreated = false
 	// MergedInto is intentionally preserved: a merge tombstones the loser and
 	// then records which survivor it was folded into.
 }
