@@ -144,13 +144,23 @@ func (s *Server) sendAsFor(r *http.Request) (*sendas.Store, error) {
 	return s.userSendAsStore(ac.UserID)
 }
 
-// userWKDPublishStore returns the user's WKD domain-publishing claim store.
-// Unlike the cached stores above, wkdpublish.Store already re-reads its
-// backing file on every access (see internal/wkdpublish's package doc), and
-// both the api process and the poller process construct independent Stores
-// over the same file, so there is nothing to gain from caching here.
+// userWKDPublishStore returns the cached per-user WKD domain-publishing
+// claim store, mirroring the sibling stores above. wkdpublish.Store
+// re-reads its backing file on every access (see internal/wkdpublish's
+// package doc) so this process and the poller process — which independently
+// constructs its own Store over the same file — stay coherent, exactly like
+// state.Store; but within THIS process, two independent Store instances
+// over the same file would each hold their own mutex, so a read-modify-write
+// (e.g. SetVerified) on one instance could interleave with another (e.g. a
+// concurrent Delete) and resurrect data one of them meant to remove. Routing
+// through the shared cache gives concurrent requests within this process a
+// single mutex to serialize on, and also drops the per-request
+// os.MkdirAll wkdpublish.New performs from the hot, unauthenticated
+// /.well-known/openpgpkey/ serving path.
 func (s *Server) userWKDPublishStore(userID string) (*wkdpublish.Store, error) {
-	return wkdpublish.New(s.userStateDir(userID))
+	return getOrCreateUserStore(&s.userMu, s.userWKDPublish, userID, func() (*wkdpublish.Store, error) {
+		return wkdpublish.New(s.userStateDir(userID))
+	})
 }
 
 func (s *Server) userGroupsStore(userID string) (*groups.Store, error) {

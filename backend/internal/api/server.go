@@ -48,6 +48,7 @@ import (
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/totp"
 	"kypost-server/backend/internal/users"
+	"kypost-server/backend/internal/wkdpublish"
 
 	goimap "github.com/BrianLeishman/go-imap"
 )
@@ -130,6 +131,7 @@ type Server struct {
 	userGroups     map[string]*groups.Store
 	userRules      map[string]*rules.Store
 	userMailCache  map[string]*mailcache.Store
+	userWKDPublish map[string]*wkdpublish.Store
 	userMail       map[string]*serverMailEntry
 	subIndex       map[string]string
 	deviceIndex    map[string]string
@@ -200,6 +202,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		userGroups:             map[string]*groups.Store{},
 		userRules:              map[string]*rules.Store{},
 		userMailCache:          map[string]*mailcache.Store{},
+		userWKDPublish:         map[string]*wkdpublish.Store{},
 		userMail:               map[string]*serverMailEntry{},
 		subIndex:               map[string]string{},
 		deviceIndex:            map[string]string{},
