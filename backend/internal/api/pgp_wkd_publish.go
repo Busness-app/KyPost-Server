@@ -10,6 +10,7 @@ import (
 
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"kypost-server/backend/internal/mailmsg"
+	"kypost-server/backend/internal/pgpdiscovery"
 	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
 )
@@ -225,12 +226,15 @@ func hostDomain(host string) string {
 }
 
 // lookupPublishedKey scans users for an Active user with a non-empty PGP key
-// who has a publishable address at domain (domain must hold a verified
-// instance-level WKD claim) whose hashed local-part matches hu. On a match
-// it returns the BINARY (unarmored) form of that user's public key, as WKD
-// requires. One user's unparseable/corrupt key is skipped (continue to the
-// next user) rather than aborting the whole scan, so it can't deny WKD
-// lookups for every other user on the same instance.
+// whose per-user PublishWKD setting is on (checked after the cheap
+// Active/has-key checks and before any address matching, so a settings file
+// read only happens for plausible candidates) and who has a publishable
+// address at domain (domain must hold a verified instance-level WKD claim)
+// whose hashed local-part matches hu. On a match it returns the BINARY
+// (unarmored) form of that user's public key, as WKD requires. One user's
+// unparseable/corrupt key, or a failed settings read, is skipped (continue
+// to the next user) rather than aborting the whole scan, so it can't deny
+// WKD lookups for every other user on the same instance.
 func (s *Server) lookupPublishedKey(domain, hu string) ([]byte, bool) {
 	store, err := s.wkdPublishStore()
 	if err != nil || !store.VerifiedDomains()[domain] {
@@ -244,6 +248,10 @@ usersLoop:
 	for _, u := range users {
 		if !u.Active || u.PGPPublicKey == "" {
 			continue
+		}
+		settings, serr := pgpdiscovery.Load(s.userStateDir(u.ID))
+		if serr != nil || !settings.PublishWKD {
+			continue usersLoop
 		}
 		for _, addr := range s.publishableAddressesAt(u, domain) {
 			at := strings.LastIndex(addr, "@")

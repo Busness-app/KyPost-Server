@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
+	"kypost-server/backend/internal/pgpdiscovery"
 	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
 )
@@ -311,6 +312,50 @@ func TestWKDServingDomainScoping(t *testing.T) {
 	// unverified claim must never serve.
 	if r := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/pending.example/hu/"+hu, "", nil); r.Code != http.StatusNotFound {
 		t.Fatalf("claimed-but-unverified domain: status %d, want 404", r.Code)
+	}
+}
+
+// TestWKDServingRespectsPublishWKDOptOut confirms domain verification alone
+// does not publish a user's key: PublishWKD is a separate, per-user gate
+// consulted at serve time. With the domain verified and a real matching
+// address, the key serves while PublishWKD defaults to true; once the user
+// explicitly turns it off, the identical lookup must 404.
+func TestWKDServingRespectsPublishWKDOptOut(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+	seedUserPGPKey(t, srv, userID, "alice@example.com")
+
+	store, err := srv.wkdPublishStore()
+	if err != nil {
+		t.Fatalf("wkdPublishStore: %v", err)
+	}
+	if _, err := store.Create("example.com"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetVerified("example.com", true, time.Now()); err != nil {
+		t.Fatalf("SetVerified: %v", err)
+	}
+
+	hu := wkdHashLocalPart("alice")
+
+	// Baseline: PublishWKD defaults to true, so the key serves.
+	if r := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/example.com/hu/"+hu, "", nil); r.Code != http.StatusOK {
+		t.Fatalf("baseline: status %d, want 200", r.Code)
+	}
+
+	// User opts out of WKD publication.
+	settings, err := pgpdiscovery.Load(srv.userStateDir(userID))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	settings.PublishWKD = false
+	if err := pgpdiscovery.Save(srv.userStateDir(userID), settings); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if r := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/example.com/hu/"+hu, "", nil); r.Code != http.StatusNotFound {
+		t.Fatalf("after opt-out: status %d, want 404", r.Code)
 	}
 }
 
