@@ -26,7 +26,7 @@ import {
   type IMService
 } from "../api/contacts";
 import { createGroup, deleteGroup, listGroups, renameGroup, type Group } from "../api/groups";
-import { getPGPIdentity, lookupPGPKeyserver } from "../api/pgp";
+import { getPGPIdentity, lookupPGPKeyserver, suppressContactDiscovery } from "../api/pgp";
 import { usePagination } from "../hooks/usePagination";
 import { useDialogOpen } from "../hooks/useDialogOpen";
 import { PageTabs } from "../components/PageTabs";
@@ -1594,6 +1594,24 @@ export function ContactsPage() {
                 <div className="contact-details-section">
                   <h4 className="contact-details-section-title">PGP Public Key</h4>
                   <PGPKeyInfo armoredKey={selectedContactPgpKey} />
+                  {selectedContact.discoveryCreated ? (
+                    <p className="contacts-muted">
+                      Added automatically by key discovery
+                      {selectedContact.pgpKeySource ? ` (${selectedContact.pgpKeySource})` : ""}
+                    </p>
+                  ) : null}
+                  {!selectedContact.isSelf &&
+                  (selectedContact.pgpKeySource === "wkd" || selectedContact.pgpKeySource === "keyserver") ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!selectedContact) return;
+                        void suppressContactDiscovery(selectedContact.uid).then(() => void loadContacts());
+                      }}
+                    >
+                      Remove key &amp; stop rediscovering
+                    </button>
+                  ) : null}
                   <details>
                     <summary className="contacts-muted">Show raw key</summary>
                     <pre className="contact-details-notes">{selectedContactPgpKey}</pre>

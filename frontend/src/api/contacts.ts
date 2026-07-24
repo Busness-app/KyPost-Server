@@ -61,6 +61,10 @@ type ContactExtendedFields = {
   photoRef?: string;
   groupIDs?: string[];
   pgpKey?: string;
+  pgpKeySource?: string;
+  pgpKeyFingerprint?: string;
+  pgpKeyVerified?: boolean;
+  discoveryCreated?: boolean;
   ims?: ContactIM[];
   websites?: ContactURL[];
   relations?: ContactRelation[];

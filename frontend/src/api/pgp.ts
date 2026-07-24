@@ -60,3 +60,21 @@ export function lookupPGPKeyserver(
 ): Promise<{ email: string; fingerprint: string; keyId: string; publicKey: string; revoked: boolean; expired: boolean }> {
   return getJSON(`/api/pgp/keyserver/lookup?email=${encodeURIComponent(email)}`);
 }
+
+export type DiscoverySuppression = {
+  email: string;
+  suppressedAt: string;
+  reason: "deleted" | "explicit";
+};
+
+export function listDiscoverySuppressions(): Promise<{ suppressions: DiscoverySuppression[] }> {
+  return getJSON<{ suppressions: DiscoverySuppression[] }>("/api/pgp/discovery/suppressions");
+}
+
+export function removeDiscoverySuppression(email: string): Promise<{ ok: boolean }> {
+  return deleteJSON<{ ok: boolean }>(`/api/pgp/discovery/suppressions/${encodeURIComponent(email)}`);
+}
+
+export function suppressContactDiscovery(contactUID: string): Promise<{ uid: string }> {
+  return postJSON<{ uid: string }>("/api/pgp/discovery/suppress-contact", { contactUID });
+}

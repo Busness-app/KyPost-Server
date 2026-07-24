@@ -9,8 +9,11 @@ import {
   deletePGPIdentity,
   getPGPDiscoverySettings,
   updatePGPDiscoverySettings,
+  listDiscoverySuppressions,
+  removeDiscoverySuppression,
   type PGPIdentity,
-  type DiscoverySettings
+  type DiscoverySettings,
+  type DiscoverySuppression
 } from "../api/pgp";
 import { listContacts, type Contact } from "../api/contacts";
 
@@ -72,6 +75,7 @@ export function SecurityPage() {
   const [discoverySettings, setDiscoverySettings] = useState<DiscoverySettings | null>(null);
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
   const [discoveryStatus, setDiscoveryStatus] = useState("");
+  const [suppressions, setSuppressions] = useState<DiscoverySuppression[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -86,6 +90,29 @@ export function SecurityPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    listDiscoverySuppressions()
+      .then((r) => {
+        if (!cancelled) setSuppressions(r.suppressions);
+      })
+      .catch(() => {
+        if (!cancelled) setSuppressions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function allowDiscoveryAgain(email: string) {
+    try {
+      await removeDiscoverySuppression(email);
+      setSuppressions((prev) => prev.filter((s) => s.email !== email));
+    } catch {
+      setDiscoveryStatus("Failed to update discovery opt-outs.");
+    }
+  }
 
   async function updateDiscoverySetting(patch: Partial<DiscoverySettings>) {
     if (!discoverySettings) return;
@@ -625,6 +652,23 @@ export function SecurityPage() {
                 Save keys I discover to my contacts
               </label>
               {discoveryStatus ? <p className="contacts-muted">{discoveryStatus}</p> : null}
+              {suppressions.length > 0 ? (
+                <div className="security-subsection">
+                  <h5>Discovery opt-outs</h5>
+                  <ul className="security-list">
+                    {suppressions.map((s) => (
+                      <li key={s.email}>
+                        <span>
+                          {s.email} <span className="contacts-muted">({s.reason})</span>
+                        </span>
+                        <button type="button" onClick={() => void allowDiscoveryAgain(s.email)}>
+                          Allow discovery again
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
