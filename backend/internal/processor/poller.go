@@ -245,6 +245,8 @@ func (p *Poller) Run() {
 	p.log.Info("poller started", "interval", interval.String())
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	wkdTicker := time.NewTicker(recheckWKDInterval)
+	defer wkdTicker.Stop()
 
 	for {
 		select {
@@ -253,6 +255,8 @@ func (p *Poller) Run() {
 			return
 		case <-ticker.C:
 			p.tick()
+		case <-wkdTicker.C:
+			p.recheckWKDDomains()
 		}
 	}
 }
