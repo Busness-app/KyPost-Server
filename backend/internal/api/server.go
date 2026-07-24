@@ -977,14 +977,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	autocryptHeader := ""
-	if u, uerr := s.users.Get(ac.UserID); uerr == nil && u.PGPPublicKey != "" {
-		if settings, serr := pgpdiscovery.Load(s.userStateDir(ac.UserID)); serr == nil && settings.AdvertiseAutocrypt {
-			if v, ok := buildAutocryptHeader(u.PGPPublicKey, envelopeFrom); ok {
-				autocryptHeader = v
-			}
-		}
-	}
+	autocryptHeader := s.outboundAutocryptHeader(ac.UserID, envelopeFrom)
 
 	msg := mailmsg.Message{
 		From:        headerFrom,
