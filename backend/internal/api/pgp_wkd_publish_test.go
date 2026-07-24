@@ -221,3 +221,74 @@ func TestWKDServing(t *testing.T) {
 		t.Fatalf("policy: status %d len %d", p.Code, p.Body.Len())
 	}
 }
+
+// TestWKDServingDomainScoping covers the access-control boundary that
+// TestWKDServing's "unknown domain" case doesn't isolate: it uses a domain
+// with no matching address at all, so a 404 there is inconclusive about
+// whether domain scoping is actually enforced. Here, other.example and
+// pending.example both have a REAL publishable address ("alice", the same
+// local part as the verified example.com address, so it hashes to the same
+// hu) — the only thing that can explain a 404 for them is the
+// domain-verification gate itself, not an address/hash mismatch.
+func TestWKDServingDomainScoping(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+	seedUserPGPKey(t, srv, userID, "alice@example.com")
+
+	sendAsStore, err := srv.userSendAsStore(userID)
+	if err != nil {
+		t.Fatalf("userSendAsStore: %v", err)
+	}
+	otherAlias, err := sendAsStore.Create(userID, "alice@other.example", "")
+	if err != nil {
+		t.Fatalf("Create alice@other.example: %v", err)
+	}
+	if err := sendAsStore.MarkVerified(otherAlias.ID); err != nil {
+		t.Fatalf("MarkVerified alice@other.example: %v", err)
+	}
+	pendingAlias, err := sendAsStore.Create(userID, "alice@pending.example", "")
+	if err != nil {
+		t.Fatalf("Create alice@pending.example: %v", err)
+	}
+	if err := sendAsStore.MarkVerified(pendingAlias.ID); err != nil {
+		t.Fatalf("MarkVerified alice@pending.example: %v", err)
+	}
+
+	wkdStore, err := srv.userWKDPublishStore(userID)
+	if err != nil {
+		t.Fatalf("userWKDPublishStore: %v", err)
+	}
+	// example.com: claimed AND verified.
+	if _, err := wkdStore.Create("example.com"); err != nil {
+		t.Fatalf("Create example.com claim: %v", err)
+	}
+	if err := wkdStore.SetVerified("example.com", true, time.Now()); err != nil {
+		t.Fatalf("SetVerified example.com: %v", err)
+	}
+	// pending.example: claimed but never verified.
+	if _, err := wkdStore.Create("pending.example"); err != nil {
+		t.Fatalf("Create pending.example claim: %v", err)
+	}
+	// other.example: no claim at all.
+
+	hu := wkdHashLocalPart("alice")
+
+	// Sanity check: the verified domain does serve this hu.
+	if r := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/example.com/hu/"+hu, "", nil); r.Code != http.StatusOK {
+		t.Fatalf("verified domain: status %d, want 200", r.Code)
+	}
+
+	// (a) Different domain, same hu, real address, but NO verified WKD claim
+	// for it → 404. A verified claim for example.com must not leak the key
+	// under other.example.
+	if r := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/other.example/hu/"+hu, "", nil); r.Code != http.StatusNotFound {
+		t.Fatalf("domain with real address but no claim: status %d, want 404", r.Code)
+	}
+
+	// (b) Claimed-but-unverified domain, same hu, real address → 404. An
+	// unverified claim must never serve.
+	if r := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/pending.example/hu/"+hu, "", nil); r.Code != http.StatusNotFound {
+		t.Fatalf("claimed-but-unverified domain: status %d, want 404", r.Code)
+	}
+}

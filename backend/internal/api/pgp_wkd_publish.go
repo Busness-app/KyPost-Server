@@ -223,12 +223,16 @@ func (s *Server) handleWKD(w http.ResponseWriter, r *http.Request) {
 	case rest == "policy":
 		writeWKDPolicy(w)
 		return
-	case strings.HasPrefix(rest, "hu/"):
-		domain = hostDomain(r.Host)
-		hu = strings.TrimPrefix(rest, "hu/")
 	case strings.HasSuffix(rest, "/policy"):
+		// Checked before the "hu/" prefix case below so a (nonsensical but
+		// possible) domain literally named "hu" — ".../openpgpkey/hu/policy"
+		// — still routes to the policy response instead of being misread as
+		// the direct-method "hu/{hu}" shape with hu="policy".
 		writeWKDPolicy(w)
 		return
+	case strings.HasPrefix(rest, "hu/"):
+		domain = hostDomain(r.Host)
+		hu = strings.ToLower(strings.TrimPrefix(rest, "hu/"))
 	default:
 		// <domain>/hu/<hu>
 		parts := strings.SplitN(rest, "/hu/", 2)
@@ -236,7 +240,7 @@ func (s *Server) handleWKD(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		domain, hu = strings.ToLower(parts[0]), parts[1]
+		domain, hu = strings.ToLower(parts[0]), strings.ToLower(parts[1])
 	}
 	if domain == "" || hu == "" {
 		http.NotFound(w, r)
