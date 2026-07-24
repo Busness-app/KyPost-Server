@@ -18,6 +18,7 @@ import (
 	"kypost-server/backend/internal/rules"
 	"kypost-server/backend/internal/sendas"
 	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/wkdpublish"
 )
 
 // getOrCreateUserStore returns the cached per-user store, constructing and
@@ -141,6 +142,15 @@ func (s *Server) sendAsFor(r *http.Request) (*sendas.Store, error) {
 		return nil, errors.New("no auth context on request")
 	}
 	return s.userSendAsStore(ac.UserID)
+}
+
+// userWKDPublishStore returns the user's WKD domain-publishing claim store.
+// Unlike the cached stores above, wkdpublish.Store already re-reads its
+// backing file on every access (see internal/wkdpublish's package doc), and
+// both the api process and the poller process construct independent Stores
+// over the same file, so there is nothing to gain from caching here.
+func (s *Server) userWKDPublishStore(userID string) (*wkdpublish.Store, error) {
+	return wkdpublish.New(s.userStateDir(userID))
 }
 
 func (s *Server) userGroupsStore(userID string) (*groups.Store, error) {
