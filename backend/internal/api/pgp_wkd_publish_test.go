@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
+	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
 )
 
@@ -290,5 +291,58 @@ func TestWKDServingDomainScoping(t *testing.T) {
 	// unverified claim must never serve.
 	if r := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/pending.example/hu/"+hu, "", nil); r.Code != http.StatusNotFound {
 		t.Fatalf("claimed-but-unverified domain: status %d, want 404", r.Code)
+	}
+}
+
+// TestLookupPublishedKeySkipsCorruptKeyContinuesToNextUser covers O1:
+// lookupPublishedKey used to `return nil, false` the instant it hit a user
+// whose stored PGPPublicKey failed to parse, aborting the scan for every
+// other user on the instance. It must instead skip only that one user and
+// keep looking. The bootstrap user (always users.List()[0]) is given a
+// verified claim + matching address but a corrupt key; a second user with a
+// genuinely valid key at the same domain/local-part must still be found.
+func TestLookupPublishedKeySkipsCorruptKeyContinuesToNextUser(t *testing.T) {
+	srv := newTestServer(t)
+	corruptUserID := srv.mustBootstrapUserID(t)
+
+	writeUnreachableSMTPIMAPConfig(t, srv, corruptUserID, "alice@example.com")
+	if _, err := srv.users.SetPGPIdentity(corruptUserID, "fp", "kid", "not a real armored key", "", "generated", "2026-07-24T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentity corrupt: %v", err)
+	}
+	corruptStore, err := srv.userWKDPublishStore(corruptUserID)
+	if err != nil {
+		t.Fatalf("userWKDPublishStore corrupt: %v", err)
+	}
+	if _, err := corruptStore.Create("example.com"); err != nil {
+		t.Fatalf("Create claim corrupt: %v", err)
+	}
+	if err := corruptStore.SetVerified("example.com", true, time.Now()); err != nil {
+		t.Fatalf("SetVerified corrupt: %v", err)
+	}
+
+	validUser, err := srv.users.Create("valid-wkd-user", "initial-pass-123", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create valid user: %v", err)
+	}
+	writeUnreachableSMTPIMAPConfig(t, srv, validUser.ID, "alice@example.com")
+	seedUserPGPKey(t, srv, validUser.ID, "alice@example.com")
+	validStore, err := srv.userWKDPublishStore(validUser.ID)
+	if err != nil {
+		t.Fatalf("userWKDPublishStore valid: %v", err)
+	}
+	if _, err := validStore.Create("example.com"); err != nil {
+		t.Fatalf("Create claim valid: %v", err)
+	}
+	if err := validStore.SetVerified("example.com", true, time.Now()); err != nil {
+		t.Fatalf("SetVerified valid: %v", err)
+	}
+
+	hu := wkdHashLocalPart("alice")
+	rec := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/example.com/hu/"+hu, "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 despite one user's corrupt key, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := crypto.NewKey(rec.Body.Bytes()); err != nil {
+		t.Fatalf("response body is not a binary key: %v", err)
 	}
 }

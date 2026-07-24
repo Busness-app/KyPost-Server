@@ -279,12 +279,16 @@ func hostDomain(host string) string {
 // lookupPublishedKey scans users for an Active user with a non-empty PGP key
 // who holds a verified WKD claim on domain and has a publishable address at
 // that domain whose hashed local-part matches hu. On a match it returns the
-// BINARY (unarmored) form of that user's public key, as WKD requires.
+// BINARY (unarmored) form of that user's public key, as WKD requires. One
+// user's unparseable/corrupt key is skipped (continue to the next user)
+// rather than aborting the whole scan, so it can't deny WKD lookups for
+// every other user on the same instance.
 func (s *Server) lookupPublishedKey(domain, hu string) ([]byte, bool) {
 	users, err := s.users.List()
 	if err != nil {
 		return nil, false
 	}
+usersLoop:
 	for _, u := range users {
 		if !u.Active || u.PGPPublicKey == "" {
 			continue
@@ -303,11 +307,11 @@ func (s *Server) lookupPublishedKey(domain, hu string) ([]byte, bool) {
 			}
 			key, err := crypto.NewKeyFromArmored(u.PGPPublicKey)
 			if err != nil {
-				return nil, false
+				continue usersLoop
 			}
 			binary, err := key.GetPublicKey()
 			if err != nil {
-				return nil, false
+				continue usersLoop
 			}
 			return binary, true
 		}
