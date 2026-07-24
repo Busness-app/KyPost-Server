@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"kypost-server/backend/internal/wkdpublish"
 )
 
@@ -143,5 +145,79 @@ func TestWKDClaimAllowsVerifiedSendAsDomain(t *testing.T) {
 	rec := doWKDRoute(srv, userID, http.MethodPost, "/api/pgp/wkd/domains", `{"domain":"other.example"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// doRaw drives an unauthenticated request through the server's real route
+// table (WKD serving is a public endpoint, no session/CSRF). An optional
+// Host header lets the direct method's domain-from-r.Host path be exercised.
+func doRaw(t *testing.T, srv *Server, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	for k, v := range headers {
+		if k == "Host" {
+			req.Host = v
+			continue
+		}
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestWKDServing(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+	seedUserPGPKey(t, srv, userID, "alice@example.com")
+
+	// Claim + verify example.com for this user.
+	store, err := srv.userWKDPublishStore(userID)
+	if err != nil {
+		t.Fatalf("userWKDPublishStore: %v", err)
+	}
+	if _, err := store.Create("example.com"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetVerified("example.com", true, time.Now()); err != nil {
+		t.Fatalf("SetVerified: %v", err)
+	}
+
+	hu := wkdHashLocalPart("alice")
+
+	// Advanced method (domain in path)
+	adv := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/example.com/hu/"+hu, "", nil)
+	if adv.Code != http.StatusOK {
+		t.Fatalf("advanced: status %d body=%s", adv.Code, adv.Body.String())
+	}
+	if _, err := crypto.NewKey(adv.Body.Bytes()); err != nil {
+		t.Fatalf("advanced body is not a binary key: %v", err)
+	}
+	if ct := adv.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Fatalf("content-type = %q", ct)
+	}
+
+	// Direct method (domain from Host)
+	dir := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/hu/"+hu, "", map[string]string{"Host": "example.com"})
+	if dir.Code != http.StatusOK {
+		t.Fatalf("direct: status %d body=%s", dir.Code, dir.Body.String())
+	}
+	if _, err := crypto.NewKey(dir.Body.Bytes()); err != nil {
+		t.Fatalf("direct body is not a binary key: %v", err)
+	}
+
+	// Unknown domain → 404
+	if r := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/unknown.test/hu/"+hu, "", nil); r.Code != http.StatusNotFound {
+		t.Fatalf("unknown domain: status %d", r.Code)
+	}
+	// Wrong hu → 404
+	if r := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/example.com/hu/zzzzzzzz", "", nil); r.Code != http.StatusNotFound {
+		t.Fatalf("wrong hu: status %d", r.Code)
+	}
+	// Policy → 200 empty
+	p := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/example.com/policy", "", nil)
+	if p.Code != http.StatusOK || p.Body.Len() != 0 {
+		t.Fatalf("policy: status %d len %d", p.Code, p.Body.Len())
 	}
 }

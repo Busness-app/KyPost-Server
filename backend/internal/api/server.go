@@ -369,6 +369,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/rules/run", s.withMailAuth(s.handleRulesRun))
 	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
 	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
+	mux.HandleFunc("GET /.well-known/openpgpkey/", s.handleWKD)
 	mux.HandleFunc("GET /api/setup", s.handleSetup)
 	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
 	mux.HandleFunc("/", s.handleFrontend)

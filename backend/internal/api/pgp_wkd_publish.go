@@ -3,11 +3,14 @@ package api
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"kypost-server/backend/internal/mailmsg"
+	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
 )
 
@@ -197,4 +200,142 @@ func (s *Server) handleWKDDomainDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleWKD is the single public (unauthenticated) catch-all for both Web Key
+// Directory serving methods, registered at GET /.well-known/openpgpkey/. A
+// single handler dispatching on the trimmed path is required rather than
+// separate mux patterns, because a literal "hu"/"policy" segment pattern and
+// a "{domain}" wildcard pattern at the same position conflict under Go 1.22's
+// ServeMux (both would match "/.well-known/openpgpkey/hu/xyz").
+//
+// Shapes handled:
+//   - .../openpgpkey/policy                 → 200, empty body (direct method)
+//   - .../openpgpkey/{domain}/policy         → 200, empty body (advanced method)
+//   - .../openpgpkey/hu/{hu}                 → binary key or 404 (direct; domain from r.Host)
+//   - .../openpgpkey/{domain}/hu/{hu}        → binary key or 404 (advanced; domain from path)
+func (s *Server) handleWKD(w http.ResponseWriter, r *http.Request) {
+	const prefix = "/.well-known/openpgpkey/"
+	rest := strings.TrimPrefix(r.URL.Path, prefix)
+
+	var domain, hu string
+	switch {
+	case rest == "policy":
+		writeWKDPolicy(w)
+		return
+	case strings.HasPrefix(rest, "hu/"):
+		domain = hostDomain(r.Host)
+		hu = strings.TrimPrefix(rest, "hu/")
+	case strings.HasSuffix(rest, "/policy"):
+		writeWKDPolicy(w)
+		return
+	default:
+		// <domain>/hu/<hu>
+		parts := strings.SplitN(rest, "/hu/", 2)
+		if len(parts) != 2 {
+			http.NotFound(w, r)
+			return
+		}
+		domain, hu = strings.ToLower(parts[0]), parts[1]
+	}
+	if domain == "" || hu == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	binary, ok := s.lookupPublishedKey(domain, hu)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cache-Control", "max-age=3600")
+	_, _ = w.Write(binary)
+}
+
+// writeWKDPolicy answers the WKD "policy" file: a 200 with an empty body,
+// meaning "no submission-address / no special policy restrictions".
+func writeWKDPolicy(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+}
+
+// hostDomain strips an optional port from an HTTP Host header and, for the
+// direct method (where WKD clients request "openpgpkey.<domain>"), the
+// leading "openpgpkey." label if present.
+func hostDomain(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(host)
+	return strings.TrimPrefix(host, "openpgpkey.")
+}
+
+// lookupPublishedKey scans users for an Active user with a non-empty PGP key
+// who holds a verified WKD claim on domain and has a publishable address at
+// that domain whose hashed local-part matches hu. On a match it returns the
+// BINARY (unarmored) form of that user's public key, as WKD requires.
+func (s *Server) lookupPublishedKey(domain, hu string) ([]byte, bool) {
+	users, err := s.users.List()
+	if err != nil {
+		return nil, false
+	}
+	for _, u := range users {
+		if !u.Active || u.PGPPublicKey == "" {
+			continue
+		}
+		store, err := s.userWKDPublishStore(u.ID)
+		if err != nil || !store.VerifiedDomains()[domain] {
+			continue
+		}
+		for _, addr := range s.publishableAddressesAt(u, domain) {
+			at := strings.LastIndex(addr, "@")
+			if at <= 0 {
+				continue
+			}
+			if wkdHashLocalPart(addr[:at]) != hu {
+				continue
+			}
+			key, err := crypto.NewKeyFromArmored(u.PGPPublicKey)
+			if err != nil {
+				return nil, false
+			}
+			binary, err := key.GetPublicKey()
+			if err != nil {
+				return nil, false
+			}
+			return binary, true
+		}
+	}
+	return nil, false
+}
+
+// publishableAddressesAt returns the lowercased addresses belonging to user
+// u whose domain equals domain: the IMAP account address (the same address
+// handleMailSend and publishableDomains treat as the account's own From
+// address) plus any of the user's verified send-as aliases at that domain.
+// Read errors (no config yet, corrupt store, etc.) simply yield no addresses
+// rather than an error, since this is a best-effort lookup over all users.
+func (s *Server) publishableAddressesAt(u users.User, domain string) []string {
+	var out []string
+
+	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(u.ID), s.imapConfigKeyPath)
+	if err == nil && exists {
+		addr := strings.ToLower(strings.TrimSpace(payload.Username))
+		if domainOfEmail(addr) == domain {
+			out = append(out, addr)
+		}
+	}
+
+	if store, err := s.userSendAsStore(u.ID); err == nil {
+		for _, alias := range store.ListVerified() {
+			addr := strings.ToLower(strings.TrimSpace(alias.Email))
+			if domainOfEmail(addr) == domain {
+				out = append(out, addr)
+			}
+		}
+	}
+
+	return out
 }
