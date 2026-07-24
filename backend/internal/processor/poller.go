@@ -17,6 +17,7 @@ import (
 	"kypost-server/backend/internal/adapters/classifier"
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/health"
 	"kypost-server/backend/internal/logging"
 	"kypost-server/backend/internal/mailcache"
@@ -59,13 +60,14 @@ type Poller struct {
 	configDir   string
 	imapKeyPath string
 
-	userMu       sync.Mutex
-	stores       map[string]*state.Store
-	mailClients  map[string]*mailClientEntry
-	mailCaches   map[string]*mailcache.Store
-	rulesStores  map[string]*rules.Store
-	sendAsStores map[string]*sendas.Store
-	rate         map[string][]time.Time
+	userMu         sync.Mutex
+	stores         map[string]*state.Store
+	mailClients    map[string]*mailClientEntry
+	mailCaches     map[string]*mailcache.Store
+	rulesStores    map[string]*rules.Store
+	sendAsStores   map[string]*sendas.Store
+	contactsStores map[string]*contacts.Store
+	rate           map[string][]time.Time
 }
 
 type mailClientEntry struct {
@@ -114,6 +116,7 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		mailCaches:           map[string]*mailcache.Store{},
 		rulesStores:          map[string]*rules.Store{},
 		sendAsStores:         map[string]*sendas.Store{},
+		contactsStores:       map[string]*contacts.Store{},
 		rate:                 map[string][]time.Time{},
 	}
 	p.tickSem = make(chan struct{}, 1)
@@ -203,6 +206,25 @@ func (p *Poller) userRulesStore(userID string) (*rules.Store, error) {
 		return nil, err
 	}
 	p.rulesStores[userID] = st
+	return st, nil
+}
+
+// userContactsStore returns the cached contacts store for a user, mirroring
+// userRulesStore — the api process independently constructs its own
+// contacts.Store over the same on-disk contacts.json, so
+// refreshFromDiskLocked keeps the two processes' in-memory views coherent,
+// exactly as with state.Store.
+func (p *Poller) userContactsStore(userID string) (*contacts.Store, error) {
+	p.userMu.Lock()
+	defer p.userMu.Unlock()
+	if st, ok := p.contactsStores[userID]; ok {
+		return st, nil
+	}
+	st, err := contacts.New(p.userStateDir(userID))
+	if err != nil {
+		return nil, err
+	}
+	p.contactsStores[userID] = st
 	return st, nil
 }
 
@@ -463,6 +485,8 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		}
 	}
 
+	harvestEnabled, harvestSuppressed := p.autocryptHarvestConfig(u.ID)
+
 	processedCount := 0
 	skippedSeenCount := 0
 	failedCount := 0
@@ -471,6 +495,9 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		if store.Seen(msg.ID) {
 			skippedSeenCount++
 			continue
+		}
+		if harvestEnabled {
+			p.harvestAutocrypt(ctx, uc, msg, harvestSuppressed)
 		}
 		if !p.allowByRate(u.ID) {
 			p.log.Info("rate limit reached, deferring remaining emails", "user_id", u.ID)
