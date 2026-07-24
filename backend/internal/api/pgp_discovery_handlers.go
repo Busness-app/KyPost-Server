@@ -27,10 +27,36 @@ func (s *Server) handlePGPDiscoverySettings(w http.ResponseWriter, r *http.Reque
 		}
 		writeJSON(w, http.StatusOK, settings)
 	case http.MethodPut:
-		var settings pgpdiscovery.Settings
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&settings); err != nil {
+		// StoreDiscoveredKeys/AdvertiseAutocrypt are decoded as *bool, mirroring
+		// pgpdiscovery.Load's own fix for this exact hazard: both default on,
+		// so a plain bool field would silently persist false whenever a client
+		// (e.g. a stale tab loaded before a field was added) PUTs a body that
+		// omits them. nil means "field not provided" and keeps whatever is
+		// currently stored instead of clobbering it with the zero value.
+		var req struct {
+			AutoEncryptWhenKeyKnown bool  `json:"autoEncryptWhenKeyKnown"`
+			StoreDiscoveredKeys     *bool `json:"storeDiscoveredKeys"`
+			AdvertiseAutocrypt      *bool `json:"advertiseAutocrypt"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
+		}
+		current, err := pgpdiscovery.Load(dir)
+		if err != nil {
+			http.Error(w, "failed to read discovery settings", http.StatusInternalServerError)
+			return
+		}
+		settings := pgpdiscovery.Settings{
+			AutoEncryptWhenKeyKnown: req.AutoEncryptWhenKeyKnown,
+			StoreDiscoveredKeys:     current.StoreDiscoveredKeys,
+			AdvertiseAutocrypt:      current.AdvertiseAutocrypt,
+		}
+		if req.StoreDiscoveredKeys != nil {
+			settings.StoreDiscoveredKeys = *req.StoreDiscoveredKeys
+		}
+		if req.AdvertiseAutocrypt != nil {
+			settings.AdvertiseAutocrypt = *req.AdvertiseAutocrypt
 		}
 		if err := pgpdiscovery.Save(dir, settings); err != nil {
 			http.Error(w, "failed to save discovery settings", http.StatusInternalServerError)
