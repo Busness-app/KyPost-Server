@@ -43,46 +43,13 @@ func domainOfEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email[at+1:]))
 }
 
-// publishableDomains returns the lowercased set of domains the caller may
-// claim for WKD publishing: the domain of their IMAP account address (the
-// same address handleMailSend treats as the account's own From address)
-// plus the domains of any of their verified send-as aliases.
-func (s *Server) publishableDomains(r *http.Request) (map[string]bool, error) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		return nil, errMailUnauthorized
-	}
-	out := map[string]bool{}
-	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
-	if err != nil {
-		return nil, err
-	}
-	if exists {
-		if d := domainOfEmail(payload.Username); d != "" {
-			out[d] = true
-		}
-	}
-	sendAs, err := s.sendAsFor(r)
-	if err != nil {
-		return nil, err
-	}
-	for _, alias := range sendAs.ListVerified() {
-		if d := domainOfEmail(alias.Email); d != "" {
-			out[d] = true
-		}
-	}
-	return out, nil
-}
-
-// handleWKDDomains serves GET (list the caller's claims) and POST (claim a
-// new domain) on /api/pgp/wkd/domains.
+// handleWKDDomains serves GET (list all instance-wide claims) and POST
+// (claim a new domain) on /api/pgp/wkd/domains. Both are s.withAdmin-gated:
+// domain ownership is an instance-level property, not a per-user one, so an
+// admin may claim any domain they control — there is no "domain you send
+// from" restriction here.
 func (s *Server) handleWKDDomains(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-	store, err := s.userWKDPublishStore(ac.UserID)
+	store, err := s.wkdPublishStore()
 	if err != nil {
 		http.Error(w, "failed to open wkd store", http.StatusInternalServerError)
 		return
@@ -110,15 +77,6 @@ func (s *Server) handleWKDDomains(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "domain is required", http.StatusBadRequest)
 			return
 		}
-		allowed, err := s.publishableDomains(r)
-		if err != nil {
-			http.Error(w, "failed to resolve send addresses", http.StatusInternalServerError)
-			return
-		}
-		if !allowed[domain] {
-			http.Error(w, "domain does not match any of your send addresses", http.StatusBadRequest)
-			return
-		}
 		claim, err := store.Create(domain)
 		if err != nil {
 			http.Error(w, "failed to create claim", http.StatusInternalServerError)
@@ -140,17 +98,12 @@ func (s *Server) handleWKDDomains(w http.ResponseWriter, r *http.Request) {
 // reported as {verified:false} (200), not a 500 — transient DNS failures
 // are an expected, non-exceptional outcome here.
 func (s *Server) handleWKDDomainVerify(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
 	domain := strings.ToLower(strings.TrimSpace(r.PathValue("domain")))
 	if domain == "" {
 		http.Error(w, "domain is required", http.StatusBadRequest)
 		return
 	}
-	store, err := s.userWKDPublishStore(ac.UserID)
+	store, err := s.wkdPublishStore()
 	if err != nil {
 		http.Error(w, "failed to open wkd store", http.StatusInternalServerError)
 		return
@@ -178,19 +131,14 @@ func (s *Server) handleWKDDomainVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"verified": verified})
 }
 
-// handleWKDDomainDelete removes the caller's claim for {domain}.
+// handleWKDDomainDelete removes the instance-wide claim for {domain}.
 func (s *Server) handleWKDDomainDelete(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
 	domain := strings.ToLower(strings.TrimSpace(r.PathValue("domain")))
 	if domain == "" {
 		http.Error(w, "domain is required", http.StatusBadRequest)
 		return
 	}
-	store, err := s.userWKDPublishStore(ac.UserID)
+	store, err := s.wkdPublishStore()
 	if err != nil {
 		http.Error(w, "failed to open wkd store", http.StatusInternalServerError)
 		return
@@ -277,13 +225,17 @@ func hostDomain(host string) string {
 }
 
 // lookupPublishedKey scans users for an Active user with a non-empty PGP key
-// who holds a verified WKD claim on domain and has a publishable address at
-// that domain whose hashed local-part matches hu. On a match it returns the
-// BINARY (unarmored) form of that user's public key, as WKD requires. One
-// user's unparseable/corrupt key is skipped (continue to the next user)
-// rather than aborting the whole scan, so it can't deny WKD lookups for
-// every other user on the same instance.
+// who has a publishable address at domain (domain must hold a verified
+// instance-level WKD claim) whose hashed local-part matches hu. On a match
+// it returns the BINARY (unarmored) form of that user's public key, as WKD
+// requires. One user's unparseable/corrupt key is skipped (continue to the
+// next user) rather than aborting the whole scan, so it can't deny WKD
+// lookups for every other user on the same instance.
 func (s *Server) lookupPublishedKey(domain, hu string) ([]byte, bool) {
+	store, err := s.wkdPublishStore()
+	if err != nil || !store.VerifiedDomains()[domain] {
+		return nil, false
+	}
 	users, err := s.users.List()
 	if err != nil {
 		return nil, false
@@ -291,10 +243,6 @@ func (s *Server) lookupPublishedKey(domain, hu string) ([]byte, bool) {
 usersLoop:
 	for _, u := range users {
 		if !u.Active || u.PGPPublicKey == "" {
-			continue
-		}
-		store, err := s.userWKDPublishStore(u.ID)
-		if err != nil || !store.VerifiedDomains()[domain] {
 			continue
 		}
 		for _, addr := range s.publishableAddressesAt(u, domain) {
@@ -321,10 +269,13 @@ usersLoop:
 
 // publishableAddressesAt returns the lowercased addresses belonging to user
 // u whose domain equals domain: the IMAP account address (the same address
-// handleMailSend and publishableDomains treat as the account's own From
-// address) plus any of the user's verified send-as aliases at that domain.
-// Read errors (no config yet, corrupt store, etc.) simply yield no addresses
-// rather than an error, since this is a best-effort lookup over all users.
+// handleMailSend treats as the account's own From address) plus any of the
+// user's verified send-as aliases at that domain. This is the anti-
+// impersonation gate at serve time: even a verified instance-level domain
+// claim only lets a user's key be served under an address that is actually
+// theirs. Read errors (no config yet, corrupt store, etc.) simply yield no
+// addresses rather than an error, since this is a best-effort lookup over
+// all users.
 func (s *Server) publishableAddressesAt(u users.User, domain string) []string {
 	var out []string
 

@@ -131,11 +131,16 @@ type Server struct {
 	userGroups     map[string]*groups.Store
 	userRules      map[string]*rules.Store
 	userMailCache  map[string]*mailcache.Store
-	userWKDPublish map[string]*wkdpublish.Store
 	userMail       map[string]*serverMailEntry
 	subIndex       map[string]string
 	deviceIndex    map[string]string
 	davCredentials davCredentialCache
+
+	// wkdMu/wkdStore guard the single instance-level WKD domain-claim store.
+	// Domain ownership is a property of the domain, not of a user — see
+	// wkdPublishStore's doc comment below.
+	wkdMu    sync.Mutex
+	wkdStore *wkdpublish.Store
 
 	// httpServer is the live *http.Server backing Run/Serve, constructed by
 	// Prepare so that a Shutdown call arriving before Serve's goroutine has
@@ -202,7 +207,6 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		userGroups:             map[string]*groups.Store{},
 		userRules:              map[string]*rules.Store{},
 		userMailCache:          map[string]*mailcache.Store{},
-		userWKDPublish:         map[string]*wkdpublish.Store{},
 		userMail:               map[string]*serverMailEntry{},
 		subIndex:               map[string]string{},
 		deviceIndex:            map[string]string{},
@@ -237,6 +241,29 @@ func (m misconfiguredCaptchaVerifier) Verify(context.Context, string, string) (b
 // startup, alongside the poller's own construction in app.go.
 func (s *Server) SetPoller(p *processor.Poller) {
 	s.poller = p
+}
+
+// wkdPublishStore returns the instance-level WKD domain-claim store. Domain
+// ownership is a property of the domain, not of a user, so there is exactly
+// one store (and one TXT record) per domain for the whole instance, rooted
+// at the state directory itself rather than under stateDir/users/<id>/.
+// wkdpublish.Store re-reads its backing file on every access, so caching
+// this pointer keeps this process and the poller process (which
+// independently constructs its own Store over the same file) coherent,
+// while still giving concurrent requests within this process a single
+// mutex to serialize read-modify-write calls on.
+func (s *Server) wkdPublishStore() (*wkdpublish.Store, error) {
+	s.wkdMu.Lock()
+	defer s.wkdMu.Unlock()
+	if s.wkdStore != nil {
+		return s.wkdStore, nil
+	}
+	st, err := wkdpublish.New(s.stateDir)
+	if err != nil {
+		return nil, err
+	}
+	s.wkdStore = st
+	return st, nil
 }
 
 // routes builds the API's route table. Split out from Run so tests can
@@ -352,10 +379,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/pgp/discovery/suppressions", s.withAuth(s.handlePGPDiscoverySuppressions))
 	mux.HandleFunc("DELETE /api/pgp/discovery/suppressions/{email}", s.withAuth(s.handlePGPDiscoverySuppressionByEmail))
 	mux.HandleFunc("POST /api/pgp/discovery/suppress-contact", s.withAuth(s.handlePGPDiscoverySuppressContact))
-	mux.HandleFunc("GET /api/pgp/wkd/domains", s.withAuth(s.handleWKDDomains))
-	mux.HandleFunc("POST /api/pgp/wkd/domains", s.withAuth(s.handleWKDDomains))
-	mux.HandleFunc("POST /api/pgp/wkd/domains/{domain}/verify", s.withAuth(s.handleWKDDomainVerify))
-	mux.HandleFunc("DELETE /api/pgp/wkd/domains/{domain}", s.withAuth(s.handleWKDDomainDelete))
+	mux.HandleFunc("GET /api/pgp/wkd/domains", s.withAdmin(s.handleWKDDomains))
+	mux.HandleFunc("POST /api/pgp/wkd/domains", s.withAdmin(s.handleWKDDomains))
+	mux.HandleFunc("POST /api/pgp/wkd/domains/{domain}/verify", s.withAdmin(s.handleWKDDomainVerify))
+	mux.HandleFunc("DELETE /api/pgp/wkd/domains/{domain}", s.withAdmin(s.handleWKDDomainDelete))
 	mux.HandleFunc("GET /api/pgp/qr/token", s.withMailAuth(s.handlePGPQRToken))
 	mux.HandleFunc("GET /api/pgp/qr/key", s.handlePGPQRKey)
 	mux.HandleFunc("GET /api/groups", s.withMailAuth(s.handleGroups))

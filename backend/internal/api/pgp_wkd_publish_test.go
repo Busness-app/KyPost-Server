@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -41,19 +43,23 @@ func decodeJSONBody(t *testing.T, rec *httptest.ResponseRecorder) map[string]any
 	return out
 }
 
-func TestWKDClaimVerifyDeleteFlow(t *testing.T) {
+// TestWKDDomainClaimVerifyDeleteFlowAsAdmin exercises the full claim ->
+// verify -> list -> delete lifecycle as the admin (bootstrap user), which is
+// now the only role allowed to manage WKD domains at all: domain ownership
+// is an instance-level property, not tied to any one user's send addresses.
+func TestWKDDomainClaimVerifyDeleteFlowAsAdmin(t *testing.T) {
 	srv := newTestServer(t)
-	userID := srv.mustBootstrapUserID(t)
-	// Give the user a mailbox whose username is alice@example.com so
-	// example.com is a permitted publish domain.
-	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+	adminID := srv.mustBootstrapUserID(t)
 
-	// Claim a domain the user sends from.
-	claimRec := doWKDRoute(srv, userID, http.MethodPost, "/api/pgp/wkd/domains", `{"domain":"example.com"}`)
+	// Admin claims a domain — note the mixed case, which must be normalized.
+	claimRec := doWKDRoute(srv, adminID, http.MethodPost, "/api/pgp/wkd/domains", `{"domain":"Example.com"}`)
 	if claimRec.Code != http.StatusOK {
 		t.Fatalf("claim: status = %d, want 200; body=%s", claimRec.Code, claimRec.Body.String())
 	}
 	claim := decodeJSONBody(t, claimRec)
+	if claim["domain"] != "example.com" {
+		t.Fatalf("claim domain = %v, want example.com", claim["domain"])
+	}
 	token, _ := claim["token"].(string)
 	if token == "" {
 		t.Fatalf("expected non-empty token in claim response: %+v", claim)
@@ -65,26 +71,13 @@ func TestWKDClaimVerifyDeleteFlow(t *testing.T) {
 		t.Fatalf("recordValue = %v, want kypost-wkd-verify=%s", claim["recordValue"], token)
 	}
 
-	// Verify with the DNS seam returning the wrong value first.
+	// Verify with the DNS seam returning the expected token.
 	orig := wkdpublish.LookupTXT
 	t.Cleanup(func() { wkdpublish.LookupTXT = orig })
 	wkdpublish.LookupTXT = func(string) ([]string, error) {
-		return []string{"kypost-wkd-verify=not-the-token"}, nil
-	}
-	badRec := doWKDRoute(srv, userID, http.MethodPost, "/api/pgp/wkd/domains/example.com/verify", "")
-	if badRec.Code != http.StatusOK {
-		t.Fatalf("verify(wrong): status = %d, want 200; body=%s", badRec.Code, badRec.Body.String())
-	}
-	badResp := decodeJSONBody(t, badRec)
-	if badResp["verified"] != false {
-		t.Fatalf("verify(wrong): expected verified=false, got %v", badResp["verified"])
-	}
-
-	// Verify with the DNS seam returning the expected token.
-	wkdpublish.LookupTXT = func(string) ([]string, error) {
 		return []string{"kypost-wkd-verify=" + token}, nil
 	}
-	okRec := doWKDRoute(srv, userID, http.MethodPost, "/api/pgp/wkd/domains/example.com/verify", "")
+	okRec := doWKDRoute(srv, adminID, http.MethodPost, "/api/pgp/wkd/domains/example.com/verify", "")
 	if okRec.Code != http.StatusOK {
 		t.Fatalf("verify(ok): status = %d, want 200; body=%s", okRec.Code, okRec.Body.String())
 	}
@@ -94,7 +87,7 @@ func TestWKDClaimVerifyDeleteFlow(t *testing.T) {
 	}
 
 	// List reflects the verified claim.
-	listRec := doWKDRoute(srv, userID, http.MethodGet, "/api/pgp/wkd/domains", "")
+	listRec := doWKDRoute(srv, adminID, http.MethodGet, "/api/pgp/wkd/domains", "")
 	if listRec.Code != http.StatusOK {
 		t.Fatalf("list: status = %d, want 200; body=%s", listRec.Code, listRec.Body.String())
 	}
@@ -104,18 +97,12 @@ func TestWKDClaimVerifyDeleteFlow(t *testing.T) {
 		t.Fatalf("list: expected 1 domain, got %+v", listResp)
 	}
 
-	// Claim a domain the user does NOT send from → rejected.
-	foreignRec := doWKDRoute(srv, userID, http.MethodPost, "/api/pgp/wkd/domains", `{"domain":"notmine.org"}`)
-	if foreignRec.Code != http.StatusBadRequest {
-		t.Fatalf("foreign claim: status = %d, want 400; body=%s", foreignRec.Code, foreignRec.Body.String())
-	}
-
 	// Delete → 204, then list is empty again.
-	delRec := doWKDRoute(srv, userID, http.MethodDelete, "/api/pgp/wkd/domains/example.com", "")
+	delRec := doWKDRoute(srv, adminID, http.MethodDelete, "/api/pgp/wkd/domains/example.com", "")
 	if delRec.Code != http.StatusNoContent {
 		t.Fatalf("delete: status = %d, want 204; body=%s", delRec.Code, delRec.Body.String())
 	}
-	listRec2 := doWKDRoute(srv, userID, http.MethodGet, "/api/pgp/wkd/domains", "")
+	listRec2 := doWKDRoute(srv, adminID, http.MethodGet, "/api/pgp/wkd/domains", "")
 	listResp2 := decodeJSONBody(t, listRec2)
 	domains2, _ := listResp2["domains"].([]any)
 	if len(domains2) != 0 {
@@ -123,29 +110,62 @@ func TestWKDClaimVerifyDeleteFlow(t *testing.T) {
 	}
 }
 
-// TestWKDClaimAllowsVerifiedSendAsDomain confirms the publishable-domain
-// rule also accepts a verified send-as alias's domain, not just the IMAP
-// account address's domain.
-func TestWKDClaimAllowsVerifiedSendAsDomain(t *testing.T) {
+// TestWKDDomainManagementRequiresAdmin confirms a non-admin user cannot
+// manage WKD domains at all, even a domain they personally send from — the
+// old per-user "domain you send from" self-service premise is gone.
+func TestWKDDomainManagementRequiresAdmin(t *testing.T) {
 	srv := newTestServer(t)
-	userID := srv.mustBootstrapUserID(t)
-	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
-
-	store, err := srv.userSendAsStore(userID)
+	srv.mustBootstrapUserID(t)
+	regular, err := srv.users.Create("regular-wkd", "regular-password", users.RoleUser)
 	if err != nil {
-		t.Fatalf("userSendAsStore: %v", err)
+		t.Fatalf("Create regular user: %v", err)
 	}
-	alias, err := store.Create(userID, "alice@other.example", "")
-	if err != nil {
-		t.Fatalf("Create alias: %v", err)
+	writeUnreachableSMTPIMAPConfig(t, srv, regular.ID, "alice@example.com")
+
+	postRec := doWKDRoute(srv, regular.ID, http.MethodPost, "/api/pgp/wkd/domains", `{"domain":"example.com"}`)
+	if postRec.Code != http.StatusForbidden {
+		t.Fatalf("POST as non-admin: status = %d, want 403; body=%s", postRec.Code, postRec.Body.String())
 	}
-	if err := store.MarkVerified(alias.ID); err != nil {
-		t.Fatalf("MarkVerified: %v", err)
+	getRec := doWKDRoute(srv, regular.ID, http.MethodGet, "/api/pgp/wkd/domains", "")
+	if getRec.Code != http.StatusForbidden {
+		t.Fatalf("GET as non-admin: status = %d, want 403; body=%s", getRec.Code, getRec.Body.String())
+	}
+}
+
+// TestWKDDomainClaimIsInstanceScoped confirms an admin's claim lands in the
+// single instance-level store (reachable via srv.wkdPublishStore()), not a
+// per-user file.
+func TestWKDDomainClaimIsInstanceScoped(t *testing.T) {
+	srv := newTestServer(t)
+	adminID := srv.mustBootstrapUserID(t)
+
+	claimRec := doWKDRoute(srv, adminID, http.MethodPost, "/api/pgp/wkd/domains", `{"domain":"example.com"}`)
+	if claimRec.Code != http.StatusOK {
+		t.Fatalf("claim: status = %d, want 200; body=%s", claimRec.Code, claimRec.Body.String())
+	}
+	claim := decodeJSONBody(t, claimRec)
+	token, _ := claim["token"].(string)
+
+	orig := wkdpublish.LookupTXT
+	t.Cleanup(func() { wkdpublish.LookupTXT = orig })
+	wkdpublish.LookupTXT = func(string) ([]string, error) {
+		return []string{"kypost-wkd-verify=" + token}, nil
+	}
+	verifyRec := doWKDRoute(srv, adminID, http.MethodPost, "/api/pgp/wkd/domains/example.com/verify", "")
+	if verifyRec.Code != http.StatusOK {
+		t.Fatalf("verify: status = %d, want 200; body=%s", verifyRec.Code, verifyRec.Body.String())
 	}
 
-	rec := doWKDRoute(srv, userID, http.MethodPost, "/api/pgp/wkd/domains", `{"domain":"other.example"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	store, err := srv.wkdPublishStore()
+	if err != nil {
+		t.Fatalf("wkdPublishStore: %v", err)
+	}
+	if !store.VerifiedDomains()["example.com"] {
+		t.Fatalf("expected example.com to be verified in the instance store")
+	}
+
+	if _, err := os.Stat(filepath.Join(srv.userStateDir(adminID), "wkd-domains.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no per-user wkd-domains.json, stat err = %v", err)
 	}
 }
 
@@ -173,10 +193,10 @@ func TestWKDServing(t *testing.T) {
 	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
 	seedUserPGPKey(t, srv, userID, "alice@example.com")
 
-	// Claim + verify example.com for this user.
-	store, err := srv.userWKDPublishStore(userID)
+	// Claim + verify example.com in the instance-level store.
+	store, err := srv.wkdPublishStore()
 	if err != nil {
-		t.Fatalf("userWKDPublishStore: %v", err)
+		t.Fatalf("wkdPublishStore: %v", err)
 	}
 	if _, err := store.Create("example.com"); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -256,9 +276,9 @@ func TestWKDServingDomainScoping(t *testing.T) {
 		t.Fatalf("MarkVerified alice@pending.example: %v", err)
 	}
 
-	wkdStore, err := srv.userWKDPublishStore(userID)
+	wkdStore, err := srv.wkdPublishStore()
 	if err != nil {
-		t.Fatalf("userWKDPublishStore: %v", err)
+		t.Fatalf("wkdPublishStore: %v", err)
 	}
 	// example.com: claimed AND verified.
 	if _, err := wkdStore.Create("example.com"); err != nil {
@@ -309,15 +329,18 @@ func TestLookupPublishedKeySkipsCorruptKeyContinuesToNextUser(t *testing.T) {
 	if _, err := srv.users.SetPGPIdentity(corruptUserID, "fp", "kid", "not a real armored key", "", "generated", "2026-07-24T00:00:00Z"); err != nil {
 		t.Fatalf("SetPGPIdentity corrupt: %v", err)
 	}
-	corruptStore, err := srv.userWKDPublishStore(corruptUserID)
+	// example.com is claimed and verified once in the shared instance store —
+	// both the corrupt-keyed user and the valid-keyed user below are
+	// publishable addresses under this single instance-wide claim.
+	wkdStore, err := srv.wkdPublishStore()
 	if err != nil {
-		t.Fatalf("userWKDPublishStore corrupt: %v", err)
+		t.Fatalf("wkdPublishStore: %v", err)
 	}
-	if _, err := corruptStore.Create("example.com"); err != nil {
-		t.Fatalf("Create claim corrupt: %v", err)
+	if _, err := wkdStore.Create("example.com"); err != nil {
+		t.Fatalf("Create claim: %v", err)
 	}
-	if err := corruptStore.SetVerified("example.com", true, time.Now()); err != nil {
-		t.Fatalf("SetVerified corrupt: %v", err)
+	if err := wkdStore.SetVerified("example.com", true, time.Now()); err != nil {
+		t.Fatalf("SetVerified: %v", err)
 	}
 
 	validUser, err := srv.users.Create("valid-wkd-user", "initial-pass-123", users.RoleUser)
@@ -326,16 +349,6 @@ func TestLookupPublishedKeySkipsCorruptKeyContinuesToNextUser(t *testing.T) {
 	}
 	writeUnreachableSMTPIMAPConfig(t, srv, validUser.ID, "alice@example.com")
 	seedUserPGPKey(t, srv, validUser.ID, "alice@example.com")
-	validStore, err := srv.userWKDPublishStore(validUser.ID)
-	if err != nil {
-		t.Fatalf("userWKDPublishStore valid: %v", err)
-	}
-	if _, err := validStore.Create("example.com"); err != nil {
-		t.Fatalf("Create claim valid: %v", err)
-	}
-	if err := validStore.SetVerified("example.com", true, time.Now()); err != nil {
-		t.Fatalf("SetVerified valid: %v", err)
-	}
 
 	hu := wkdHashLocalPart("alice")
 	rec := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/example.com/hu/"+hu, "", nil)
