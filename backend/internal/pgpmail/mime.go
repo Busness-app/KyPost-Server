@@ -58,11 +58,23 @@ func splitMessage(raw []byte) (envelope textproto.MIMEHeader, content []byte, er
 	return header, buf.Bytes(), nil
 }
 
+// writeEnvelopeHeaders re-emits the preserved envelope headers. splitMessage
+// read them via textproto.ReadMIMEHeader, which unfolds any RFC 5322 folded
+// continuation lines back into a single long value — so the Autocrypt header
+// (see mailmsg.FoldHeaderValue) must be re-folded here, or its long base64
+// keydata would go back out as one unfolded line exceeding the RFC 5322/5321
+// line-length limits, even though mailmsg.Message.Build() folded it
+// correctly the first time.
 func writeEnvelopeHeaders(w io.Writer, envelope textproto.MIMEHeader) {
 	for _, name := range envelopeHeaderOrder {
-		if v := envelope.Get(name); v != "" {
-			_, _ = io.WriteString(w, name+": "+v+"\r\n")
+		v := envelope.Get(name)
+		if v == "" {
+			continue
 		}
+		if name == "Autocrypt" {
+			v = mailmsg.FoldHeaderValue(v)
+		}
+		_, _ = io.WriteString(w, name+": "+v+"\r\n")
 	}
 }
 

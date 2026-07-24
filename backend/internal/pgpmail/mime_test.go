@@ -2,6 +2,7 @@ package pgpmail
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 
 	"kypost-server/backend/internal/mailmsg"
+	"kypost-server/backend/internal/pgpautocrypt"
 )
 
 // withLoweredMaxInboundMessageBytes temporarily lowers the shared inbound
@@ -764,5 +766,110 @@ func TestSignMIMEPreservesAutocryptHeader(t *testing.T) {
 	}
 	if !bytes.Contains(signed, []byte("\r\nAutocrypt: addr=alice@example.com; keydata=QUJD\r\n")) {
 		t.Fatalf("Autocrypt header not on signed envelope:\n%s", signed)
+	}
+}
+
+// longAutocryptTestKeydata returns base64 keydata roughly the size of an
+// imported RSA-3072 key (~2487 octets unfolded), matching the size that
+// motivated R1: gopenpgp's default curve25519 keys stay under RFC 5322's
+// line-length limit with little headroom, but an imported RSA key does not.
+func longAutocryptTestKeydata(t *testing.T) (keyBytes []byte, keydataB64 string) {
+	t.Helper()
+	keyBytes = make([]byte, 1865)
+	if _, err := rand.Read(keyBytes); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	keydataB64 = base64.StdEncoding.EncodeToString(keyBytes)
+	if len(keydataB64) < 2000 {
+		t.Fatalf("test setup bug: keydata too short to exercise folding (%d)", len(keydataB64))
+	}
+	return keyBytes, keydataB64
+}
+
+// assertNoOverlongLines fails the test if any \r\n-delimited line in raw
+// exceeds the RFC 5322 §2.1.1 / RFC 5321 §4.5.3.1.6 998/1000-octet limits.
+func assertNoOverlongLines(t *testing.T, raw []byte) {
+	t.Helper()
+	for _, line := range bytes.Split(raw, []byte("\r\n")) {
+		if len(line) > 998 {
+			t.Fatalf("line exceeds 998 octets (%d): %q", len(line), line)
+		}
+	}
+}
+
+// TestEncryptMIMEFoldsLongAutocryptHeader covers R1's "critical subtlety":
+// splitMessage reads the outer headers via textproto.ReadMIMEHeader, which
+// unfolds mailmsg.Build()'s RFC 5322 folding back into one long value, and
+// writeEnvelopeHeaders must re-fold the Autocrypt header when re-emitting it
+// on the encrypted envelope — otherwise the fold applied on the plain path
+// is silently undone on the encrypt path.
+func TestEncryptMIMEFoldsLongAutocryptHeader(t *testing.T) {
+	alice, err := GenerateIdentity("Alice", "alice@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity alice: %v", err)
+	}
+	keyBytes, keydataB64 := longAutocryptTestKeydata(t)
+	plaintext := mailmsg.Message{
+		From:      "alice@example.com",
+		To:        []string{"bob@example.com"},
+		Subject:   "hi",
+		Body:      "secret",
+		Mode:      "plain",
+		Autocrypt: "addr=alice@example.com; keydata=" + keydataB64,
+	}.Build()
+
+	encrypted, err := EncryptMIME(plaintext, []string{alice.ArmoredPublicKey}, nil)
+	if err != nil {
+		t.Fatalf("EncryptMIME: %v", err)
+	}
+	assertNoOverlongLines(t, encrypted)
+
+	msg, err := mail.ReadMessage(bytes.NewReader(encrypted))
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	_, gotKeydata, err := pgpautocrypt.ParseAutocryptHeader(msg.Header.Get("Autocrypt"))
+	if err != nil {
+		t.Fatalf("ParseAutocryptHeader: %v", err)
+	}
+	if !bytes.Equal(gotKeydata, keyBytes) {
+		t.Fatalf("keydata round-trip mismatch on encrypted envelope")
+	}
+}
+
+// TestSignMIMEFoldsLongAutocryptHeader is TestEncryptMIMEFoldsLongAutocryptHeader's
+// counterpart for the sign-only path (buildSignedEnvelope also goes through
+// writeEnvelopeHeaders).
+func TestSignMIMEFoldsLongAutocryptHeader(t *testing.T) {
+	alice, err := GenerateIdentity("Alice", "alice@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity alice: %v", err)
+	}
+	keyBytes, keydataB64 := longAutocryptTestKeydata(t)
+	plaintext := mailmsg.Message{
+		From:      "alice@example.com",
+		To:        []string{"bob@example.com"},
+		Subject:   "hi",
+		Body:      "secret",
+		Mode:      "plain",
+		Autocrypt: "addr=alice@example.com; keydata=" + keydataB64,
+	}.Build()
+
+	signed, err := SignMIME(plaintext, alice)
+	if err != nil {
+		t.Fatalf("SignMIME: %v", err)
+	}
+	assertNoOverlongLines(t, signed)
+
+	msg, err := mail.ReadMessage(bytes.NewReader(signed))
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	_, gotKeydata, err := pgpautocrypt.ParseAutocryptHeader(msg.Header.Get("Autocrypt"))
+	if err != nil {
+		t.Fatalf("ParseAutocryptHeader: %v", err)
+	}
+	if !bytes.Equal(gotKeydata, keyBytes) {
+		t.Fatalf("keydata round-trip mismatch on signed envelope")
 	}
 }
