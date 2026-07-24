@@ -12,6 +12,7 @@ import (
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/fsutil"
+	"kypost-server/backend/internal/pgpdiscovery"
 	"kypost-server/backend/internal/users"
 )
 
@@ -99,6 +100,35 @@ func backfillPGPKeyFingerprint(c contacts.Contact) contacts.Contact {
 	}
 	c.PGPKeyFingerprint = key.GetFingerprint()
 	return c
+}
+
+// discoveryCreatedEmails returns the email addresses of the contact at uid if
+// it exists and was created by the key-discovery ladder — the set to suppress
+// when it is deleted. A non-discovery contact (or a missing one) yields nil,
+// so deleting it records no suppression.
+func discoveryCreatedEmails(store *contacts.Store, uid string) []string {
+	c, ok := store.Get(uid)
+	if !ok || !c.DiscoveryCreated {
+		return nil
+	}
+	emails := make([]string, 0, len(c.Emails))
+	for _, e := range c.Emails {
+		if v := strings.TrimSpace(e.Value); v != "" {
+			emails = append(emails, v)
+		}
+	}
+	return emails
+}
+
+// suppressDiscoveryOnDelete records a discovery opt-out (reason "deleted") for
+// each address of a removed discovery-created contact, so the ladder does not
+// silently re-create it on the next encrypted send. Best-effort: a failed
+// write is swallowed because the delete itself already succeeded.
+func (s *Server) suppressDiscoveryOnDelete(userID string, emails []string) {
+	dir := s.userStateDir(userID)
+	for _, e := range emails {
+		_ = pgpdiscovery.AddSuppression(dir, e, pgpdiscovery.ReasonDeleted)
+	}
 }
 
 // handleContacts serves the caller's own address book list and creates new
@@ -203,10 +233,16 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
+		emails := discoveryCreatedEmails(store, uid)
 		removed, err := store.Delete(uid)
 		if err != nil {
 			http.Error(w, "failed to delete contact", http.StatusInternalServerError)
 			return
+		}
+		if removed && len(emails) > 0 {
+			if ac, ok := authFromContext(r); ok {
+				s.suppressDiscoveryOnDelete(ac.UserID, emails)
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 	default:
@@ -253,14 +289,19 @@ func (s *Server) handleContactsBulkDelete(w http.ResponseWriter, r *http.Request
 		ID    string `json:"id"`
 		Error string `json:"error"`
 	}
+	ac, _ := authFromContext(r)
 	failures := make([]bulkDeleteFailure, 0)
 	processed := 0
 	for _, uid := range uniqueIDs {
+		emails := discoveryCreatedEmails(store, uid)
 		if _, err := store.Delete(uid); err != nil {
 			failures = append(failures, bulkDeleteFailure{ID: uid, Error: err.Error()})
 			continue
 		}
 		processed++
+		if len(emails) > 0 {
+			s.suppressDiscoveryOnDelete(ac.UserID, emails)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

@@ -1029,7 +1029,12 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load pgp discovery settings", http.StatusInternalServerError)
 		return
 	}
-	resolver := &keyResolver{store: contactsStore, settings: discoverySettings, discover: req.Encrypt}
+	suppressed, serr := pgpdiscovery.SuppressedSet(s.userStateDir(ac.UserID))
+	if serr != nil {
+		http.Error(w, "failed to load pgp discovery suppressions", http.StatusInternalServerError)
+		return
+	}
+	resolver := &keyResolver{store: contactsStore, settings: discoverySettings, discover: req.Encrypt, suppressed: suppressed}
 	plan := buildPGPRecipientPlan(r.Context(), toList, ccList, bccList, resolver)
 	if len(plan.toCCEmails) == 0 && len(plan.bccEmails) == 0 {
 		http.Error(w, "none of the recipients have a known pgp key — disable encryption or add keys to your contacts first", http.StatusBadRequest)
