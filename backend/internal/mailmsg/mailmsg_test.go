@@ -179,6 +179,27 @@ func TestBuildSanitizesToCCBCCHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildEmitsAutocryptHeader(t *testing.T) {
+	m := Message{
+		From:      "alice@example.com",
+		To:        []string{"bob@example.com"},
+		Subject:   "hi",
+		Body:      "hello",
+		Autocrypt: "addr=alice@example.com; keydata=QUJD",
+	}
+	out := string(m.Build())
+	if !strings.Contains(out, "\r\nAutocrypt: addr=alice@example.com; keydata=QUJD\r\n") {
+		t.Fatalf("expected Autocrypt header, got:\n%s", out)
+	}
+}
+
+func TestBuildOmitsAutocryptWhenEmpty(t *testing.T) {
+	m := Message{From: "a@x.com", To: []string{"b@y.com"}, Body: "hi"}
+	if strings.Contains(string(m.Build()), "Autocrypt:") {
+		t.Fatal("did not expect an Autocrypt header")
+	}
+}
+
 func decodeBase64Lines(encoded string) ([]byte, error) {
 	clean := strings.NewReplacer("\r", "", "\n", "").Replace(encoded)
 	return base64.StdEncoding.DecodeString(clean)

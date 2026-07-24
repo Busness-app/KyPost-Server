@@ -31,7 +31,13 @@ type Message struct {
 	Body    string
 	// "plain" (default), "html", or "markup" (sent as text/markdown) —
 	// the same values /api/mail/send accepts.
-	Mode        string
+	Mode string
+	// Autocrypt, when non-empty, is emitted verbatim as the value of an
+	// outer "Autocrypt:" header (RFC-none; see the Autocrypt Level 1 spec).
+	// It advertises the sender's own public key. The caller is responsible
+	// for its content (addr=<from>; keydata=<base64>); it is placed on the
+	// outer, unencrypted envelope so correspondents' clients can harvest it.
+	Autocrypt   string
 	Attachments []Attachment
 }
 
@@ -74,6 +80,9 @@ func (m Message) Build() []byte {
 	}
 	msg.WriteString("Subject: " + SanitizeHeaderValue(m.Subject) + "\r\n")
 	msg.WriteString("MIME-Version: 1.0\r\n")
+	if m.Autocrypt != "" {
+		msg.WriteString("Autocrypt: " + SanitizeHeaderValue(m.Autocrypt) + "\r\n")
+	}
 
 	if len(m.Attachments) == 0 {
 		msg.WriteString("Content-Type: " + m.ContentType() + "\r\n")
