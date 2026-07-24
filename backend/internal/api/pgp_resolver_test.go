@@ -248,3 +248,153 @@ func TestResolvePreservesManualVerificationOnSameFingerprint(t *testing.T) {
 		t.Fatalf("expected PGPKeyVerified to remain true on same-fingerprint refresh")
 	}
 }
+
+func TestResolveMarksDiscoveryCreatedOnNewContact(t *testing.T) {
+	allowLoopbackOutboundForTest(t)
+	id, err := pgpmail.GenerateIdentity("Gale", "gale@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	key, _ := crypto.NewKeyFromArmored(id.ArmoredPublicKey)
+	binKey, _ := key.GetPublicKey()
+	hu := wkdHashLocalPart("gale")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/hu/"+hu) {
+			_, _ = w.Write(binKey)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	wkdBaseURLOverride = srv.URL
+	defer func() { wkdBaseURLOverride = "" }()
+
+	store, err := contacts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+	kr := &keyResolver{store: store, settings: pgpdiscovery.Settings{StoreDiscoveredKeys: true}, discover: true}
+
+	if got := kr.resolve(context.Background(), "gale@example.com"); got.Tier != tierWKD {
+		t.Fatalf("expected tierWKD, got %+v", got)
+	}
+	c, ok := findContact(store, "gale@example.com")
+	if !ok {
+		t.Fatalf("expected an auto-created contact")
+	}
+	if !c.DiscoveryCreated {
+		t.Fatalf("expected DiscoveryCreated=true on an auto-created contact")
+	}
+}
+
+func TestResolveDoesNotMarkDiscoveryCreatedOnExistingContact(t *testing.T) {
+	allowLoopbackOutboundForTest(t)
+	id, err := pgpmail.GenerateIdentity("Hana", "hana@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	key, _ := crypto.NewKeyFromArmored(id.ArmoredPublicKey)
+	binKey, _ := key.GetPublicKey()
+	hu := wkdHashLocalPart("hana")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/hu/"+hu) {
+			_, _ = w.Write(binKey)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	wkdBaseURLOverride = srv.URL
+	defer func() { wkdBaseURLOverride = "" }()
+
+	store, err := contacts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+	// Pre-existing contact with no key — the user made this one.
+	pinned, err := store.Upsert(contacts.Contact{
+		FormattedName: "Hana",
+		Emails:        []contacts.ContactValue{{Value: "hana@example.com"}},
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	kr := &keyResolver{store: store, settings: pgpdiscovery.Settings{StoreDiscoveredKeys: true}, discover: true}
+
+	if got := kr.resolve(context.Background(), "hana@example.com"); got.Tier != tierWKD {
+		t.Fatalf("expected tierWKD, got %+v", got)
+	}
+	after, ok := store.Get(pinned.UID)
+	if !ok {
+		t.Fatalf("expected contact %s to still exist", pinned.UID)
+	}
+	if after.DiscoveryCreated {
+		t.Fatalf("expected DiscoveryCreated=false when pinning onto a pre-existing contact")
+	}
+}
+
+func TestResolveSkipsSuppressedAddress(t *testing.T) {
+	allowLoopbackOutboundForTest(t)
+	// A WKD server that FAILS the test if it is ever hit — a suppressed
+	// address must not trigger any discovery lookup.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("WKD lookup fired for a suppressed address: %s", r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	wkdBaseURLOverride = srv.URL
+	defer func() { wkdBaseURLOverride = "" }()
+
+	store, err := contacts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+	kr := &keyResolver{
+		store:      store,
+		settings:   pgpdiscovery.Settings{StoreDiscoveredKeys: true},
+		discover:   true,
+		suppressed: map[string]bool{"erin@example.com": true},
+	}
+
+	got := kr.resolve(context.Background(), "Erin@Example.com")
+	if got.Tier != tierNone {
+		t.Fatalf("expected tierNone for a suppressed address, got %+v", got)
+	}
+	if _, ok := findContact(store, "erin@example.com"); ok {
+		t.Fatalf("expected no contact to be auto-created for a suppressed address")
+	}
+}
+
+func TestResolveSuppressionDoesNotBlockManualKey(t *testing.T) {
+	allowLoopbackOutboundForTest(t)
+	id, err := pgpmail.GenerateIdentity("Fred", "fred@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	key, _ := crypto.NewKeyFromArmored(id.ArmoredPublicKey)
+	store, err := contacts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+	if _, err := store.Upsert(contacts.Contact{
+		FormattedName:     "Fred",
+		Emails:            []contacts.ContactValue{{Value: "fred@example.com"}},
+		PGPKey:            id.ArmoredPublicKey,
+		PGPKeyFingerprint: key.GetFingerprint(),
+		PGPKeySource:      contacts.PGPSourceManual,
+		PGPKeyVerified:    true,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	kr := &keyResolver{
+		store:      store,
+		settings:   pgpdiscovery.Settings{StoreDiscoveredKeys: true},
+		discover:   true,
+		suppressed: map[string]bool{"fred@example.com": true},
+	}
+
+	got := kr.resolve(context.Background(), "fred@example.com")
+	if !got.Usable || got.Tier != tierContactVerified {
+		t.Fatalf("expected a suppressed address to still use its manual pinned key, got %+v", got)
+	}
+}

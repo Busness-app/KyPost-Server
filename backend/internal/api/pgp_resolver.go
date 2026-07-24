@@ -54,6 +54,11 @@ type keyResolver struct {
 	// only the already-pinned contact key is considered (e.g. discovery
 	// disabled by policy, or a caller that only wants the local view).
 	discover bool
+	// suppressed is the set of normalized addresses the user has opted out of
+	// discovery. A suppressed address does no WKD/keyserver lookup, pin, or
+	// auto-create — it falls through to the pickup path. A key the user
+	// already holds (resolve step 1) is unaffected.
+	suppressed map[string]bool
 }
 
 // findContact returns the first contact whose email matches, case-
@@ -83,8 +88,9 @@ func (kr *keyResolver) pin(email, armored, fingerprint, source string) {
 	c, ok := findContact(kr.store, email)
 	if !ok {
 		c = contacts.Contact{
-			FormattedName: email,
-			Emails:        []contacts.ContactValue{{Value: email}},
+			FormattedName:    email,
+			Emails:           []contacts.ContactValue{{Value: email}},
+			DiscoveryCreated: true,
 		}
 	}
 	sameKey := ok && c.PGPKeyFingerprint != "" && strings.EqualFold(c.PGPKeyFingerprint, fingerprint)
@@ -126,6 +132,10 @@ func (kr *keyResolver) resolve(ctx context.Context, email string) resolvedKey {
 		pinnedFP = c.PGPKeyFingerprint
 	}
 	if !kr.discover {
+		return resolvedKey{Tier: tierNone}
+	}
+
+	if kr.suppressed[strings.ToLower(strings.TrimSpace(email))] {
 		return resolvedKey{Tier: tierNone}
 	}
 

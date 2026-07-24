@@ -346,6 +346,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/pgp/recipients/check", s.withAuth(s.handlePGPRecipientsCheck))
 	mux.HandleFunc("GET /api/pgp/discovery/settings", s.withAuth(s.handlePGPDiscoverySettings))
 	mux.HandleFunc("PUT /api/pgp/discovery/settings", s.withAuth(s.handlePGPDiscoverySettings))
+	mux.HandleFunc("GET /api/pgp/discovery/suppressions", s.withAuth(s.handlePGPDiscoverySuppressions))
+	mux.HandleFunc("DELETE /api/pgp/discovery/suppressions/{email}", s.withAuth(s.handlePGPDiscoverySuppressionByEmail))
+	mux.HandleFunc("POST /api/pgp/discovery/suppress-contact", s.withAuth(s.handlePGPDiscoverySuppressContact))
 	mux.HandleFunc("GET /api/pgp/qr/token", s.withMailAuth(s.handlePGPQRToken))
 	mux.HandleFunc("GET /api/pgp/qr/key", s.handlePGPQRKey)
 	mux.HandleFunc("GET /api/groups", s.withMailAuth(s.handleGroups))
@@ -1029,7 +1032,12 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to load pgp discovery settings", http.StatusInternalServerError)
 		return
 	}
-	resolver := &keyResolver{store: contactsStore, settings: discoverySettings, discover: req.Encrypt}
+	suppressed, serr := pgpdiscovery.SuppressedSet(s.userStateDir(ac.UserID))
+	if serr != nil {
+		http.Error(w, "failed to load pgp discovery suppressions", http.StatusInternalServerError)
+		return
+	}
+	resolver := &keyResolver{store: contactsStore, settings: discoverySettings, discover: req.Encrypt, suppressed: suppressed}
 	plan := buildPGPRecipientPlan(r.Context(), toList, ccList, bccList, resolver)
 	if len(plan.toCCEmails) == 0 && len(plan.bccEmails) == 0 {
 		http.Error(w, "none of the recipients have a known pgp key — disable encryption or add keys to your contacts first", http.StatusBadRequest)
