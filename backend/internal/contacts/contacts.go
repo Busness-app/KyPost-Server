@@ -10,6 +10,7 @@ const (
 	PGPSourceQR        = "qr"
 	PGPSourceWKD       = "wkd"
 	PGPSourceKeyserver = "keyserver"
+	PGPSourceAutocrypt = "autocrypt"
 )
 
 func etagForRev(rev int64) string {
