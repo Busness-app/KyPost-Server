@@ -23,8 +23,12 @@ import (
 // a PGP/MIME-wrapped message, in the order mailmsg.Message.Build() writes
 // them. PGP/MIME wraps only the *content* (Content-Type + body); routing and
 // display headers stay outside the encrypted/signed part — OpenPGP does not
-// protect message routing metadata, only the body.
-var envelopeHeaderOrder = []string{"From", "To", "Cc", "Bcc", "Subject"}
+// protect message routing metadata, only the body. Autocrypt is included
+// here (rather than being folded into the encrypted content like Subject)
+// because it exists to let a receiving client opportunistically pick up the
+// sender's public key without decrypting anything — it must stay on the
+// outer, unencrypted envelope of both signed and encrypted mail.
+var envelopeHeaderOrder = []string{"From", "To", "Cc", "Bcc", "Subject", "Autocrypt"}
 
 // splitMessage separates a raw RFC 5322 message (as produced by
 // mailmsg.Message.Build()) into its preserved envelope headers and its inner

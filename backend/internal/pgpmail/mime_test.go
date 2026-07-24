@@ -702,3 +702,67 @@ func TestEncryptMIMENoSubject(t *testing.T) {
 func base64UTF8(s string) string {
 	return base64.StdEncoding.EncodeToString([]byte(s))
 }
+
+// TestEncryptMIMEPreservesAutocryptHeader and TestSignMIMEPreservesAutocryptHeader
+// prove Task 2 of the outbound-publishing spec: mailmsg.Message.Autocrypt
+// (Task 1) must survive PGP/MIME wrapping on the outer, unencrypted envelope
+// — never inside the ciphertext, since Autocrypt exists precisely so a
+// receiving client can opportunistically pick up the sender's key without
+// decrypting anything.
+func TestEncryptMIMEPreservesAutocryptHeader(t *testing.T) {
+	alice, err := GenerateIdentity("Alice", "alice@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity alice: %v", err)
+	}
+	plaintext := mailmsg.Message{
+		From:      "alice@example.com",
+		To:        []string{"bob@example.com"},
+		Subject:   "hi",
+		Body:      "secret",
+		Mode:      "plain",
+		Autocrypt: "addr=alice@example.com; keydata=QUJD",
+	}.Build()
+
+	encrypted, err := EncryptMIME(plaintext, []string{alice.ArmoredPublicKey}, nil)
+	if err != nil {
+		t.Fatalf("EncryptMIME: %v", err)
+	}
+	if !bytes.Contains(encrypted, []byte("\r\nAutocrypt: addr=alice@example.com; keydata=QUJD\r\n")) {
+		t.Fatalf("Autocrypt header not on outer envelope:\n%s", encrypted)
+	}
+
+	armoredData, ok := extractOctetStreamPart(t, encrypted)
+	if !ok {
+		t.Fatal("expected an application/octet-stream data part")
+	}
+	result, err := DecryptMIME(armoredData, alice, nil)
+	if err != nil {
+		t.Fatalf("DecryptMIME: %v", err)
+	}
+	if bytes.Contains(result.Content, []byte("Autocrypt")) {
+		t.Fatalf("Autocrypt header leaked into the encrypted/decrypted inner content:\n%s", result.Content)
+	}
+}
+
+func TestSignMIMEPreservesAutocryptHeader(t *testing.T) {
+	alice, err := GenerateIdentity("Alice", "alice@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity alice: %v", err)
+	}
+	plaintext := mailmsg.Message{
+		From:      "alice@example.com",
+		To:        []string{"bob@example.com"},
+		Subject:   "hi",
+		Body:      "secret",
+		Mode:      "plain",
+		Autocrypt: "addr=alice@example.com; keydata=QUJD",
+	}.Build()
+
+	signed, err := SignMIME(plaintext, alice)
+	if err != nil {
+		t.Fatalf("SignMIME: %v", err)
+	}
+	if !bytes.Contains(signed, []byte("\r\nAutocrypt: addr=alice@example.com; keydata=QUJD\r\n")) {
+		t.Fatalf("Autocrypt header not on signed envelope:\n%s", signed)
+	}
+}
