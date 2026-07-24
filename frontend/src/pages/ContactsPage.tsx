@@ -453,6 +453,17 @@ export function ContactsPage() {
     }
   }
 
+  async function handleSuppressContactDiscovery(contact: Contact) {
+    setStatus("");
+    try {
+      await suppressContactDiscovery(contact.uid);
+      const next = await loadContacts();
+      setSelectedContact(next.find((c) => c.uid === contact.uid) ?? null);
+    } catch (error: unknown) {
+      setStatus(`Failed to remove key: ${toErrorMessage(error, "unknown error")}`);
+    }
+  }
+
   async function deleteBulk() {
     if (!window.confirm(`Delete ${selectedUids.length} contact${selectedUids.length === 1 ? "" : "s"}?`)) {
       return;
@@ -1606,7 +1617,7 @@ export function ContactsPage() {
                       type="button"
                       onClick={() => {
                         if (!selectedContact) return;
-                        void suppressContactDiscovery(selectedContact.uid).then(() => void loadContacts());
+                        void handleSuppressContactDiscovery(selectedContact);
                       }}
                     >
                       Remove key &amp; stop rediscovering
