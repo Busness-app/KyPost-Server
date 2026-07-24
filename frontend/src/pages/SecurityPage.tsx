@@ -2,7 +2,16 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import QRCode from "qrcode";
 import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
-import { getPGPIdentity, generatePGPIdentity, importPGPIdentity, deletePGPIdentity, type PGPIdentity } from "../api/pgp";
+import {
+  getPGPIdentity,
+  generatePGPIdentity,
+  importPGPIdentity,
+  deletePGPIdentity,
+  getPGPDiscoverySettings,
+  updatePGPDiscoverySettings,
+  type PGPIdentity,
+  type DiscoverySettings
+} from "../api/pgp";
 import { listContacts, type Contact } from "../api/contacts";
 
 type ApproverDevice = {
@@ -58,6 +67,42 @@ export function SecurityPage() {
   const [pgpImportKey, setPgpImportKey] = useState("");
   const [pgpImportPassphrase, setPgpImportPassphrase] = useState("");
   const [selfContact, setSelfContact] = useState<Contact | null>(null);
+
+  // PGP key-discovery settings.
+  const [discoverySettings, setDiscoverySettings] = useState<DiscoverySettings | null>(null);
+  const [discoveryBusy, setDiscoveryBusy] = useState(false);
+  const [discoveryStatus, setDiscoveryStatus] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    getPGPDiscoverySettings()
+      .then((settings) => {
+        if (!cancelled) setDiscoverySettings(settings);
+      })
+      .catch(() => {
+        if (!cancelled) setDiscoverySettings(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function updateDiscoverySetting(patch: Partial<DiscoverySettings>) {
+    if (!discoverySettings) return;
+    const next = { ...discoverySettings, ...patch };
+    setDiscoverySettings(next);
+    setDiscoveryBusy(true);
+    setDiscoveryStatus("");
+    try {
+      const saved = await updatePGPDiscoverySettings(next);
+      setDiscoverySettings(saved);
+    } catch (e) {
+      setDiscoverySettings(discoverySettings);
+      setDiscoveryStatus(`Failed to save: ${toErrorMessage(e, "unknown error")}`);
+    } finally {
+      setDiscoveryBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -557,6 +602,31 @@ export function SecurityPage() {
             </>
           )}
           {pgpStatus ? <p className="contacts-muted">{pgpStatus}</p> : null}
+
+          {discoverySettings ? (
+            <div className="security-section">
+              <h4>Key discovery</h4>
+              <label className="security-check">
+                <input
+                  type="checkbox"
+                  checked={discoverySettings.autoEncryptWhenKeyKnown}
+                  disabled={discoveryBusy}
+                  onChange={(e) => void updateDiscoverySetting({ autoEncryptWhenKeyKnown: e.target.checked })}
+                />
+                Encrypt automatically when I have a recipient's key
+              </label>
+              <label className="security-check">
+                <input
+                  type="checkbox"
+                  checked={discoverySettings.storeDiscoveredKeys}
+                  disabled={discoveryBusy}
+                  onChange={(e) => void updateDiscoverySetting({ storeDiscoveredKeys: e.target.checked })}
+                />
+                Save keys I discover to my contacts
+              </label>
+              {discoveryStatus ? <p className="contacts-muted">{discoveryStatus}</p> : null}
+            </div>
+          ) : null}
         </div>
       </div>
     </section>

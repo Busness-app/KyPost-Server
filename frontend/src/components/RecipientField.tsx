@@ -1,10 +1,32 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, KeyboardEvent } from "react";
 import type { Contact } from "../api/contacts";
+import type { PGPRecipientTier } from "../api/pgp";
 import { contactToToken, isPlausibleEmail } from "../lib/recipients";
 import type { RecipientFieldState, RecipientToken } from "../lib/recipients";
 import { useContactAutocomplete } from "../hooks/useContactAutocomplete";
 import { RecipientAutocomplete } from "./RecipientAutocomplete";
+
+// recipientTierBadge maps a recipients-check tier to the short label shown
+// next to a recipient's chip in compose. keyserver_confirm/key_changed are
+// deliberately just a labeled warning here — the fingerprint-confirm modal
+// that lets a user pin/accept those keys is a follow-up (see task-10-report).
+function recipientTierBadge(tier: PGPRecipientTier | undefined): string | null {
+  switch (tier) {
+    case "verified":
+      return "🔒 verified";
+    case "wkd":
+      return "🔒 found via WKD";
+    case "keyserver_confirm":
+      return "⚠️ confirm fingerprint";
+    case "key_changed":
+      return "⚠️ key changed";
+    case "none":
+      return "no key — pickup link";
+    default:
+      return null;
+  }
+}
 
 type RecipientFieldProps = {
   label: string; // "To", "Cc", "Bcc" — for placeholder/aria-label
@@ -12,9 +34,13 @@ type RecipientFieldProps = {
   onDraftChange: (draft: string) => void;
   onAddToken: (token: RecipientToken) => void;
   onRemoveToken: (index: number) => void;
+  // Keyed by lowercased email address; populated from the recipients-check
+  // response while encryption is enabled in compose. Omitted/empty when the
+  // check hasn't run (e.g. encryption is off) — no badges render then.
+  tiers?: Record<string, PGPRecipientTier>;
 };
 
-export function RecipientField({ label, state, onDraftChange, onAddToken, onRemoveToken }: RecipientFieldProps) {
+export function RecipientField({ label, state, onDraftChange, onAddToken, onRemoveToken, tiers }: RecipientFieldProps) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const [fieldError, setFieldError] = useState("");
@@ -111,19 +137,23 @@ export function RecipientField({ label, state, onDraftChange, onAddToken, onRemo
   return (
     <div className="compose-token-field-wrap">
       <div className="compose-token-field">
-        {state.tokens.map((token, index) => (
-          <span key={`${token.email}-${index}`} className="compose-token-pill">
-            <span className="compose-token-pill-label">{token.name ? `${token.name} <${token.email}>` : token.email}</span>
-            <button
-              type="button"
-              className="compose-token-pill-remove"
-              aria-label={`Remove ${token.email}`}
-              onClick={() => onRemoveToken(index)}
-            >
-              &times;
-            </button>
-          </span>
-        ))}
+        {state.tokens.map((token, index) => {
+          const badge = recipientTierBadge(tiers?.[token.email.toLowerCase()]);
+          return (
+            <span key={`${token.email}-${index}`} className="compose-token-pill">
+              <span className="compose-token-pill-label">{token.name ? `${token.name} <${token.email}>` : token.email}</span>
+              {badge ? <span className="compose-token-pill-badge">{badge}</span> : null}
+              <button
+                type="button"
+                className="compose-token-pill-remove"
+                aria-label={`Remove ${token.email}`}
+                onClick={() => onRemoveToken(index)}
+              >
+                &times;
+              </button>
+            </span>
+          );
+        })}
         <input
           type="text"
           className="compose-token-input"

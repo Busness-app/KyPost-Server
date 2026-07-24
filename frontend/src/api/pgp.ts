@@ -1,4 +1,4 @@
-import { getJSON, postJSON, deleteJSON } from "./client";
+import { getJSON, postJSON, putJSON, deleteJSON } from "./client";
 
 export type PGPIdentity = {
   fingerprint: string;
@@ -8,9 +8,23 @@ export type PGPIdentity = {
   createdAt: string;
 };
 
+// PGPRecipientTier mirrors the backend's resolveTier ladder. The
+// recipients-check endpoint currently only ever emits "verified" (a usable
+// key already pinned to a contact) or "none" — the remaining values are
+// produced by the send-time resolver (WKD/keyserver lookups, TOFU
+// fingerprint changes) and are included here so the UI can render them
+// wherever they do show up without another type change.
+export type PGPRecipientTier = "verified" | "wkd" | "keyserver_confirm" | "key_changed" | "none";
+
 export type PGPRecipientStatus = {
   address: string;
   hasKey: boolean;
+  tier?: PGPRecipientTier;
+};
+
+export type DiscoverySettings = {
+  autoEncryptWhenKeyKnown: boolean;
+  storeDiscoveredKeys: boolean;
 };
 
 export function getPGPIdentity(): Promise<PGPIdentity> {
@@ -31,6 +45,14 @@ export function deletePGPIdentity(): Promise<{ ok: boolean }> {
 
 export function checkPGPRecipients(addresses: string[]): Promise<{ results: PGPRecipientStatus[] }> {
   return postJSON<{ results: PGPRecipientStatus[] }>("/api/pgp/recipients/check", { addresses });
+}
+
+export function getPGPDiscoverySettings(): Promise<DiscoverySettings> {
+  return getJSON<DiscoverySettings>("/api/pgp/discovery/settings");
+}
+
+export function updatePGPDiscoverySettings(settings: DiscoverySettings): Promise<DiscoverySettings> {
+  return putJSON<DiscoverySettings>("/api/pgp/discovery/settings", settings);
 }
 
 export function lookupPGPKeyserver(
