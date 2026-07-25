@@ -170,6 +170,7 @@ purely a user action.
 | "WKD Domains" tab isn't visible | The tab only renders for administrators | Only an admin account can manage domain claims; ask an admin to add/verify the domain |
 | A user's key stopped being served, domain still shows verified | The user turned off "Publish my public key via Web Key Directory (WKD)" on their own Security page | Have that user re-enable the toggle if they want to be discoverable again |
 | Domain was verified but stopped serving for everyone on it | The TXT record was removed or changed, and the periodic re-check (every 12h, plus at startup) caught it | Re-add the TXT record and click Verify again in Configuration → WKD Domains |
+| Lookups intermittently return `429 Too Many Requests` | The public WKD endpoint is rate limited per client IP (burst of 30, then ~1 request/second sustained) | Normal clients never reach this — a key is fetched once and cached. If a legitimate caller trips it, it is retrying far more often than it needs to; the response's `Retry-After` header says how long to wait. Note that behind a reverse proxy the limit keys on the IP the proxy reports, so a misconfigured proxy that hides the real client IP makes every caller share one budget |
 
 ---
 
