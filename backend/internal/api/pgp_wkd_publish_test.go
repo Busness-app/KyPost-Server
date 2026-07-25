@@ -452,3 +452,64 @@ func TestLookupPublishedKeySkipsCorruptKeyContinuesToNextUser(t *testing.T) {
 		t.Fatalf("response body is not a binary key: %v", err)
 	}
 }
+
+// TestWKDServedAliasKeyIsAcceptedByDiscovery is the end-to-end property the
+// whole User-ID plumbing exists for: a key generated after an alias was
+// verified must, when fetched over WKD at the ALIAS address, survive the
+// same address-binding check every consumer applies (validateDiscoveredKey
+// here; GnuPG's WKD User ID filtering in the wild). Serving the bytes is not
+// enough — a key that doesn't carry the queried address is discarded on
+// arrival.
+func TestWKDServedAliasKeyIsAcceptedByDiscovery(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+
+	sendAsStore, err := srv.userSendAsStore(userID)
+	if err != nil {
+		t.Fatalf("userSendAsStore: %v", err)
+	}
+	alias, err := sendAsStore.Create(userID, "alice@other.example", "")
+	if err != nil {
+		t.Fatalf("Create alias: %v", err)
+	}
+	if err := sendAsStore.MarkVerified(alias.ID); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+
+	// Generate the key only now, with the alias already verified.
+	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", nil)
+	authRequest(srv, genReq)
+	genRec := httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPIdentityGenerate)(genRec, genReq)
+	if genRec.Code != http.StatusOK {
+		t.Fatalf("generate: expected 200, got %d: %s", genRec.Code, genRec.Body.String())
+	}
+
+	wkdStore, err := srv.wkdPublishStore()
+	if err != nil {
+		t.Fatalf("wkdPublishStore: %v", err)
+	}
+	if _, err := wkdStore.Create("other.example"); err != nil {
+		t.Fatalf("Create other.example claim: %v", err)
+	}
+	if err := wkdStore.SetVerified("other.example", true, time.Now()); err != nil {
+		t.Fatalf("SetVerified other.example: %v", err)
+	}
+
+	rec := doRaw(t, srv, http.MethodGet, "/.well-known/openpgpkey/other.example/hu/"+wkdHashLocalPart("alice"), "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("wkd lookup at alias domain: status %d, want 200", rec.Code)
+	}
+	served, err := crypto.NewKey(rec.Body.Bytes()) // WKD serves binary keys
+	if err != nil {
+		t.Fatalf("parse served key: %v", err)
+	}
+	armored, err := served.GetArmoredPublicKey()
+	if err != nil {
+		t.Fatalf("armor served key: %v", err)
+	}
+	if _, err := validateDiscoveredKey(armored, "alice@other.example"); err != nil {
+		t.Fatalf("served key rejected for the alias it was served under: %v", err)
+	}
+}
