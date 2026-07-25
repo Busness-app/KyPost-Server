@@ -91,6 +91,18 @@ type AuthContext struct {
 	MustChangePassword bool
 }
 
+// Server holds the HTTP surface and its process-wide state.
+//
+// LOCK ORDER: mu before userMu. Never the reverse.
+//
+// These are two independent mutexes guarding two independent groups of
+// fields — mu covers cfg/sessions/httpServer, userMu covers the per-user
+// store caches and the subscriber/device indexes. Nothing currently takes
+// both, which is the only reason there is no deadlock to find today. The
+// moment one handler reads s.cfg (mu) inside a userMu critical section
+// while another does the reverse, that becomes an ABBA deadlock that only
+// shows up under concurrent load in production. Stating the order here is
+// cheaper than discovering it there.
 type Server struct {
 	mu                     sync.RWMutex
 	cfg                    config.Config
@@ -286,11 +298,28 @@ func (s *Server) wkdPublishStore() (*wkdpublish.Store, error) {
 // routes builds the API's route table. Split out from Run so tests can
 // dispatch through the exact same registration (middleware included)
 // instead of calling handlers directly and assuming the wiring matches.
+// routes builds the full HTTP surface. It is split into one function per
+// area rather than one 130-line block so the auth posture of a given
+// group -- which middleware wraps it, and which endpoints deliberately
+// have none -- can be read at a glance instead of scanned for.
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/health", s.handleHealth)
-	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
-	mux.HandleFunc("POST /api/admin/mail/poll-now", s.withAdmin(s.handlePollNow))
+	s.routesAuth(mux)
+	s.routesAdmin(mux)
+	s.routesMail(mux)
+	s.routesContacts(mux)
+	s.routesPGP(mux)
+	s.routesNotifications(mux)
+	s.routesRules(mux)
+	s.routesFrontend(mux)
+
+	return withSecurityHeaders(mux)
+}
+
+// routesAuth registers sign-in, session, and second-factor endpoints.
+// The pre-session ones (login, the MFA challenge completions, captcha
+// config) are deliberately unwrapped: they run before a session exists.
+func (s *Server) routesAuth(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("GET /api/auth/captcha-config", s.handleCaptchaConfig)
 	mux.HandleFunc("POST /api/auth/mfa/totp", s.handleMFATOTP)
@@ -304,23 +333,24 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/mfa/totp/disable", s.withAuth(s.handleMFADisable))
 	mux.HandleFunc("POST /api/mfa/recovery-codes/regenerate", s.withAuth(s.handleMFARecoveryCodesRegenerate))
 	mux.HandleFunc("PUT /api/mfa/push/enabled", s.withAuth(s.handleMFAPushEnabled))
-	mux.HandleFunc("PUT /api/notifications/native/devices/{deviceId}/mfa", s.withAuth(s.handleNativeDeviceMFA))
 	mux.HandleFunc("GET /api/auth/me", s.handleMe)
 	mux.HandleFunc("GET /api/auth/csrf", s.handleCSRFToken)
 	mux.HandleFunc("POST /api/auth/logout", s.withAuth(s.handleLogout))
 	mux.HandleFunc("POST /api/auth/password", s.withAuth(s.handleChangePassword))
+}
+
+// routesAdmin registers instance administration and observability:
+// health, users, config, logs, tuning, the classifier/Ollama controls, and
+// the pre-login setup hint.
+func (s *Server) routesAdmin(mux *http.ServeMux) {
+	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
+	mux.HandleFunc("POST /api/admin/mail/poll-now", s.withAdmin(s.handlePollNow))
 	mux.HandleFunc("/api/status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("GET /api/config", s.withAuth(s.handleConfig))
 	mux.HandleFunc("PUT /api/config", s.withAdmin(s.handleConfig))
 	mux.HandleFunc("GET /api/labels", s.withAuth(s.handleLabels))
 	mux.HandleFunc("GET /api/decisions", s.withAuth(s.handleDecisions))
-	mux.HandleFunc("GET /api/inbox", s.withMailAuth(s.handleInbox))
-	mux.HandleFunc("GET /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
-	mux.HandleFunc("POST /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
-	mux.HandleFunc("PUT /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
-	mux.HandleFunc("DELETE /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
-	mux.HandleFunc("POST /api/inbox/actions", s.withMailAuth(s.handleInboxActions))
-	mux.HandleFunc("GET /api/mail/search", s.withMailAuth(s.handleMailSearch))
 	mux.HandleFunc("GET /api/logs", s.withAdmin(s.handleLogs))
 	mux.HandleFunc("GET /api/logs/list", s.withAdmin(s.handleLogsList))
 	mux.HandleFunc("GET /api/users", s.withAdmin(s.handleUsersList))
@@ -330,6 +360,27 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/users/{id}/deactivate", s.withAdmin(s.handleUsersDeactivate))
 	mux.HandleFunc("POST /api/users/{id}/reactivate", s.withAdmin(s.handleUsersReactivate))
 	mux.HandleFunc("POST /api/users/{id}/clear-mfa", s.withAdmin(s.handleUsersClearMFA))
+	mux.HandleFunc("POST /api/classifier/test", s.withAdmin(s.handleClassifierTest))
+	mux.HandleFunc("GET /api/ollama/version", s.withAuth(s.handleOllamaVersion))
+	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
+	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
+	mux.HandleFunc("GET /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
+	mux.HandleFunc("PUT /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
+	mux.HandleFunc("GET /api/setup", s.handleSetup)
+}
+
+// routesMail registers mailbox reading and sending, plus IMAP/SMTP
+// account setup. The read/act paths use withMailAuth so paired mobile
+// devices reach them without a web session; credential setup stays on
+// withAuth (web UI only).
+func (s *Server) routesMail(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/inbox", s.withMailAuth(s.handleInbox))
+	mux.HandleFunc("GET /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("POST /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("PUT /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("DELETE /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("POST /api/inbox/actions", s.withMailAuth(s.handleInboxActions))
+	mux.HandleFunc("GET /api/mail/search", s.withMailAuth(s.handleMailSearch))
 	mux.HandleFunc("GET /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("POST /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("DELETE /api/imap/config", s.withAuth(s.handleIMAPConfig))
@@ -341,27 +392,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/mail/send-as/{id}", s.withAuth(s.handleSendAsByID))
 	mux.HandleFunc("GET /api/mail/attachments", s.withMailAuth(s.handleMailAttachmentList))
 	mux.HandleFunc("GET /api/mail/attachment", s.withMailAuth(s.handleMailAttachmentDownload))
-	mux.HandleFunc("POST /api/classifier/test", s.withAdmin(s.handleClassifierTest))
-	mux.HandleFunc("GET /api/ollama/version", s.withAuth(s.handleOllamaVersion))
-	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
-	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
-	mux.HandleFunc("GET /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
-	mux.HandleFunc("PUT /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
-	mux.HandleFunc("GET /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
-	mux.HandleFunc("PUT /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
-	mux.HandleFunc("GET /api/notifications/vapid-public-key", s.withAuth(s.handleNotificationVAPIDPublicKey))
-	mux.HandleFunc("POST /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
-	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
-	mux.HandleFunc("POST /api/notifications/test", s.withAuth(s.handleNotificationTest))
-	mux.HandleFunc("GET /api/notifications/pairing", s.withAuth(s.handleNotificationPairing))
-	mux.HandleFunc("POST /api/notifications/native/register", s.handleNotificationNativeRegister)
-	mux.HandleFunc("GET /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
-	mux.HandleFunc("DELETE /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
-	mux.HandleFunc("POST /api/notifications/native/unpair", s.withAuth(s.handleNotificationNativeUnpair))
-	mux.HandleFunc("POST /api/notifications/native/deregister", s.handleNotificationNativeDeregister)
-	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
-	mux.HandleFunc("GET /api/notifications/native/pull", s.handleNotificationNativePull)
-	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
+}
+
+// routesContacts registers the address book, groups, and the CardDAV
+// server surface (which authenticates via HTTP Basic, not a session).
+func (s *Server) routesContacts(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/contacts", s.withAuth(s.handleContacts))
 	mux.HandleFunc("POST /api/contacts", s.withAuth(s.handleContacts))
 	mux.HandleFunc("POST /api/contacts/dedupe", s.withMailAuth(s.handleContactsDedupe))
@@ -385,6 +420,18 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/contacts/{id}/photo", s.withMailAuth(s.handleContactPhoto))
 	mux.HandleFunc("DELETE /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
 	mux.HandleFunc("POST /api/contacts/{id}/self", s.withAuth(s.handleContactSelf))
+	mux.HandleFunc("GET /api/groups", s.withMailAuth(s.handleGroups))
+	mux.HandleFunc("POST /api/groups", s.withAuth(s.handleGroups))
+	mux.HandleFunc("PUT /api/groups/{id}", s.withAuth(s.handleGroupByID))
+	mux.HandleFunc("DELETE /api/groups/{id}", s.withAuth(s.handleGroupByID))
+	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
+	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
+}
+
+// routesPGP registers key management, recipient/keyserver lookup,
+// discovery settings, WKD publishing, and the two token-gated public
+// endpoints (QR key exchange and one-time pickup links).
+func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/pgp/identity/generate", s.withAuth(s.handlePGPIdentityGenerate))
 	mux.HandleFunc("POST /api/pgp/identity/import", s.withAuth(s.handlePGPIdentityImport))
 	mux.HandleFunc("GET /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
@@ -402,10 +449,35 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/pgp/wkd/domains/{domain}", s.withAdmin(s.handleWKDDomainDelete))
 	mux.HandleFunc("GET /api/pgp/qr/token", s.withMailAuth(s.handlePGPQRToken))
 	mux.HandleFunc("GET /api/pgp/qr/key", s.handlePGPQRKey)
-	mux.HandleFunc("GET /api/groups", s.withMailAuth(s.handleGroups))
-	mux.HandleFunc("POST /api/groups", s.withAuth(s.handleGroups))
-	mux.HandleFunc("PUT /api/groups/{id}", s.withAuth(s.handleGroupByID))
-	mux.HandleFunc("DELETE /api/groups/{id}", s.withAuth(s.handleGroupByID))
+	mux.HandleFunc("GET /.well-known/openpgpkey/", s.withWKDRateLimit(s.handleWKD))
+	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
+}
+
+// routesNotifications registers web push, native device pairing, and the
+// App Pull queue. The register/deregister/pull endpoints authenticate with
+// per-device credentials rather than a session, so they carry no middleware
+// here and check inside the handler.
+func (s *Server) routesNotifications(mux *http.ServeMux) {
+	mux.HandleFunc("PUT /api/notifications/native/devices/{deviceId}/mfa", s.withAuth(s.handleNativeDeviceMFA))
+	mux.HandleFunc("GET /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
+	mux.HandleFunc("PUT /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
+	mux.HandleFunc("GET /api/notifications/vapid-public-key", s.withAuth(s.handleNotificationVAPIDPublicKey))
+	mux.HandleFunc("POST /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
+	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
+	mux.HandleFunc("POST /api/notifications/test", s.withAuth(s.handleNotificationTest))
+	mux.HandleFunc("GET /api/notifications/pairing", s.withAuth(s.handleNotificationPairing))
+	mux.HandleFunc("POST /api/notifications/native/register", s.handleNotificationNativeRegister)
+	mux.HandleFunc("GET /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
+	mux.HandleFunc("DELETE /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
+	mux.HandleFunc("POST /api/notifications/native/unpair", s.withAuth(s.handleNotificationNativeUnpair))
+	mux.HandleFunc("POST /api/notifications/native/deregister", s.handleNotificationNativeDeregister)
+	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
+	mux.HandleFunc("GET /api/notifications/native/pull", s.handleNotificationNativePull)
+	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
+}
+
+// routesRules registers the filter-rule builder and the Sieve editor.
+func (s *Server) routesRules(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/rules", s.withMailAuth(s.handleRules))
 	mux.HandleFunc("POST /api/rules", s.withAuth(s.handleRules))
 	mux.HandleFunc("PUT /api/rules/{id}", s.withAuth(s.handleRuleByID))
@@ -414,14 +486,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/rules/{id}/sieve", s.withMailAuth(s.handleRuleSieve))
 	mux.HandleFunc("PUT /api/rules/{id}/sieve", s.withAuth(s.handleRuleSieve))
 	mux.HandleFunc("POST /api/rules/run", s.withMailAuth(s.handleRulesRun))
-	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
-	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
-	mux.HandleFunc("GET /.well-known/openpgpkey/", s.withWKDRateLimit(s.handleWKD))
-	mux.HandleFunc("GET /api/setup", s.handleSetup)
-	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
-	mux.HandleFunc("/", s.handleFrontend)
+}
 
-	return withSecurityHeaders(mux)
+// routesFrontend registers the SPA fallback. "/" is the least specific
+// pattern, so Go's mux only reaches it when nothing else matches.
+func (s *Server) routesFrontend(mux *http.ServeMux) {
+	mux.HandleFunc("/", s.handleFrontend)
 }
 
 // Prepare constructs the underlying *http.Server (Addr + Handler) without

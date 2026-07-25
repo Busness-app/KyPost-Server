@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -320,5 +321,40 @@ func TestAdminResetPasswordRevokesTargetSessions(t *testing.T) {
 	srv.mu.Unlock()
 	if targetStillLive {
 		t.Error("target's session survived an admin password reset; it should have been revoked")
+	}
+}
+
+// TestRoutesRegistersEveryArea guards the routes() split: each per-area
+// function must actually be called from routes(). Dropping one would compile
+// fine and silently 404 a whole feature, and the SPA fallback ("/") would
+// serve index.html for those paths rather than erroring, so nothing else
+// would notice.
+func TestRoutesRegistersEveryArea(t *testing.T) {
+	srv := newTestServer(t)
+	handler := srv.routes()
+
+	// One representative path per routes* function, chosen so a match proves
+	// that function ran. Each must resolve to something other than the SPA
+	// fallback.
+	for _, probe := range []struct{ method, path string }{
+		{http.MethodPost, "/api/auth/login"},           // routesAuth
+		{http.MethodGet, "/api/health"},                // routesAdmin
+		{http.MethodGet, "/api/inbox"},                 // routesMail
+		{http.MethodGet, "/api/contacts"},              // routesContacts
+		{http.MethodGet, "/api/pgp/identity"},          // routesPGP
+		{http.MethodGet, "/api/notifications/pairing"}, // routesNotifications
+		{http.MethodGet, "/api/rules"},                 // routesRules
+	} {
+		req := httptest.NewRequest(probe.method, probe.path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		// Unauthenticated, so 401/403/400 are all fine — what must not happen
+		// is falling through to the SPA fallback, which answers 200 with HTML
+		// (or 404 "frontend assets not found" when no build is present).
+		body := rec.Body.String()
+		if strings.Contains(body, "frontend assets not found") {
+			t.Errorf("%s %s fell through to the SPA fallback; its routes* function is not wired into routes()",
+				probe.method, probe.path)
+		}
 	}
 }
