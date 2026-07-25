@@ -143,15 +143,35 @@ failed. The envelope carries its own `kdf`/`iterations`/`salt`/`iv`, so
 clients must derive from the blob rather than hardcoding parameters; that is
 what lets the KDF change later without stranding them.
 
-Not yet wired:
+Web UI (wired):
 
-- **Web UI.** The Security page still drives the legacy server-side generate
-  and import endpoints, and ReadPage/compose do not yet call `pgpClient`. Until
-  that lands, client protection is reachable via the API but is not the
-  default and no user is on it — the shipped behavior is unchanged. The
-  server contract is now complete and tested, so this is UI work only.
-- Unlock prompt and its placement in the login flow.
-- Browser-side send-as User ID reconcile.
+- **Cold start** in `App.tsx`: every authenticated page load fetches
+  `/api/pgp/bootstrap` into `lib/pgpSession`. Nothing unlocks at login — the
+  prompt appears the first time something needs the key, so a user who never
+  opens encrypted mail is never asked. Logout clears the vault.
+- **Security page**: browser-side generate and import, protection-mode
+  status, unlock/lock, and the one-time migration for legacy keys. Both
+  creation paths warn that an admin password reset destroys the key.
+- **Read page**: fetches ciphertext from `/api/mail/pgp-payload` and decrypts
+  locally; the signature verdict comes from that decrypt, not the server.
+- **Compose**: resolves recipient keys via
+  `/api/pgp/recipients/resolve`, encrypts per delivery group (BCC each in its
+  own), posts to `/api/mail/send-pgp`. **Refuses** when a recipient has no
+  usable key rather than downgrading — the pickup-link fallback stores
+  plaintext on the server, which is what this mode prevents.
+- **Password change**: rewraps the key, unwrapping before the password write
+  so a failure leaves nothing half-applied.
+
+Still open:
+
+- Browser-side send-as User ID reconcile. The daemon skips client-protected
+  keys (adding a User ID re-signs the key and needs the private half), so an
+  alias verified after key creation is not yet added to the key. Until that
+  lands, regenerate the key after verifying a new alias if you need WKD or
+  Autocrypt to serve it for that address.
+- **Nothing here has been exercised against a real IMAP server or a real
+  recipient.** The unit and HTTP-level tests pass; an end-to-end manual run
+  is still required before relying on this.
 
 Because the default is unchanged, this is safe to ship incrementally: existing
 installs keep working exactly as before, and nothing silently downgrades.
