@@ -11,7 +11,7 @@ func TestSetAndClearPGPIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("erin", "pw-erin", RoleUser)
+	u, err := store.Create("erin", "pw-erin-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

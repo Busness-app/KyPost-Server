@@ -4,8 +4,22 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 )
+
+// newTestStore returns a Store backed by a fresh temp dir, already seeded
+// with the first-run admin.
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	return store
+}
 
 func TestLoadOrMigrateFreshInstallMintsDefaultAdmin(t *testing.T) {
 	dir := t.TempDir()
@@ -80,15 +94,15 @@ func TestStoreLifecycle(t *testing.T) {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
 
-	u, err := store.Create("alice", "correct-horse", RoleUser)
+	u, err := store.Create("alice", "correct-horse-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if !VerifyPassword(u, "correct-horse") {
+	if !VerifyPassword(u, "correct-horse-testpassword") {
 		t.Fatalf("VerifyPassword: expected new user's password to verify")
 	}
 
-	if _, err := store.Create("alice", "other", RoleUser); err != ErrUsernameTaken {
+	if _, err := store.Create("alice", "other-testpassword", RoleUser); err != ErrUsernameTaken {
 		t.Fatalf("Create duplicate: err = %v, want ErrUsernameTaken", err)
 	}
 
@@ -103,11 +117,11 @@ func TestStoreLifecycle(t *testing.T) {
 		t.Fatalf("Role = %v, want admin", got.Role)
 	}
 
-	if _, err := store.SetPassword(u.ID, "new-password", true); err != nil {
+	if _, err := store.SetPassword(u.ID, "new-password-testpassword", true); err != nil {
 		t.Fatalf("SetPassword: %v", err)
 	}
 	got, _ = store.Get(u.ID)
-	if !got.MustChangePassword || !VerifyPassword(got, "new-password") {
+	if !got.MustChangePassword || !VerifyPassword(got, "new-password-testpassword") {
 		t.Fatalf("unexpected state after SetPassword: %+v", got)
 	}
 
@@ -138,7 +152,7 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("carol", "pw", RoleUser)
+	u, err := store.Create("carol", "pw-carol-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -194,7 +208,7 @@ func TestEnableTOTPRequiresPendingSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("dan", "pw", RoleUser)
+	u, err := store.Create("dan", "pw-dan-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -209,7 +223,7 @@ func TestSetLastUsedTOTPStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("judy", "pw-judy", RoleUser)
+	u, err := store.Create("judy", "pw-judy-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -260,7 +274,7 @@ func TestSetPushMFAEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("ivan", "pw-ivan", RoleUser)
+	u, err := store.Create("ivan", "pw-ivan-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -277,5 +291,68 @@ func TestSetPushMFAEnabled(t *testing.T) {
 	got, _ = store.Get(u.ID)
 	if got.PushMFAEnabled {
 		t.Fatalf("expected PushMFAEnabled false")
+	}
+}
+
+func TestValidatePasswordEnforcesMinLength(t *testing.T) {
+	short := strings.Repeat("a", MinPasswordLen-1)
+	if err := ValidatePassword(short); err == nil {
+		t.Fatalf("ValidatePassword(%d chars) = nil, want ErrPasswordWeak", len(short))
+	}
+	if err := ValidatePassword(strings.Repeat("a", MinPasswordLen)); err != nil {
+		t.Fatalf("ValidatePassword(%d chars) = %v, want nil", MinPasswordLen, err)
+	}
+	// Counted in runes, not bytes: a short multi-byte passphrase must still
+	// be rejected rather than sneaking past on byte length.
+	if err := ValidatePassword(strings.Repeat("é", MinPasswordLen-1)); err == nil {
+		t.Fatal("ValidatePassword rejected on byte length, not rune length")
+	}
+}
+
+func TestCreateRejectsWeakPassword(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.Create("weakuser", "short", RoleUser); !errors.Is(err, ErrPasswordWeak) {
+		t.Fatalf("Create with weak password: err = %v, want ErrPasswordWeak", err)
+	}
+}
+
+func TestUsernamesAreCaseInsensitive(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.Create("Casey", "casey-testpassword", RoleUser); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.Create("CASEY", "casey2-testpassword", RoleUser); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("Create differing only in case: err = %v, want ErrUsernameTaken", err)
+	}
+	for _, probe := range []string{"Casey", "casey", "CASEY", "  casey  "} {
+		u, err := store.GetByUsername(probe)
+		if err != nil {
+			t.Fatalf("GetByUsername(%q): %v", probe, err)
+		}
+		if u.Username != "Casey" {
+			t.Fatalf("GetByUsername(%q) = %q, want the stored form %q", probe, u.Username, "Casey")
+		}
+	}
+}
+
+func TestListIsSortedByUsername(t *testing.T) {
+	store := newTestStore(t)
+	for _, name := range []string{"zoe", "Adam", "mike"} {
+		if _, err := store.Create(name, name+"-testpassword", RoleUser); err != nil {
+			t.Fatalf("Create(%q): %v", name, err)
+		}
+	}
+	all, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var got []string
+	for _, u := range all {
+		got = append(got, u.Username)
+	}
+	if !sort.SliceIsSorted(got, func(i, j int) bool {
+		return strings.ToLower(got[i]) < strings.ToLower(got[j])
+	}) {
+		t.Fatalf("List() not sorted by username: %v", got)
 	}
 }

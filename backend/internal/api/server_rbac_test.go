@@ -127,7 +127,7 @@ func TestUserLifecycleEndpoints(t *testing.T) {
 	}
 
 	// Reset password.
-	body, _ = json.Marshal(map[string]string{"password": "temp-password"})
+	body, _ = json.Marshal(map[string]string{"password": "temp-password-1234"})
 	req = httptest.NewRequest(http.MethodPost, "/api/users/"+created.ID+"/reset-password", bytes.NewReader(body))
 	req.SetPathValue("id", created.ID)
 	authRequestAs(srv, req, admin.ID)
@@ -137,7 +137,7 @@ func TestUserLifecycleEndpoints(t *testing.T) {
 		t.Fatalf("reset password: status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	got, _ := srv.users.Get(created.ID)
-	if !got.MustChangePassword || !users.VerifyPassword(got, "temp-password") {
+	if !got.MustChangePassword || !users.VerifyPassword(got, "temp-password-1234") {
 		t.Fatalf("unexpected state after reset: %+v", got)
 	}
 
@@ -196,7 +196,7 @@ func TestLastActiveAdminIsProtected(t *testing.T) {
 	}
 
 	// With a second active admin, deactivating the first is allowed.
-	second, err := srv.users.Create("second-admin", "password-two", users.RoleAdmin)
+	second, err := srv.users.Create("second-admin", "password-two-testpassword", users.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

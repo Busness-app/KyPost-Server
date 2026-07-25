@@ -121,7 +121,7 @@ func doJSONAuth(srv *Server, handler http.HandlerFunc, method, path string, payl
 
 func TestTOTPEnrollmentAndLoginFlow(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("erin", "pw-erin", users.RoleUser)
+	u, err := srv.users.Create("erin", "pw-erin-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestTOTPEnrollmentAndLoginFlow(t *testing.T) {
 
 	// Password login now returns an MFA challenge, NOT a session cookie.
 	loginRec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-		map[string]string{"username": "erin", "password": "pw-erin"})
+		map[string]string{"username": "erin", "password": "pw-erin-testpassword"})
 	if loginRec.Code != http.StatusOK {
 		t.Fatalf("login: status=%d body=%s", loginRec.Code, loginRec.Body.String())
 	}
@@ -175,7 +175,7 @@ func TestTOTPEnrollmentAndLoginFlow(t *testing.T) {
 // user can still retry the current step correctly).
 func TestTOTPPerAccountReplayGuard(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("ivy", "pw-ivy", users.RoleUser)
+	u, err := srv.users.Create("ivy", "pw-ivy-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestTOTPPerAccountReplayGuard(t *testing.T) {
 	newChallenge := func() string {
 		t.Helper()
 		loginRec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-			map[string]string{"username": "ivy", "password": "pw-ivy"})
+			map[string]string{"username": "ivy", "password": "pw-ivy-testpassword"})
 		var login struct {
 			ChallengeID string `json:"challengeId"`
 		}
@@ -240,7 +240,7 @@ func TestTOTPPerAccountReplayGuard(t *testing.T) {
 	// following genuine code can legitimately advance (ivy's recorded step
 	// above is already pinned near the edge of the ±1 skew window accepted
 	// by totp.Validate, since (c) deliberately used a next-step code).
-	v, err := srv.users.Create("jill", "pw-jill", users.RoleUser)
+	v, err := srv.users.Create("jill", "pw-jill-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create jill: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestTOTPPerAccountReplayGuard(t *testing.T) {
 	newJillChallenge := func() string {
 		t.Helper()
 		loginRec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-			map[string]string{"username": "jill", "password": "pw-jill"})
+			map[string]string{"username": "jill", "password": "pw-jill-testpassword"})
 		var login struct {
 			ChallengeID string `json:"challengeId"`
 		}
@@ -300,7 +300,7 @@ func TestTOTPPerAccountReplayGuard(t *testing.T) {
 // guesses for the real, still-unknown current code.
 func TestTOTPReplayCountsTowardLockout(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("kate", "pw-kate", users.RoleUser)
+	u, err := srv.users.Create("kate", "pw-kate-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestTOTPReplayCountsTowardLockout(t *testing.T) {
 	newChallenge := func() string {
 		t.Helper()
 		loginRec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-			map[string]string{"username": "kate", "password": "pw-kate"})
+			map[string]string{"username": "kate", "password": "pw-kate-testpassword"})
 		var login struct {
 			ChallengeID string `json:"challengeId"`
 		}
@@ -357,14 +357,14 @@ func TestTOTPReplayCountsTowardLockout(t *testing.T) {
 
 func TestTOTPAttemptLockout(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("frank", "pw-frank", users.RoleUser)
+	u, err := srv.users.Create("frank", "pw-frank-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	secret, _ := enrollTOTP(t, srv, u.ID)
 
 	loginRec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-		map[string]string{"username": "frank", "password": "pw-frank"})
+		map[string]string{"username": "frank", "password": "pw-frank-testpassword"})
 	var login struct {
 		ChallengeID string `json:"challengeId"`
 	}
@@ -403,7 +403,7 @@ func TestTOTPAttemptLockout(t *testing.T) {
 
 func TestRecoveryCodeSingleUse(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("grace", "pw-grace", users.RoleUser)
+	u, err := srv.users.Create("grace", "pw-grace-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestRecoveryCodeSingleUse(t *testing.T) {
 
 	// First challenge: recovery code works and mints a session.
 	login1 := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-		map[string]string{"username": "grace", "password": "pw-grace"})
+		map[string]string{"username": "grace", "password": "pw-grace-testpassword"})
 	var l1 struct {
 		ChallengeID string `json:"challengeId"`
 	}
@@ -425,7 +425,7 @@ func TestRecoveryCodeSingleUse(t *testing.T) {
 
 	// Second challenge: the same code is now consumed and rejected.
 	login2 := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-		map[string]string{"username": "grace", "password": "pw-grace"})
+		map[string]string{"username": "grace", "password": "pw-grace-testpassword"})
 	var l2 struct {
 		ChallengeID string `json:"challengeId"`
 	}
@@ -439,7 +439,7 @@ func TestRecoveryCodeSingleUse(t *testing.T) {
 
 func TestMFAStatusAndDisable(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("heidi", "pw-heidi", users.RoleUser)
+	u, err := srv.users.Create("heidi", "pw-heidi-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestMFAStatusAndDisable(t *testing.T) {
 		t.Fatalf("disable wrong pw: status=%d, want 401", bad.Code)
 	}
 	good := doJSONAuth(srv, srv.withAuth(srv.handleMFADisable), http.MethodPost, "/api/mfa/totp/disable",
-		map[string]string{"password": "pw-heidi"}, u.ID)
+		map[string]string{"password": "pw-heidi-testpassword"}, u.ID)
 	if good.Code != http.StatusOK {
 		t.Fatalf("disable: status=%d body=%s", good.Code, good.Body.String())
 	}
@@ -486,7 +486,7 @@ func TestMFAStatusAndDisable(t *testing.T) {
 // against a login challenge in the same window.
 func TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("nora", "pw-nora", users.RoleUser)
+	u, err := srv.users.Create("nora", "pw-nora-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge(t *testing.T) {
 	}
 
 	loginRec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-		map[string]string{"username": "nora", "password": "pw-nora"})
+		map[string]string{"username": "nora", "password": "pw-nora-testpassword"})
 	if loginRec.Code != http.StatusOK {
 		t.Fatalf("login: status=%d body=%s", loginRec.Code, loginRec.Body.String())
 	}
@@ -555,7 +555,7 @@ func TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge(t *testing.T) {
 	// consumed login.ChallengeID (handleMFATOTP deletes the challenge on any
 	// rejected code, replay or otherwise).
 	login2Rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-		map[string]string{"username": "nora", "password": "pw-nora"})
+		map[string]string{"username": "nora", "password": "pw-nora-testpassword"})
 	var login2 struct {
 		ChallengeID string `json:"challengeId"`
 	}

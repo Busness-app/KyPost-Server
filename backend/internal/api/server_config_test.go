@@ -258,7 +258,7 @@ func TestConfigRoundTripDoesNotCorruptChangeDetection(t *testing.T) {
 // The session that performs the change itself must stay logged in.
 func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("heidi", "old-password", users.RoleUser)
+	u, err := srv.users.Create("heidi", "old-password-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 	srv.sessions[otherToken] = Session{UserID: u.ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-b"}
 	srv.mu.Unlock()
 
-	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password", "newPassword": "new-password"})
+	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password-testpassword", "newPassword": "new-password-testpassword"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
 	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: changingToken})
 	req.Header.Set("X-CSRF-Token", "csrf-a")

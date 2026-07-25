@@ -50,8 +50,8 @@ func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "username required", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.Password) == "" {
-		http.Error(w, "password required", http.StatusBadRequest)
+	if err := users.ValidatePassword(req.Password); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	role, err := parseRole(req.Role)
@@ -65,7 +65,7 @@ func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "username already in use", http.StatusConflict)
 			return
 		}
-		http.Error(w, "failed to create user", http.StatusInternalServerError)
+		writeUserStoreError(w, err)
 		return
 	}
 	s.logger.Info("user created", "user_id", u.ID, "username", u.Username, "role", string(u.Role))
@@ -113,8 +113,8 @@ func (s *Server) handleUsersResetPassword(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.Password) == "" {
-		http.Error(w, "password required", http.StatusBadRequest)
+	if err := users.ValidatePassword(req.Password); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	u, err := s.users.SetPassword(id, req.Password, true)
@@ -228,6 +228,12 @@ func parseRole(raw string) (users.Role, error) {
 func writeUserStoreError(w http.ResponseWriter, err error) {
 	if errors.Is(err, users.ErrNotFound) {
 		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	// A rejected password is caller error, not a store failure — the message
+	// is safe to echo verbatim since it only states the length requirement.
+	if errors.Is(err, users.ErrPasswordWeak) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	http.Error(w, "user store error", http.StatusInternalServerError)

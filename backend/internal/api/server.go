@@ -3679,8 +3679,8 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.NewPassword) == "" {
-		http.Error(w, "new password required", http.StatusBadRequest)
+	if err := users.ValidatePassword(req.NewPassword); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	u, err := s.users.Get(ac.UserID)
@@ -3775,15 +3775,31 @@ func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 
 	result, err := client.Classify(ctx, allowed, "", "", prompt, tuning)
 	if err != nil {
+		// The model answered but off-allowlist: that is a successful round
+		// trip as far as connectivity goes, which is all this endpoint
+		// tests. Show the operator what it actually said.
+		var noLabel *classifier.NoAllowedLabelError
+		if errors.As(err, &noLabel) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":             true,
+				"response":       noLabel.Output,
+				"matchedAllowed": false,
+				"baseUrl":        baseURL,
+				"path":           path,
+				"allowedLabels":  allowed,
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"response": result,
-		"baseUrl":  baseURL,
-		"path":     path,
+		"ok":             true,
+		"response":       result,
+		"matchedAllowed": true,
+		"baseUrl":        baseURL,
+		"path":           path,
 	})
 }
 

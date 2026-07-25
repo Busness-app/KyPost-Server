@@ -487,8 +487,21 @@ func (s *Store) Decisions(limit int) []Decision {
 	}
 	out := make([]Decision, len(s.decisions))
 	copy(out, s.decisions)
+	// Compare parsed instants, not RFC3339 strings. String ordering only
+	// happens to work while every value is UTC with identical formatting;
+	// one offset-bearing or fractional-second timestamp written by any
+	// future call site would silently scramble the ordering instead of
+	// failing. An unparseable timestamp sorts last (zero time) rather than
+	// taking the whole sort with it.
+	at := func(d Decision) time.Time {
+		t, err := time.Parse(time.RFC3339, d.AtUTC)
+		if err != nil {
+			return time.Time{}
+		}
+		return t
+	}
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].AtUTC > out[j].AtUTC
+		return at(out[i]).After(at(out[j]))
 	})
 	if limit > 0 && len(out) > limit {
 		return out[:limit]
@@ -847,28 +860,27 @@ func (s *Store) SetDesktopPairingCode(code string, ttl time.Duration) error {
 
 // ValidateDesktopPairingCode checks if a code is valid and not expired.
 // Returns true if valid, false if expired or not found.
+//
+// This is a pure read: it refreshes from disk like every other reader here
+// (so a code minted by the other process is visible), and it does NOT prune
+// expired entries. An earlier version deleted the expired entry in memory
+// without setting pairingCodesDirty or persisting, so the delete was silently
+// reverted by the next refresh — housekeeping that only looked like it
+// worked. Expired codes are pruned for real on load, in applyStateFile.
 func (s *Store) ValidateDesktopPairingCode(code string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_ = s.refreshStateFromDiskLocked()
 
-	cleaned := strings.TrimSpace(code)
-	expiresAtStr, ok := s.desktopPairingCodes[cleaned]
+	expiresAtStr, ok := s.desktopPairingCodes[strings.TrimSpace(code)]
 	if !ok {
 		return false
 	}
-
 	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
 	if err != nil {
 		return false
 	}
-
-	if time.Now().UTC().After(expiresAt) {
-		// Code has expired, clean it up
-		delete(s.desktopPairingCodes, cleaned)
-		return false
-	}
-
-	return true
+	return time.Now().UTC().Before(expiresAt)
 }
 
 // ConsumeDesktopPairingCode validates and removes a pairing code.

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -113,7 +114,36 @@ func (u User) Public() Public {
 var (
 	ErrNotFound      = errors.New("user not found")
 	ErrUsernameTaken = errors.New("username already in use")
+	ErrPasswordWeak  = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 )
+
+// MinPasswordLen is the minimum length of any password this store will
+// accept. Length is the only rule enforced: character-class requirements
+// push users toward predictable substitutions without adding real entropy,
+// while a length floor is what actually defeats the online guessing this
+// server's lockout only slows down.
+const MinPasswordLen = 14
+
+// ValidatePassword enforces MinPasswordLen. It is called by every store
+// method that sets a password (Create, SetPassword) rather than by each API
+// handler, so a new call site cannot forget it. Length is counted in runes,
+// not bytes, so a passphrase in a non-Latin script is not penalized.
+func ValidatePassword(password string) error {
+	if len([]rune(password)) < MinPasswordLen {
+		return ErrPasswordWeak
+	}
+	return nil
+}
+
+// normalizeUsername folds a username to its comparison form. Usernames are
+// stored as the user typed them (minus surrounding whitespace) but compared
+// case-insensitively, so "admin", "Admin", and "ADMIN" can never coexist as
+// separate accounts on a system where the admin role can reach every other
+// user's configuration. Comparing rather than rewriting means accounts
+// created before this rule existed keep working without a migration.
+func normalizeUsername(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
+}
 
 type usersFile struct {
 	Version int    `json:"version"`
@@ -349,6 +379,9 @@ func (s *Store) List() ([]User, error) {
 	if err != nil {
 		return nil, err
 	}
+	sort.Slice(f.Users, func(i, j int) bool {
+		return normalizeUsername(f.Users[i].Username) < normalizeUsername(f.Users[j].Username)
+	})
 	return f.Users, nil
 }
 
@@ -368,7 +401,8 @@ func (s *Store) Get(id string) (User, error) {
 	return User{}, ErrNotFound
 }
 
-// GetByUsername returns a user by username (case-sensitive).
+// GetByUsername returns a user by username, compared case-insensitively —
+// see normalizeUsername.
 func (s *Store) GetByUsername(username string) (User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -376,8 +410,9 @@ func (s *Store) GetByUsername(username string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
+	want := normalizeUsername(username)
 	for _, u := range f.Users {
-		if u.Username == username {
+		if normalizeUsername(u.Username) == want {
 			return u, nil
 		}
 	}
@@ -386,14 +421,19 @@ func (s *Store) GetByUsername(username string) (User, error) {
 
 // Create adds a new user with the given username/password/role.
 func (s *Store) Create(username, password string, role Role) (User, error) {
+	if err := ValidatePassword(password); err != nil {
+		return User{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f, err := s.readLocked()
 	if err != nil {
 		return User{}, err
 	}
+	username = strings.TrimSpace(username)
+	want := normalizeUsername(username)
 	for _, u := range f.Users {
-		if u.Username == username {
+		if normalizeUsername(u.Username) == want {
 			return User{}, ErrUsernameTaken
 		}
 	}
@@ -458,6 +498,9 @@ func (s *Store) SetRole(id string, role Role) (User, error) {
 // SetPassword sets a new password. If requireChange is true the user must
 // change it again on next login (used for admin-initiated resets).
 func (s *Store) SetPassword(id, newPassword string, requireChange bool) (User, error) {
+	if err := ValidatePassword(newPassword); err != nil {
+		return User{}, err
+	}
 	hash, err := HashPassword(newPassword)
 	if err != nil {
 		return User{}, err

@@ -272,14 +272,14 @@ func TestHandleCaptchaConfigReportsDisabledByDefault(t *testing.T) {
 // matching header still succeeds.
 func TestCSRFProtectionOnCookieAuthedMutations(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("heidi", "old-password", users.RoleUser)
+	u, err := srv.users.Create("heidi", "old-password-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	protected := srv.withAuth(srv.handleChangePassword)
 
 	// Cookie present, no CSRF header: rejected, even with correct password.
-	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password", "newPassword": "new-password"})
+	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password-testpassword", "newPassword": "new-password-testpassword"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
 	token := "session-token-" + u.ID
 	srv.mu.Lock()
@@ -320,7 +320,7 @@ func TestCSRFProtectionOnCookieAuthedMutations(t *testing.T) {
 // credential for CSRF to exploit.
 func TestCSRFProtectionSkipsRequestsWithoutSessionCookie(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("ivan", "pw-ivan", users.RoleUser)
+	u, err := srv.users.Create("ivan", "pw-ivan-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestCSRFProtectionSkipsRequestsWithoutSessionCookie(t *testing.T) {
 
 func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("bob", "old-password", users.RoleUser)
+	u, err := srv.users.Create("bob", "old-password-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	protected := srv.withAuth(srv.handleChangePassword)
 
 	// Wrong old password is rejected.
-	body, _ := json.Marshal(map[string]string{"oldPassword": "not-it", "newPassword": "new-password"})
+	body, _ := json.Marshal(map[string]string{"oldPassword": "not-it", "newPassword": "new-password-testpassword"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
 	authRequestAs(srv, req, u.ID)
 	rec := httptest.NewRecorder()
@@ -355,7 +355,7 @@ func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	}
 
 	// Correct old password succeeds and the new password takes effect.
-	body, _ = json.Marshal(map[string]string{"oldPassword": "old-password", "newPassword": "new-password"})
+	body, _ = json.Marshal(map[string]string{"oldPassword": "old-password-testpassword", "newPassword": "new-password-testpassword"})
 	req = httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
 	authRequestAs(srv, req, u.ID)
 	rec = httptest.NewRecorder()
@@ -368,7 +368,7 @@ func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if !users.VerifyPassword(got, "new-password") {
+	if !users.VerifyPassword(got, "new-password-testpassword") {
 		t.Fatalf("expected new password to verify")
 	}
 }

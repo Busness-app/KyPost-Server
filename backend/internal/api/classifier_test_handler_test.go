@@ -46,7 +46,7 @@ func TestHandleClassifierTestCooldownBlocksRapidRequests(t *testing.T) {
 func TestHandleClassifierTestCooldownIsPerAdmin(t *testing.T) {
 	srv := newTestServer(t)
 	admin, _ := newTestUsers(t, srv)
-	secondAdmin, err := srv.users.Create("admin2", "pw-admin2", users.RoleAdmin)
+	secondAdmin, err := srv.users.Create("admin2", "pw-admin2-testpassword", users.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create second admin: %v", err)
 	}

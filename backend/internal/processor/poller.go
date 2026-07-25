@@ -869,6 +869,15 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	}
 
 	label, err := classifyWithRetry(ctx, p.classifier, cfg.Labels.Allowlist, msg.Sender, msg.Subject, bodyWithContext, uc.tuning)
+	// The model answering with something that isn't an allowed label is a
+	// normal outcome, not a classifier failure: fall through to the
+	// "no known label returned" skip path below (which retires the message
+	// and still notifies) rather than treating it as an error worth
+	// retrying or worth blocking MarkProcessed on.
+	var noLabel *classifier.NoAllowedLabelError
+	if errors.As(err, &noLabel) {
+		label, err = noLabel.Output, nil
+	}
 	if err != nil {
 		if isAICreditsExhaustedError(err) {
 			p.flagAICreditsExhausted()
@@ -1172,6 +1181,13 @@ func classifyWithRetry(ctx context.Context, c *classifier.HTTPClient, labels []s
 func isPermanentClassifierError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// The model gave a real answer that just isn't on the allowlist. Asking
+	// the same question two more times, five seconds apart, is not going to
+	// change that — and the caller handles it as a skip, not a failure.
+	var noLabel *classifier.NoAllowedLabelError
+	if errors.As(err, &noLabel) {
+		return true
 	}
 	msg := strings.ToLower(strings.TrimSpace(err.Error()))
 	if strings.Contains(msg, "422") {

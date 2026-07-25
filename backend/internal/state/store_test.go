@@ -535,3 +535,56 @@ func TestUpsertNativeDevicePreservesRevokedMFAApprover(t *testing.T) {
 		t.Fatalf("expected revoked approver to survive token-match re-registration, got %+v ok=%v", got, ok)
 	}
 }
+
+// TestDecisionsSortByInstantNotString pins that ordering survives a
+// timestamp written with a non-UTC offset — string comparison of RFC3339
+// silently scrambles that case, parsed-instant comparison does not.
+func TestDecisionsSortByInstantNotString(t *testing.T) {
+	s, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// 09:00-04:00 is 13:00Z — later than 12:00Z, but sorts EARLIER as a
+	// string because "0" < "1".
+	older := Decision{MessageID: "older", AtUTC: "2026-07-25T12:00:00Z"}
+	newer := Decision{MessageID: "newer", AtUTC: "2026-07-25T09:00:00-04:00"}
+	for _, d := range []Decision{older, newer} {
+		if err := s.AddDecision(d); err != nil {
+			t.Fatalf("AddDecision: %v", err)
+		}
+	}
+	got := s.Decisions(0)
+	if len(got) != 2 {
+		t.Fatalf("Decisions len = %d, want 2", len(got))
+	}
+	if got[0].MessageID != "newer" {
+		t.Fatalf("Decisions[0] = %q, want %q (newest first)", got[0].MessageID, "newer")
+	}
+}
+
+// TestValidateDesktopPairingCodeDoesNotHalfDeleteExpired pins that
+// validating an expired code is a pure read: it must not leave the in-memory
+// map disagreeing with disk.
+func TestValidateDesktopPairingCodeDoesNotHalfDeleteExpired(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.SetDesktopPairingCode("code-abc", time.Millisecond); err != nil {
+		t.Fatalf("SetDesktopPairingCode: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if s.ValidateDesktopPairingCode("code-abc") {
+		t.Fatal("expired code validated as good")
+	}
+	// A second reader (fresh Store over the same dir) must see exactly what
+	// the first one saw — no silent divergence between memory and disk.
+	s2, err := New(dir)
+	if err != nil {
+		t.Fatalf("New (second): %v", err)
+	}
+	if s2.ValidateDesktopPairingCode("code-abc") {
+		t.Fatal("expired code validated as good on reload")
+	}
+}

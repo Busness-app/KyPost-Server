@@ -176,7 +176,7 @@ func TestHandleSendAsCreateRateLimited(t *testing.T) {
 func TestHandleSendAsListScopedToCaller(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
-	other, err := srv.users.Create("other-sendas", "pw-other", users.RoleUser)
+	other, err := srv.users.Create("other-sendas", "pw-other-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create other user: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestHandleSendAsDeleteHappyPath(t *testing.T) {
 func TestHandleSendAsDeleteRejectsOtherUsersAlias(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
-	other, err := srv.users.Create("other-sendas-del", "pw-other", users.RoleUser)
+	other, err := srv.users.Create("other-sendas-del", "pw-other-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create other user: %v", err)
 	}
