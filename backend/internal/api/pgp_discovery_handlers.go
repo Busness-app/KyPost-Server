@@ -44,27 +44,25 @@ func (s *Server) handlePGPDiscoverySettings(w http.ResponseWriter, r *http.Reque
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		current, err := pgpdiscovery.Load(dir)
+		// Update, not Load-then-Save: the merge below reads the stored value
+		// for every omitted field, so two concurrent PUTs (two open tabs)
+		// would otherwise both start from the same snapshot and the second
+		// write would silently discard the first one's change.
+		settings, err := pgpdiscovery.Update(dir, func(current pgpdiscovery.Settings) pgpdiscovery.Settings {
+			next := current
+			next.AutoEncryptWhenKeyKnown = req.AutoEncryptWhenKeyKnown
+			if req.StoreDiscoveredKeys != nil {
+				next.StoreDiscoveredKeys = *req.StoreDiscoveredKeys
+			}
+			if req.AdvertiseAutocrypt != nil {
+				next.AdvertiseAutocrypt = *req.AdvertiseAutocrypt
+			}
+			if req.PublishWKD != nil {
+				next.PublishWKD = *req.PublishWKD
+			}
+			return next
+		})
 		if err != nil {
-			http.Error(w, "failed to read discovery settings", http.StatusInternalServerError)
-			return
-		}
-		settings := pgpdiscovery.Settings{
-			AutoEncryptWhenKeyKnown: req.AutoEncryptWhenKeyKnown,
-			StoreDiscoveredKeys:     current.StoreDiscoveredKeys,
-			AdvertiseAutocrypt:      current.AdvertiseAutocrypt,
-			PublishWKD:              current.PublishWKD,
-		}
-		if req.StoreDiscoveredKeys != nil {
-			settings.StoreDiscoveredKeys = *req.StoreDiscoveredKeys
-		}
-		if req.AdvertiseAutocrypt != nil {
-			settings.AdvertiseAutocrypt = *req.AdvertiseAutocrypt
-		}
-		if req.PublishWKD != nil {
-			settings.PublishWKD = *req.PublishWKD
-		}
-		if err := pgpdiscovery.Save(dir, settings); err != nil {
 			http.Error(w, "failed to save discovery settings", http.StatusInternalServerError)
 			return
 		}
