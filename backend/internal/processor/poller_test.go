@@ -107,7 +107,7 @@ func TestBuildNativeNotificationText(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			title, body := buildNativeNotificationText(tc.msg)
+			title, body := buildNativeNotificationText(tc.msg, true)
 			if title != tc.wantTitle || body != tc.wantBody {
 				t.Fatalf("buildNativeNotificationText() = (%q, %q), want (%q, %q)", title, body, tc.wantTitle, tc.wantBody)
 			}
@@ -163,7 +163,7 @@ func TestBuildNativePushData(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildNativePushData(tc.msg, tc.keywords, tc.title, tc.body)
+			got := buildNativePushData(tc.msg, tc.keywords, tc.title, tc.body, true)
 			for key, want := range tc.want {
 				if got[key] != want {
 					t.Errorf("buildNativePushData()[%q] = %q, want %q", key, got[key], want)
@@ -870,5 +870,53 @@ func TestHandleMessage_TooLargeMessageStillRecordsDecisionWhenNotifyFails(t *tes
 	}
 	if !strings.Contains(decisions[0].Detail, "rejection notice could not be sent") {
 		t.Fatalf("expected Detail to mention the notice failure, got %q", decisions[0].Detail)
+	}
+}
+
+// TestNativePushOmitsContentByDefault is the check for the privacy default.
+// A native push leaves this server for a relay Worker and then Google or
+// Apple, readable at every hop, so nothing about the message may ride along
+// unless the user asked for it.
+func TestNativePushOmitsContentByDefault(t *testing.T) {
+	msg := imapadapter.Message{
+		ID:      "42",
+		Sender:  "whistleblower@example.org",
+		Subject: "the documents",
+	}
+	keywords := []string{"Important"}
+
+	title, body := buildNativeNotificationText(msg, false)
+	if strings.Contains(title, "whistleblower") || strings.Contains(body, "documents") {
+		t.Fatalf("generic push leaked content: title=%q body=%q", title, body)
+	}
+
+	data := buildNativePushData(msg, keywords, title, body, false)
+	for key, value := range data {
+		for _, secret := range []string{"whistleblower", "example.org", "documents", "Important"} {
+			if strings.Contains(value, secret) {
+				t.Errorf("data[%q] = %q leaks %q", key, value, secret)
+			}
+		}
+	}
+	// The message id and deep link are the whole point: the app opens the
+	// right message after syncing over its own authenticated connection.
+	if data["messageId"] != "42" {
+		t.Errorf("data[messageId] = %q, want %q", data["messageId"], "42")
+	}
+	if _, ok := data["subject"]; ok {
+		t.Error("data still carries a subject key when previews are off")
+	}
+}
+
+// With the opt-in on, the payload must carry both key spellings: the mobile
+// client reads senderName/emailSubject on FCM and sender/subject on App Pull.
+func TestNativePushCarriesBothKeySpellingsWhenOptedIn(t *testing.T) {
+	msg := imapadapter.Message{ID: "7", Sender: "a@example.com", Subject: "hello"}
+	title, body := buildNativeNotificationText(msg, true)
+	data := buildNativePushData(msg, nil, title, body, true)
+	for _, key := range []string{"sender", "senderName", "subject", "emailSubject", "title", "body"} {
+		if data[key] == "" {
+			t.Errorf("data[%q] is empty; the mobile client reads this key", key)
+		}
 	}
 }

@@ -977,8 +977,17 @@ func (p *Poller) maybeSendPushNotification(uc userCtx, msg imapadapter.Message, 
 		return
 	}
 
+	// Web push payloads are encrypted to the browser's own subscription keys
+	// (RFC 8291), so unlike the native relay path the push service sees only
+	// ciphertext and there is no third-party disclosure here. The
+	// ContentPreview setting is still honored, because a user who asked not
+	// to see senders and subjects in notifications means on their lock
+	// screen too, not just in transit.
 	title := "New Email"
-	body := buildNotificationBody(msg)
+	body := "You have a new email."
+	if uc.settings.ContentPreview {
+		body = buildNotificationBody(msg)
+	}
 
 	// Deep-link straight to the email that triggered the notification
 	// instead of the generic inbox view, so tapping the notification opens
@@ -1028,8 +1037,9 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 		return
 	}
 
-	title, body := buildNativeNotificationText(msg)
-	data := buildNativePushData(msg, messageKeywords, title, body)
+	includeContent := uc.settings.ContentPreview
+	title, body := buildNativeNotificationText(msg, includeContent)
+	data := buildNativePushData(msg, messageKeywords, title, body, includeContent)
 
 	// title/body are duplicated into data so a mobile client that renders its
 	// own notification from the data payload shows the sender and subject
@@ -1127,11 +1137,19 @@ func buildNotificationBody(msg imapadapter.Message) string {
 	return fmt.Sprintf("From %s: %s", from, subject)
 }
 
-// buildNativeNotificationText renders a mobile push as a mail app would:
-// the sender is the notification title and the subject its body, so the
-// user sees who it is from and what it is about rather than a generic
-// "New Email".
-func buildNativeNotificationText(msg imapadapter.Message) (title, body string) {
+// buildNativeNotificationText renders a mobile push. With includeContent it
+// reads as a mail app's does — sender as the title, subject as the body.
+// Without it, the notification is generic and carries no message metadata at
+// all.
+//
+// includeContent is off unless the user turned on
+// UserNotificationSettings.ContentPreview, because a native push is not
+// delivered by this server: it goes backend -> relay Worker -> FCM/APNs, in
+// cleartext to every hop. See that field's doc comment.
+func buildNativeNotificationText(msg imapadapter.Message, includeContent bool) (title, body string) {
+	if !includeContent {
+		return "KyPost", "You have a new email."
+	}
 	from := strings.TrimSpace(msg.Sender)
 	subject := strings.TrimSpace(msg.Subject)
 	title = from
@@ -1145,18 +1163,36 @@ func buildNativeNotificationText(msg imapadapter.Message) (title, body string) {
 	return title, body
 }
 
-func buildNativePushData(msg imapadapter.Message, messageKeywords []string, title, body string) map[string]string {
-	return map[string]string{
-		"messageId":    strings.TrimSpace(msg.ID),
-		"sender":       strings.TrimSpace(msg.Sender),
-		"subject":      strings.TrimSpace(msg.Subject),
-		"senderName":   strings.TrimSpace(msg.Sender),
-		"emailSubject": strings.TrimSpace(msg.Subject),
-		"Keywords":     strings.Join(messageKeywords, ","),
-		"title":        title,
-		"body":         body,
-		"url":          "/read",
+// buildNativePushData builds the data payload accompanying a native push.
+//
+// Without includeContent it carries only the message id (so tapping the
+// notification can open the right message once the app syncs over its own
+// authenticated connection) and the deep link. No sender, no subject, no
+// keywords — keywords leak the classification, which is itself a statement
+// about the message.
+//
+// The sender appears under both "sender" and "senderName", and the subject
+// under both "subject" and "emailSubject". That is not redundancy to clean
+// up: the mobile client reads senderName/emailSubject on the FCM path and
+// falls back to sender/subject on the App Pull path, so removing either pair
+// breaks one of them. The client already renders generic text when they are
+// absent, which is exactly what this function produces when previews are off.
+func buildNativePushData(msg imapadapter.Message, messageKeywords []string, title, body string, includeContent bool) map[string]string {
+	data := map[string]string{
+		"messageId": strings.TrimSpace(msg.ID),
+		"url":       "/read",
 	}
+	if !includeContent {
+		return data
+	}
+	data["sender"] = strings.TrimSpace(msg.Sender)
+	data["subject"] = strings.TrimSpace(msg.Subject)
+	data["senderName"] = strings.TrimSpace(msg.Sender)
+	data["emailSubject"] = strings.TrimSpace(msg.Subject)
+	data["Keywords"] = strings.Join(messageKeywords, ",")
+	data["title"] = title
+	data["body"] = body
+	return data
 }
 
 func classifyWithRetry(ctx context.Context, c *classifier.HTTPClient, labels []string, sender, subject, body, tuning string) (string, error) {
