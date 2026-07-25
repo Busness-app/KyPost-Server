@@ -15,14 +15,6 @@ import (
 	"kypost-server/backend/internal/wkdpublish"
 )
 
-// wkdRecordNameFormat/wkdRecordValueFormat describe, before a claim exists,
-// the shape of the DNS TXT record a caller will need to add once they claim
-// a domain (used only in the GET list response as a hint for the UI).
-const (
-	wkdRecordNameFormat  = "_kypost-wkd.<domain>"
-	wkdRecordValueFormat = "kypost-wkd-verify=<token>"
-)
-
 // wkdClaimResponse is the POST /api/pgp/wkd/domains response: the created
 // claim (fields promoted to the top level via embedding) plus the literal
 // DNS TXT record the caller must add to prove ownership.
@@ -60,9 +52,7 @@ func (s *Server) handleWKDDomains(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		claims := store.List()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"domains":           claims,
-			"recordNameFormat":  wkdRecordNameFormat,
-			"recordValueFormat": wkdRecordValueFormat,
+			"domains": claims,
 		})
 
 	case http.MethodPost:
@@ -95,9 +85,18 @@ func (s *Server) handleWKDDomains(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWKDDomainVerify re-checks the DNS TXT record for {domain} against
-// the stored claim's token and persists the result. A DNS lookup error is
-// reported as {verified:false} (200), not a 500 — transient DNS failures
-// are an expected, non-exceptional outcome here.
+// the stored claim's token and persists the result. wkdpublish.CheckTXT
+// already classifies a definitive "not found" (NXDOMAIN/NODATA) as
+// (false, nil), so only a genuinely transient resolver failure (timeout,
+// SERVFAIL, network down, ...) comes back as a non-nil error here. On a
+// transient error, the claim's current verified value is left untouched —
+// persisting SetVerified(domain, false, ...) on a mere DNS blip would
+// unpublish an entire domain's users, which is exactly the invariant the
+// background re-check (recheckWKDDomains) is careful to preserve. The
+// endpoint still answers 200 in that case (transient DNS trouble is an
+// expected, non-exceptional outcome here, not a server error), reporting the
+// claim's unchanged verified value plus a checkError hint the frontend may
+// ignore.
 func (s *Server) handleWKDDomainVerify(w http.ResponseWriter, r *http.Request) {
 	domain := strings.ToLower(strings.TrimSpace(r.PathValue("domain")))
 	if domain == "" {
@@ -124,7 +123,16 @@ func (s *Server) handleWKDDomainVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verified, _ := wkdpublish.CheckTXT(domain, claim.Token)
+	verified, checkErr := wkdpublish.CheckTXT(domain, claim.Token)
+	if checkErr != nil {
+		// Transient DNS failure: don't persist a false verified value over
+		// the claim's real current state. Report what's on record instead.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"verified":   claim.Verified,
+			"checkError": checkErr.Error(),
+		})
+		return
+	}
 	if err := store.SetVerified(domain, verified, time.Now()); err != nil {
 		http.Error(w, "failed to update claim", http.StatusInternalServerError)
 		return
@@ -251,7 +259,7 @@ usersLoop:
 		}
 		settings, serr := pgpdiscovery.Load(s.userStateDir(u.ID))
 		if serr != nil || !settings.PublishWKD {
-			continue usersLoop
+			continue
 		}
 		for _, addr := range s.publishableAddressesAt(u, domain) {
 			at := strings.LastIndex(addr, "@")

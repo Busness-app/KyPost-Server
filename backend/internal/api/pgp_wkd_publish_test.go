@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -108,6 +109,53 @@ func TestWKDDomainClaimVerifyDeleteFlowAsAdmin(t *testing.T) {
 	domains2, _ := listResp2["domains"].([]any)
 	if len(domains2) != 0 {
 		t.Fatalf("list after delete: expected 0 domains, got %+v", listResp2)
+	}
+}
+
+// TestWKDDomainVerifyDoesNotUnpublishOnTransientDNSError covers R2: the
+// admin Verify endpoint used to discard CheckTXT's error entirely
+// (`verified, _ := wkdpublish.CheckTXT(...)`) and persist the resulting
+// false, unpublishing an entire domain's users on a mere transient DNS blip
+// — the opposite of the invariant the background re-check preserves. A
+// transient failure (a plain, non-*net.DNSError-not-found error) must leave
+// the claim's stored verified value untouched.
+func TestWKDDomainVerifyDoesNotUnpublishOnTransientDNSError(t *testing.T) {
+	srv := newTestServer(t)
+	adminID := srv.mustBootstrapUserID(t)
+
+	claimRec := doWKDRoute(srv, adminID, http.MethodPost, "/api/pgp/wkd/domains", `{"domain":"example.com"}`)
+	if claimRec.Code != http.StatusOK {
+		t.Fatalf("claim: status = %d, want 200; body=%s", claimRec.Code, claimRec.Body.String())
+	}
+
+	store, err := srv.wkdPublishStore()
+	if err != nil {
+		t.Fatalf("wkdPublishStore: %v", err)
+	}
+	if err := store.SetVerified("example.com", true, time.Now()); err != nil {
+		t.Fatalf("SetVerified: %v", err)
+	}
+
+	orig := wkdpublish.LookupTXT
+	t.Cleanup(func() { wkdpublish.LookupTXT = orig })
+	wkdpublish.LookupTXT = func(string) ([]string, error) {
+		return nil, errors.New("some transient resolver failure")
+	}
+
+	verifyRec := doWKDRoute(srv, adminID, http.MethodPost, "/api/pgp/wkd/domains/example.com/verify", "")
+	if verifyRec.Code != http.StatusOK {
+		t.Fatalf("verify: status = %d, want 200; body=%s", verifyRec.Code, verifyRec.Body.String())
+	}
+	verifyResp := decodeJSONBody(t, verifyRec)
+	if verifyResp["verified"] != true {
+		t.Fatalf("verify response should report the claim's unchanged verified=true, got %v", verifyResp["verified"])
+	}
+	if _, ok := verifyResp["checkError"]; !ok {
+		t.Fatalf("verify response should surface a checkError hint on transient failure: %+v", verifyResp)
+	}
+
+	if !store.VerifiedDomains()["example.com"] {
+		t.Fatal("a transient DNS error on Verify must not unpublish an already-verified domain")
 	}
 }
 
