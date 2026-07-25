@@ -60,11 +60,20 @@ func saveSuppressions(dir string, list []Suppression) error {
 // AddSuppression records (or refreshes) a discovery opt-out for email. It is
 // idempotent on the normalized address: re-adding updates the timestamp and
 // reason instead of appending a duplicate. An empty address is a no-op.
+//
+// The load-modify-save cycle is serialized per directory (see atomic.go):
+// both production call sites loop over addresses, so without the lock
+// concurrent callers dropped each other's entries — and a lost suppression
+// means a key the user rejected gets silently rediscovered.
 func AddSuppression(dir, email, reason string) error {
 	e := normalizeEmail(email)
 	if e == "" {
 		return nil
 	}
+	mu := dirMu(dir)
+	mu.Lock()
+	defer mu.Unlock()
+
 	list, err := LoadSuppressions(dir)
 	if err != nil {
 		return err
@@ -83,9 +92,14 @@ func AddSuppression(dir, email, reason string) error {
 }
 
 // RemoveSuppression deletes the opt-out for email ("allow discovery again"),
-// reporting whether an entry was present.
+// reporting whether an entry was present. Serialized per directory for the
+// same reason as AddSuppression.
 func RemoveSuppression(dir, email string) (bool, error) {
 	e := normalizeEmail(email)
+	mu := dirMu(dir)
+	mu.Lock()
+	defer mu.Unlock()
+
 	list, err := LoadSuppressions(dir)
 	if err != nil {
 		return false, err
