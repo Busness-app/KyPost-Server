@@ -28,6 +28,7 @@ import (
 	"kypost-server/backend/internal/sendas"
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
+	"kypost-server/backend/internal/wkdpublish"
 )
 
 // maxConcurrentUserTicks bounds how many user mailboxes are polled in
@@ -55,6 +56,11 @@ type Poller struct {
 	nativePushDispatcher *NativePushDispatcher
 	cancel               context.CancelFunc
 	tickSem              chan struct{}
+
+	// wkdStore is the single instance-level WKD domain-claim store, shared
+	// with (the same *wkdpublish.Store instance as) the API server — see
+	// wkdpublish.Store's doc comment for why a shared instance matters.
+	wkdStore *wkdpublish.Store
 
 	stateDir    string
 	configDir   string
@@ -94,7 +100,7 @@ type userCtx struct {
 	rules []rules.Rule
 }
 
-func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, usersStore *users.Store, stateDir, configDir string, healthSvc *health.Service, classifierClient *classifier.HTTPClient) (*Poller, error) {
+func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, usersStore *users.Store, stateDir, configDir string, healthSvc *health.Service, classifierClient *classifier.HTTPClient, wkdStore *wkdpublish.Store) (*Poller, error) {
 	re, err := redaction.New(cfg.Redaction.Patterns)
 	if err != nil {
 		return nil, err
@@ -108,6 +114,7 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		classifier:           classifierClient,
 		redaction:            re,
 		nativePushDispatcher: NewNativePushDispatcher(log),
+		wkdStore:             wkdStore,
 		stateDir:             stateDir,
 		configDir:            configDir,
 		imapKeyPath:          config.EnvOrDefault("IMAP_CONFIG_KEY_FILE", "/kypost/private/imap-config.key"),

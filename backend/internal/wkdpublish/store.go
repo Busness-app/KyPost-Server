@@ -2,10 +2,12 @@
 // claims — domains an admin has proven control over (via a DNS TXT record)
 // and for which this instance may serve public keys at the Web Key
 // Directory well-known paths, one claim/TXT record per domain. Persisted as
-// a single wkd-domains.json at the instance's state root. The api process
-// (management + serving) and the poller process (periodic re-check)
-// construct independent Stores over the same file and refresh from disk on
-// every read, mirroring internal/sendas and internal/contacts.
+// a single wkd-domains.json at the instance's state root. Unlike
+// internal/sendas and internal/contacts (which are per-user and safely
+// opened independently by each process), the api and poller goroutines in
+// this binary share a SINGLE *Store instance, constructed once in app.go and
+// injected into both (api.NewServer and processor.New) — see Store's doc
+// comment below for why that sharing is required here specifically.
 package wkdpublish
 
 import (
@@ -34,9 +36,18 @@ type Claim struct {
 }
 
 // Store is the instance's set of WKD domain claims, admin-managed and
-// persisted as a single wkd-domains.json at the instance's state root. The
-// API and poller processes share no memory, so every read and mutation
-// re-reads the file from disk first, matching sendas.Store's convention.
+// persisted as a single wkd-domains.json at the instance's state root. Every
+// read and mutation re-reads the file from disk first (matching
+// sendas.Store's convention), but that alone is NOT sufficient to make two
+// independent *Store values over the same file safe to mutate concurrently:
+// refresh-then-mutate-then-rewrite-whole-file is a read-modify-write, and
+// two independent Stores each hold their own mutex, so an interleaving
+// between an admin request and the poller's periodic re-check could lose a
+// write (e.g. the poller re-persisting a stale copy of a claim an admin just
+// deleted). The api server and the poller (both running as goroutines in the
+// same binary — see app.go) therefore MUST share exactly one *Store
+// instance, so mu actually serializes every read-modify-write call between
+// them. Callers must not construct a second Store over the same baseDir.
 type Store struct {
 	mu      sync.Mutex
 	baseDir string

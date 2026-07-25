@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -9,9 +10,10 @@ import (
 )
 
 // newTestPollerForWKDRecheck builds a minimal *Poller sufficient to exercise
-// recheckWKDDomains: a logger and a stateDir pointing at the instance-level
-// WKD domain store, mirroring newTestPollerForHarvest / newTestPollerForSendAs
-// in this package.
+// recheckWKDDomains: a logger, a stateDir, and a wkdStore rooted at that same
+// stateDir (recheckWKDDomains uses p.wkdStore directly rather than opening
+// its own Store — see R3/wkdpublish.Store's doc comment), mirroring
+// newTestPollerForHarvest / newTestPollerForSendAs in this package.
 func newTestPollerForWKDRecheck(t *testing.T) *Poller {
 	t.Helper()
 	logger, err := logging.New(t.TempDir())
@@ -20,14 +22,24 @@ func newTestPollerForWKDRecheck(t *testing.T) *Poller {
 	}
 	t.Cleanup(func() { _ = logger.Close() })
 
+	stateDir := t.TempDir()
+	wkdStore, err := wkdpublish.New(stateDir)
+	if err != nil {
+		t.Fatalf("wkdpublish.New: %v", err)
+	}
+
 	p := &Poller{
 		log:      logger,
-		stateDir: t.TempDir(),
+		stateDir: stateDir,
+		wkdStore: wkdStore,
 	}
 	return p
 }
 
-func TestRecheckSuspendsWhenTXTGone(t *testing.T) {
+// TestRecheckSuspendsWhenTXTValueWrong covers one definitive-suspend path: a
+// successful DNS lookup that resolves but no longer carries the expected
+// token value (e.g. the record was edited to something else).
+func TestRecheckSuspendsWhenTXTValueWrong(t *testing.T) {
 	p := newTestPollerForWKDRecheck(t)
 	store, err := wkdpublish.New(p.stateDir)
 	if err != nil {
@@ -50,7 +62,41 @@ func TestRecheckSuspendsWhenTXTGone(t *testing.T) {
 	p.recheckWKDDomains()
 
 	if store.VerifiedDomains()["example.com"] {
-		t.Fatal("claim should be suspended after TXT disappeared")
+		t.Fatal("claim should be suspended when the TXT value no longer matches")
+	}
+}
+
+// TestRecheckSuspendsWhenTXTRecordDeleted covers R1: the primary revocation
+// path is an operator DELETING the TXT record entirely, which net.LookupTXT
+// reports as an NXDOMAIN/NODATA *net.DNSError with IsNotFound set — not a
+// successful empty answer. This must be treated as a definitive "no proof"
+// and suspend the claim, exactly like a wrong value does. Before the R1 fix,
+// CheckTXT returned this as a plain lookup error, which recheckWKDDomains's
+// transient-error branch swallowed without ever suspending the domain — the
+// exact action an operator performs to revoke never worked.
+func TestRecheckSuspendsWhenTXTRecordDeleted(t *testing.T) {
+	p := newTestPollerForWKDRecheck(t)
+	store, err := wkdpublish.New(p.stateDir)
+	if err != nil {
+		t.Fatalf("wkdpublish.New: %v", err)
+	}
+	if _, err := store.Create("example.com"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetVerified("example.com", true, time.Now().Add(-recheckWKDInterval-time.Hour)); err != nil {
+		t.Fatalf("SetVerified: %v", err)
+	}
+
+	orig := wkdpublish.LookupTXT
+	defer func() { wkdpublish.LookupTXT = orig }()
+	wkdpublish.LookupTXT = func(string) ([]string, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: "_kypost-wkd.example.com", IsNotFound: true}
+	}
+
+	p.recheckWKDDomains()
+
+	if store.VerifiedDomains()["example.com"] {
+		t.Fatal("claim should be suspended after the TXT record was deleted (NXDOMAIN/NODATA)")
 	}
 }
 
@@ -121,8 +167,10 @@ func TestRecheckSkipsRecentlyCheckedClaims(t *testing.T) {
 }
 
 // TestRecheckDoesNotSuspendOnLookupError covers the global constraint: a
-// transient DNS/lookup error must never flip a verified claim to
-// unverified, only a successful lookup that fails to find the token does.
+// transient DNS/lookup error (here a plain, non-*net.DNSError failure —
+// contrast TestRecheckSuspendsWhenTXTRecordDeleted's *net.DNSError with
+// IsNotFound, which IS definitive) must never flip a verified claim to
+// unverified.
 func TestRecheckDoesNotSuspendOnLookupError(t *testing.T) {
 	p := newTestPollerForWKDRecheck(t)
 	store, err := wkdpublish.New(p.stateDir)

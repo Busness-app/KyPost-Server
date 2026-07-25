@@ -15,6 +15,7 @@ import (
 	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
+	"kypost-server/backend/internal/wkdpublish"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -37,7 +38,17 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("users.LoadOrMigrate: %v", err)
 	}
 
-	srv := NewServer(config.Default(), logger, health.NewService(), usersStore, nil)
+	// NewServer takes the WKD publish store as a constructor argument (it's
+	// shared with the poller process rather than lazily opened per-process —
+	// see wkdpublish.Store's doc comment), so it must be built against
+	// stateDir up front rather than reassigned after the fact like
+	// pickupStore/globalStore below.
+	wkdStore, err := wkdpublish.New(stateDir)
+	if err != nil {
+		t.Fatalf("wkdpublish.New: %v", err)
+	}
+
+	srv := NewServer(config.Default(), logger, health.NewService(), usersStore, nil, wkdStore)
 	srv.pairingSecret = "test-pairing-secret"
 	srv.stateDir = stateDir
 	srv.configDir = configDir

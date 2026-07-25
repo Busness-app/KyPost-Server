@@ -12,6 +12,7 @@ import (
 	"kypost-server/backend/internal/config"
 	"kypost-server/backend/internal/health"
 	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/wkdpublish"
 )
 
 // freeTCPPort asks the OS for a currently-unused TCP port by briefly binding
@@ -45,6 +46,12 @@ func newGracefulShutdownTestDeps(t *testing.T) runDeps {
 	if err != nil {
 		t.Fatalf("state.New: %v", err)
 	}
+	// Mirrors Run()'s real wiring: one wkdStore, shared by both the poller
+	// and the api server in runAll (see R3/wkdpublish.Store's doc comment).
+	wkdStore, err := wkdpublish.New(stateDir)
+	if err != nil {
+		t.Fatalf("wkdpublish.New: %v", err)
+	}
 
 	return runDeps{
 		cfg:        config.Default(),
@@ -55,6 +62,7 @@ func newGracefulShutdownTestDeps(t *testing.T) runDeps {
 		store:      store,
 		users:      newTestUsersStore(t),
 		health:     health.NewService(),
+		wkdStore:   wkdStore,
 	}
 }
 

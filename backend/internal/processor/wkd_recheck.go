@@ -15,15 +15,23 @@ const recheckWKDInterval = 12 * time.Hour
 // reappear. The loop intentionally covers both verified and suspended
 // claims — suspended ones need re-checking too, since that's how a claim
 // re-enables once its TXT record reappears. Best-effort: every error is
-// logged and swallowed, never affecting mail processing. A DNS/lookup error
-// never flips a claim — only a successful lookup that fails to find the
-// token does.
+// logged and swallowed, never affecting mail processing. A transient
+// DNS/lookup error never flips a claim — only a definitive result (a
+// successful lookup, whether or not it finds the token, or a confirmed
+// NXDOMAIN/NODATA "not found" — see wkdpublish.CheckTXT) does.
+//
+// p.wkdStore is the SAME *wkdpublish.Store instance the API server uses
+// (both are constructed once in app.go and injected), not a second Store
+// opened over the same file — see wkdpublish.Store's doc comment for why
+// that sharing matters.
 func (p *Poller) recheckWKDDomains() {
-	store, err := wkdpublish.New(p.stateDir)
-	if err != nil {
-		p.log.Error("wkd recheck: open store failed", "error", err.Error())
+	if p.wkdStore == nil {
+		// Defensive only: app.go always injects a wkdStore in production.
+		// Guards Poller values built without New() (e.g. test helpers that
+		// construct &Poller{...} directly and never set wkdStore).
 		return
 	}
+	store := p.wkdStore
 	for _, c := range store.List() {
 		// Only re-check claims that are due; a claim checked more
 		// recently than recheckWKDInterval is left alone.

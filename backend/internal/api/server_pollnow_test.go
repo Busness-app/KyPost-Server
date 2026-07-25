@@ -56,7 +56,11 @@ func TestHandlePollNowTriggersPoll(t *testing.T) {
 		t.Fatalf("state.New: %v", err)
 	}
 	classifierClient := classifier.NewHTTPClient("http://127.0.0.1:0", "", "", "", time.Second)
-	poller, err := processor.New(config.Default(), srv.logger, globalStore, srv.users, srv.stateDir, srv.configDir, srv.health, classifierClient)
+	wkdStore, err := srv.wkdPublishStore()
+	if err != nil {
+		t.Fatalf("wkdPublishStore: %v", err)
+	}
+	poller, err := processor.New(config.Default(), srv.logger, globalStore, srv.users, srv.stateDir, srv.configDir, srv.health, classifierClient, wkdStore)
 	if err != nil {
 		t.Fatalf("processor.New: %v", err)
 	}

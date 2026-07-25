@@ -1,6 +1,7 @@
 package wkdpublish
 
 import (
+	"errors"
 	"net"
 	"strings"
 )
@@ -16,11 +17,22 @@ func TXTRecordName(domain string) string {
 }
 
 // CheckTXT reports whether the domain's proof record currently carries token.
-// A lookup error is returned (and is not a match) so callers can distinguish
-// "record absent / DNS down" from "present but wrong".
+// A definitive "not found" result — NXDOMAIN or NODATA on the record name,
+// i.e. a *net.DNSError with IsNotFound set — means the proof is genuinely
+// absent (the record was deleted, or never existed) and is reported as
+// (false, nil): the same outcome as a record that resolves but carries the
+// wrong value, since both mean "no valid proof right now" and callers must
+// treat them identically for revocation purposes. Any other lookup error
+// (timeout, SERVFAIL, network down, etc.) is a transient resolver failure
+// and is returned as an error, so callers can avoid flipping a claim on a
+// blip.
 func CheckTXT(domain, token string) (bool, error) {
 	values, err := LookupTXT(TXTRecordName(domain))
 	if err != nil {
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return false, nil
+		}
 		return false, err
 	}
 	want := txtPrefix + token

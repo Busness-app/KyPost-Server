@@ -136,10 +136,10 @@ type Server struct {
 	deviceIndex    map[string]string
 	davCredentials davCredentialCache
 
-	// wkdMu/wkdStore guard the single instance-level WKD domain-claim store.
-	// Domain ownership is a property of the domain, not of a user — see
-	// wkdPublishStore's doc comment below.
-	wkdMu    sync.Mutex
+	// wkdStore is the single instance-level WKD domain-claim store, injected
+	// once at construction (NewServer) and shared with the poller process —
+	// see wkdPublishStore's doc comment below and wkdpublish.Store's doc
+	// comment for why sharing one instance matters.
 	wkdStore *wkdpublish.Store
 
 	// httpServer is the live *http.Server backing Run/Serve, constructed by
@@ -149,7 +149,7 @@ type Server struct {
 	httpServer *http.Server
 }
 
-func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Service, usersStore *users.Store, onConfigUpdated func(config.Config)) *Server {
+func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Service, usersStore *users.Store, onConfigUpdated func(config.Config), wkdStore *wkdpublish.Store) *Server {
 	configDir := config.EnvOrDefault("CONFIG_DIR", "/kypost/config")
 	stateDir := config.EnvOrDefault("STATE_DIR", "/kypost/state")
 	logPath := filepath.Join(config.EnvOrDefault("LOG_DIR", "/kypost/logs"), "app.log")
@@ -223,6 +223,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		captchaProvider:        captchaProvider,
 		captchaSiteKey:         captchaSiteKey,
 		globalStore:            globalStore,
+		wkdStore:               wkdStore,
 	}
 }
 
@@ -247,23 +248,20 @@ func (s *Server) SetPoller(p *processor.Poller) {
 // ownership is a property of the domain, not of a user, so there is exactly
 // one store (and one TXT record) per domain for the whole instance, rooted
 // at the state directory itself rather than under stateDir/users/<id>/.
-// wkdpublish.Store re-reads its backing file on every access, so caching
-// this pointer keeps this process and the poller process (which
-// independently constructs its own Store over the same file) coherent,
-// while still giving concurrent requests within this process a single
-// mutex to serialize read-modify-write calls on.
+// s.wkdStore is set once at construction (NewServer) to the SAME
+// *wkdpublish.Store instance the poller process uses (both are built once in
+// app.go and injected) — not a second Store independently opened over the
+// same file — so wkdpublish.Store's own internal mutex actually serializes
+// every read-modify-write call across both the API and the poller, rather
+// than each process only ever serializing against itself. An error return
+// here only means "not wired" (e.g. a test server built without a wkdStore);
+// it does not indicate an I/O failure, since construction already happened
+// up front.
 func (s *Server) wkdPublishStore() (*wkdpublish.Store, error) {
-	s.wkdMu.Lock()
-	defer s.wkdMu.Unlock()
-	if s.wkdStore != nil {
-		return s.wkdStore, nil
+	if s.wkdStore == nil {
+		return nil, fmt.Errorf("wkd publish store not configured")
 	}
-	st, err := wkdpublish.New(s.stateDir)
-	if err != nil {
-		return nil, err
-	}
-	s.wkdStore = st
-	return st, nil
+	return s.wkdStore, nil
 }
 
 // routes builds the API's route table. Split out from Run so tests can
