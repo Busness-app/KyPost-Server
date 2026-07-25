@@ -3,9 +3,12 @@ name: ci
 # AGENTS.md's governance section requires "CI must pass" for new logic. Until
 # this file existed that rule was unsatisfiable — 28 Go packages with real
 # tests and nothing running them on push.
+# Push is restricted to main rather than "**": with a pull_request trigger as
+# well, every push to a PR branch otherwise runs the whole suite twice for the
+# same commit.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 permissions:
