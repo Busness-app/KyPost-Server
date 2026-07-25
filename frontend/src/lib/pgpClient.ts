@@ -31,12 +31,30 @@ export type GeneratedIdentity = {
  * of the ecosystem still rejects, which for a mail client means recipients
  * silently unable to read anything you send them.
  */
-export async function generateIdentity(name: string, email: string): Promise<GeneratedIdentity> {
+export async function generateIdentity(
+  name: string,
+  email: string,
+  additionalEmails: string[] = []
+): Promise<GeneratedIdentity> {
   const pgp = await openpgp();
+  // Every address the account has proven it owns becomes a User ID. Both WKD
+  // serving and Autocrypt advertising refuse a key that does not carry the
+  // address in question, so a key with only the primary address silently
+  // fails to publish for verified aliases. Mirrors pgpmail.GenerateIdentity.
+  const seen = new Set([email.trim().toLowerCase()]);
+  const userIDs = [{ name, email: email.trim() }];
+  for (const extra of additionalEmails) {
+    const addr = extra.trim();
+    if (!addr || seen.has(addr.toLowerCase())) {
+      continue;
+    }
+    seen.add(addr.toLowerCase());
+    userIDs.push({ name, email: addr });
+  }
   const { privateKey, publicKey } = await pgp.generateKey({
     type: "ecc",
     curve: "curve25519Legacy",
-    userIDs: [{ name, email }],
+    userIDs,
     format: "armored"
   });
   const parsed = await pgp.readKey({ armoredKey: publicKey });
@@ -145,19 +163,48 @@ export type EncryptedDelivery = {
 };
 
 /**
- * Encrypts (and optionally signs) mimeBody once per delivery group.
+ * The outer, unencrypted envelope of a PGP/MIME message.
+ *
+ * These headers are the message as far as a receiving MTA is concerned:
+ * /api/mail/send-pgp relays the bytes verbatim and synthesizes nothing. An
+ * earlier version of this module emitted only Content-Type and MIME-Version,
+ * producing messages with no From, To, Subject, or Date — malformed, and
+ * rejected or rendered blank by receiving clients. The server now refuses
+ * such a delivery (validatePGPMimeDelivery) rather than relaying it.
+ *
+ * bcc is deliberately absent: BCC recipients get their own delivery and must
+ * not appear in anyone's headers, exactly as the server-side path does it.
+ */
+export type MessageEnvelope = {
+  from: string;
+  to: string[];
+  cc?: string[];
+  subject: string;
+  date?: Date;
+};
+
+/**
+ * Encrypts (and optionally signs) a message body once per delivery group.
  *
  * BCC recipients get their own delivery each, so they never appear in one
  * another's encryption key list — the same split the server-side path makes,
  * and the reason this takes groups rather than one flat recipient list.
+ *
+ * The real Subject is moved inside the encrypted part as a protected header
+ * and replaced on the outside with a placeholder, mirroring
+ * pgpmail.EncryptMIME. Encrypting the body while leaving the subject in
+ * cleartext would give away most of what encryption was for.
  */
 export async function buildEncryptedDeliveries(
-  mimeBody: string,
+  envelope: MessageEnvelope,
+  contentType: string,
+  body: string,
   groups: { recipients: string[]; publicKeys: string[] }[],
   sign: boolean
 ): Promise<EncryptedDelivery[]> {
   const pgp = await openpgp();
   const signingKeys = sign ? [await pgp.readPrivateKey({ armoredKey: requireUnlockedKey() })] : undefined;
+  const protectedContent = buildProtectedContent(contentType, body, envelope.subject);
 
   const deliveries: EncryptedDelivery[] = [];
   for (const group of groups) {
@@ -166,17 +213,45 @@ export async function buildEncryptedDeliveries(
     }
     const encryptionKeys = await readPublicKeys(pgp, group.publicKeys);
     const armored = await pgp.encrypt({
-      message: await pgp.createMessage({ text: mimeBody }),
+      message: await pgp.createMessage({ text: protectedContent }),
       encryptionKeys,
       signingKeys,
       format: "armored"
     });
     deliveries.push({
       recipients: group.recipients,
-      ciphertext: wrapAsPGPMime(String(armored))
+      ciphertext: wrapAsPGPMime(envelope, String(armored))
     });
   }
   return deliveries;
+}
+
+// Matches pgpmail.OuterPlaceholderSubject so both send paths look identical
+// on the wire.
+const OUTER_PLACEHOLDER_SUBJECT = "[Encrypted] Email Sent by KyPost";
+
+/**
+ * Wraps the real content in an RFC 5322 protected-headers part carrying the
+ * true Subject, mirroring pgpmail.protectContent. The receiving side lifts it
+ * back out (pgpmail.ExtractProtectedSubject).
+ */
+function buildProtectedContent(contentType: string, body: string, subject: string): string {
+  const clean = sanitizeHeaderValue(subject);
+  const boundary = `kypost-protected-${randomToken()}`;
+  const lines = [`Content-Type: multipart/mixed; boundary="${boundary}"; protected-headers="v1"`, ""];
+  if (clean) {
+    lines.unshift(`Subject: ${clean}`);
+    lines.push(
+      `--${boundary}`,
+      'Content-Type: text/rfc822-headers; protected-headers="v1"',
+      "Content-Disposition: inline",
+      "",
+      `Subject: ${clean}`,
+      ""
+    );
+  }
+  lines.push(`--${boundary}`, `Content-Type: ${contentType}`, "", body, "", `--${boundary}--`, "");
+  return lines.join("\r\n");
 }
 
 async function readPublicKeys(pgp: OpenPGP, armoredKeys: string[]) {
@@ -200,34 +275,59 @@ async function readPublicKeys(pgp: OpenPGP, armoredKeys: string[]) {
 // occur in the body, and an ASCII-armored PGP block cannot contain it.
 const PGP_MIME_BOUNDARY = "kypost-pgp-boundary";
 
+/** Flattens CR/LF so a header value cannot inject extra headers. */
+function sanitizeHeaderValue(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+function randomToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(12));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /**
- * Wraps an armored PGP message as an RFC 3156 multipart/encrypted body,
- * which is what a receiving mail client expects.
+ * Wraps an armored PGP message as a complete RFC 5322 message with an RFC
+ * 3156 multipart/encrypted body.
  *
- * Only the body is produced here; the server prepends nothing and the
- * headers travel inside the ciphertext, matching how the server-side
- * EncryptMIME path builds its output.
+ * This emits the full envelope — From, To, Cc, Subject, Date, MIME-Version —
+ * not just the Content-Type. /api/mail/send-pgp relays these bytes verbatim,
+ * so anything omitted here is simply absent from the delivered mail.
  */
-function wrapAsPGPMime(armoredMessage: string): string {
+function wrapAsPGPMime(envelope: MessageEnvelope, armoredMessage: string): string {
+  const boundary = `${PGP_MIME_BOUNDARY}-${randomToken()}`;
+  const headers = [
+    `From: ${sanitizeHeaderValue(envelope.from)}`,
+    `To: ${envelope.to.map(sanitizeHeaderValue).filter(Boolean).join(", ")}`
+  ];
+  const cc = (envelope.cc ?? []).map(sanitizeHeaderValue).filter(Boolean);
+  if (cc.length > 0) {
+    headers.push(`Cc: ${cc.join(", ")}`);
+  }
+  // The real subject is inside the ciphertext as a protected header; this is
+  // the placeholder the server-side path uses too.
+  headers.push(`Subject: ${OUTER_PLACEHOLDER_SUBJECT}`);
+  headers.push(`Date: ${(envelope.date ?? new Date()).toUTCString()}`);
+  headers.push("MIME-Version: 1.0");
+  headers.push(`Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="${boundary}"`);
+
   return [
-    `Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"; boundary="${PGP_MIME_BOUNDARY}"`,
-    "MIME-Version: 1.0",
+    ...headers,
     "",
     "This is an OpenPGP/MIME encrypted message (RFC 3156).",
-    `--${PGP_MIME_BOUNDARY}`,
+    `--${boundary}`,
     "Content-Type: application/pgp-encrypted",
     "Content-Description: PGP/MIME version identification",
     "",
     "Version: 1",
     "",
-    `--${PGP_MIME_BOUNDARY}`,
+    `--${boundary}`,
     'Content-Type: application/octet-stream; name="encrypted.asc"',
     "Content-Description: OpenPGP encrypted message",
     'Content-Disposition: inline; filename="encrypted.asc"',
     "",
     armoredMessage.trim(),
     "",
-    `--${PGP_MIME_BOUNDARY}--`,
+    `--${boundary}--`,
     ""
   ].join("\r\n");
 }

@@ -4,9 +4,9 @@ import QRCode from "qrcode";
 import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
 import {
   getPGPIdentity,
-  generatePGPIdentity,
-  importPGPIdentity,
   deletePGPIdentity,
+  storeClientPGPIdentity,
+  exportLegacyPGPKey,
   getPGPDiscoverySettings,
   updatePGPDiscoverySettings,
   listDiscoverySuppressions,
@@ -15,6 +15,11 @@ import {
   type DiscoverySettings,
   type DiscoverySuppression
 } from "../api/pgp";
+import { generateIdentity, importIdentity } from "../lib/pgpClient";
+import { wrapPrivateKey } from "../lib/keyVault";
+import { lockPGPSession, loadPGPSession, subscribePGPSession, type PGPSessionState } from "../lib/pgpSession";
+import { unlockWithArmoredKey } from "../lib/keyVault";
+import { PgpUnlockDialog } from "../components/PgpUnlockDialog";
 import { listContacts, type Contact } from "../api/contacts";
 
 type ApproverDevice = {
@@ -69,6 +74,11 @@ export function SecurityPage() {
   const [pgpImportOpen, setPgpImportOpen] = useState(false);
   const [pgpImportKey, setPgpImportKey] = useState("");
   const [pgpImportPassphrase, setPgpImportPassphrase] = useState("");
+  // Cold-start PGP state (protection mode, wrapped key, unlock status).
+  const [pgpSession, setPgpSession] = useState<PGPSessionState | null>(null);
+  const [unlockOpen, setUnlockOpen] = useState(false);
+  const [migratePassword, setMigratePassword] = useState("");
+  const [migrateOpen, setMigrateOpen] = useState(false);
   const [selfContact, setSelfContact] = useState<Contact | null>(null);
 
   // PGP key-discovery settings.
@@ -162,15 +172,79 @@ export function SecurityPage() {
     };
   }, []);
 
+  // Subscribe to the shared PGP session so this page and the rest of the app
+  // agree on protection mode and lock state.
+  useEffect(() => subscribePGPSession(setPgpSession), []);
+  useEffect(() => {
+    void loadPGPSession();
+  }, []);
+
+  /**
+   * Generates the keypair in the browser and uploads only the public half
+   * plus an envelope wrapped under the account password. The server never
+   * sees the private key, which is the whole point — so this needs the
+   * password here, at creation, not just a session.
+   */
   async function handleGeneratePGPIdentity() {
+    const password = window.prompt(
+      "Enter your account password.\n\nYour new private key will be encrypted with it before it leaves this browser. " +
+        "This server will not be able to decrypt it — keep a backup of the key."
+    );
+    if (!password) {
+      return;
+    }
     setPgpBusy(true);
     setPgpStatus("");
     try {
-      const id = await generatePGPIdentity();
+      // Addresses come from the server, which knows the IMAP account address
+      // and every verified send-as alias. Guessing here would mint a key that
+      // WKD and Autocrypt then refuse to serve.
+      const session = await loadPGPSession();
+      const addresses = session.bootstrap?.suggestedUserIDs ?? [];
+      if (addresses.length === 0) {
+        setPgpStatus("Configure your mail account first — the key needs your email address as its User ID.");
+        return;
+      }
+      const name = selfContact?.fn?.trim() || session.bootstrap?.displayName || "KyPost user";
+      const generated = await generateIdentity(name, addresses[0], addresses.slice(1));
+      const wrapped = await wrapPrivateKey(generated.armoredPrivateKey, password);
+      const id = await storeClientPGPIdentity(generated.armoredPublicKey, JSON.stringify(wrapped), "generated");
+      // Hold the fresh key for this page so the user is not immediately asked
+      // to unlock a key they just made.
+      unlockWithArmoredKey(generated.armoredPrivateKey);
       setPgpIdentity(id);
-      setPgpStatus("New PGP identity generated.");
+      await loadPGPSession();
+      setPgpStatus("New PGP identity generated. Back up your key: an admin password reset makes it unrecoverable.");
     } catch (e) {
       setPgpStatus(`Failed to generate identity: ${toErrorMessage(e, "unknown error")}`);
+    } finally {
+      setPgpBusy(false);
+    }
+  }
+
+  /**
+   * Migrates a legacy server-held key: the server hands it back once (after
+   * re-verifying the password), the browser rewraps it, and the
+   * server-readable copy is deleted by the upload.
+   */
+  async function handleMigrateToClientProtection(e: FormEvent) {
+    e.preventDefault();
+    setPgpBusy(true);
+    setPgpStatus("");
+    try {
+      const exported = await exportLegacyPGPKey(migratePassword);
+      const wrapped = await wrapPrivateKey(exported.privateKey, migratePassword);
+      const id = await storeClientPGPIdentity(exported.publicKey, JSON.stringify(wrapped), "imported");
+      unlockWithArmoredKey(exported.privateKey);
+      setPgpIdentity(id);
+      setMigrateOpen(false);
+      setMigratePassword("");
+      await loadPGPSession();
+      setPgpStatus(
+        "Migrated. This server can no longer read your encrypted mail. Back up your key — an admin password reset now makes it unrecoverable."
+      );
+    } catch (err) {
+      setPgpStatus(`Migration failed: ${toErrorMessage(err, "unknown error")}`);
     } finally {
       setPgpBusy(false);
     }
@@ -181,12 +255,25 @@ export function SecurityPage() {
     setPgpBusy(true);
     setPgpStatus("");
     try {
-      const id = await importPGPIdentity(pgpImportKey, pgpImportPassphrase);
+      const password = window.prompt(
+        "Enter your account password.\n\nThe imported key will be encrypted with it before it leaves this browser."
+      );
+      if (!password) {
+        return;
+      }
+      // The key's own passphrase (if any) only unlocks it for the import; it
+      // is then rewrapped under the account password, so the user has one
+      // secret to remember rather than two.
+      const imported = await importIdentity(pgpImportKey, pgpImportPassphrase);
+      const wrapped = await wrapPrivateKey(imported.armoredPrivateKey, password);
+      const id = await storeClientPGPIdentity(imported.armoredPublicKey, JSON.stringify(wrapped), "imported");
+      unlockWithArmoredKey(imported.armoredPrivateKey);
       setPgpIdentity(id);
       setPgpImportOpen(false);
       setPgpImportKey("");
       setPgpImportPassphrase("");
-      setPgpStatus("PGP identity imported.");
+      await loadPGPSession();
+      setPgpStatus("PGP identity imported and encrypted with your account password.");
     } catch (e) {
       setPgpStatus(`Failed to import identity: ${toErrorMessage(e, "unknown error")}`);
     } finally {
@@ -580,6 +667,83 @@ export function SecurityPage() {
               <p className="contacts-pgp-fingerprint">
                 Fingerprint: {pgpIdentity.fingerprint} · Source: {pgpIdentity.source}
               </p>
+
+              {pgpSession?.bootstrap?.protection === "client" ? (
+                <div className="security-section">
+                  <span className="security-badge security-badge-on">
+                    <span className="security-dot" aria-hidden="true" />
+                    End-to-end: this server cannot read your encrypted mail
+                  </span>
+                  <p className="contacts-muted">
+                    Your private key is encrypted with your account password and unlocked only in this browser tab.{" "}
+                    {pgpSession.unlocked ? "It is unlocked for this session." : "It is locked — you will be asked for your password when you open or send encrypted mail."}
+                  </p>
+                  <p className="contacts-muted">
+                    <strong>Keep a backup of your key.</strong> Because the server cannot open it, an admin password
+                    reset makes it permanently unrecoverable along with every message encrypted to it.
+                  </p>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {pgpSession.unlocked ? (
+                      <button type="button" className="contacts-action" onClick={() => lockPGPSession()}>
+                        Lock key
+                      </button>
+                    ) : (
+                      <button type="button" onClick={() => setUnlockOpen(true)}>
+                        Unlock key
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : pgpSession?.bootstrap?.migrationAvailable ? (
+                <div className="security-section">
+                  <span className="security-badge security-badge-off">
+                    <span className="security-dot" aria-hidden="true" />
+                    This server can read your encrypted mail
+                  </span>
+                  <p className="contacts-muted">
+                    Your private key is stored on this server, encrypted with a key kept on the same machine. Anyone
+                    with access to the server or its backups can decrypt everything you have received. Migrating moves
+                    the key under your account password so only your browser can open it.
+                  </p>
+                  <p className="contacts-muted">
+                    After migrating, an admin password reset will make the key unrecoverable — export a backup first.
+                  </p>
+                  {migrateOpen ? (
+                    <form onSubmit={(e) => void handleMigrateToClientProtection(e)}>
+                      <label>
+                        <div>Confirm your account password</div>
+                        <input
+                          type="password"
+                          autoComplete="current-password"
+                          value={migratePassword}
+                          onChange={(e) => setMigratePassword(e.target.value)}
+                          required
+                        />
+                      </label>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <button type="submit" disabled={pgpBusy || migratePassword.length === 0}>
+                          {pgpBusy ? "Migrating…" : "Migrate to end-to-end"}
+                        </button>
+                        <button
+                          type="button"
+                          className="contacts-action"
+                          onClick={() => {
+                            setMigrateOpen(false);
+                            setMigratePassword("");
+                          }}
+                          disabled={pgpBusy}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <button type="button" onClick={() => setMigrateOpen(true)} disabled={pgpBusy}>
+                      Migrate to end-to-end
+                    </button>
+                  )}
+                </div>
+              ) : null}
               <p className="contacts-muted">
                 {selfContact ? (
                   <>Sharing contact card: {selfContact.fn} · <Link to="/contacts">Manage in Contacts</Link></>
@@ -629,6 +793,12 @@ export function SecurityPage() {
             </>
           )}
           {pgpStatus ? <p className="contacts-muted">{pgpStatus}</p> : null}
+          <PgpUnlockDialog
+            open={unlockOpen}
+            reason="to unlock your PGP key for this session"
+            onUnlocked={() => setUnlockOpen(false)}
+            onCancel={() => setUnlockOpen(false)}
+          />
 
           {discoverySettings ? (
             <div className="security-section">

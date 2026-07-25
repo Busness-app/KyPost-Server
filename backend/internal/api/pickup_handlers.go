@@ -36,6 +36,16 @@ func (s *Server) handlePickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A client-sealed record cannot be rendered here: the server has no key
+	// for it. Serve the shell page and let the browser decrypt with the key
+	// from the URL fragment. Kind() does not consume the record, so this
+	// choice does not burn the link.
+	clientSealed, kindErr := s.pickupStore.Kind(id)
+	if kindErr == nil && clientSealed {
+		s.servePickupDecryptPage(w, id, token)
+		return
+	}
+
 	subject, body, err := s.pickupStore.View(id)
 	if err != nil {
 		http.Error(w, "this message has already been viewed or has expired", http.StatusGone)

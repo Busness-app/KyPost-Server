@@ -139,3 +139,117 @@ export function wkdDomainRecord(claim: Pick<WKDDomainClaim, "domain" | "token">)
 } {
   return { name: `_kypost-wkd.${claim.domain}`, value: `kypost-wkd-verify=${claim.token}` };
 }
+
+// ---- end-to-end (client-protected) key handling ----------------------------
+
+/** The cold-start snapshot — see docs/E2E_PGP.md "Cold start". */
+export type PGPBootstrap = {
+  hasIdentity: boolean;
+  /** "client" (end-to-end), "server" (legacy), or "" (no key). */
+  protection: "client" | "server" | "";
+  fingerprint: string;
+  keyId: string;
+  publicKey: string;
+  keySource: string;
+  createdAt: string;
+  /** The self-describing wrapped envelope; empty unless protection is "client". */
+  wrappedPrivateKey: string;
+  unlockRequired: boolean;
+  canDecryptServerSide: boolean;
+  migrationAvailable: boolean;
+  signerPublicKeys: string[];
+  /**
+   * Addresses a newly generated key must carry as User IDs — the IMAP
+   * account address first, then verified send-as aliases. Empty means no
+   * mail account is configured yet; do not guess from the login name, which
+   * is often not an email address.
+   */
+  suggestedUserIDs: string[];
+  displayName: string;
+  /** Absent on a server older than the payload endpoint. */
+  payloadEndpoint?: string;
+};
+
+export function getPGPBootstrap(): Promise<PGPBootstrap> {
+  return getJSON<PGPBootstrap>("/api/pgp/bootstrap");
+}
+
+/** Stores a browser-generated or imported identity. `wrapped` is opaque to the server. */
+export function storeClientPGPIdentity(
+  publicKey: string,
+  wrapped: string,
+  source: "generated" | "imported"
+): Promise<PGPIdentity> {
+  return postJSON<PGPIdentity>("/api/pgp/identity/client", { publicKey, wrapped, source });
+}
+
+/** Replaces the wrapped envelope after a password change. */
+export function rewrapPGPPrivateKey(wrapped: string): Promise<{ ok: boolean }> {
+  return postJSON<{ ok: boolean }>("/api/pgp/identity/rewrap", { wrapped });
+}
+
+/**
+ * One-time migration: hands a legacy server-held key back so the browser can
+ * rewrap it. Requires the account password, not just a session.
+ */
+export function exportLegacyPGPKey(password: string): Promise<{ privateKey: string; publicKey: string }> {
+  return postJSON<{ privateKey: string; publicKey: string }>("/api/pgp/identity/export-legacy", { password });
+}
+
+export type PGPMessagePayload = {
+  messageId: number;
+  mailbox: string;
+  encryptedPayload: string;
+  signaturePayload: string;
+  body: string;
+  signerPublicKeys: string[];
+};
+
+/** Fetches one message's ciphertext for local decryption. */
+export function getPGPMessagePayload(mailbox: string, messageId: string | number): Promise<PGPMessagePayload> {
+  const params = new URLSearchParams({ mailbox, messageId: String(messageId) });
+  return getJSON<PGPMessagePayload>(`/api/mail/pgp-payload?${params.toString()}`);
+}
+
+export type ResolvedRecipientKey = {
+  address: string;
+  publicKey?: string;
+  fingerprint?: string;
+  tier: PGPRecipientTier;
+  usable: boolean;
+};
+
+/** Resolves recipients to actual public keys, running the server's discovery ladder. */
+export function resolveRecipientKeys(addresses: string[]): Promise<{ results: ResolvedRecipientKey[] }> {
+  return postJSON<{ results: ResolvedRecipientKey[] }>("/api/pgp/recipients/resolve", { addresses });
+}
+
+export type ClientEncryptedDelivery = { recipients: string[]; ciphertext: string };
+
+/** Sends browser-encrypted deliveries; the server only relays them. */
+export function sendClientEncryptedMail(payload: {
+  from: string;
+  subject: string;
+  deliveries: ClientEncryptedDelivery[];
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  sentCopy: string;
+  mode: string;
+}): Promise<{ ok: boolean; sentSaved?: boolean; warning?: string }> {
+  return postJSON("/api/mail/send-pgp", payload);
+}
+
+/**
+ * Stores a browser-sealed pickup blob and returns the link to email.
+ *
+ * The returned url contains the record id and fetch token but NOT the
+ * decryption key — the caller appends that as a `#` fragment, which browsers
+ * never transmit.
+ */
+export function createSealedPickup(
+  recipient: string,
+  sealed: unknown
+): Promise<{ id: string; url: string; expiresAt: string }> {
+  return postJSON("/api/pgp/pickup", { recipient, sealed: JSON.stringify(sealed) });
+}

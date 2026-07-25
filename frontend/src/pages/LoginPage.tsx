@@ -1,4 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
+import { prepareRewrappedPGPKey } from "../lib/pgpSession";
+import { toErrorMessage } from "../api/client";
 import { useNavigate } from "react-router-dom";
 import { getJSON, postJSON } from "../api/client";
 import type { AuthState } from "../auth";
@@ -208,11 +210,34 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       return;
     }
     try {
+      // The PGP key is wrapped under the account password, so it must be
+      // rewrapped as part of this change. Do it BEFORE the password write:
+      // if the rewrap fails, the password is untouched and the user retries,
+      // which is recoverable. The other order leaves the password changed and
+      // the key still wrapped under the old one — recoverable only by knowing
+      // to enter a password that is no longer their password.
+      const rewrap = await prepareRewrappedPGPKey(currentPassword, newPassword);
+
       await postJSON<{ ok: boolean }>("/api/auth/password", {
         username,
         oldPassword: currentPassword,
         newPassword
       });
+
+      if (rewrap) {
+        try {
+          await rewrap();
+        } catch (rewrapErr) {
+          // The password did change, so say exactly that and name the remedy
+          // rather than reporting a generic failure for a half-applied change.
+          setStatus(
+            "Password updated, but re-encrypting your PGP key failed. Go to Security and unlock your key with your PREVIOUS password, then change your password again. " +
+              toErrorMessage(rewrapErr, "")
+          );
+          setBusy(false);
+          return;
+        }
+      }
       await onAuthChanged();
       setNeedsPasswordChange(false);
       setPassword("");

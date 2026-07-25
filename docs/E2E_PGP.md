@@ -66,37 +66,174 @@ test asserting nothing lands in either store.
   second call is lost, the stored envelope is still wrapped under the old
   password — recoverable by entering the previous password once, which beats
   the alternative of the server holding the key so it can rewrap unattended.
-- **The pickup-link fallback is not end-to-end** and cannot be. A recipient
-  with no key has nothing to encrypt to.
+- **The pickup-link fallback is weaker than PGP.** See "Sealed pickup links"
+  below for exactly how much weaker.
 - **Subject headers are still cleartext** outside the encrypted part, as with
   any PGP/MIME mail.
 
+
+## Sealed pickup links
+
+A recipient with no PGP key has nothing to encrypt to, so KyPost falls back to
+emailing them a one-time link. Originally the server stored that message's
+plaintext (sealed with its own key, which it holds) for seven days — the exact
+property client-side protection exists to remove.
+
+For client-protected accounts the message is now sealed in the sender's
+browser instead:
+
+1. The browser picks a random AES-256-GCM key and encrypts subject and body.
+2. It uploads **only ciphertext** to `POST /api/pgp/pickup`.
+3. The link is `…/pickup/<id>?t=<token>#<key>`. Browsers never transmit a URL
+   fragment, so the key does not reach the server on the fetch.
+4. The recipient's page (`/pickup-decrypt.js`) reads `location.hash` and
+   decrypts locally, then strips the key from the address bar.
+
+`?t=` still authenticates the fetch, as before. The key is separate and rides
+only in the fragment.
+
+### What this actually protects against
+
+**Protects:** the server's disk, its backups, snapshots, a compromise after
+the fact, and an operator reading files. The stored blob is ciphertext and the
+key was never written anywhere.
+
+**Does not protect:**
+
+- **Anyone who can read the recipient's mailbox has the key**, because the key
+  is in the email. Their provider, an attacker with mailbox access, an
+  unencrypted hop. This defends against *your* server, not their mail path.
+- **The server sees the key once, in flight**, when it relays the notification
+  email over SMTP. Unavoidable while it holds the SMTP credentials. So a
+  server compromised *at the moment of sending* still sees it; one compromised
+  later does not.
+
+Net: a seven-day plaintext-at-rest exposure becomes a momentary in-flight one.
+That is a real improvement and it is not the same guarantee the PGP path
+gives. The compose checkbox is off by default and says so.
+
+### Operational hazard: link rewriting
+
+Corporate mail security products (Outlook Safe Links, Proofpoint, Mimecast)
+rewrite inbound URLs. HTTP redirects preserve fragments, but a rewriter that
+*constructs* a new URL can drop everything after `#` — and then the message is
+permanently unreadable. This is the most likely real-world failure, and it is
+why the page checks for an absent fragment first and names that cause
+specifically rather than reporting a generic decryption failure.
+
+### Other notes
+
+- The subject is inside the sealed blob, not stored alongside it. A subject in
+  the clear gives away most of what the encryption was for.
+- The page renders the decrypted body as **text**, never as HTML: it has no
+  sanitizer available, and the content is written by the sender.
+- Consumption happens on the blob fetch, not the page load, so a link-preview
+  bot fetching the HTML does not burn the message.
+- Server-protected accounts keep the original server-sealed path. The server
+  can already read their mailbox, so client-sealing there adds machinery
+  without changing what it can see.
+
 ## Status
+
+### Corrections to an earlier version of this document
+
+The first version of this file claimed "Read path passes ciphertext through
+untouched for client-protected accounts." That was true of the Go struct and
+false end to end. `decryptPGPMessageContent` does leave
+`PGPEncryptedPayload` populated, but `inboxEmail` has no field for it and
+`mailcache.Entry` does not persist it, so the ciphertext was dropped at JSON
+serialization and never reached any client. No client-protected account
+could read encrypted mail, on web or anywhere else. Fixed by
+`GET /api/mail/pgp-payload`.
+
+It also listed the key endpoints as implemented without noting they were all
+`withAuth` (session cookie only), which locked out every paired mobile
+device — the clients this mode was designed for. All but `export-legacy` are
+now `withMailAuth`.
+
+Both defects came from verifying at the Go boundary and never at the HTTP
+boundary. There are now HTTP-level tests
+(`api/pgp_client_e2e_test.go`) for exactly that gap.
 
 Implemented:
 
 - Storage model, `PGPProtection()`, and refusal of every server-side PGP
   operation on a client-protected key (`users`, `api/pgp_receive.go`,
   `handleMailSend`, `processor/sendas_check.go`).
-- Endpoints: `GET /api/pgp/identity/wrapped`, `POST /api/pgp/identity/client`,
-  `POST /api/pgp/identity/rewrap`, `POST /api/pgp/identity/export-legacy`,
-  `POST /api/mail/send-pgp`.
+- Endpoints, all `withMailAuth` (device or session) unless noted:
+  `GET /api/pgp/bootstrap`, `GET /api/pgp/identity/wrapped`,
+  `POST /api/pgp/identity/client`, `POST /api/pgp/identity/rewrap`,
+  `POST /api/mail/send-pgp`, `GET /api/mail/pgp-payload`.
+  `POST /api/pgp/identity/export-legacy` is **session-only** on purpose: it
+  is the one endpoint that returns a private key, and it re-verifies the
+  account password, which a device secret is not.
 - The server derives fingerprint and key ID from the uploaded public key
   rather than trusting the client's claim — otherwise a client could get its
   own key published under someone else's identity through WKD or Autocrypt.
 - Browser crypto: `lib/keyVault.ts` (wrap/unwrap/lock, 12 tests) and
-  `lib/pgpClient.ts` (generate, import, decrypt, encrypt, RFC 3156 wrapping).
-- Read path passes ciphertext through untouched for client-protected
-  accounts.
+  `lib/pgpClient.ts` (generate, import, decrypt, encrypt, RFC 3156 wrapping
+  with a full RFC 5322 envelope and protected Subject).
+- Client-protected accounts fetch ciphertext per message from
+  `/api/mail/pgp-payload` and decrypt locally.
 
-Not yet wired:
+### Cold start
 
-- **Web UI.** The Security page still drives the legacy server-side generate
-  and import endpoints, and ReadPage/compose do not yet call `pgpClient`. Until
-  that lands, client protection is reachable via the API but is not the
-  default and no user is on it — the shipped behavior is unchanged.
-- Unlock prompt and its placement in the login flow.
-- Browser-side send-as User ID reconcile.
+A client cannot keep the unwrapped private key across restarts — the web
+vault holds it in page memory only, and the mobile apps are told not to put
+it in the Keystore/Keychain, since anything recoverable without the password
+defeats the model. Every launch is therefore a full reload.
+
+`GET /api/pgp/bootstrap` is the single call that makes a client operational
+from nothing:
+
+| field | meaning |
+|---|---|
+| `hasIdentity` | whether this account has a key at all |
+| `protection` | `client`, `server`, or `""` |
+| `wrappedPrivateKey` | the self-describing envelope to unwrap (client mode) |
+| `unlockRequired` | prompt for the password before reading mail |
+| `canDecryptServerSide` | true only for legacy accounts |
+| `migrationAvailable` | offer the one-time migration |
+| `publicKey`, `fingerprint`, `keyId` | the identity itself |
+| `signerPublicKeys` | contact public keys, so signatures verify without waiting on a contacts sync |
+| `payloadEndpoint` | where to fetch ciphertext; absent on older servers |
+
+Doing this as separate calls gives four chances to render a
+half-initialized UI — showing "no PGP identity" to someone who has one, or
+treating mail as unreadable because the wrapped-key call was the one that
+failed. The envelope carries its own `kdf`/`iterations`/`salt`/`iv`, so
+clients must derive from the blob rather than hardcoding parameters; that is
+what lets the KDF change later without stranding them.
+
+Web UI (wired):
+
+- **Cold start** in `App.tsx`: every authenticated page load fetches
+  `/api/pgp/bootstrap` into `lib/pgpSession`. Nothing unlocks at login — the
+  prompt appears the first time something needs the key, so a user who never
+  opens encrypted mail is never asked. Logout clears the vault.
+- **Security page**: browser-side generate and import, protection-mode
+  status, unlock/lock, and the one-time migration for legacy keys. Both
+  creation paths warn that an admin password reset destroys the key.
+- **Read page**: fetches ciphertext from `/api/mail/pgp-payload` and decrypts
+  locally; the signature verdict comes from that decrypt, not the server.
+- **Compose**: resolves recipient keys via
+  `/api/pgp/recipients/resolve`, encrypts per delivery group (BCC each in its
+  own), posts to `/api/mail/send-pgp`. **Refuses** when a recipient has no
+  usable key rather than downgrading — the pickup-link fallback stores
+  plaintext on the server, which is what this mode prevents.
+- **Password change**: rewraps the key, unwrapping before the password write
+  so a failure leaves nothing half-applied.
+
+Still open:
+
+- Browser-side send-as User ID reconcile. The daemon skips client-protected
+  keys (adding a User ID re-signs the key and needs the private half), so an
+  alias verified after key creation is not yet added to the key. Until that
+  lands, regenerate the key after verifying a new alias if you need WKD or
+  Autocrypt to serve it for that address.
+- **Nothing here has been exercised against a real IMAP server or a real
+  recipient.** The unit and HTTP-level tests pass; an end-to-end manual run
+  is still required before relying on this.
 
 Because the default is unchanged, this is safe to ship incrementally: existing
 installs keep working exactly as before, and nothing silently downgrades.
@@ -109,15 +246,27 @@ nothing on the server to decrypt with.
 
 ### Shared contract
 
-1. `GET /api/pgp/identity/wrapped` → `{ protection, wrapped, publicKey, fingerprint }`.
+1. `GET /api/pgp/bootstrap` on every launch — see Cold start above. This
+   replaces the older advice to call `/api/pgp/identity/wrapped` directly;
+   that endpoint still exists for a re-unlock after an explicit lock, where
+   pulling the whole address book again would be wasteful.
 2. If `protection == "client"`, unwrap locally with the account password:
    PBKDF2-HMAC-SHA256, iterations and salt from the envelope, AES-256-GCM.
    The envelope is self-describing; do not hardcode 600,000.
-3. Messages arrive with `pgpEncrypted: true` and `pgpEncryptedPayload`
-   populated (the server no longer clears it). Decrypt on device.
+3. Messages arrive with `pgpEncrypted: true` and an empty `pgpDecryptError`.
+   The ciphertext is **not** inlined in the inbox row — fetch it per message
+   from `GET /api/mail/pgp-payload?mailbox=&messageId=<uid>`, which also
+   returns `signerPublicKeys` for verification. An earlier version of this
+   document said the payload arrived inline; it never did.
 4. Sending encrypted: build the ciphertext on device and POST to
    `/api/mail/send-pgp` with one delivery per recipient group, BCC recipients
-   each in their own.
+   each in their own. Each delivery must be a **complete RFC 5322 message** —
+   From, To, Subject, Date, MIME-Version, Content-Type — because the server
+   relays the bytes verbatim and synthesizes nothing. It now rejects a
+   delivery missing any of those rather than sending malformed mail. Put the
+   real subject inside the encrypted part as a protected header and use the
+   placeholder `[Encrypted] Email Sent by KyPost` outside, matching both
+   other send paths.
 
 ### kypost-android
 

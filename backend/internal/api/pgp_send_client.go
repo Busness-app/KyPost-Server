@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -72,6 +74,22 @@ func (s *Server) handleMailSendPGP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate every delivery before sending any of them. Checking inside the
+	// send loop would let a malformed delivery at index 3 be discovered only
+	// after 0, 1, and 2 had already gone out — a partial send the caller
+	// cannot undo, caused entirely by input the server could have rejected up
+	// front. This also means a bad request costs no IMAP config read or SMTP
+	// connection.
+	for i, delivery := range req.Deliveries {
+		if len(sanitizeRecipients(delivery.Recipients)) == 0 || strings.TrimSpace(delivery.Ciphertext) == "" {
+			continue
+		}
+		if err := validatePGPMimeDelivery(strings.TrimSpace(delivery.Ciphertext)); err != nil {
+			http.Error(w, fmt.Sprintf("delivery %d: %s", i, err), http.StatusBadRequest)
+			return
+		}
+	}
+
 	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
 	if err != nil {
 		http.Error(w, "failed to read mail configuration: "+err.Error(), http.StatusInternalServerError)
@@ -105,10 +123,6 @@ func (s *Server) handleMailSendPGP(w http.ResponseWriter, r *http.Request) {
 		ciphertext := strings.TrimSpace(delivery.Ciphertext)
 		if len(recipients) == 0 || ciphertext == "" {
 			continue
-		}
-		if !strings.HasPrefix(ciphertext, "Content-Type:") && !strings.Contains(ciphertext, "-----BEGIN PGP MESSAGE-----") {
-			http.Error(w, "delivery does not look like a PGP/MIME message", http.StatusBadRequest)
-			return
 		}
 		sendErr := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password,
 			envelopeFrom, recipients, []byte(ciphertext))
@@ -162,4 +176,57 @@ func sanitizeRecipients(in []string) []string {
 		out = append(out, addr)
 	}
 	return out
+}
+
+// requiredDeliveryHeaders are the RFC 5322 headers a delivery must carry.
+//
+// SMTPDeliver relays these bytes verbatim — it does not synthesize headers —
+// so whatever the client sends is the entire message as far as the receiving
+// MTA is concerned. Date is included because a message without one is
+// non-conformant and gets stamped by a relay (or not at all) rather than
+// reflecting when the sender actually sent it.
+var requiredDeliveryHeaders = []string{"From:", "To:", "Subject:", "Date:"}
+
+// validatePGPMimeDelivery rejects a client-supplied delivery that is not a
+// complete RFC 5322 message.
+//
+// The previous check was `HasPrefix("Content-Type:") || contains armor`,
+// which accepted a body carrying only Content-Type and MIME-Version — no
+// From, To, Subject, or Date. The browser's own wrapAsPGPMime emitted
+// exactly that, so this endpoint would have relayed header-less messages
+// that receiving MTAs reject or render blank, and the validation that was
+// supposed to catch it instead certified it as fine.
+//
+// Only the header block is inspected. Everything past the blank line is
+// ciphertext the server cannot read and has no business parsing.
+func validatePGPMimeDelivery(delivery string) error {
+	headerBlock, _, found := strings.Cut(delivery, "\r\n\r\n")
+	if !found {
+		// Tolerate bare-LF folding from a client that did not use CRLF; the
+		// SMTP layer normalizes on the way out.
+		headerBlock, _, found = strings.Cut(delivery, "\n\n")
+	}
+	if !found {
+		return errors.New("delivery has no header block: expected RFC 5322 headers followed by a blank line")
+	}
+	if !strings.Contains(delivery, "-----BEGIN PGP MESSAGE-----") {
+		return errors.New("delivery carries no OpenPGP message")
+	}
+
+	// Header names are case-insensitive per RFC 5322 §1.2.2.
+	lowered := strings.ToLower(headerBlock)
+	var missing []string
+	for _, header := range requiredDeliveryHeaders {
+		if !strings.Contains(lowered, "\n"+strings.ToLower(header)) &&
+			!strings.HasPrefix(lowered, strings.ToLower(header)) {
+			missing = append(missing, strings.TrimSuffix(header, ":"))
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("delivery is missing required header(s): %s", strings.Join(missing, ", "))
+	}
+	if !strings.Contains(lowered, "content-type:") {
+		return errors.New("delivery is missing a Content-Type header")
+	}
+	return nil
 }
