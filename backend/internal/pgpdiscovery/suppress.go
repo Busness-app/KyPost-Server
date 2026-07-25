@@ -73,6 +73,11 @@ func AddSuppression(dir, email, reason string) error {
 	mu := dirMu(dir)
 	mu.Lock()
 	defer mu.Unlock()
+	release, err := fsutil.LockFile(suppressionsPath(dir))
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	list, err := LoadSuppressions(dir)
 	if err != nil {
@@ -99,6 +104,11 @@ func RemoveSuppression(dir, email string) (bool, error) {
 	mu := dirMu(dir)
 	mu.Lock()
 	defer mu.Unlock()
+	release, err := fsutil.LockFile(suppressionsPath(dir))
+	if err != nil {
+		return false, err
+	}
+	defer release()
 
 	list, err := LoadSuppressions(dir)
 	if err != nil {

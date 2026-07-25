@@ -2,10 +2,12 @@ package users
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -354,5 +356,63 @@ func TestListIsSortedByUsername(t *testing.T) {
 		return strings.ToLower(got[i]) < strings.ToLower(got[j])
 	}) {
 		t.Fatalf("List() not sorted by username: %v", got)
+	}
+}
+
+// TestConcurrentStoresDoNotLoseUpdates is the check for the cross-process
+// file lock. Two independent *Store values over the same users.json have
+// independent mutexes — exactly the situation the api and daemon processes
+// are in, since supervisord runs them as separate processes. Without the
+// file lock in mutate, these interleaved read-modify-write cycles drop
+// writes: each reads the same starting file and the last one to write wins.
+func TestConcurrentStoresDoNotLoseUpdates(t *testing.T) {
+	dir := t.TempDir()
+	first, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	// A second Store over the same path, as a different process would have.
+	second := newStore(filepath.Join(dir, "users.json"))
+
+	const n = 12
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		u, err := first.Create(fmt.Sprintf("user%02d", i), "concurrent-testpassword", RoleUser)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		ids = append(ids, u.ID)
+	}
+
+	// Every mutation is a full-file rewrite. Run them all at once, split
+	// across the two stores.
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		store := first
+		if i%2 == 1 {
+			store = second
+		}
+		go func(s *Store, id string) {
+			defer wg.Done()
+			if _, err := s.SetPGPIdentity(id, "fp-"+id, "kid", "pub", "enc", "generated", "now"); err != nil {
+				t.Errorf("SetPGPIdentity(%s): %v", id, err)
+			}
+		}(store, id)
+	}
+	wg.Wait()
+
+	all, err := first.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := 0
+	for _, u := range all {
+		if u.PGPFingerprint != "" {
+			got++
+		}
+	}
+	if got != n {
+		t.Fatalf("%d/%d fingerprints survived concurrent mutation; lost %d updates", got, n, n-got)
 	}
 }

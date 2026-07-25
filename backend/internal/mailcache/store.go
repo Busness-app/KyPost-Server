@@ -129,6 +129,11 @@ func (s *Store) Snapshot(mailboxKey string, limit int) ([]Entry, bool) {
 func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64) (SyncResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return SyncResult{}, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return SyncResult{}, err
 	}
@@ -236,6 +241,11 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return err
 	}

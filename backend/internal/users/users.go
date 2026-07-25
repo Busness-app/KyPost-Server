@@ -150,9 +150,19 @@ type usersFile struct {
 	Users   []User `json:"users"`
 }
 
-// Store is the on-disk users.json store. It re-reads from disk before every
-// mutation so the api and daemon processes (which never share memory, see
-// supervisord.conf) never race a lost update against each other.
+// Store is the on-disk users.json store.
+//
+// Every mutation is a read-modify-write of the whole file, and this file is
+// written by BOTH processes supervisord starts: the api process (password
+// changes, TOTP enrollment, recovery-code consumption) and the daemon
+// process (processor/sendas_check.go's SetPGPIdentity, when a verified
+// send-as alias is added to a user's key). mu only serializes goroutines
+// within one process, so every mutator additionally takes an inter-process
+// file lock for the whole read-modify-write cycle — see
+// fsutil.WithFileLock. Without it, two overlapping mutations each read the
+// same starting state and the second write silently discards the first: a
+// lost password change, or a recovery code that stays usable after being
+// consumed.
 type Store struct {
 	mu   sync.RWMutex
 	path string
@@ -426,41 +436,45 @@ func (s *Store) Create(username, password string, role Role) (User, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f, err := s.readLocked()
-	if err != nil {
-		return User{}, err
-	}
-	username = strings.TrimSpace(username)
-	want := normalizeUsername(username)
-	for _, u := range f.Users {
-		if normalizeUsername(u.Username) == want {
-			return User{}, ErrUsernameTaken
+	var created User
+	err := fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readLocked()
+		if err != nil {
+			return err
 		}
-	}
-	hash, err := HashPassword(password)
+		username = strings.TrimSpace(username)
+		want := normalizeUsername(username)
+		for _, u := range f.Users {
+			if normalizeUsername(u.Username) == want {
+				return ErrUsernameTaken
+			}
+		}
+		hash, err := HashPassword(password)
+		if err != nil {
+			return err
+		}
+		id, err := fsutil.NewUUIDv4()
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		created = User{
+			ID:                 id,
+			Username:           username,
+			PasswordHash:       hash,
+			Role:               role,
+			Active:             true,
+			MustChangePassword: true,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+		f.Users = append(f.Users, created)
+		return s.writeLocked(f)
+	})
 	if err != nil {
 		return User{}, err
 	}
-	id, err := fsutil.NewUUIDv4()
-	if err != nil {
-		return User{}, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	u := User{
-		ID:                 id,
-		Username:           username,
-		PasswordHash:       hash,
-		Role:               role,
-		Active:             true,
-		MustChangePassword: true,
-		CreatedAt:          now,
-		UpdatedAt:          now,
-	}
-	f.Users = append(f.Users, u)
-	if err := s.writeLocked(f); err != nil {
-		return User{}, err
-	}
-	return u, nil
+	return created, nil
 }
 
 // mutate re-reads the store, applies fn to the matching user, and persists
@@ -468,23 +482,32 @@ func (s *Store) Create(username, password string, role Role) (User, error) {
 func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f, err := s.readLocked()
-	if err != nil {
-		return User{}, err
-	}
-	for i := range f.Users {
-		if f.Users[i].ID == id {
+	var updated User
+	err := fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readLocked()
+		if err != nil {
+			return err
+		}
+		for i := range f.Users {
+			if f.Users[i].ID != id {
+				continue
+			}
 			if err := fn(&f.Users[i]); err != nil {
-				return User{}, err
+				return err
 			}
 			f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			if err := s.writeLocked(f); err != nil {
-				return User{}, err
+				return err
 			}
-			return f.Users[i], nil
+			updated = f.Users[i]
+			return nil
 		}
+		return ErrNotFound
+	})
+	if err != nil {
+		return User{}, err
 	}
-	return User{}, ErrNotFound
+	return updated, nil
 }
 
 // SetRole updates a user's role.
