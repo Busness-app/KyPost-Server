@@ -1,7 +1,0 @@
-{
- "batchIndex": 7,
- "totalBatches": 12,
- "fileList": "  - path: backend/AGENTS.md (178 lines, language: markdown, fileCategory: docs)\n  - path: backend/go.mod (48 lines, language: mod, fileCategory: config)\n  - path: backend/go.sum (156 lines, language: sum, fileCategory: config)",
- "batchImportData": "{\"backend/AGENTS.md\":[],\"backend/go.mod\":[],\"backend/go.sum\":[]}",
- "neighborMap": "{}"
-}

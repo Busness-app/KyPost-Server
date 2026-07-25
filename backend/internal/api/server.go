@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"kypost-server/backend/internal/adapters/classifier"
@@ -4049,13 +4048,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// scheduleContainerRestart exits this process after delay so supervisord's
+// autorestart brings it back with fresh state.
+//
+// It does NOT signal PID 1. The previous version called
+// syscall.Kill(1, SIGTERM) and discarded the error — which was always EPERM,
+// because this process runs unprivileged while PID 1 does not belong to it.
+// The call had never once worked; the restart came entirely from the
+// os.Exit below plus supervisord's autorestart. Naming that honestly beats
+// keeping a line that implies the whole container gets recycled.
 func scheduleContainerRestart(logger *logging.Logger, reason string, delay time.Duration) {
 	go func() {
 		time.Sleep(delay)
 		if logger != nil {
-			logger.Error("container restart requested", "reason", reason)
+			logger.Error("restarting process; supervisord will bring it back", "reason", reason)
 		}
-		_ = syscall.Kill(1, syscall.SIGTERM)
 		os.Exit(2)
 	}()
 }

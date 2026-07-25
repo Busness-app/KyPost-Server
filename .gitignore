@@ -49,5 +49,8 @@ share/ollama/models/
 .superpowers/
 docs/superpowers/
 
+# Understand-Anything analysis workspace (incl. its .trash/ scratch output)
+.ua/
+
 # Playwright MCP verification artifacts
 .playwright-mcp/

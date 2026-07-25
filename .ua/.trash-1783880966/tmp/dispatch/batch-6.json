@@ -1,7 +1,0 @@
-{
- "batchIndex": 6,
- "totalBatches": 12,
- "fileList": "  - path: .env.example (48 lines, language: config, fileCategory: config)\n  - path: AGENTS.md (134 lines, language: markdown, fileCategory: docs)\n  - path: README.md (342 lines, language: markdown, fileCategory: docs)\n  - path: TUNING.md (36 lines, language: markdown, fileCategory: docs)",
- "batchImportData": "{\".env.example\":[],\"AGENTS.md\":[],\"README.md\":[],\"TUNING.md\":[]}",
- "neighborMap": "{}"
-}

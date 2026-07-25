@@ -1,7 +1,0 @@
-{
- "batchIndex": 8,
- "totalBatches": 12,
- "fileList": "  - path: frontend/AGENTS.md (83 lines, language: markdown, fileCategory: docs)\n  - path: frontend/index.html (21 lines, language: html, fileCategory: markup)\n  - path: frontend/package.json (26 lines, language: json, fileCategory: config)\n  - path: frontend/tsconfig.json (16 lines, language: json, fileCategory: config)",
- "batchImportData": "{\"frontend/AGENTS.md\":[],\"frontend/index.html\":[],\"frontend/package.json\":[],\"frontend/tsconfig.json\":[]}",
- "neighborMap": "{}"
-}

@@ -19,7 +19,7 @@ services:
       TZ: ${TZ:-America/New_York}
       SECRET_DIR: ${SECRET_DIR:-/kypost/private}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma4:e4b}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-nemotron-3-nano:4b}
       TUNING_FILE: ${TUNING_FILE:-/kypost/config/TUNING.md}
       SERVER_BASE_URL: ${SERVER_BASE_URL:-}
       PAIRING_SECRET: ${PAIRING_SECRET:-}
@@ -32,9 +32,14 @@ services:
       APNS_RELAY_URL: ${APNS_RELAY_URL:-}
       APNS_RELAY_KEY: ${APNS_RELAY_KEY:-}
       APNS_RELAY_KEY_FILE: ${APNS_RELAY_KEY_FILE:-}
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
+    # No `dns:` override. This container previously forced 8.8.8.8/8.8.4.4,
+    # which sent every lookup this server makes — each user's IMAP and SMTP
+    # host, every WKD key-discovery probe, every recipient domain — to
+    # Google, reconstructing the correspondence graph of a product whose
+    # whole premise is self-hosting. It also broke split-horizon and
+    # internal DNS. Docker's default (the host's resolver) is correct; set
+    # `dns:` here yourself only if your host resolver genuinely can't
+    # resolve public names.
     volumes:
       - kypost_config:/kypost/config
       - kypost_private:/kypost/private

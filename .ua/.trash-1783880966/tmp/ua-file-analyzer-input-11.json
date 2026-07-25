@@ -1,9 +1,0 @@
-{
-  "projectRoot": "/home/yoshi/git/llama labels",
-  "batchFiles": [
-    {"path": "worker/README.md", "language": "markdown", "sizeLines": 190, "fileCategory": "docs"},
-    {"path": "worker/package.json", "language": "json", "sizeLines": 16, "fileCategory": "config"},
-    {"path": "worker/tsconfig.json", "language": "json", "sizeLines": 15, "fileCategory": "config"}
-  ],
-  "batchImportData": {"worker/README.md":[],"worker/package.json":[],"worker/tsconfig.json":[]}
-}

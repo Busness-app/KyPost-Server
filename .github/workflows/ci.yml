@@ -1,0 +1,80 @@
+name: ci
+
+# AGENTS.md's governance section requires "CI must pass" for new logic. Until
+# this file existed that rule was unsatisfiable — 28 Go packages with real
+# tests and nothing running them on push.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race matters more than usual here: this codebase runs the api and the
+      # poller as goroutines in "all" mode and as two processes under
+      # supervisord, and several stores are shared between them.
+      - name: go test -race
+        run: go test -race ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci` here for the same reason the Dockerfile uses it: CI must
+      # build the dependency set the lockfile pins, not whatever resolves today.
+      - name: npm ci
+        run: npm ci
+
+      - name: typecheck
+        run: npx tsc --noEmit
+
+      - name: test
+        run: npm test -- --run
+
+      - name: build
+        run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Builds the image the same way a self-hoster does, which is what
+      # catches a bad Ollama pin (the SHA-256 check fails the build) or a
+      # lockfile that no longer satisfies `npm ci`.
+      - name: docker build
+        run: docker build -t kypost-server:ci .

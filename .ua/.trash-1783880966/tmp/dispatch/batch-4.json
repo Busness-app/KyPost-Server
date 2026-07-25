@@ -1,7 +1,0 @@
-{
- "batchIndex": 4,
- "totalBatches": 12,
- "fileList": "  - path: push-relay-shared/base64url.ts (18 lines, language: typescript, fileCategory: code)\n  - path: push-relay-shared/push-relay-common.ts (376 lines, language: typescript, fileCategory: code)\n  - path: worker-apns/src/apns.ts (212 lines, language: typescript, fileCategory: code)\n  - path: worker-apns/src/index.ts (237 lines, language: typescript, fileCategory: code)\n  - path: worker/src/fcm.ts (185 lines, language: typescript, fileCategory: code)\n  - path: worker/src/index.ts (234 lines, language: typescript, fileCategory: code)",
- "batchImportData": "{\"push-relay-shared/base64url.ts\":[],\"push-relay-shared/push-relay-common.ts\":[],\"worker-apns/src/apns.ts\":[\"push-relay-shared/base64url.ts\"],\"worker-apns/src/index.ts\":[\"push-relay-shared/push-relay-common.ts\",\"worker-apns/src/apns.ts\"],\"worker/src/fcm.ts\":[\"push-relay-shared/base64url.ts\"],\"worker/src/index.ts\":[\"push-relay-shared/push-relay-common.ts\",\"worker/src/fcm.ts\"]}",
- "neighborMap": "{}"
-}

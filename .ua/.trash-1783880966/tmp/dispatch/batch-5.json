@@ -1,7 +1,0 @@
-{
- "batchIndex": 5,
- "totalBatches": 12,
- "fileList": "  - path: docker-compose.yml (38 lines, language: yaml, fileCategory: infra)\n  - path: Dockerfile (50 lines, language: dockerfile, fileCategory: infra)",
- "batchImportData": "{\"docker-compose.yml\":[],\"Dockerfile\":[]}",
- "neighborMap": "{}"
-}
