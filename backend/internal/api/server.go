@@ -1327,18 +1327,12 @@ func writeEncryptedPayload(path, keyPath string, payload []byte) error {
 	return fsutil.AtomicWriteFile(path, b, 0o600)
 }
 
+// decryptEncryptedPayload reverses writeEncryptedPayload. It is a thin
+// alias for cryptutil.OpenBytes, kept so the several call sites in this
+// package read symmetrically with their write side; see OpenBytes for why
+// there is no plaintext fallback.
 func decryptEncryptedPayload(raw []byte, keyPath string) ([]byte, error) {
-	env, ok := cryptutil.ParseEnvelope(raw)
-	if !ok {
-		// Backward-compatibility with plaintext credentials.
-		return raw, nil
-	}
-
-	key, err := cryptutil.LoadOrCreateKey(keyPath)
-	if err != nil {
-		return nil, err
-	}
-	return cryptutil.Open(env, key)
+	return cryptutil.OpenBytes(raw, keyPath)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

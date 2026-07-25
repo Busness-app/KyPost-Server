@@ -759,12 +759,22 @@ func (s *Store) RemoveNativeDevice(deviceID string) (bool, error) {
 }
 
 // GetNativeDevice returns a single device by ID, reading through to disk.
+//
+// A failed disk read fails CLOSED — no device, rather than whatever this
+// Store happened to have in memory. This is the lookup that
+// api.deviceAuthFromRequest authenticates against, so serving a stale list
+// here means a device the user just unpaired still authenticates: revoking
+// a stolen phone would silently do nothing for as long as the read kept
+// failing (a full disk, a read-only volume). Every other reader in this
+// file may serve stale data on a failed refresh; this one may not.
 func (s *Store) GetNativeDevice(deviceID string) (NativeDevice, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshNativeDevicesFromDiskLocked()
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" {
+		return NativeDevice{}, false
+	}
+	if err := s.refreshNativeDevicesFromDiskLocked(); err != nil {
 		return NativeDevice{}, false
 	}
 	for _, d := range s.nativeDevices {

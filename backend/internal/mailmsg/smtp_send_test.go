@@ -1,6 +1,11 @@
 package mailmsg
 
-import "testing"
+import (
+	"net"
+	"runtime"
+	"testing"
+	"time"
+)
 
 // TestResolveSMTPTarget covers the fallback chain shared by every
 // outbound-send call site: payload.SMTPHost, then SMTP_HOST env var, then
@@ -77,4 +82,60 @@ func TestResolveSMTPTarget(t *testing.T) {
 			t.Fatal("expected error when no smtp host can be determined, got nil")
 		}
 	})
+}
+
+// TestSMTPSendWithTimeoutDoesNotLeakOnHang is the check for the timeout
+// rewrite. Against a server that accepts the TCP connection and then never
+// speaks, the old goroutine+time.After version returned to the caller on
+// time but left the goroutine blocked in smtp.SendMail forever, holding the
+// socket and the message bytes. This asserts the goroutine count returns to
+// baseline, which only holds if the timeout actually tears the connection
+// down rather than abandoning it.
+func TestSMTPSendWithTimeoutDoesNotLeakOnHang(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c // accept, then say nothing at all
+		}
+	}()
+
+	before := runtime.NumGoroutine()
+
+	start := time.Now()
+	err = SMTPSendWithTimeout(ln.Addr().String(), nil, "a@example.com",
+		[]string{"b@example.com"}, []byte("Subject: hi\r\n\r\nbody"), 300*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected a timeout error from a server that never responds")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("took %s, want the send to give up near the 300ms deadline", elapsed)
+	}
+
+	select {
+	case c := <-accepted:
+		defer c.Close()
+	default:
+		t.Fatal("server never saw the connection; test did not exercise the hang")
+	}
+
+	// Allow the runtime a moment to reap anything that is genuinely finishing.
+	for i := 0; i < 50; i++ {
+		if runtime.NumGoroutine() <= before {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("goroutines: before=%d after=%d — the timed-out send leaked", before, runtime.NumGoroutine())
 }

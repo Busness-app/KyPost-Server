@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"kypost-server/backend/internal/cryptutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -682,12 +683,13 @@ func TestHandleMessage_AutoLabelDisabledUsesConfiguredLabel(t *testing.T) {
 	}
 }
 
-// writeTestIMAPConfig writes a plaintext (unencrypted) IMAP/SMTP config
-// payload at the path notifyMessageTooLarge reads via
-// mailmsg.ReadIMAPConfigPayload for userID. Plaintext is enough:
-// decryptEncryptedPayload falls back to treating unparseable input as
-// plaintext, so this test doesn't need a real encryption-at-rest key file.
-func writeTestIMAPConfig(t *testing.T, configDir, userID, username, password string) {
+// writeTestIMAPConfig writes an encrypted IMAP/SMTP config payload at the
+// path notifyMessageTooLarge reads via mailmsg.ReadIMAPConfigPayload for
+// userID, sealed with a throwaway master key under keyPath. It writes a real
+// envelope because the read path no longer accepts plaintext: silently
+// treating an unparseable config as cleartext credentials is exactly the
+// behavior that was removed (see cryptutil.OpenBytes).
+func writeTestIMAPConfig(t *testing.T, configDir, keyPath, userID, username, password string) {
 	t.Helper()
 	payload := mailmsg.IMAPConfigPayload{
 		Host:     "imap.example.com",
@@ -702,11 +704,23 @@ func writeTestIMAPConfig(t *testing.T, configDir, userID, username, password str
 	if err != nil {
 		t.Fatalf("marshal test imap config: %v", err)
 	}
+	key, err := cryptutil.LoadOrCreateKey(keyPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreateKey: %v", err)
+	}
+	env, err := cryptutil.Seal(b, key)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	sealed, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
 	dir := filepath.Join(configDir, "users", userID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "imap-config.json"), b, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "imap-config.json"), sealed, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 }
@@ -760,10 +774,12 @@ func TestHandleMessage_TooLargeMessageRejectsAndNotifies(t *testing.T) {
 	}
 
 	configDir := t.TempDir()
-	writeTestIMAPConfig(t, configDir, "user-1", "alice@example.com", "hunter2")
+	imapKeyPath := filepath.Join(t.TempDir(), "imap-config.key")
+	writeTestIMAPConfig(t, configDir, imapKeyPath, "user-1", "alice@example.com", "hunter2")
 	calls := stubSendRejectionNotice(t, nil)
 
-	p := &Poller{log: logger, configDir: configDir} // classifier intentionally nil: must never be reached
+	// classifier intentionally nil: must never be reached
+	p := &Poller{log: logger, configDir: configDir, imapKeyPath: imapKeyPath}
 	mail := &noopMailClient{}
 	uc := userCtx{id: "user-1", mail: mail, store: store, autoLabelEnabled: true}
 	msg := imapadapter.Message{

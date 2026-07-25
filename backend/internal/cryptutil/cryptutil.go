@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,20 +160,58 @@ func SealString(plaintext, keyPath string) (string, error) {
 // OpenString reverses SealString, returning the plaintext. errNotEnvelope is
 // returned verbatim when enc isn't a well-formed envelope, so callers can
 // supply their own contextual message.
+// It uses LoadKey, never LoadOrCreateKey: creating a master key on a
+// decrypt path is how a missing/unmounted SECRET_DIR turns a loud "the key
+// is gone" into a silent catastrophe. LoadOrCreateKey would mint a fresh
+// random key, fail GCM authentication on every existing secret, and then
+// leave the next SealString writing real data under the new key — half the
+// volume encrypted under one key and half under another, with no way to
+// tell which is which and no way back. LoadOrCreateKey's own doc comment
+// restricts it to callers allowed to originate the key; this is not one.
 func OpenString(enc, keyPath string, errNotEnvelope error) (string, error) {
 	env, ok := ParseEnvelope([]byte(enc))
 	if !ok {
 		return "", errNotEnvelope
 	}
-	key, err := LoadOrCreateKey(keyPath)
+	key, err := LoadKey(keyPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("load master key %s: %w", keyPath, err)
 	}
 	plain, err := Open(env, key)
 	if err != nil {
 		return "", err
 	}
 	return string(plain), nil
+}
+
+// ErrNotEncrypted reports that a stored payload is not a well-formed
+// encryption envelope — it was written before encryption-at-rest existed,
+// or it is corrupt.
+var ErrNotEncrypted = errors.New("stored payload is not encrypted")
+
+// OpenBytes decrypts a stored payload written as a marshaled
+// EncryptedPayload, returning ErrNotEncrypted if raw is not one.
+//
+// It deliberately does NOT fall back to returning raw as plaintext. That
+// fallback previously existed here (twice, copy-pasted) under a
+// "backward-compatibility with plaintext credentials" comment, and a comment
+// that exists to justify code is a sign the code is wrong: it made
+// encryption-at-rest permanently optional and unenforced. Nothing ever
+// re-encrypted the legacy file, nothing logged, and nothing could tell a
+// legacy plaintext config apart from a corrupt one — so an IMAP password
+// could sit in cleartext on disk forever while every call site reported
+// success. Failing here is loud, loses nothing (the file is untouched), and
+// has an obvious remedy: re-save the credentials once.
+func OpenBytes(raw []byte, keyPath string) ([]byte, error) {
+	env, ok := ParseEnvelope(raw)
+	if !ok {
+		return nil, ErrNotEncrypted
+	}
+	key, err := LoadKey(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load master key %s: %w", keyPath, err)
+	}
+	return Open(env, key)
 }
 
 // Open AES-GCM decrypts env with key.
