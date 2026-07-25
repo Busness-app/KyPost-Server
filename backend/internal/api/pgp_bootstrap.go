@@ -2,7 +2,9 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
+	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/users"
 )
 
@@ -92,10 +94,49 @@ func (s *Server) handlePGPBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["signerPublicKeys"] = signerKeys
 
+	// The addresses a newly generated key must carry as User IDs: the IMAP
+	// account address plus every verified send-as alias. Both WKD serving
+	// and Autocrypt advertising refuse a key that does not carry the address
+	// in question, so a client generating a key needs this and must not
+	// guess — the login name is frequently not an email address at all.
+	// Mirrors handlePGPIdentityGenerate's own derivation.
+	resp["suggestedUserIDs"] = s.suggestedKeyUserIDs(ac.UserID)
+	resp["displayName"] = u.Username
+
 	// Tell the client where to go for ciphertext rather than making it infer
 	// the route, so an older server and a newer app disagree loudly (absent
 	// field) instead of silently 404ing every decrypt.
 	resp["payloadEndpoint"] = "/api/mail/pgp-payload"
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// suggestedKeyUserIDs returns the addresses a key generated for userID should
+// carry, primary address first. Empty when no mail account is configured —
+// the caller surfaces that rather than minting a key with no usable User ID.
+func (s *Server) suggestedKeyUserIDs(userID string) []string {
+	out := []string{}
+	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(userID), s.imapConfigKeyPath)
+	if err != nil || !exists || strings.TrimSpace(payload.Username) == "" {
+		return out
+	}
+	out = append(out, strings.TrimSpace(payload.Username))
+
+	seen := map[string]bool{strings.ToLower(out[0]): true}
+	store, err := s.userSendAsStore(userID)
+	if err != nil {
+		// A key missing its alias User IDs is only fixable by regenerating,
+		// so this is worth a log line rather than a silent partial answer.
+		s.logger.Error("failed to open send-as store for key user ids", "user_id", userID, "error", err.Error())
+		return out
+	}
+	for _, alias := range store.ListVerified() {
+		addr := strings.TrimSpace(alias.Email)
+		if addr == "" || seen[strings.ToLower(addr)] {
+			continue
+		}
+		seen[strings.ToLower(addr)] = true
+		out = append(out, addr)
+	}
+	return out
 }

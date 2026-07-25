@@ -9,7 +9,11 @@ import { AuthContext, type AuthState } from "./auth";
 import { ContactPickerModal } from "./components/ContactPickerModal";
 import { RecipientField } from "./components/RecipientField";
 import { useDialogOpen } from "./hooks/useDialogOpen";
-import { contactToToken, isDuplicateInField, parseRecipientField, serializeRecipientField } from "./lib/recipients";
+import { contactToToken, isDuplicateInField, parseRecipientField, serializeRecipientField, splitAddressList } from "./lib/recipients";
+import { isClientProtected, needsUnlock, loadPGPSession, clearPGPSession } from "./lib/pgpSession";
+import { buildEncryptedDeliveries } from "./lib/pgpClient";
+import { resolveRecipientKeys, sendClientEncryptedMail } from "./api/pgp";
+import { PgpUnlockDialog } from "./components/PgpUnlockDialog";
 import type { RecipientFieldState, RecipientToken } from "./lib/recipients";
 import { ConfigPage } from "./pages/ConfigPage";
 import { ContactsPage } from "./pages/ContactsPage";
@@ -165,6 +169,7 @@ export function App() {
   const [composeSubject, setComposeSubject] = useState("");
   const [composeHtmlBody, setComposeHtmlBody] = useState("");
   const [composeSending, setComposeSending] = useState(false);
+  const [composeUnlockOpen, setComposeUnlockOpen] = useState(false);
   const [composeSavingDraft, setComposeSavingDraft] = useState(false);
   const [composeError, setComposeError] = useState("");
   const [composeSuccess, setComposeSuccess] = useState("");
@@ -199,6 +204,16 @@ export function App() {
     refreshAuth();
   }, []);
 
+  // Cold start: the unwrapped PGP key cannot survive a reload, so every
+  // authenticated page load re-fetches the snapshot that says whether this
+  // account has a key, which mode it is under, and whether an unlock is
+  // needed. Nothing is unlocked here — that waits until something needs it.
+  useEffect(() => {
+    if (auth?.authenticated) {
+      void loadPGPSession();
+    }
+  }, [auth?.authenticated]);
+
   useEffect(() => {
     const standalone = window.matchMedia("(display-mode: standalone)").matches ||
       (window.navigator as Navigator & { standalone?: boolean }).standalone === true;
@@ -228,6 +243,9 @@ export function App() {
     } finally {
       setMailboxFolders([]);
       setArchiveFolders([]);
+      // Drop the unwrapped private key with the session. Leaving it in memory
+      // after logout would let the next person at this browser read mail.
+      clearPGPSession();
       setAuth({ authenticated: false });
     }
   }
@@ -648,6 +666,70 @@ export function App() {
     };
   }, [composeEncrypt, composeTo, composeCc, composeBcc]);
 
+  /**
+   * Encrypts and signs in the browser, then posts the ciphertext.
+   *
+   * Refuses rather than downgrading when a recipient has no usable key. The
+   * server-side path falls back to a one-time pickup link for those, but that
+   * works by storing the plaintext on the server — exactly what client-side
+   * key protection exists to prevent — so it is not available here, and
+   * quietly sending in the clear instead would be worse than failing.
+   */
+  async function sendComposeEncryptedLocally(to: string, body: string) {
+    if (needsUnlock()) {
+      // Open the prompt and stop. The composed body is deliberately not
+      // stashed across the unlock: holding it would mean sending whatever was
+      // captured at the moment of the first click, not what is on screen when
+      // the user actually confirms.
+      setComposeUnlockOpen(true);
+      throw new Error("Your PGP key is locked — unlock it, then press Send again.");
+    }
+
+    const ccList = splitAddressList(serializeRecipientField(composeCc));
+    const bccList = splitAddressList(serializeRecipientField(composeBcc));
+    const toList = splitAddressList(to);
+
+    const { results } = await resolveRecipientKeys([...toList, ...ccList, ...bccList]);
+    const keyFor = new Map(results.filter((r) => r.usable && r.publicKey).map((r) => [r.address.toLowerCase(), r.publicKey!]));
+    const missing = [...toList, ...ccList, ...bccList].filter((addr) => !keyFor.has(addr.toLowerCase()));
+    if (missing.length > 0) {
+      throw new Error(
+        `No usable PGP key for: ${missing.join(", ")}. Add their key in Contacts, or turn off encryption to send this unencrypted.`
+      );
+    }
+
+    const envelope = {
+      from: composeFrom || "",
+      to: toList,
+      cc: ccList,
+      subject: composeSubject
+    };
+    // To/Cc share one ciphertext; each Bcc gets its own so they never appear
+    // in one another's encryption headers.
+    const groups = [
+      {
+        recipients: [...toList, ...ccList],
+        publicKeys: [...toList, ...ccList].map((a) => keyFor.get(a.toLowerCase())!)
+      },
+      ...bccList.map((addr) => ({ recipients: [addr], publicKeys: [keyFor.get(addr.toLowerCase())!] }))
+    ].filter((g) => g.recipients.length > 0);
+
+    const deliveries = await buildEncryptedDeliveries(envelope, "text/html; charset=UTF-8", body, groups, composeSign);
+    if (deliveries.length === 0) {
+      throw new Error("Nothing to send: no recipient had a usable key.");
+    }
+    await sendClientEncryptedMail({
+      from: composeFrom || "",
+      subject: composeSubject,
+      deliveries,
+      to: toList,
+      cc: ccList,
+      bcc: bccList,
+      sentCopy: body,
+      mode: "html"
+    });
+  }
+
   async function sendComposeEmail() {
     if (composeSending) return;
     const to = serializeRecipientField(composeTo);
@@ -660,18 +742,26 @@ export function App() {
     setComposeSuccess("");
     const body = quillInstanceRef.current?.root.innerHTML ?? composeHtmlBody;
     try {
-      await postJSON<{ ok: boolean; sentSaved?: boolean; warning?: string }>("/api/mail/send", {
-        from: composeFrom,
-        to,
-        cc: serializeRecipientField(composeCc),
-        bcc: serializeRecipientField(composeBcc),
-        subject: composeSubject,
-        body,
-        mode: "html",
-        attachments: composeAttachments.map(({ name, mimeType, dataBase64 }) => ({ name, mimeType, dataBase64 })),
-        encrypt: composeEncrypt,
-        sign: composeSign
-      });
+      // A client-protected account's key is not on the server, so the server
+      // cannot sign or encrypt on its behalf — the browser does it and posts
+      // ciphertext. Falling through to /api/mail/send here would get a 409
+      // (the server refuses rather than silently sending in the clear).
+      if ((composeEncrypt || composeSign) && isClientProtected()) {
+        await sendComposeEncryptedLocally(to, body);
+      } else {
+        await postJSON<{ ok: boolean; sentSaved?: boolean; warning?: string }>("/api/mail/send", {
+          from: composeFrom,
+          to,
+          cc: serializeRecipientField(composeCc),
+          bcc: serializeRecipientField(composeBcc),
+          subject: composeSubject,
+          body,
+          mode: "html",
+          attachments: composeAttachments.map(({ name, mimeType, dataBase64 }) => ({ name, mimeType, dataBase64 })),
+          encrypt: composeEncrypt,
+          sign: composeSign
+        });
+      }
       setComposeOpen(false);
       resetComposeForm();
     } catch (e) {
@@ -1094,6 +1184,12 @@ export function App() {
             ) : null}
 
             {composeError ? <p className="notice notice-error" style={{ margin: 0 }}>Send failed: {composeError}</p> : null}
+            <PgpUnlockDialog
+              open={composeUnlockOpen}
+              reason="to sign and encrypt this message"
+              onUnlocked={() => setComposeUnlockOpen(false)}
+              onCancel={() => setComposeUnlockOpen(false)}
+            />
             {composeSuccess ? <p className="notice notice-success" style={{ margin: 0 }}>{composeSuccess}</p> : null}
             {composeNotice ? <p className="notice notice-warning">{composeNotice}</p> : null}
 

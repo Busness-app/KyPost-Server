@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { processEmailHtml, sanitizeEmailHtml } from "../lib/emailHtml";
+import { decryptMessage } from "../lib/pgpClient";
+import { getPGPMessagePayload } from "../api/pgp";
+import { isClientProtected, needsUnlock, subscribePGPSession, type PGPSessionState } from "../lib/pgpSession";
+import { PgpUnlockDialog } from "../components/PgpUnlockDialog";
 import { getJSON, postJSON, toErrorMessage } from "../api/client";
 import { usePagination } from "../hooks/usePagination";
 import { useDialogOpen } from "../hooks/useDialogOpen";
@@ -25,6 +29,17 @@ type InboxEmail = {
   pgpVerified?: boolean;
   pgpSignerFingerprint?: string;
   pgpDecryptError?: string;
+};
+
+// DecryptedView is one locally-decrypted message: the plaintext body plus
+// what the signature check found. Held in component state only, so it is
+// gone on reload along with the key that produced it.
+type DecryptedView = {
+  body: string;
+  signed: boolean;
+  verified: boolean;
+  signerFingerprint: string;
+  error: string;
 };
 
 // AttachmentInfo mirrors the /api/mail/attachments wire shape.
@@ -237,6 +252,13 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [byTab, setByTab] = useState<Record<string, InboxEmail[]>>({});
   const [activeTab, setActiveTab] = useState<string>("");
   const [selected, setSelected] = useState<InboxEmail | null>(null);
+  // Locally decrypted bodies for client-protected accounts, keyed by message
+  // id. The server hands over ciphertext only (see /api/mail/pgp-payload);
+  // nothing decrypted here is ever sent back to it.
+  const [decrypted, setDecrypted] = useState<Record<string, DecryptedView>>({});
+  const [decryptingId, setDecryptingId] = useState("");
+  const [pgpUnlockOpen, setPgpUnlockOpen] = useState(false);
+  const [, setPgpSession] = useState<PGPSessionState | null>(null);
   const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
   const [attachmentsError, setAttachmentsError] = useState("");
@@ -271,6 +293,70 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [refillAnimationTick, setRefillAnimationTick] = useState(0);
   const isDraftMailbox = mailbox.toLowerCase().includes("drafts");
   const sourceMailbox = mailbox || "INBOX";
+
+  useEffect(() => subscribePGPSession(setPgpSession), []);
+
+  // Fetch and decrypt a client-protected message when it is opened.
+  //
+  // The server no longer decrypts for these accounts — it cannot — so an
+  // encrypted message arrives with pgpEncrypted set, no body, and no
+  // decryptError. That combination is the signal to fetch the ciphertext and
+  // do the work here.
+  useEffect(() => {
+    const message = selected;
+    if (!message || !message.pgpEncrypted || message.pgpDecryptError) {
+      return;
+    }
+    if (!isClientProtected() || decrypted[message.messageId]) {
+      return;
+    }
+    if (needsUnlock()) {
+      setPgpUnlockOpen(true);
+      return;
+    }
+
+    let cancelled = false;
+    setDecryptingId(message.messageId);
+    (async () => {
+      try {
+        const payload = await getPGPMessagePayload(sourceMailbox, message.messageId);
+        const result = await decryptMessage(payload.encryptedPayload, payload.signerPublicKeys ?? []);
+        if (cancelled) return;
+        setDecrypted((prev) => ({
+          ...prev,
+          [message.messageId]: {
+            body: result.body,
+            signed: result.signed,
+            verified: result.verified,
+            signerFingerprint: result.signerFingerprint,
+            error: ""
+          }
+        }));
+      } catch (e) {
+        if (cancelled) return;
+        setDecrypted((prev) => ({
+          ...prev,
+          [message.messageId]: {
+            body: "",
+            signed: false,
+            verified: false,
+            signerFingerprint: "",
+            error: toErrorMessage(e, "could not decrypt this message")
+          }
+        }));
+      } finally {
+        if (!cancelled) setDecryptingId("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // decrypted is intentionally not a dependency: including it would re-run
+    // this effect on every successful decrypt, and the guard above already
+    // reads the latest value through the closure on each selection change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, sourceMailbox, pgpUnlockOpen]);
+
   const swipeSessionRef = useRef<{
     messageId: string;
     startX: number;
@@ -1455,20 +1541,56 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
               </div>
             </div>
 
+            <PgpUnlockDialog
+              open={pgpUnlockOpen}
+              reason="to read this encrypted message"
+              onUnlocked={() => setPgpUnlockOpen(false)}
+              onCancel={() => setPgpUnlockOpen(false)}
+            />
             <div className="email-reader-content">
               {selected.pgpEncrypted ? (
-                <p style={{ margin: 0 }}>
-                  <span className={`security-badge ${selected.pgpDecryptError ? "security-badge-off" : "security-badge-on"}`}>
-                    <span className="security-dot" aria-hidden="true" />
-                    {selected.pgpDecryptError ? "PGP: could not decrypt" : "PGP: encrypted"}
-                  </span>
-                  {!selected.pgpDecryptError && selected.pgpSigned ? (
-                    <span className={`security-badge ${selected.pgpVerified ? "security-badge-on" : "security-badge-off"}`} style={{ marginLeft: 6 }}>
-                      <span className="security-dot" aria-hidden="true" />
-                      {selected.pgpVerified ? "signature verified" : "signature not verified"}
-                    </span>
-                  ) : null}
-                </p>
+                (() => {
+                  // For client-protected accounts the signature verdict comes
+                  // from the local decrypt, not from the server (which never
+                  // saw the plaintext). Fall back to the server's fields for
+                  // legacy accounts.
+                  const local = decrypted[selected.messageId];
+                  const decryptFailed = Boolean(selected.pgpDecryptError || local?.error);
+                  const decryptingNow = decryptingId === selected.messageId;
+                  const signed = local ? local.signed : Boolean(selected.pgpSigned);
+                  const verified = local ? local.verified : Boolean(selected.pgpVerified);
+                  return (
+                    <p style={{ margin: 0 }}>
+                      <span className={`security-badge ${decryptFailed ? "security-badge-off" : "security-badge-on"}`}>
+                        <span className="security-dot" aria-hidden="true" />
+                        {decryptingNow
+                          ? "PGP: decrypting…"
+                          : decryptFailed
+                            ? "PGP: could not decrypt"
+                            : "PGP: encrypted"}
+                      </span>
+                      {!decryptFailed && !decryptingNow && signed ? (
+                        <span className={`security-badge ${verified ? "security-badge-on" : "security-badge-off"}`} style={{ marginLeft: 6 }}>
+                          <span className="security-dot" aria-hidden="true" />
+                          {verified ? "signature verified" : "signature not verified"}
+                        </span>
+                      ) : null}
+                      {local?.error ? (
+                        <span className="contacts-muted" style={{ marginLeft: 6 }}>{local.error}</span>
+                      ) : null}
+                      {!local && !decryptingNow && !selected.pgpDecryptError && needsUnlock() ? (
+                        <button
+                          type="button"
+                          className="contacts-action"
+                          style={{ marginLeft: 6 }}
+                          onClick={() => setPgpUnlockOpen(true)}
+                        >
+                          Unlock to read
+                        </button>
+                      ) : null}
+                    </p>
+                  );
+                })()
               ) : null}
               <p style={{ margin: 0 }}><strong>Subject:</strong> {selected.subject || "(no subject)"}</p>
               <p style={{ margin: 0 }}><strong>Sender:</strong> {selected.sender || "-"}</p>
@@ -1547,11 +1669,15 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                     key="raw"
                     className="email-reader-body-block"
                   >
-                    {selected.body || "No message body available."}
+                    {decrypted[selected.messageId]?.body || selected.body || "No message body available."}
                   </pre>
                 ) : null}
                 {!showRawEmail ? (() => {
-                  const body = selected.body || "No message body available.";
+                  // A locally decrypted body wins over whatever the server
+                  // sent: for a client-protected account the server sends no
+                  // body at all for encrypted mail.
+                  const body =
+                    decrypted[selected.messageId]?.body || selected.body || "No message body available.";
                   const isHtml = /<[^>]+>/.test(body);
                   
                   if (isHtml) {

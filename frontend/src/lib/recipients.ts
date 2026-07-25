@@ -38,3 +38,14 @@ export function isDuplicateInField(tokens: RecipientToken[], email: string): boo
 export function isPlausibleEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 }
+
+/**
+ * Splits a serialized recipient string into bare addresses, using the same
+ * comma-or-semicolon rule parseRecipientField does. Callers that need a list
+ * (e.g. per-recipient PGP key resolution) must use this rather than their own
+ * split, or a semicolon-separated field silently becomes one malformed
+ * address.
+ */
+export function splitAddressList(raw: string): string[] {
+  return parseRecipientField(raw).tokens.map((t) => t.email);
+}

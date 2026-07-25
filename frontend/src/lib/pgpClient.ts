@@ -31,12 +31,30 @@ export type GeneratedIdentity = {
  * of the ecosystem still rejects, which for a mail client means recipients
  * silently unable to read anything you send them.
  */
-export async function generateIdentity(name: string, email: string): Promise<GeneratedIdentity> {
+export async function generateIdentity(
+  name: string,
+  email: string,
+  additionalEmails: string[] = []
+): Promise<GeneratedIdentity> {
   const pgp = await openpgp();
+  // Every address the account has proven it owns becomes a User ID. Both WKD
+  // serving and Autocrypt advertising refuse a key that does not carry the
+  // address in question, so a key with only the primary address silently
+  // fails to publish for verified aliases. Mirrors pgpmail.GenerateIdentity.
+  const seen = new Set([email.trim().toLowerCase()]);
+  const userIDs = [{ name, email: email.trim() }];
+  for (const extra of additionalEmails) {
+    const addr = extra.trim();
+    if (!addr || seen.has(addr.toLowerCase())) {
+      continue;
+    }
+    seen.add(addr.toLowerCase());
+    userIDs.push({ name, email: addr });
+  }
   const { privateKey, publicKey } = await pgp.generateKey({
     type: "ecc",
     curve: "curve25519Legacy",
-    userIDs: [{ name, email }],
+    userIDs,
     format: "armored"
   });
   const parsed = await pgp.readKey({ armoredKey: publicKey });
