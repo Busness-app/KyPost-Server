@@ -12,7 +12,8 @@ import { useDialogOpen } from "./hooks/useDialogOpen";
 import { contactToToken, isDuplicateInField, parseRecipientField, serializeRecipientField, splitAddressList } from "./lib/recipients";
 import { isClientProtected, needsUnlock, loadPGPSession, clearPGPSession } from "./lib/pgpSession";
 import { buildEncryptedDeliveries } from "./lib/pgpClient";
-import { resolveRecipientKeys, sendClientEncryptedMail } from "./api/pgp";
+import { sealPickup } from "./lib/pickupCrypto";
+import { createSealedPickup, resolveRecipientKeys, sendClientEncryptedMail } from "./api/pgp";
 import { PgpUnlockDialog } from "./components/PgpUnlockDialog";
 import type { RecipientFieldState, RecipientToken } from "./lib/recipients";
 import { ConfigPage } from "./pages/ConfigPage";
@@ -170,6 +171,9 @@ export function App() {
   const [composeHtmlBody, setComposeHtmlBody] = useState("");
   const [composeSending, setComposeSending] = useState(false);
   const [composeUnlockOpen, setComposeUnlockOpen] = useState(false);
+  // Opt-in: send keyless recipients a one-time encrypted link rather than
+  // failing the send. Off by default because it is weaker than PGP.
+  const [composeSendLinkForKeyless, setComposeSendLinkForKeyless] = useState(false);
   const [composeSavingDraft, setComposeSavingDraft] = useState(false);
   const [composeError, setComposeError] = useState("");
   const [composeSuccess, setComposeSuccess] = useState("");
@@ -667,6 +671,40 @@ export function App() {
   }, [composeEncrypt, composeTo, composeCc, composeBcc]);
 
   /**
+   * Seals the message for one keyless recipient and emails them a one-time
+   * link. The key rides in the link's fragment, which the server never
+   * receives on the fetch, so what it stores is ciphertext it cannot open.
+   */
+  async function sendSealedPickupLink(address: string, body: string) {
+    const { sealed, fragmentKey } = await sealPickup({
+      subject: composeSubject,
+      body,
+      mode: "html",
+      from: composeFrom || ""
+    });
+    const created = await createSealedPickup(address, sealed);
+    const link = `${created.url}#${fragmentKey}`;
+    // The notice itself is ordinary mail: it carries the link, not the
+    // message. It goes through the normal send path because there is no key
+    // to encrypt it to — that is the whole situation being handled.
+    await postJSON<{ ok: boolean }>("/api/mail/send", {
+      from: composeFrom,
+      to: address,
+      subject: "[Encrypted] Email Sent by KyPost",
+      body:
+        "You've received a message that was sent encrypted.\n\n" +
+        "Since there's no PGP key on file for your address, you can read it once at the link below. " +
+        "The message is encrypted in your browser using a key contained in the link itself, " +
+        "so the server storing it cannot read it.\n\n" +
+        link +
+        "\n\nThis link expires in 7 days or as soon as it's opened, whichever comes first.",
+      mode: "plain",
+      encrypt: false,
+      sign: false
+    });
+  }
+
+  /**
    * Encrypts and signs in the browser, then posts the ciphertext.
    *
    * Refuses rather than downgrading when a recipient has no usable key. The
@@ -692,42 +730,56 @@ export function App() {
     const { results } = await resolveRecipientKeys([...toList, ...ccList, ...bccList]);
     const keyFor = new Map(results.filter((r) => r.usable && r.publicKey).map((r) => [r.address.toLowerCase(), r.publicKey!]));
     const missing = [...toList, ...ccList, ...bccList].filter((addr) => !keyFor.has(addr.toLowerCase()));
-    if (missing.length > 0) {
+
+    // Recipients with no key get a secure link instead: the message is
+    // sealed here under a random key that travels in the link's fragment,
+    // so the server stores ciphertext it cannot read. This is weaker than
+    // PGP — whoever can read their mail has the key — so it is an explicit
+    // choice, never a silent fallback.
+    if (missing.length > 0 && !composeSendLinkForKeyless) {
       throw new Error(
-        `No usable PGP key for: ${missing.join(", ")}. Add their key in Contacts, or turn off encryption to send this unencrypted.`
+        `No usable PGP key for: ${missing.join(", ")}. Add their key in Contacts, tick "send a secure link" to send those recipients a one-time encrypted link instead, or turn off encryption.`
       );
     }
+    const keyed = [toList, ccList, bccList].map((list) => list.filter((a) => keyFor.has(a.toLowerCase())));
+    const [keyedTo, keyedCc, keyedBcc] = keyed;
 
     const envelope = {
       from: composeFrom || "",
-      to: toList,
-      cc: ccList,
+      to: keyedTo,
+      cc: keyedCc,
       subject: composeSubject
     };
     // To/Cc share one ciphertext; each Bcc gets its own so they never appear
     // in one another's encryption headers.
     const groups = [
       {
-        recipients: [...toList, ...ccList],
-        publicKeys: [...toList, ...ccList].map((a) => keyFor.get(a.toLowerCase())!)
+        recipients: [...keyedTo, ...keyedCc],
+        publicKeys: [...keyedTo, ...keyedCc].map((a) => keyFor.get(a.toLowerCase())!)
       },
-      ...bccList.map((addr) => ({ recipients: [addr], publicKeys: [keyFor.get(addr.toLowerCase())!] }))
+      ...keyedBcc.map((addr) => ({ recipients: [addr], publicKeys: [keyFor.get(addr.toLowerCase())!] }))
     ].filter((g) => g.recipients.length > 0);
 
-    const deliveries = await buildEncryptedDeliveries(envelope, "text/html; charset=UTF-8", body, groups, composeSign);
-    if (deliveries.length === 0) {
-      throw new Error("Nothing to send: no recipient had a usable key.");
+    if (groups.length > 0) {
+      const deliveries = await buildEncryptedDeliveries(envelope, "text/html; charset=UTF-8", body, groups, composeSign);
+      await sendClientEncryptedMail({
+        from: composeFrom || "",
+        subject: composeSubject,
+        deliveries,
+        to: keyedTo,
+        cc: keyedCc,
+        bcc: keyedBcc,
+        sentCopy: body,
+        mode: "html"
+      });
     }
-    await sendClientEncryptedMail({
-      from: composeFrom || "",
-      subject: composeSubject,
-      deliveries,
-      to: toList,
-      cc: ccList,
-      bcc: bccList,
-      sentCopy: body,
-      mode: "html"
-    });
+
+    for (const address of missing) {
+      await sendSealedPickupLink(address, body);
+    }
+    if (groups.length === 0 && missing.length === 0) {
+      throw new Error("Nothing to send: no recipients.");
+    }
   }
 
   async function sendComposeEmail() {
@@ -1169,6 +1221,23 @@ export function App() {
                   <input type="checkbox" checked={composeSign} onChange={(e) => setComposeSign(e.target.checked)} />
                   Sign
                 </label>
+                {composeEncrypt && isClientProtected() ? (
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.85rem" }}
+                    title={
+                      "Recipients with no PGP key get a one-time link instead. The message is encrypted in your browser " +
+                      "and this server only stores ciphertext — but the key is in the link, so anyone who can read that " +
+                      "email can read the message. Weaker than PGP."
+                    }
+                  >
+                    <input
+                      type="checkbox"
+                      checked={composeSendLinkForKeyless}
+                      onChange={(e) => setComposeSendLinkForKeyless(e.target.checked)}
+                    />
+                    Secure link if no key
+                  </label>
+                ) : null}
                 <input
                   ref={attachmentInputRef}
                   type="file"

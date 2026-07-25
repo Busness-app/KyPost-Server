@@ -477,6 +477,11 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/pgp/qr/key", s.handlePGPQRKey)
 	mux.HandleFunc("GET /.well-known/openpgpkey/", s.withWKDRateLimit(s.handleWKD))
 	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
+	// Client-sealed pickup: the browser encrypts, the server stores an opaque
+	// blob, and the key travels in the link fragment it never receives.
+	// See pickup_client_sealed.go.
+	mux.HandleFunc("GET /pickup/{id}/blob", s.handlePickupBlob)
+	mux.HandleFunc("POST /api/pgp/pickup", s.withMailAuth(s.handlePickupCreate))
 }
 
 // routesNotifications registers web push, native device pairing, and the

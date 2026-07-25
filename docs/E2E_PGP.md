@@ -66,10 +66,72 @@ test asserting nothing lands in either store.
   second call is lost, the stored envelope is still wrapped under the old
   password — recoverable by entering the previous password once, which beats
   the alternative of the server holding the key so it can rewrap unattended.
-- **The pickup-link fallback is not end-to-end** and cannot be. A recipient
-  with no key has nothing to encrypt to.
+- **The pickup-link fallback is weaker than PGP.** See "Sealed pickup links"
+  below for exactly how much weaker.
 - **Subject headers are still cleartext** outside the encrypted part, as with
   any PGP/MIME mail.
+
+
+## Sealed pickup links
+
+A recipient with no PGP key has nothing to encrypt to, so KyPost falls back to
+emailing them a one-time link. Originally the server stored that message's
+plaintext (sealed with its own key, which it holds) for seven days — the exact
+property client-side protection exists to remove.
+
+For client-protected accounts the message is now sealed in the sender's
+browser instead:
+
+1. The browser picks a random AES-256-GCM key and encrypts subject and body.
+2. It uploads **only ciphertext** to `POST /api/pgp/pickup`.
+3. The link is `…/pickup/<id>?t=<token>#<key>`. Browsers never transmit a URL
+   fragment, so the key does not reach the server on the fetch.
+4. The recipient's page (`/pickup-decrypt.js`) reads `location.hash` and
+   decrypts locally, then strips the key from the address bar.
+
+`?t=` still authenticates the fetch, as before. The key is separate and rides
+only in the fragment.
+
+### What this actually protects against
+
+**Protects:** the server's disk, its backups, snapshots, a compromise after
+the fact, and an operator reading files. The stored blob is ciphertext and the
+key was never written anywhere.
+
+**Does not protect:**
+
+- **Anyone who can read the recipient's mailbox has the key**, because the key
+  is in the email. Their provider, an attacker with mailbox access, an
+  unencrypted hop. This defends against *your* server, not their mail path.
+- **The server sees the key once, in flight**, when it relays the notification
+  email over SMTP. Unavoidable while it holds the SMTP credentials. So a
+  server compromised *at the moment of sending* still sees it; one compromised
+  later does not.
+
+Net: a seven-day plaintext-at-rest exposure becomes a momentary in-flight one.
+That is a real improvement and it is not the same guarantee the PGP path
+gives. The compose checkbox is off by default and says so.
+
+### Operational hazard: link rewriting
+
+Corporate mail security products (Outlook Safe Links, Proofpoint, Mimecast)
+rewrite inbound URLs. HTTP redirects preserve fragments, but a rewriter that
+*constructs* a new URL can drop everything after `#` — and then the message is
+permanently unreadable. This is the most likely real-world failure, and it is
+why the page checks for an absent fragment first and names that cause
+specifically rather than reporting a generic decryption failure.
+
+### Other notes
+
+- The subject is inside the sealed blob, not stored alongside it. A subject in
+  the clear gives away most of what the encryption was for.
+- The page renders the decrypted body as **text**, never as HTML: it has no
+  sanitizer available, and the content is written by the sender.
+- Consumption happens on the blob fetch, not the page load, so a link-preview
+  bot fetching the HTML does not burn the message.
+- Server-protected accounts keep the original server-sealed path. The server
+  can already read their mailbox, so client-sealing there adds machinery
+  without changing what it can see.
 
 ## Status
 
