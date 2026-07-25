@@ -239,3 +239,17 @@ export function sendClientEncryptedMail(payload: {
 }): Promise<{ ok: boolean; sentSaved?: boolean; warning?: string }> {
   return postJSON("/api/mail/send-pgp", payload);
 }
+
+/**
+ * Stores a browser-sealed pickup blob and returns the link to email.
+ *
+ * The returned url contains the record id and fetch token but NOT the
+ * decryption key — the caller appends that as a `#` fragment, which browsers
+ * never transmit.
+ */
+export function createSealedPickup(
+  recipient: string,
+  sealed: unknown
+): Promise<{ id: string; url: string; expiresAt: string }> {
+  return postJSON("/api/pgp/pickup", { recipient, sealed: JSON.stringify(sealed) });
+}

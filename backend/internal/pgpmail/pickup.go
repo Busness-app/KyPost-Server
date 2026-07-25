@@ -17,14 +17,24 @@ import (
 // can retrieve once via an authenticated link, in place of receiving PGP-
 // encrypted content they have no key to read.
 type PickupRecord struct {
-	ID             string                     `json:"id"`
-	SenderUserID   string                     `json:"senderUserId"`
-	RecipientEmail string                     `json:"recipientEmail"`
-	Subject        string                     `json:"subject"`
-	BodyEnc        cryptutil.EncryptedPayload `json:"bodyEnc"`
-	CreatedAt      string                     `json:"createdAt"`
-	ExpiresAt      string                     `json:"expiresAt"`
-	Viewed         bool                       `json:"viewed"`
+	ID             string `json:"id"`
+	SenderUserID   string `json:"senderUserId"`
+	RecipientEmail string `json:"recipientEmail"`
+	// Subject and BodyEnc are the SERVER-sealed form: the server holds the
+	// key, so it can read both. Used only by legacy server-protected
+	// accounts, for which the server can already read the mailbox anyway.
+	Subject string                     `json:"subject"`
+	BodyEnc cryptutil.EncryptedPayload `json:"bodyEnc"`
+	// ClientSealed is the browser-sealed form: an opaque blob encrypted
+	// under a random key that never reaches this server (it travels in the
+	// URL fragment of the pickup link, which browsers do not transmit). The
+	// subject lives inside it, which is why Subject is empty in this mode —
+	// storing it alongside would hand back exactly what the encryption was
+	// meant to withhold. The server can delete this but never read it.
+	ClientSealed string `json:"clientSealed,omitempty"`
+	CreatedAt    string `json:"createdAt"`
+	ExpiresAt    string `json:"expiresAt"`
+	Viewed       bool   `json:"viewed"`
 }
 
 // PickupStore is the global (not per-user — the recipient has no account)
@@ -80,6 +90,40 @@ func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body string,
 	return id, nil
 }
 
+// CreateClientSealed persists a browser-encrypted pickup record. sealed is
+// opaque: this server stores and later returns it, and at no point holds the
+// key that opens it.
+//
+// The subject is deliberately not a parameter — it belongs inside sealed. A
+// subject stored alongside would be readable here, which for most mail gives
+// away the substance of the message and would make the encryption largely
+// decorative.
+func (s *PickupStore) CreateClientSealed(senderUserID, recipientEmail, sealed string, ttl time.Duration) (string, error) {
+	if strings.TrimSpace(sealed) == "" {
+		return "", errors.New("pgpmail: sealed payload is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id, err := fsutil.NewUUIDv4()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC()
+	record := PickupRecord{
+		ID:             id,
+		SenderUserID:   senderUserID,
+		RecipientEmail: recipientEmail,
+		ClientSealed:   sealed,
+		CreatedAt:      now.Format(time.RFC3339),
+		ExpiresAt:      now.Add(ttl).Format(time.RFC3339),
+	}
+	if err := s.save(record); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 func (s *PickupStore) save(record PickupRecord) error {
 	b, err := json.Marshal(record)
 	if err != nil {
@@ -91,39 +135,71 @@ func (s *PickupStore) save(record PickupRecord) error {
 var ErrPickupNotFound = errors.New("pgpmail: pickup record not found")
 var ErrPickupExpired = errors.New("pgpmail: pickup record expired or already viewed")
 
-// View opens a pickup record's body exactly once: on success it returns the
-// decrypted subject/body and immediately deletes the sealed body from disk,
-// keeping a viewed tombstone so a repeat visit reports ErrPickupExpired
-// instead of ErrPickupNotFound. Also returns ErrPickupExpired if the TTL has
-// passed — "expire after N days or first view, whichever comes first."
+// ErrPickupClientSealed / ErrPickupNotClientSealed report that a record was
+// fetched through the wrong view path for how it was stored.
+var ErrPickupClientSealed = errors.New("pgpmail: pickup record is client-sealed; the server cannot decrypt it")
+var ErrPickupNotClientSealed = errors.New("pgpmail: pickup record is server-sealed")
+
+// consumeLocked loads a record and marks it viewed, enforcing
+// "expire after N days or first view, whichever comes first". Shared by both
+// view paths so the one-time semantics cannot drift between them.
+//
+// Marking viewed does not require reading the payload, which is what lets the
+// server enforce single-use on a blob it cannot decrypt.
+func (s *PickupStore) consumeLocked(id string) (PickupRecord, error) {
+	b, err := os.ReadFile(s.recordPath(id))
+	if os.IsNotExist(err) {
+		return PickupRecord{}, ErrPickupNotFound
+	}
+	if err != nil {
+		return PickupRecord{}, err
+	}
+	var record PickupRecord
+	if err := json.Unmarshal(b, &record); err != nil {
+		return PickupRecord{}, err
+	}
+	if record.Viewed {
+		return PickupRecord{}, ErrPickupExpired
+	}
+
+	tombstone := func(r PickupRecord) PickupRecord {
+		r.Viewed = true
+		r.BodyEnc = cryptutil.EncryptedPayload{}
+		r.ClientSealed = ""
+		r.Subject = ""
+		return r
+	}
+	if expiresAt, perr := time.Parse(time.RFC3339, record.ExpiresAt); perr == nil && time.Now().UTC().After(expiresAt) {
+		_ = s.save(tombstone(record))
+		return PickupRecord{}, ErrPickupExpired
+	}
+
+	// Tombstone before returning the payload: if the caller fails partway
+	// through rendering, the link is still burned. A message that fails to
+	// display is recoverable by asking the sender to resend; a link that
+	// stays live after being fetched is not.
+	if err := s.save(tombstone(record)); err != nil {
+		return PickupRecord{}, err
+	}
+	return record, nil
+}
+
+// View opens a SERVER-sealed pickup record's body exactly once. Returns
+// ErrPickupClientSealed for a client-sealed record, which this server has no
+// key for — the caller must serve it to the browser instead.
 func (s *PickupStore) View(id string) (subject, body string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, err := os.ReadFile(s.recordPath(id))
-	if os.IsNotExist(err) {
-		return "", "", ErrPickupNotFound
-	}
+	record, err := s.consumeLocked(id)
 	if err != nil {
 		return "", "", err
 	}
-	var record PickupRecord
-	if err := json.Unmarshal(b, &record); err != nil {
-		return "", "", err
+	if record.ClientSealed != "" {
+		return "", "", ErrPickupClientSealed
 	}
 
-	if record.Viewed {
-		return "", "", ErrPickupExpired
-	}
-	expiresAt, err := time.Parse(time.RFC3339, record.ExpiresAt)
-	if err == nil && time.Now().UTC().After(expiresAt) {
-		record.Viewed = true
-		record.BodyEnc = cryptutil.EncryptedPayload{}
-		_ = s.save(record)
-		return "", "", ErrPickupExpired
-	}
-
-	key, err := cryptutil.LoadOrCreateKey(s.keyPath)
+	key, err := cryptutil.LoadKey(s.keyPath)
 	if err != nil {
 		return "", "", err
 	}
@@ -131,13 +207,47 @@ func (s *PickupStore) View(id string) (subject, body string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-
-	record.Viewed = true
-	record.BodyEnc = cryptutil.EncryptedPayload{}
-	if err := s.save(record); err != nil {
-		return "", "", err
-	}
 	return record.Subject, string(plain), nil
+}
+
+// ViewClientSealed returns a client-sealed blob exactly once, for the browser
+// to decrypt with the key from the link fragment. The server never sees that
+// key and cannot read what it is handing over.
+func (s *PickupStore) ViewClientSealed(id string) (sealed string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record, err := s.consumeLocked(id)
+	if err != nil {
+		return "", err
+	}
+	if record.ClientSealed == "" {
+		return "", ErrPickupNotClientSealed
+	}
+	return record.ClientSealed, nil
+}
+
+// Kind reports whether a record is client-sealed, without consuming it, so
+// the page handler can choose what to render before burning the link.
+func (s *PickupStore) Kind(id string) (clientSealed bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, rerr := os.ReadFile(s.recordPath(id))
+	if os.IsNotExist(rerr) {
+		return false, ErrPickupNotFound
+	}
+	if rerr != nil {
+		return false, rerr
+	}
+	var record PickupRecord
+	if uerr := json.Unmarshal(b, &record); uerr != nil {
+		return false, uerr
+	}
+	if record.Viewed {
+		return record.ClientSealed != "", ErrPickupExpired
+	}
+	return record.ClientSealed != "", nil
 }
 
 // Sweep deletes tombstones (already-viewed or expired-and-unviewed records)
