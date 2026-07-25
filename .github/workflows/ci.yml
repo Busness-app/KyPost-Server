@@ -52,11 +52,20 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+      # Node and npm are pinned to what the Dockerfile actually builds with
+      # (node:26.5.0-slim + npm@12.0.1). A CI job on a different npm major is
+      # testing a toolchain nobody ships: npm 10 and npm 12 disagree about how
+      # esbuild's optional per-platform packages are recorded, so a lockfile
+      # written by one is rejected by the other. Matching the image means a
+      # green frontend job actually predicts a green `docker build`.
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "26.5.0"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      - name: pin npm to the image's version
+        run: npm install -g npm@12.0.1
 
       # `npm ci` here for the same reason the Dockerfile uses it: CI must
       # build the dependency set the lockfile pins, not whatever resolves today.
