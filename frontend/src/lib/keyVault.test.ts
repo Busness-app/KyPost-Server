@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   WrongPasswordError,
   VaultLockedError,
@@ -124,16 +124,37 @@ describe("keyVault lock state", () => {
     TIMEOUT
   );
 
-  it("never persists the key outside memory", () => {
-    unlockWithArmoredKey(SECRET);
-    // Anything reachable after a tab close is readable by any script that
-    // achieves XSS, which is exactly what this module protects against.
-    for (const store of [window.localStorage, window.sessionStorage]) {
-      for (let i = 0; i < store.length; i++) {
-        const value = store.getItem(store.key(i)!) ?? "";
-        expect(value).not.toContain("not-a-real-key");
-      }
+  // Anything reachable after a tab close is readable by any script that
+  // achieves XSS, which is exactly what this module protects against.
+  //
+  // This asserts on the behaviour (we never call the setters) rather than on
+  // the contents of the environment's storage objects: whether jsdom happens
+  // to expose localStorage/sessionStorage varies by version, and a test that
+  // reads them crashes where they are absent while proving nothing where
+  // they are present.
+  it("never writes the key to persistent storage", async () => {
+    const writes: string[] = [];
+    const stubStorage = () =>
+      ({
+        setItem: (key: string, value: string) => void writes.push(`${key}=${value}`),
+        getItem: () => null,
+        removeItem: () => undefined,
+        clear: () => undefined,
+        key: () => null,
+        length: 0
+      }) as Storage;
+
+    vi.stubGlobal("localStorage", stubStorage());
+    vi.stubGlobal("sessionStorage", stubStorage());
+    try {
+      const envelope = await wrapPrivateKey(SECRET, PASSWORD);
+      await unlock(envelope, PASSWORD);
+      unlockWithArmoredKey(SECRET);
+      expect(requireUnlockedKey()).toBe(SECRET);
+      lock();
+      expect(writes).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
     }
-    expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
-  });
+  }, TIMEOUT);
 });
