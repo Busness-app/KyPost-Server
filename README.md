@@ -14,7 +14,7 @@ It polls unread mail, classifies messages, applies IMAP keywords, and includes a
 - Automatic keyword labeling for unread mail (each active user's mailbox is polled independently)
 - Filter Rules: a GUI condition/action builder plus a raw Sieve script editor, with a run-now panel to apply rules on demand
 - Built-in compose flow with SMTP send and IMAP draft save
-- PGP end-to-end mail encryption: generate or import a key, look up recipient keys on keys.openpgp.org, and check recipient key status before sending
+- PGP mail encryption: generate or import a key, look up recipient keys on keys.openpgp.org, and check recipient key status before sending. Two key-protection modes — see [Where your PGP private key lives](#where-your-pgp-private-key-lives) before you rely on this
 - Contacts address book with groups, dedupe, bulk delete, CSV/vCard import/export, and photo support
 - Built-in CardDAV server (`/dav`, `/.well-known/carddav`) for syncing contacts to phones/desktop apps, plus an optional CardDAV client sync against an external address book
 - Multi-factor authentication: TOTP authenticator apps, one-time recovery codes, and push-approval sign-in
@@ -85,10 +85,67 @@ docker compose up --build -d
 7. In Config, save IMAP and SMTP settings and run IMAP Test.
 8. In Tuning, update labels/prompt and save.
 
+## Where your PGP private key lives
+
+This is the question that decides what PGP actually buys you here, so it gets
+its own section rather than a bullet.
+
+KyPost supports two protection modes for your PGP private key.
+
+**Client-protected (end-to-end).** Your browser generates or imports the key,
+wraps it under a key derived from your account password (PBKDF2-HMAC-SHA256,
+600,000 iterations, AES-256-GCM), and uploads only the wrapped blob plus the
+public half. The server stores that blob and cannot open it: it holds a scrypt
+hash of your password, not the password, so it cannot derive the wrapping key.
+Decryption and signing happen in your browser. Someone who takes the disk, a
+backup, or this process's memory gets ciphertext.
+
+The costs are real and you should know them up front:
+
+- **An admin password reset destroys the key.** The wrapping key comes from
+  your password. An admin can reset the password but cannot rewrap a key they
+  cannot open, so the key becomes unrecoverable and you must import or
+  generate a new one. Keep an exported backup of your private key somewhere
+  safe.
+- **You unlock once per browser session.** The unwrapped key is held in page
+  memory only, never in localStorage or sessionStorage. A reload means
+  re-entering your password.
+- **Verified send-as addresses are not added to your key automatically.** That
+  edit re-signs the key and needs the private half, so it happens in the
+  browser rather than in the background poller.
+
+**Server-protected (legacy).** The key is sealed with a master key stored on
+the same volume, which means the server — and anyone who can read that
+volume — can decrypt everything you have ever received. This is the mode
+KyPost used before client protection existed, and the only reason it still
+exists is so upgrading installs keep working. It is **not** end-to-end
+encryption, and earlier versions of this README described it as if it were.
+Migrate when you can: the Security page offers a one-time migration that hands
+the key to your browser, rewraps it under your password, and deletes the
+server-readable copy.
+
+Either way, some things are outside PGP's reach and worth stating plainly:
+
+- **Subject lines are not encrypted** by ordinary PGP/MIME, so they are
+  visible to your mail provider regardless of mode. KyPost does protect the
+  subject inside the encrypted part when it can, but the outer header still
+  exists.
+- **Mobile push notifications** are generic by default for exactly this
+  reason — see the Notifications page.
+- **Recipients without a key** get a one-time pickup link instead, and that
+  message is stored on this server (encrypted with the server's own key) until
+  it is read or expires. It is not end-to-end encrypted; nothing sent to
+  someone with no key can be.
+
 ## Session Behavior
 
 - Login sessions expire after 24 hours of inactivity.
-- Session expiry is sliding (each authenticated request extends TTL by 24h).
+- Session expiry is sliding (each authenticated request extends TTL by 24h),
+  but capped: a session dies 7 days after it was issued no matter how active
+  it has been, so a stolen cookie cannot be kept alive indefinitely by the
+  thief's own traffic.
+- Expired sessions are swept hourly rather than only when their own cookie is
+  presented again.
 - Logout invalidates the server-side session and clears the cookie.
 - Deactivating a user or changing their role takes effect on their very next request, not just at next login.
 

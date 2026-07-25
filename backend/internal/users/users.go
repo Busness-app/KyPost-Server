@@ -65,15 +65,64 @@ type User struct {
 	// Milestone 1 sets or reads it.
 	PushMFAEnabled bool `json:"pushMfaEnabled,omitempty"`
 
-	// PGP identity (backend-only encryption/signing — see internal/pgpmail).
-	// PGPPrivateKeyEnc is a cryptutil envelope JSON string sealed with the
-	// dedicated PGP private key master key; it is never exposed via Public().
-	PGPFingerprint   string `json:"pgpFingerprint,omitempty"`
-	PGPKeyID         string `json:"pgpKeyId,omitempty"`
-	PGPPublicKey     string `json:"pgpPublicKey,omitempty"`
+	// PGP identity. The public key is not sensitive. The private key is
+	// stored one of two ways, distinguished by PGPKeyProtection:
+	//
+	//   "client" — PGPPrivateKeyWrapped holds an envelope the BROWSER
+	//     produced, sealed under a key derived from the user's password
+	//     (see frontend/src/lib/keyVault.ts). The server cannot open it and
+	//     has no code that tries. This is the end-to-end mode: possession of
+	//     the disk, a backup, or this process's memory does not yield the
+	//     private key or anything encrypted to it.
+	//
+	//   "server" — LEGACY. PGPPrivateKeyEnc holds a cryptutil envelope
+	//     sealed with a master key sitting on the same volume, which means
+	//     the server (and anyone who can read that volume) can decrypt every
+	//     message. Retained only so existing installs keep working until the
+	//     owner logs in and migrates; see MigratePGPKeyToClientProtection.
+	//
+	// Neither private field is ever exposed via Public().
+	PGPFingerprint string `json:"pgpFingerprint,omitempty"`
+	PGPKeyID       string `json:"pgpKeyId,omitempty"`
+	PGPPublicKey   string `json:"pgpPublicKey,omitempty"`
+	// PGPPrivateKeyEnc is the legacy server-sealed private key. Empty for
+	// any identity created or migrated since client-side protection landed.
 	PGPPrivateKeyEnc string `json:"pgpPrivateKeyEnc,omitempty"`
-	PGPKeySource     string `json:"pgpKeySource,omitempty"`
-	PGPKeyCreatedAt  string `json:"pgpKeyCreatedAt,omitempty"`
+	// PGPPrivateKeyWrapped is the client-wrapped private key envelope,
+	// opaque to the server: it is stored, returned to the owning user, and
+	// never interpreted here.
+	PGPPrivateKeyWrapped string `json:"pgpPrivateKeyWrapped,omitempty"`
+	PGPKeyProtection     string `json:"pgpKeyProtection,omitempty"`
+	PGPKeySource         string `json:"pgpKeySource,omitempty"`
+	PGPKeyCreatedAt      string `json:"pgpKeyCreatedAt,omitempty"`
+}
+
+// PGP key protection modes. See User's PGP block.
+const (
+	PGPProtectionClient = "client"
+	PGPProtectionServer = "server"
+)
+
+// PGPProtection returns the effective protection mode for u's identity.
+// An identity with no explicit mode but a legacy sealed key is "server";
+// this keeps pre-existing users.json files readable without a migration
+// pass.
+func (u User) PGPProtection() string {
+	if u.PGPKeyProtection == PGPProtectionClient || u.PGPPrivateKeyWrapped != "" {
+		return PGPProtectionClient
+	}
+	if u.PGPPrivateKeyEnc != "" {
+		return PGPProtectionServer
+	}
+	return ""
+}
+
+// HasServerReadableKey reports whether the server can still decrypt this
+// user's mail on their behalf. Every server-side PGP operation must check
+// this and refuse rather than assume — under client protection there is no
+// key here to use.
+func (u User) HasServerReadableKey() bool {
+	return u.PGPProtection() == PGPProtectionServer
 }
 
 // Public is the JSON-safe view returned to API clients (no password hash).
@@ -91,6 +140,10 @@ type Public struct {
 	PGPKeyID           string `json:"pgpKeyId,omitempty"`
 	PGPKeySource       string `json:"pgpKeySource,omitempty"`
 	PGPKeyCreatedAt    string `json:"pgpKeyCreatedAt,omitempty"`
+	// PGPKeyProtection tells the client whether it must unwrap the private
+	// key itself ("client") or whether this is a legacy server-held key
+	// ("server") the UI should prompt the user to migrate.
+	PGPKeyProtection string `json:"pgpKeyProtection,omitempty"`
 }
 
 func (u User) Public() Public {
@@ -108,6 +161,7 @@ func (u User) Public() Public {
 		PGPKeyID:           u.PGPKeyID,
 		PGPKeySource:       u.PGPKeySource,
 		PGPKeyCreatedAt:    u.PGPKeyCreatedAt,
+		PGPKeyProtection:   u.PGPProtection(),
 	}
 }
 
@@ -639,17 +693,64 @@ func (s *Store) SetLastUsedTOTPStep(id string, step int64) (User, error) {
 	})
 }
 
-// SetPGPIdentity stores a user's own PGP identity: the armored public key
-// (not sensitive) and the sealed private key envelope (from
-// pgpmail.Identity.SealPrivateKey), replacing any existing identity.
+// SetPGPIdentity stores a legacy, SERVER-READABLE PGP identity: the armored
+// public key plus a private key sealed with the server's own master key.
+//
+// New identities must not use this. It exists for the send-as User ID
+// reconcile, which can only run against a key the server can already open,
+// and which skips client-protected identities entirely.
 func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, privateKeyEnc, source, createdAt string) (User, error) {
 	return s.mutate(id, func(u *User) error {
 		u.PGPFingerprint = fingerprint
 		u.PGPKeyID = keyID
 		u.PGPPublicKey = armoredPublicKey
 		u.PGPPrivateKeyEnc = privateKeyEnc
+		u.PGPPrivateKeyWrapped = ""
+		u.PGPKeyProtection = PGPProtectionServer
 		u.PGPKeySource = source
 		u.PGPKeyCreatedAt = createdAt
+		return nil
+	})
+}
+
+// SetPGPIdentityClientProtected stores an end-to-end PGP identity. wrapped
+// is an opaque envelope the browser produced under a key derived from the
+// user's password; this store never interprets it, and clearing
+// PGPPrivateKeyEnc is the point — after this call there is no copy of the
+// private key on this server that this server can open.
+func (s *Store) SetPGPIdentityClientProtected(id, fingerprint, keyID, armoredPublicKey, wrapped, source, createdAt string) (User, error) {
+	if strings.TrimSpace(wrapped) == "" {
+		return User{}, errors.New("wrapped private key is required for client-protected identities")
+	}
+	return s.mutate(id, func(u *User) error {
+		u.PGPFingerprint = fingerprint
+		u.PGPKeyID = keyID
+		u.PGPPublicKey = armoredPublicKey
+		u.PGPPrivateKeyWrapped = wrapped
+		u.PGPPrivateKeyEnc = ""
+		u.PGPKeyProtection = PGPProtectionClient
+		u.PGPKeySource = source
+		u.PGPKeyCreatedAt = createdAt
+		return nil
+	})
+}
+
+// RewrapPGPPrivateKey replaces only the wrapped private key envelope,
+// leaving the identity (fingerprint, public key, provenance) untouched.
+// Used when the user changes their password: the wrapping key is derived
+// from that password, so the browser unwraps with the old one and rewraps
+// with the new one, and this stores the result.
+func (s *Store) RewrapPGPPrivateKey(id, wrapped string) (User, error) {
+	if strings.TrimSpace(wrapped) == "" {
+		return User{}, errors.New("wrapped private key is required")
+	}
+	return s.mutate(id, func(u *User) error {
+		if u.PGPFingerprint == "" {
+			return errors.New("no pgp identity to rewrap")
+		}
+		u.PGPPrivateKeyWrapped = wrapped
+		u.PGPPrivateKeyEnc = ""
+		u.PGPKeyProtection = PGPProtectionClient
 		return nil
 	})
 }
@@ -661,6 +762,8 @@ func (s *Store) ClearPGPIdentity(id string) (User, error) {
 		u.PGPKeyID = ""
 		u.PGPPublicKey = ""
 		u.PGPPrivateKeyEnc = ""
+		u.PGPPrivateKeyWrapped = ""
+		u.PGPKeyProtection = ""
 		u.PGPKeySource = ""
 		u.PGPKeyCreatedAt = ""
 		return nil

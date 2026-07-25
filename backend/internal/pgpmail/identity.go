@@ -184,3 +184,61 @@ func OpenPrivateKey(enc, keyPath string) (*Identity, error) {
 	}
 	return identityFromKey(unlockedKey)
 }
+
+// PublicKeyInfo describes an armored public key well enough to store it as
+// a user's identity, without ever seeing the matching private key.
+type PublicKeyInfo struct {
+	Fingerprint string
+	KeyID       string
+	// ArmoredPublicKey is the re-armored key, not the caller's input: the
+	// stored form is whatever this library produces from the parsed key, so
+	// a client cannot smuggle trailing data past the parser by wrapping it
+	// in an armor block the parser tolerates.
+	ArmoredPublicKey string
+}
+
+// InspectPublicKey parses an armored public key and reports its identifying
+// fields.
+//
+// This exists for the client-protected key flow: the browser generates the
+// keypair, wraps the private half itself, and uploads only the public half
+// plus an opaque wrapped blob. The server must therefore derive the
+// fingerprint and key ID from the key it was actually given rather than
+// believing whatever the client claimed them to be — a client that could
+// assert an arbitrary fingerprint could get its own key published under
+// another key's identity via WKD or Autocrypt.
+func InspectPublicKey(armoredPublicKey string) (PublicKeyInfo, error) {
+	key, err := crypto.NewKeyFromArmored(strings.TrimSpace(armoredPublicKey))
+	if err != nil {
+		return PublicKeyInfo{}, fmt.Errorf("pgpmail: parse public key: %w", err)
+	}
+	if key.IsPrivate() {
+		// A private key here means the client uploaded the wrong half. Refuse
+		// rather than quietly storing a private key in a public field.
+		return PublicKeyInfo{}, errors.New("pgpmail: expected a public key, got a private key")
+	}
+	armored, err := key.GetArmoredPublicKey()
+	if err != nil {
+		return PublicKeyInfo{}, fmt.Errorf("pgpmail: armor public key: %w", err)
+	}
+	return PublicKeyInfo{
+		Fingerprint:      key.GetFingerprint(),
+		KeyID:            key.GetHexKeyID(),
+		ArmoredPublicKey: armored,
+	}, nil
+}
+
+// ExportArmoredPrivateKey returns the identity's armored private key.
+//
+// The only caller is the one-time migration that hands a legacy
+// server-sealed key back to its owner's browser so the browser can rewrap it
+// under a key the server does not have. It is deliberately a distinct,
+// awkwardly-named method rather than a field: exporting a private key is
+// not something any other code path should reach for by accident.
+func (id *Identity) ExportArmoredPrivateKey() (string, error) {
+	armored, err := id.key.Armor()
+	if err != nil {
+		return "", fmt.Errorf("pgpmail: armor private key: %w", err)
+	}
+	return armored, nil
+}

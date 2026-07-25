@@ -387,6 +387,9 @@ func (s *Server) routesMail(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/imap/test", s.withAuth(s.handleIMAPTest))
 	mux.HandleFunc("POST /api/mail/draft", s.withMailAuth(s.handleMailDraft))
 	mux.HandleFunc("POST /api/mail/send", s.withMailAuth(s.handleMailSend))
+	// Send path for end-to-end keys: the browser has already encrypted and
+	// signed, the server only relays over SMTP. See pgp_send_client.go.
+	mux.HandleFunc("POST /api/mail/send-pgp", s.withMailAuth(s.handleMailSendPGP))
 	mux.HandleFunc("GET /api/mail/send-as", s.withAuth(s.handleSendAs))
 	mux.HandleFunc("POST /api/mail/send-as", s.withAuth(s.handleSendAs))
 	mux.HandleFunc("DELETE /api/mail/send-as/{id}", s.withAuth(s.handleSendAsByID))
@@ -435,6 +438,12 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/pgp/identity/generate", s.withAuth(s.handlePGPIdentityGenerate))
 	mux.HandleFunc("POST /api/pgp/identity/import", s.withAuth(s.handlePGPIdentityImport))
 	mux.HandleFunc("GET /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
+	// End-to-end key handling: the browser wraps and unwraps the private
+	// half, the server only stores an opaque envelope. See pgp_client_keys.go.
+	mux.HandleFunc("GET /api/pgp/identity/wrapped", s.withAuth(s.handlePGPWrappedKey))
+	mux.HandleFunc("POST /api/pgp/identity/client", s.withAuth(s.handlePGPIdentityClient))
+	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withAuth(s.handlePGPRewrapKey))
+	mux.HandleFunc("POST /api/pgp/identity/export-legacy", s.withAuth(s.handlePGPExportLegacyKey))
 	mux.HandleFunc("DELETE /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
 	mux.HandleFunc("GET /api/pgp/keyserver/lookup", s.withAuth(s.handlePGPKeyserverLookup))
 	mux.HandleFunc("POST /api/pgp/recipients/check", s.withAuth(s.handlePGPRecipientsCheck))
@@ -1153,7 +1162,19 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	var signer *pgpmail.Identity
 	if req.Sign || req.Encrypt {
 		u, uerr := s.users.Get(ac.UserID)
-		if uerr == nil && u.PGPPrivateKeyEnc != "" {
+		// An end-to-end key cannot be used here: the server has no way to
+		// open it, by design. Refuse loudly and point at the browser path
+		// rather than falling through to sending the message unsigned and
+		// unencrypted, which is the one outcome a user who ticked those
+		// boxes must never silently get.
+		if uerr == nil && u.PGPProtection() == users.PGPProtectionClient {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":            "this account's PGP key is end-to-end protected, so the server cannot sign or encrypt on your behalf",
+				"clientSideNeeded": true,
+			})
+			return
+		}
+		if uerr == nil && u.HasServerReadableKey() {
 			signer, err = pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, s.pgpPrivateKeyPath)
 			if err != nil {
 				http.Error(w, "failed to load pgp identity", http.StatusInternalServerError)
