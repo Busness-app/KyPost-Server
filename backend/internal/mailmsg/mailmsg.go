@@ -31,7 +31,13 @@ type Message struct {
 	Body    string
 	// "plain" (default), "html", or "markup" (sent as text/markdown) —
 	// the same values /api/mail/send accepts.
-	Mode        string
+	Mode string
+	// Autocrypt, when non-empty, is emitted verbatim as the value of an
+	// outer "Autocrypt:" header (RFC-none; see the Autocrypt Level 1 spec).
+	// It advertises the sender's own public key. The caller is responsible
+	// for its content (addr=<from>; keydata=<base64>); it is placed on the
+	// outer, unencrypted envelope so correspondents' clients can harvest it.
+	Autocrypt   string
 	Attachments []Attachment
 }
 
@@ -61,6 +67,66 @@ func sanitizeHeaderValues(values []string) []string {
 	return result
 }
 
+// foldWidth is how many characters of an attribute's value are emitted per
+// physical line by FoldHeaderValue. Chosen with generous headroom under both
+// the RFC 5322 §2.1.1 998-octet MUST NOT and the RFC 5321 §4.5.3.1.6
+// 1000-octet SMTP line cap: even the longest realistic physical line this
+// produces (header name + a full attribute prefix + one foldWidth chunk) is
+// well under a few hundred octets.
+const foldWidth = 72
+
+// FoldHeaderValue folds a structured "name=value; name2=value2; ..." header
+// value (the shape the Autocrypt header uses) so that any single attribute
+// whose value exceeds foldWidth characters is wrapped across RFC 5322 folded
+// continuation lines ("\r\n " — CRLF followed by exactly one space of
+// linear whitespace). Attribute names, the "=" separating name from value,
+// and the "; " between attributes are never split — only kept together with
+// their own attribute's fold breaks — so a receiving parser that splits on
+// ";" before stripping whitespace (as pgpautocrypt.ParseAutocryptHeader
+// does) still finds each "name=" intact.
+//
+// This exists because the Autocrypt header's base64 keydata can exceed 900+
+// octets for an imported RSA-3072 key (gopenpgp's default curve25519 keys
+// stay under the limit with little headroom). Emitted unfolded, that single
+// line would violate RFC 5322 and RFC 5321's line-length limits, which can
+// cause an MTA to reject the message outright or corrupt it mid base64.
+//
+// Values that don't look like "name=value" pairs (e.g. a plain Subject) or
+// whose attributes are all short pass through unchanged — folding only ever
+// engages for an attribute value longer than foldWidth.
+func FoldHeaderValue(value string) string {
+	parts := strings.Split(value, ";")
+	for i, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		prefix := ""
+		if i > 0 {
+			prefix = " "
+		}
+		if len(trimmed) <= foldWidth {
+			parts[i] = prefix + trimmed
+			continue
+		}
+		eq := strings.IndexByte(trimmed, '=')
+		if eq < 0 {
+			parts[i] = prefix + trimmed
+			continue
+		}
+		name, val := trimmed[:eq+1], trimmed[eq+1:]
+		var b strings.Builder
+		b.WriteString(prefix)
+		b.WriteString(name)
+		for j := 0; j < len(val); j += foldWidth {
+			if j > 0 {
+				b.WriteString("\r\n ")
+			}
+			end := min(j+foldWidth, len(val))
+			b.WriteString(val[j:end])
+		}
+		parts[i] = b.String()
+	}
+	return strings.Join(parts, ";")
+}
+
 // Build renders the complete message bytes.
 func (m Message) Build() []byte {
 	var msg bytes.Buffer
@@ -74,6 +140,9 @@ func (m Message) Build() []byte {
 	}
 	msg.WriteString("Subject: " + SanitizeHeaderValue(m.Subject) + "\r\n")
 	msg.WriteString("MIME-Version: 1.0\r\n")
+	if m.Autocrypt != "" {
+		msg.WriteString("Autocrypt: " + FoldHeaderValue(SanitizeHeaderValue(m.Autocrypt)) + "\r\n")
+	}
 
 	if len(m.Attachments) == 0 {
 		msg.WriteString("Content-Type: " + m.ContentType() + "\r\n")

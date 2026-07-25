@@ -64,6 +64,11 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new Error(detail ? `request failed: ${response.status} - ${detail}` : `request failed: ${response.status}`);
   }
+  if (response.status === 204) {
+    // No body to parse (e.g. DELETE endpoints that answer 204 No Content).
+    // response.json() would throw on the empty body, so short-circuit here.
+    return undefined as T;
+  }
   return response.json() as Promise<T>;
 }
 

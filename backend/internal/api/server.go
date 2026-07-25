@@ -48,6 +48,7 @@ import (
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/totp"
 	"kypost-server/backend/internal/users"
+	"kypost-server/backend/internal/wkdpublish"
 
 	goimap "github.com/BrianLeishman/go-imap"
 )
@@ -135,6 +136,12 @@ type Server struct {
 	deviceIndex    map[string]string
 	davCredentials davCredentialCache
 
+	// wkdStore is the single instance-level WKD domain-claim store, injected
+	// once at construction (NewServer) and shared with the poller process —
+	// see wkdPublishStore's doc comment below and wkdpublish.Store's doc
+	// comment for why sharing one instance matters.
+	wkdStore *wkdpublish.Store
+
 	// httpServer is the live *http.Server backing Run/Serve, constructed by
 	// Prepare so that a Shutdown call arriving before Serve's goroutine has
 	// even been scheduled still has a real server to act on instead of racing
@@ -142,7 +149,7 @@ type Server struct {
 	httpServer *http.Server
 }
 
-func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Service, usersStore *users.Store, onConfigUpdated func(config.Config)) *Server {
+func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Service, usersStore *users.Store, onConfigUpdated func(config.Config), wkdStore *wkdpublish.Store) *Server {
 	configDir := config.EnvOrDefault("CONFIG_DIR", "/kypost/config")
 	stateDir := config.EnvOrDefault("STATE_DIR", "/kypost/state")
 	logPath := filepath.Join(config.EnvOrDefault("LOG_DIR", "/kypost/logs"), "app.log")
@@ -216,6 +223,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		captchaProvider:        captchaProvider,
 		captchaSiteKey:         captchaSiteKey,
 		globalStore:            globalStore,
+		wkdStore:               wkdStore,
 	}
 }
 
@@ -234,6 +242,26 @@ func (m misconfiguredCaptchaVerifier) Verify(context.Context, string, string) (b
 // startup, alongside the poller's own construction in app.go.
 func (s *Server) SetPoller(p *processor.Poller) {
 	s.poller = p
+}
+
+// wkdPublishStore returns the instance-level WKD domain-claim store. Domain
+// ownership is a property of the domain, not of a user, so there is exactly
+// one store (and one TXT record) per domain for the whole instance, rooted
+// at the state directory itself rather than under stateDir/users/<id>/.
+// s.wkdStore is set once at construction (NewServer) to the SAME
+// *wkdpublish.Store instance the poller process uses (both are built once in
+// app.go and injected) — not a second Store independently opened over the
+// same file — so wkdpublish.Store's own internal mutex actually serializes
+// every read-modify-write call across both the API and the poller, rather
+// than each process only ever serializing against itself. An error return
+// here only means "not wired" (e.g. a test server built without a wkdStore);
+// it does not indicate an I/O failure, since construction already happened
+// up front.
+func (s *Server) wkdPublishStore() (*wkdpublish.Store, error) {
+	if s.wkdStore == nil {
+		return nil, fmt.Errorf("wkd publish store not configured")
+	}
+	return s.wkdStore, nil
 }
 
 // routes builds the API's route table. Split out from Run so tests can
@@ -349,6 +377,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/pgp/discovery/suppressions", s.withAuth(s.handlePGPDiscoverySuppressions))
 	mux.HandleFunc("DELETE /api/pgp/discovery/suppressions/{email}", s.withAuth(s.handlePGPDiscoverySuppressionByEmail))
 	mux.HandleFunc("POST /api/pgp/discovery/suppress-contact", s.withAuth(s.handlePGPDiscoverySuppressContact))
+	mux.HandleFunc("GET /api/pgp/wkd/domains", s.withAdmin(s.handleWKDDomains))
+	mux.HandleFunc("POST /api/pgp/wkd/domains", s.withAdmin(s.handleWKDDomains))
+	mux.HandleFunc("POST /api/pgp/wkd/domains/{domain}/verify", s.withAdmin(s.handleWKDDomainVerify))
+	mux.HandleFunc("DELETE /api/pgp/wkd/domains/{domain}", s.withAdmin(s.handleWKDDomainDelete))
 	mux.HandleFunc("GET /api/pgp/qr/token", s.withMailAuth(s.handlePGPQRToken))
 	mux.HandleFunc("GET /api/pgp/qr/key", s.handlePGPQRKey)
 	mux.HandleFunc("GET /api/groups", s.withMailAuth(s.handleGroups))
@@ -365,6 +397,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/rules/run", s.withMailAuth(s.handleRulesRun))
 	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
 	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
+	mux.HandleFunc("GET /.well-known/openpgpkey/", s.handleWKD)
 	mux.HandleFunc("GET /api/setup", s.handleSetup)
 	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
 	mux.HandleFunc("/", s.handleFrontend)
@@ -977,6 +1010,8 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	autocryptHeader := s.outboundAutocryptHeader(ac.UserID, envelopeFrom)
+
 	msg := mailmsg.Message{
 		From:        headerFrom,
 		To:          toList,
@@ -985,6 +1020,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		Body:        req.Body,
 		Mode:        req.Mode,
 		Attachments: req.Attachments,
+		Autocrypt:   autocryptHeader,
 	}.Build()
 
 	var signer *pgpmail.Identity

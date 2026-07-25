@@ -14,6 +14,8 @@ import (
 type discoverySettingsResp struct {
 	AutoEncryptWhenKeyKnown bool `json:"autoEncryptWhenKeyKnown"`
 	StoreDiscoveredKeys     bool `json:"storeDiscoveredKeys"`
+	AdvertiseAutocrypt      bool `json:"advertiseAutocrypt"`
+	PublishWKD              bool `json:"publishWKD"`
 }
 
 func TestDiscoverySettingsRoundTrip(t *testing.T) {
@@ -49,6 +51,69 @@ func TestDiscoverySettingsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDiscoverySettingsPutOmittingFieldsKeepsOnByDefaultValues covers R3: a
+// PUT body omitting storeDiscoveredKeys/advertiseAutocrypt (e.g. a stale
+// client built before the field existed) must not silently persist them as
+// false — the mirror image of the bug pgpdiscovery.Load was fixed for.
+func TestDiscoverySettingsPutOmittingFieldsKeepsOnByDefaultValues(t *testing.T) {
+	srv := newTestServer(t)
+	all, _ := srv.users.List()
+	userID := all[0].ID
+
+	// First PUT explicitly turns advertiseAutocrypt off, to prove a later
+	// omission preserves whatever is currently stored (not just the default).
+	putRec := doJSONAuth(srv, srv.withAuth(srv.handlePGPDiscoverySettings), http.MethodPut,
+		"/api/pgp/discovery/settings",
+		map[string]bool{"advertiseAutocrypt": false}, userID)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+	var putResp discoverySettingsResp
+	if err := json.NewDecoder(putRec.Body).Decode(&putResp); err != nil {
+		t.Fatalf("decode PUT response: %v", err)
+	}
+	if putResp.AdvertiseAutocrypt {
+		t.Fatalf("expected advertiseAutocrypt=false after explicit PUT, got %+v", putResp)
+	}
+	if !putResp.StoreDiscoveredKeys {
+		t.Fatalf("storeDiscoveredKeys was omitted from this PUT and must keep its on-by-default value, got %+v", putResp)
+	}
+
+	// Second PUT omits advertiseAutocrypt entirely — a stale client sending
+	// only autoEncryptWhenKeyKnown must not flip advertiseAutocrypt back on
+	// (it was just explicitly turned off) nor touch storeDiscoveredKeys.
+	putRec2 := doJSONAuth(srv, srv.withAuth(srv.handlePGPDiscoverySettings), http.MethodPut,
+		"/api/pgp/discovery/settings",
+		map[string]bool{"autoEncryptWhenKeyKnown": true}, userID)
+	if putRec2.Code != http.StatusOK {
+		t.Fatalf("PUT 2: expected 200, got %d: %s", putRec2.Code, putRec2.Body.String())
+	}
+	var putResp2 discoverySettingsResp
+	if err := json.NewDecoder(putRec2.Body).Decode(&putResp2); err != nil {
+		t.Fatalf("decode PUT 2 response: %v", err)
+	}
+	if putResp2.AdvertiseAutocrypt {
+		t.Fatalf("advertiseAutocrypt was omitted from PUT 2 and must keep its stored value (false), got %+v", putResp2)
+	}
+	if !putResp2.StoreDiscoveredKeys {
+		t.Fatalf("storeDiscoveredKeys was omitted from PUT 2 and must keep its on-by-default value, got %+v", putResp2)
+	}
+	if !putResp2.AutoEncryptWhenKeyKnown {
+		t.Fatalf("autoEncryptWhenKeyKnown was explicitly set true in PUT 2, got %+v", putResp2)
+	}
+
+	// Confirm it persisted, not just reflected in the response.
+	getRec := doJSONAuth(srv, srv.withAuth(srv.handlePGPDiscoverySettings), http.MethodGet,
+		"/api/pgp/discovery/settings", nil, userID)
+	var getResp discoverySettingsResp
+	if err := json.NewDecoder(getRec.Body).Decode(&getResp); err != nil {
+		t.Fatalf("decode GET response: %v", err)
+	}
+	if getResp.AdvertiseAutocrypt || !getResp.StoreDiscoveredKeys || !getResp.AutoEncryptWhenKeyKnown {
+		t.Fatalf("persisted settings mismatch: %+v", getResp)
+	}
+}
+
 func TestDiscoverySettingsDefaultsBeforePut(t *testing.T) {
 	srv := newTestServer(t)
 	all, _ := srv.users.List()
@@ -65,6 +130,60 @@ func TestDiscoverySettingsDefaultsBeforePut(t *testing.T) {
 	}
 	if getResp.AutoEncryptWhenKeyKnown || !getResp.StoreDiscoveredKeys {
 		t.Fatalf("expected defaults {false,true}, got %+v", getResp)
+	}
+	if !getResp.PublishWKD {
+		t.Fatalf("expected publishWKD to default to true, got %+v", getResp)
+	}
+}
+
+// TestDiscoverySettingsPutPublishWKDExplicitFalseAndOmissionKeepsCurrent
+// covers the PUT handler's merge behavior for the new PublishWKD field: an
+// explicit false must take effect, and a later PUT that omits the field must
+// not silently flip it back on (the same nil-means-keep-current contract as
+// storeDiscoveredKeys/advertiseAutocrypt).
+func TestDiscoverySettingsPutPublishWKDExplicitFalseAndOmissionKeepsCurrent(t *testing.T) {
+	srv := newTestServer(t)
+	all, _ := srv.users.List()
+	userID := all[0].ID
+
+	putRec := doJSONAuth(srv, srv.withAuth(srv.handlePGPDiscoverySettings), http.MethodPut,
+		"/api/pgp/discovery/settings",
+		map[string]bool{"publishWKD": false}, userID)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+	var putResp discoverySettingsResp
+	if err := json.NewDecoder(putRec.Body).Decode(&putResp); err != nil {
+		t.Fatalf("decode PUT response: %v", err)
+	}
+	if putResp.PublishWKD {
+		t.Fatalf("expected publishWKD=false after explicit PUT, got %+v", putResp)
+	}
+
+	// Omitting publishWKD on a later PUT must keep it false, not reset to
+	// the on-by-default value.
+	putRec2 := doJSONAuth(srv, srv.withAuth(srv.handlePGPDiscoverySettings), http.MethodPut,
+		"/api/pgp/discovery/settings",
+		map[string]bool{"autoEncryptWhenKeyKnown": true}, userID)
+	if putRec2.Code != http.StatusOK {
+		t.Fatalf("PUT 2: expected 200, got %d: %s", putRec2.Code, putRec2.Body.String())
+	}
+	var putResp2 discoverySettingsResp
+	if err := json.NewDecoder(putRec2.Body).Decode(&putResp2); err != nil {
+		t.Fatalf("decode PUT 2 response: %v", err)
+	}
+	if putResp2.PublishWKD {
+		t.Fatalf("publishWKD was omitted from PUT 2 and must keep its stored value (false), got %+v", putResp2)
+	}
+
+	getRec := doJSONAuth(srv, srv.withAuth(srv.handlePGPDiscoverySettings), http.MethodGet,
+		"/api/pgp/discovery/settings", nil, userID)
+	var getResp discoverySettingsResp
+	if err := json.NewDecoder(getRec.Body).Decode(&getResp); err != nil {
+		t.Fatalf("decode GET response: %v", err)
+	}
+	if getResp.PublishWKD {
+		t.Fatalf("persisted publishWKD mismatch: %+v", getResp)
 	}
 }
 

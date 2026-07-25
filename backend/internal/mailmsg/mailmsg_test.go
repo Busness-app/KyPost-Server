@@ -1,6 +1,8 @@
 package mailmsg
 
 import (
+	"bytes"
+	"crypto/rand"
 	"encoding/base64"
 	"io"
 	"mime"
@@ -8,6 +10,8 @@ import (
 	"net/mail"
 	"strings"
 	"testing"
+
+	"kypost-server/backend/internal/pgpautocrypt"
 )
 
 func TestBuildSinglePart(t *testing.T) {
@@ -179,7 +183,104 @@ func TestBuildSanitizesToCCBCCHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildEmitsAutocryptHeader(t *testing.T) {
+	m := Message{
+		From:      "alice@example.com",
+		To:        []string{"bob@example.com"},
+		Subject:   "hi",
+		Body:      "hello",
+		Autocrypt: "addr=alice@example.com; keydata=QUJD",
+	}
+	out := string(m.Build())
+	if !strings.Contains(out, "\r\nAutocrypt: addr=alice@example.com; keydata=QUJD\r\n") {
+		t.Fatalf("expected Autocrypt header, got:\n%s", out)
+	}
+}
+
+func TestBuildOmitsAutocryptWhenEmpty(t *testing.T) {
+	m := Message{From: "a@x.com", To: []string{"b@y.com"}, Body: "hi"}
+	if strings.Contains(string(m.Build()), "Autocrypt:") {
+		t.Fatal("did not expect an Autocrypt header")
+	}
+}
+
 func decodeBase64Lines(encoded string) ([]byte, error) {
 	clean := strings.NewReplacer("\r", "", "\n", "").Replace(encoded)
 	return base64.StdEncoding.DecodeString(clean)
+}
+
+// TestBuildFoldsLongAutocryptHeader covers R1: an imported RSA-3072 key's
+// base64 keydata (~2487 octets unfolded, per the branch review that found
+// this) must not be emitted as a single unfolded line, since that would
+// exceed the RFC 5322 §2.1.1 998-octet MUST NOT and the RFC 5321 §4.5.3.1.6
+// 1000-octet SMTP line cap. It must fold, and the folded value must still
+// round-trip through pgpautocrypt.ParseAutocryptHeader (after the folding
+// whitespace textproto.ReadMIMEHeader would unfold on receipt) to the
+// identical key bytes.
+func TestBuildFoldsLongAutocryptHeader(t *testing.T) {
+	keyBytes := make([]byte, 1865) // ~2487 base64 octets, an RSA-3072-sized key
+	if _, err := rand.Read(keyBytes); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	keydataB64 := base64.StdEncoding.EncodeToString(keyBytes)
+	if len(keydataB64) < 2000 {
+		t.Fatalf("test setup bug: keydata too short to exercise folding (%d)", len(keydataB64))
+	}
+	autocrypt := "addr=alice@example.com; prefer-encrypt=mutual; keydata=" + keydataB64
+
+	raw := Message{
+		From:      "alice@example.com",
+		To:        []string{"bob@example.com"},
+		Subject:   "hi",
+		Body:      "hello",
+		Autocrypt: autocrypt,
+	}.Build()
+
+	for _, line := range strings.Split(string(raw), "\r\n") {
+		if len(line) > 998 {
+			t.Fatalf("line exceeds 998 octets (%d): %q", len(line), line)
+		}
+	}
+	if !bytes.Contains(raw, []byte("Autocrypt: addr=alice@example.com; prefer-encrypt=mutual; keydata=")) {
+		t.Fatalf("Autocrypt header prefix not found unfolded:\n%s", raw)
+	}
+	if !bytes.Contains(raw, []byte("\r\n ")) {
+		t.Fatalf("expected at least one RFC 5322 folded continuation line:\n%s", raw)
+	}
+
+	msg, err := mail.ReadMessage(strings.NewReader(string(raw)))
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	// net/mail's underlying textproto reader unfolds continuation lines back
+	// into a single value with the fold's leading space preserved — the same
+	// transformation pgpmail.splitMessage performs on the send path.
+	unfolded := msg.Header.Get("Autocrypt")
+	if strings.Contains(unfolded, "\r\n") {
+		t.Fatalf("expected header to be unfolded by the MIME header reader, got %q", unfolded)
+	}
+
+	_, gotKeydata, err := pgpautocrypt.ParseAutocryptHeader(unfolded)
+	if err != nil {
+		t.Fatalf("ParseAutocryptHeader: %v", err)
+	}
+	if !bytes.Equal(gotKeydata, keyBytes) {
+		t.Fatalf("keydata round-trip mismatch: got %d bytes, want %d bytes", len(gotKeydata), len(keyBytes))
+	}
+}
+
+func TestFoldHeaderValueShortValuePassesThrough(t *testing.T) {
+	in := "addr=alice@example.com; keydata=QUJD"
+	if got := FoldHeaderValue(in); got != in {
+		t.Fatalf("FoldHeaderValue(%q) = %q, want unchanged", in, got)
+	}
+}
+
+func TestFoldHeaderValueNeverSplitsAttributeName(t *testing.T) {
+	// A value with no "=" at all (e.g. a plain long Subject) must pass
+	// through unfolded rather than being chopped mid-word.
+	in := strings.Repeat("nofoldpoints", 20)
+	if got := FoldHeaderValue(in); got != in {
+		t.Fatalf("FoldHeaderValue without '=' must pass through unchanged, got %q", got)
+	}
 }

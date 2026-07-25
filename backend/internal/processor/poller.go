@@ -28,6 +28,7 @@ import (
 	"kypost-server/backend/internal/sendas"
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
+	"kypost-server/backend/internal/wkdpublish"
 )
 
 // maxConcurrentUserTicks bounds how many user mailboxes are polled in
@@ -55,6 +56,11 @@ type Poller struct {
 	nativePushDispatcher *NativePushDispatcher
 	cancel               context.CancelFunc
 	tickSem              chan struct{}
+
+	// wkdStore is the single instance-level WKD domain-claim store, shared
+	// with (the same *wkdpublish.Store instance as) the API server — see
+	// wkdpublish.Store's doc comment for why a shared instance matters.
+	wkdStore *wkdpublish.Store
 
 	stateDir    string
 	configDir   string
@@ -94,7 +100,7 @@ type userCtx struct {
 	rules []rules.Rule
 }
 
-func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, usersStore *users.Store, stateDir, configDir string, healthSvc *health.Service, classifierClient *classifier.HTTPClient) (*Poller, error) {
+func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, usersStore *users.Store, stateDir, configDir string, healthSvc *health.Service, classifierClient *classifier.HTTPClient, wkdStore *wkdpublish.Store) (*Poller, error) {
 	re, err := redaction.New(cfg.Redaction.Patterns)
 	if err != nil {
 		return nil, err
@@ -108,6 +114,7 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		classifier:           classifierClient,
 		redaction:            re,
 		nativePushDispatcher: NewNativePushDispatcher(log),
+		wkdStore:             wkdStore,
 		stateDir:             stateDir,
 		configDir:            configDir,
 		imapKeyPath:          config.EnvOrDefault("IMAP_CONFIG_KEY_FILE", "/kypost/private/imap-config.key"),
@@ -245,6 +252,18 @@ func (p *Poller) Run() {
 	p.log.Info("poller started", "interval", interval.String())
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	wkdTicker := time.NewTicker(recheckWKDInterval)
+	defer wkdTicker.Stop()
+
+	// time.NewTicker only fires after the first full interval elapses, so
+	// without this, a host that restarts more often than every
+	// recheckWKDInterval (12h) would never actually run recheckWKDDomains —
+	// silently disabling the revocation half of the WKD DNS-proof control.
+	// recheckWKDDomains is idempotent and cheap (its per-claim LastCheckedAt
+	// due-guard skips anything checked recently), so running it once eagerly
+	// here is safe. Backgrounded so it never delays the tick/select loop
+	// below from starting.
+	go p.recheckWKDDomains()
 
 	for {
 		select {
@@ -253,6 +272,8 @@ func (p *Poller) Run() {
 			return
 		case <-ticker.C:
 			p.tick()
+		case <-wkdTicker.C:
+			p.recheckWKDDomains()
 		}
 	}
 }

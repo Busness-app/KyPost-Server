@@ -24,6 +24,7 @@ import (
 	"kypost-server/backend/internal/processor"
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
+	"kypost-server/backend/internal/wkdpublish"
 )
 
 // Run dispatches the process mode and blocks until shutdown for long-running modes.
@@ -90,6 +91,17 @@ func Run(args []string) error {
 	healthSvc := health.NewService()
 	healthSvc.MarkHealthy()
 
+	// wkdStore is the single instance-level WKD domain-claim store shared by
+	// the api server and the poller — both run as goroutines in the same
+	// binary in "all" mode, and wkdpublish.Store's own mutex only actually
+	// serializes their read-modify-write calls if they share one instance
+	// (see wkdpublish.Store's doc comment). Constructed once here and
+	// injected into both api.NewServer and processor.New below.
+	wkdStore, err := wkdpublish.New(paths.StateDir)
+	if err != nil {
+		return fmt.Errorf("create wkd publish store: %w", err)
+	}
+
 	deps := runDeps{
 		cfg:        cfg,
 		configPath: paths.ConfigFile,
@@ -99,6 +111,7 @@ func Run(args []string) error {
 		store:      store,
 		users:      usersStore,
 		health:     healthSvc,
+		wkdStore:   wkdStore,
 	}
 
 	switch *mode {
@@ -122,11 +135,12 @@ type runDeps struct {
 	store      *state.Store
 	users      *users.Store
 	health     *health.Service
+	wkdStore   *wkdpublish.Store
 }
 
 func runDaemon(d runDeps) error {
 	classifierClient := newClassifierClient(d.cfg)
-	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, classifierClient)
+	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, classifierClient, d.wkdStore)
 	if err != nil {
 		return err
 	}
@@ -143,7 +157,7 @@ func runDaemon(d runDeps) error {
 }
 
 func runServer(d runDeps) error {
-	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, nil)
+	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, nil, d.wkdStore)
 	srv.SetClassifier(newClassifierClient(d.cfg))
 
 	// Prepare constructs the *http.Server synchronously, before the Serve
@@ -195,12 +209,12 @@ func runAll(d runDeps) error {
 		d.health.SetAICreditsExhausted(at)
 	}
 	classifierClient := newClassifierClient(d.cfg)
-	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, classifierClient)
+	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, classifierClient, d.wkdStore)
 	if err != nil {
 		return err
 	}
 	poller.SetConfigPath(d.configPath)
-	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, poller.UpdateConfig)
+	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, poller.UpdateConfig, d.wkdStore)
 	srv.SetPoller(poller)
 	srv.SetClassifier(classifierClient)
 	warmupClassifierOnStartup(d.logger, classifierClient, poller)

@@ -651,6 +651,32 @@ export function SecurityPage() {
                 />
                 Save keys I discover to my contacts
               </label>
+              <label className="security-check">
+                <input
+                  type="checkbox"
+                  checked={discoverySettings.advertiseAutocrypt}
+                  disabled={discoveryBusy}
+                  onChange={(e) => void updateDiscoverySetting({ advertiseAutocrypt: e.target.checked })}
+                />
+                Advertise my public key on outgoing mail (Autocrypt)
+              </label>
+              <p className="security-muted">
+                Adds an Autocrypt header so people you email can automatically discover your key. On by
+                default.
+              </p>
+              <label className="security-check">
+                <input
+                  type="checkbox"
+                  checked={discoverySettings.publishWKD}
+                  disabled={discoveryBusy}
+                  onChange={(e) => void updateDiscoverySetting({ publishWKD: e.target.checked })}
+                />
+                Publish my public key via Web Key Directory (WKD)
+              </label>
+              <p className="security-muted">
+                Lets people look up your key at your mail domain. Requires an administrator to have set up
+                WKD for that domain. On by default.
+              </p>
               {discoveryStatus ? <p className="contacts-muted">{discoveryStatus}</p> : null}
               {suppressions.length > 0 ? (
                 <div className="security-subsection">
