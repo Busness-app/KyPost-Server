@@ -61,10 +61,28 @@ import (
 // and mirrored into the non-HttpOnly csrf_token cookie so the frontend can
 // read and echo it back as a header.
 type Session struct {
-	UserID    string
+	UserID string
+	// IssuedAt is when this session was minted. ExpiresAt slides forward on
+	// every request so an active user is not logged out mid-work, but
+	// IssuedAt never moves, and sessionMaxLifetime past it the session dies
+	// regardless of activity. Without that cap a stolen cookie is valid
+	// forever: the thief's own polling keeps renewing it, and the legitimate
+	// user has no way to see it or end it short of changing their password.
+	IssuedAt  time.Time
 	ExpiresAt time.Time
 	CSRFToken string
 }
+
+const (
+	// sessionIdleTimeout is how long a session survives with no requests.
+	sessionIdleTimeout = 24 * time.Hour
+	// sessionMaxLifetime is the absolute ceiling from IssuedAt, renewals
+	// notwithstanding.
+	sessionMaxLifetime = 7 * 24 * time.Hour
+	// sessionSweepInterval is how often StartSessionSweeper reclaims
+	// sessions that expired without anyone presenting them again.
+	sessionSweepInterval = time.Hour
+)
 
 // AuthContext identifies the caller of an authenticated request.
 type AuthContext struct {
@@ -486,6 +504,44 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// StartSessionSweeper reclaims sessions that passed their idle timeout or
+// absolute lifetime without anyone presenting them again, mirroring
+// StartPickupSweeper's ticker/select pattern. Call once after NewServer.
+//
+// Without it, s.sessions only ever shrinks when a token is presented again
+// (currentUser), logged out, or revoked — so every session belonging to a
+// user who simply closed the tab is pinned for the process lifetime. Every
+// other bounded map in this package already has a sweep (loginLockout,
+// nativePairingNonces, sendAsCooldown, pickupStore); the one holding live
+// credentials was the exception.
+func (s *Server) StartSessionSweeper(ctx context.Context) {
+	ticker := time.NewTicker(sessionSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.sweepSessions(time.Now())
+		}
+	}
+}
+
+// sweepSessions drops every session dead as of now. Split out so tests can
+// drive it directly instead of waiting on the ticker.
+func (s *Server) sweepSessions(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for token, sess := range s.sessions {
+		if now.After(sess.ExpiresAt) || now.Sub(sess.IssuedAt) >= sessionMaxLifetime {
+			delete(s.sessions, token)
+			removed++
+		}
+	}
+	return removed
 }
 
 // sendAsCooldownSweepInterval is a var rather than an inline literal (unlike
@@ -3435,8 +3491,14 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID str
 	if err != nil {
 		return err
 	}
+	now := time.Now()
 	s.mu.Lock()
-	s.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
+	s.sessions[token] = Session{
+		UserID:    userID,
+		IssuedAt:  now,
+		ExpiresAt: now.Add(sessionIdleTimeout),
+		CSRFToken: csrfToken,
+	}
 	s.mu.Unlock()
 	secure := isRequestSecure(r)
 	http.SetCookie(w, &http.Cookie{Name: "kypost_session", Value: token, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
@@ -3941,19 +4003,24 @@ func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
 		return AuthContext{}, false
 	}
 
+	now := time.Now()
 	s.mu.Lock()
 	sess, ok := s.sessions[cookie.Value]
 	if !ok {
 		s.mu.Unlock()
 		return AuthContext{}, false
 	}
-	if time.Now().After(sess.ExpiresAt) {
+	// Idle timeout, then the absolute cap. The cap is checked separately so
+	// that renewing below can never push a session past sessionMaxLifetime.
+	if now.After(sess.ExpiresAt) || now.Sub(sess.IssuedAt) >= sessionMaxLifetime {
 		delete(s.sessions, cookie.Value)
 		s.mu.Unlock()
 		return AuthContext{}, false
 	}
-	// Sliding window session expiry for active users.
-	s.sessions[cookie.Value] = Session{UserID: sess.UserID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: sess.CSRFToken}
+	// Sliding idle window for active users; IssuedAt is deliberately carried
+	// through unchanged so the absolute ceiling still applies.
+	sess.ExpiresAt = now.Add(sessionIdleTimeout)
+	s.sessions[cookie.Value] = sess
 	s.mu.Unlock()
 
 	u, err := s.users.Get(sess.UserID)

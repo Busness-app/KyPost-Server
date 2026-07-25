@@ -170,6 +170,7 @@ func runServer(d runDeps) error {
 	defer cancelSweepers()
 	go srv.StartPickupSweeper(sweeperCtx)
 	go srv.StartSendAsCooldownSweeper(sweeperCtx)
+	go srv.StartSessionSweeper(sweeperCtx)
 	go srv.StartOllamaVersionMonitor(sweeperCtx)
 
 	stop := make(chan os.Signal, 1)
@@ -234,6 +235,7 @@ func runAll(d runDeps) error {
 	d.logger.Info("poller goroutine started")
 	go srv.StartPickupSweeper(sweeperCtx)
 	go srv.StartSendAsCooldownSweeper(sweeperCtx)
+	go srv.StartSessionSweeper(sweeperCtx)
 	go srv.StartOllamaVersionMonitor(sweeperCtx)
 	go monitorHealth(d.logger, d.health)
 	go func() {

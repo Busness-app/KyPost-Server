@@ -266,8 +266,8 @@ func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 	changingToken := "changing-session-token"
 	otherToken := "other-stolen-session-token"
 	srv.mu.Lock()
-	srv.sessions[changingToken] = Session{UserID: u.ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-a"}
-	srv.sessions[otherToken] = Session{UserID: u.ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-b"}
+	srv.sessions[changingToken] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-a"}
+	srv.sessions[otherToken] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-b"}
 	srv.mu.Unlock()
 
 	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password-testpassword", "newPassword": "new-password-testpassword"})
@@ -302,7 +302,7 @@ func TestAdminResetPasswordRevokesTargetSessions(t *testing.T) {
 
 	targetToken := "target-session-token"
 	srv.mu.Lock()
-	srv.sessions[targetToken] = Session{UserID: target.ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-target"}
+	srv.sessions[targetToken] = Session{UserID: target.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-target"}
 	srv.mu.Unlock()
 
 	body, _ := json.Marshal(map[string]string{"password": "brand-new-password"})

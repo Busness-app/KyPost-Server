@@ -98,7 +98,7 @@ func doJSONAuth(srv *Server, handler http.HandlerFunc, method, path string, payl
 	token := "session-token-" + userID
 	csrfToken := "csrf-token-" + userID
 	srv.mu.Lock()
-	srv.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
+	srv.sessions[token] = Session{UserID: userID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	srv.mu.Unlock()
 	// Model an onboarded session; the must-change gate (withAuth) is exercised
 	// by its own dedicated test.
