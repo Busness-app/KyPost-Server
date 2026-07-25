@@ -390,6 +390,9 @@ func (s *Server) routesMail(mux *http.ServeMux) {
 	// Send path for end-to-end keys: the browser has already encrypted and
 	// signed, the server only relays over SMTP. See pgp_send_client.go.
 	mux.HandleFunc("POST /api/mail/send-pgp", s.withMailAuth(s.handleMailSendPGP))
+	// Read path for end-to-end keys: lazy per-message ciphertext fetch, since
+	// the inbox DTO cannot carry it. See pgp_client_read.go.
+	mux.HandleFunc("GET /api/mail/pgp-payload", s.withMailAuth(s.handlePGPPayload))
 	mux.HandleFunc("GET /api/mail/send-as", s.withAuth(s.handleSendAs))
 	mux.HandleFunc("POST /api/mail/send-as", s.withAuth(s.handleSendAs))
 	mux.HandleFunc("DELETE /api/mail/send-as/{id}", s.withAuth(s.handleSendAsByID))
@@ -440,9 +443,20 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
 	// End-to-end key handling: the browser wraps and unwraps the private
 	// half, the server only stores an opaque envelope. See pgp_client_keys.go.
-	mux.HandleFunc("GET /api/pgp/identity/wrapped", s.withAuth(s.handlePGPWrappedKey))
-	mux.HandleFunc("POST /api/pgp/identity/client", s.withAuth(s.handlePGPIdentityClient))
-	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withAuth(s.handlePGPRewrapKey))
+	//
+	// These are withMailAuth, not withAuth: a paired mobile device
+	// authenticates with per-device credentials and no session cookie, and it
+	// needs to unwrap its own key exactly as much as the browser does. They
+	// were session-only when first added, which locked every native client
+	// out of the feature built for it.
+	mux.HandleFunc("GET /api/pgp/bootstrap", s.withMailAuth(s.handlePGPBootstrap))
+	mux.HandleFunc("GET /api/pgp/identity/wrapped", s.withMailAuth(s.handlePGPWrappedKey))
+	mux.HandleFunc("POST /api/pgp/identity/client", s.withMailAuth(s.handlePGPIdentityClient))
+	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withMailAuth(s.handlePGPRewrapKey))
+	// export-legacy stays session-only on purpose. It is the one endpoint
+	// that returns a private key in the clear, and it re-verifies the account
+	// password before doing so — a device secret is not that password, and a
+	// paired device must not be able to exchange itself for the key.
 	mux.HandleFunc("POST /api/pgp/identity/export-legacy", s.withAuth(s.handlePGPExportLegacyKey))
 	mux.HandleFunc("DELETE /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
 	mux.HandleFunc("GET /api/pgp/keyserver/lookup", s.withAuth(s.handlePGPKeyserverLookup))
