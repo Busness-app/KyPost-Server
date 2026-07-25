@@ -255,6 +255,8 @@ export function ConfigPage() {
     try {
       const res = await listWKDDomains();
       setWkdDomains(res.domains);
+    } catch (e) {
+      setWkdStatus(`Failed to load domains: ${toErrorMessage(e, "unknown error")}`);
     } finally {
       setWkdLoading(false);
     }
@@ -609,6 +611,19 @@ export function ConfigPage() {
   async function addWKDDomain() {
     const domain = wkdNewDomain.trim().toLowerCase();
     if (!domain) return;
+    // Re-claiming an already-listed domain mints a fresh token and resets
+    // Verified to false server-side (wkdpublish.Store.Create), instantly
+    // unpublishing every user currently served under it until it's
+    // re-verified — the same blast radius Remove already warns about, so
+    // Add needs the same confirmation for the same case.
+    if (
+      wkdDomains.some((d) => d.domain === domain) &&
+      !window.confirm(
+        `${domain} is already claimed. Re-adding it mints a new verification token and immediately unpublishes every user's key at this domain until it's re-verified. Continue?`
+      )
+    ) {
+      return;
+    }
     setWkdBusy(true);
     setWkdStatus("");
     try {
