@@ -1930,6 +1930,39 @@ pre {
   background: currentColor;
 }
 
+/* The key-custody question. Each option carries its consequence inline rather than behind a
+   tooltip, because the consequence is the whole decision. */
+.security-choice {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0 0 12px;
+}
+
+.security-choice legend {
+  padding: 0 6px;
+  font-size: 0.86rem;
+  color: var(--ink-strong);
+}
+
+.security-choice label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.security-choice label + label {
+  margin-top: 10px;
+}
+
+.security-choice input[type="radio"] {
+  margin-top: 3px;
+}
+
 .contacts-page {
   position: relative;
   height: calc(100vh - 74px);

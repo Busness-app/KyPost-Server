@@ -224,6 +224,37 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 	return result, nil
 }
 
+// warmBody is the Body to persist for in. A decrypted OpenPGP body is never
+// written: this cache is plain JSON on disk (see Store.path), so storing the
+// plaintext of a message someone took the trouble to encrypt would recreate
+// at rest exactly the exposure the encryption was for — and it would do so
+// for every encrypted message the owner has ever received, which is a larger
+// disclosure than the sealed private key beside it.
+//
+// The PGP flags are still stored: clients need them to render the badge, and
+// correctness is unaffected, because callers already read an empty Body as
+// "not warmed yet, fetch live if needed" rather than "empty message" (see
+// Entry.Body).
+//
+// The performance cost is real and larger than one fetch: Snapshot reports a
+// window as warmed only when every entry has a body, so one encrypted message
+// makes the whole mailbox read as cold and handleInbox's cache-first branch is
+// skipped. That is the right trade as it stands — serving that branch from a
+// window with empty PGP bodies would emit pgpEncrypted with no body and no
+// pgpDecryptError, which is exactly the wire signature of a CLIENT-protected
+// message, so clients would tell a server-mode user their own mail is
+// unreadable. See docs/E2E_PGP.md for the fix if the fast path is wanted back.
+//
+// This is enforced here rather than at the two internal/api call sites so a
+// future third caller cannot bypass it, and so the caller's own response
+// entry keeps the body it just fetched.
+func warmBody(in Entry) string {
+	if in.PGPEncrypted {
+		return ""
+	}
+	return in.Body
+}
+
 // Upsert merges freshly-known entries into mailboxKey's window without
 // inferring removals — unlike Sync, the caller (the background poller,
 // which only ever sees UNSEEN-since-checkpoint INBOX mail) never has the
@@ -266,6 +297,7 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 		if !ok {
 			win.Seq++
 			e := in
+			e.Body = warmBody(in)
 			e.Rev = win.Seq
 			e.FirstRev = win.Seq
 			win.Entries = append(win.Entries, e)
@@ -282,12 +314,17 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 		updated.CC, updated.BCC = in.CC, in.BCC
 		updated.Keywords, updated.Status, updated.AtUTC = in.Keywords, in.Status, in.AtUTC
 		if in.Body != "" {
-			updated.Body = in.Body
+			// warmBody, not in.Body: a decrypted OpenPGP body is never
+			// persisted. Assigning it here also clears any plaintext an
+			// older build already wrote for this UID.
+			updated.Body = warmBody(in)
 			// PGP fields are only ever known alongside a freshly fetched
 			// body (see decryptPGPMessageContent/decryptPGPUnreadMessage in
 			// internal/api — a failed decrypt leaves Body empty and is
 			// deliberately never warmed into the cache), so gate them on
-			// the same sentinel as Body.
+			// the same sentinel as Body. Note the sentinel is the *incoming*
+			// body, so the flags still land even though warmBody drops the
+			// body itself.
 			updated.PGPEncrypted = in.PGPEncrypted
 			updated.PGPSigned = in.PGPSigned
 			updated.PGPVerified = in.PGPVerified

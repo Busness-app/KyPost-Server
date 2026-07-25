@@ -1442,6 +1442,21 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           }}
                           className={`inbox-subject-button ${isRead ? "" : "inbox-subject-unread"}`}
                         >
+                          {/*
+                            Marked only when the row yields nothing readable without a further
+                            step: a client-protected message needs the vault unlocked, and a
+                            failed decrypt never opens at all. A server-decrypted message reads
+                            normally, so marking it would put a symbol on most rows of a
+                            server-mode mailbox for no actionable reason — the reader badge
+                            already says who decrypted it.
+                          */}
+                          {item.pgpEncrypted && !decrypted[item.messageId] ? (
+                            item.pgpDecryptError ? (
+                              <span className="inbox-attachment-icon" title={`Could not decrypt: ${item.pgpDecryptError}`} aria-label="Encrypted, could not be decrypted">⚠ </span>
+                            ) : !item.body ? (
+                              <span className="inbox-attachment-icon" title="Encrypted — unlock your PGP key to read" aria-label="Encrypted, locked">🔒 </span>
+                            ) : null
+                          ) : null}
                           {item.hasAttachments ? <span className="inbox-attachment-icon" title="Has attachments" aria-label="Has attachments">📎 </span> : null}
                           {item.subject || "(no subject)"}
                         </button>

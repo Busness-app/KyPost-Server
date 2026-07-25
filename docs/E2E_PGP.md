@@ -48,6 +48,40 @@ therefore cannot derive the wrapping key, and there is no code path that
 tries. `cryptutil.OpenString` uses `LoadKey`, not `LoadOrCreateKey`, so a
 missing master key is a loud error rather than a silently-minted new one.
 
+### Decrypted mail is never cached
+
+`mailcache.json` is plain JSON on disk. In `server` mode the daemon's warm path
+would otherwise write decrypted PGP bodies straight into it, so the sealed
+private key sat next to a plaintext copy of everything it had ever opened — a
+larger disclosure than the key itself.
+
+`mailcache.Store.Upsert` now drops the body of any entry flagged
+`PGPEncrypted`, keeping the flags so clients still render the badge. This is
+enforced in the store rather than at the `internal/api` call sites, so a future
+caller cannot bypass it. Correctness is unaffected: an empty `Body` has always
+meant "not warmed, fetch if needed" rather than "empty message", and every read
+path already falls back to a live fetch.
+
+**The cost is larger than one fetch per message, and worth knowing.**
+`Store.Snapshot` reports a window as warmed only when *every* entry has a body
+(`store.go:102-106`). A single encrypted message therefore makes the whole
+mailbox read as cold, so `handleInbox`'s cache-first branch is skipped and the
+non-delta path does a full live `ListUnreadMessages` plus decrypt on every load.
+For an account that receives encrypted mail regularly, the fast path is
+effectively off.
+
+That is the correct trade as it stands — serving the cache-first branch from a
+window with empty PGP bodies would hand clients `pgpEncrypted: true` with no
+body and no `pgpDecryptError`, which is precisely the wire signature of a
+*client*-protected message, and every client would then tell a `server`-mode
+user their own mail is unreadable.
+
+If the fast path is wanted back, the fix is to teach `Snapshot` that a PGP
+entry's empty body is expected rather than cold, and have the cache-first
+branch live-fetch just those UIDs — not to relax what gets stored.
+
+This applies to both modes and is independent of which one an account uses.
+
 ### Session handling
 
 The unwrapped key lives in module memory for the life of the page and is
@@ -239,6 +273,86 @@ Because the default is unchanged, this is safe to ship incrementally: existing
 installs keep working exactly as before, and nothing silently downgrades.
 
 ## Mobile plan
+
+**Superseded.** An earlier version of this section prescribed porting the
+browser's crypto to Android and Qt. It ran into a constraint it had not
+accounted for, described below, and the answer changed. The old prescription is
+kept at the end of this section, marked as such, because the analysis behind it
+is still the right starting point if the decision is ever revisited.
+
+### Why porting the crypto was the wrong shape
+
+A phone pairs by QR or deep link and never learns the account password. The
+wrapped envelope is sealed under a key derived from that password, so unwrapping
+on device means introducing password entry on the least-trusted device, for the
+credential that also gates web login and admin.
+
+Every way around that is worse:
+
+- **Per-device PGP keys** break inbound mail. A sender encrypts to one key,
+  whichever they discovered through WKD or Autocrypt. This is why Autocrypt's
+  multi-device story transfers the same key rather than minting one per device.
+- **A device key held in the Keystore/Keychain** makes mail recoverable without
+  any user secret, which is the property "Cold start" above exists to remove.
+- **Server-side re-encryption to per-device keys** requires the server to
+  decrypt first, so it holds the account key anyway, in `SECRET_DIR` beside
+  `users.json`. An attacker with the disk decrypts from IMAP directly. The
+  layer sits downstream of the secret it would be protecting.
+
+### What we do instead
+
+Offer the user the choice, in the terms they can actually evaluate, and make the
+mobile app honest about which one is in force. Both modes already exist; this is
+a UI and copy problem, not new cryptography.
+
+| | `server` | `client` (default) |
+|---|---|---|
+| Server can read your mail | Yes | No |
+| Readable in the native mobile app | Yes | No — deep-links to webmail |
+
+The question the Security page asks is "read encrypted mail on your phone?", not
+"pick a key custody model". The mode follows from the answer. `client` stays the
+default so nothing downgrades by inattention, and the `server` branch is never
+described as end-to-end — advertising it that way is the defect this whole split
+exists to close.
+
+The choice is offered **at key creation only**. There is deliberately no
+downgrade path: `export-legacy` already refuses once an account is
+client-protected, and reversing that invariant to save a re-key is not a trade
+worth making. Switching from `client` to `server` means generating a new key,
+with the usual warning that mail encrypted to the old one stops being readable.
+
+### What mobile apps must implement
+
+Only the degradation, not the crypto:
+
+1. Read `pgpEncrypted`, `pgpSigned`, `pgpVerified`, `pgpSignerFingerprint` and
+   `pgpDecryptError` off the inbox row. They are `omitempty`, so absent means
+   "no OpenPGP content".
+2. `pgpEncrypted` with an **empty** `pgpDecryptError` means client-protected:
+   there is no body, and the app cannot produce one. Say so, and offer a link to
+   webmail. A **non-empty** `pgpDecryptError` is the different case where the
+   server tried and failed — show that error.
+3. `pgpEncrypted` **with** a body means the server decrypted it. Surface that
+   too: the user should be able to tell that the server read their mail.
+   Mark the *list* row for the first two cases only — a row that opens and reads
+   normally does not need a marker, and marking it would decorate most rows of a
+   `server`-mode mailbox with nothing the user can act on.
+4. `POST /api/mail/send` returns **409** with `clientSideNeeded: true` when a
+   client-protected account asks the server to sign or encrypt. Treat it as
+   "not available here", not as a generic failure.
+5. The webmail deep link is `/read?mailbox=<mailbox>&message=<messageId>`, the
+   same route a web push click uses. Omit `mailbox` for INBOX. Hand it to the
+   system as a normal https intent so an installed PWA or the user's browser
+   handles it — **not** an in-app WebView, which shares no session and would put
+   an account-password field inside the app.
+
+`kypost-android` implements the above. `kypost-Linux` / `kypost-for-Mac` still
+need it.
+
+### Superseded: the original port-the-crypto plan
+
+Retained for the analysis, not as instructions.
 
 Both apps need the same three capabilities. Neither can keep using the
 server-side decrypt path once its user migrates, because there will be

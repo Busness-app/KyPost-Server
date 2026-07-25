@@ -4,6 +4,7 @@ import QRCode from "qrcode";
 import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
 import {
   getPGPIdentity,
+  generatePGPIdentity,
   deletePGPIdentity,
   storeClientPGPIdentity,
   exportLegacyPGPKey,
@@ -72,6 +73,9 @@ export function SecurityPage() {
   const [pgpBusy, setPgpBusy] = useState(false);
   const [pgpStatus, setPgpStatus] = useState("");
   const [pgpImportOpen, setPgpImportOpen] = useState(false);
+  // Which side of the "can my phone read this" question the user picked; false keeps the key
+  // in the browser, which is the mode nothing should downgrade away from by accident.
+  const [pgpReadOnMobile, setPgpReadOnMobile] = useState(false);
   const [pgpImportKey, setPgpImportKey] = useState("");
   const [pgpImportPassphrase, setPgpImportPassphrase] = useState("");
   // Cold-start PGP state (protection mode, wrapped key, unlock status).
@@ -215,6 +219,40 @@ export function SecurityPage() {
       setPgpIdentity(id);
       await loadPGPSession();
       setPgpStatus("New PGP identity generated. Back up your key: an admin password reset makes it unrecoverable.");
+    } catch (e) {
+      setPgpStatus(`Failed to generate identity: ${toErrorMessage(e, "unknown error")}`);
+    } finally {
+      setPgpBusy(false);
+    }
+  }
+
+  /**
+   * The other branch of the mobile question: the server generates and keeps the
+   * key, so it can decrypt for paired devices.
+   *
+   * This is a real reduction in protection, not a convenience toggle, so it is
+   * never the default and never described as end-to-end. Claiming end-to-end
+   * while holding the key is the exact defect this whole mode split exists to
+   * close — see docs/E2E_PGP.md.
+   */
+  async function handleGenerateServerPGPIdentity() {
+    if (
+      !window.confirm(
+        "Generate a key this server holds?\n\n" +
+          "This server will be able to read every message encrypted to you, and so will anyone " +
+          "who gains access to it or its backups. Choose this only if reading encrypted mail on " +
+          "your phone matters more than keeping it from the server."
+      )
+    ) {
+      return;
+    }
+    setPgpBusy(true);
+    setPgpStatus("");
+    try {
+      const id = await generatePGPIdentity();
+      setPgpIdentity(id);
+      await loadPGPSession();
+      setPgpStatus("PGP identity generated. This server holds the key and can read your encrypted mail.");
     } catch (e) {
       setPgpStatus(`Failed to generate identity: ${toErrorMessage(e, "unknown error")}`);
     } finally {
@@ -761,7 +799,47 @@ export function SecurityPage() {
             </>
           ) : (
             <>
-              <button type="button" onClick={() => void handleGeneratePGPIdentity()} disabled={pgpBusy}>
+              {/*
+                The choice is framed as the question a user can actually answer, not as a
+                protection mode. "Client vs server key custody" is not something most people
+                can weigh; "can my phone read this" is. The mode follows from the answer.
+
+                Defaults to no, so nothing downgrades by inattention.
+              */}
+              <fieldset className="security-choice">
+                <legend>Read encrypted mail on your phone?</legend>
+                <label>
+                  <input
+                    type="radio"
+                    name="pgp-mobile-readable"
+                    checked={!pgpReadOnMobile}
+                    onChange={() => setPgpReadOnMobile(false)}
+                    disabled={pgpBusy}
+                  />
+                  <strong>No</strong> (recommended) — only this browser can decrypt. Nobody with
+                  access to the server can read your encrypted mail, and the mobile app will show
+                  these messages as unreadable with a link to open them here.
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="pgp-mobile-readable"
+                    checked={pgpReadOnMobile}
+                    onChange={() => setPgpReadOnMobile(true)}
+                    disabled={pgpBusy}
+                  />
+                  <strong>Yes</strong> — this server stores your key so it can decrypt for your
+                  devices. Anyone with access to the server, its disk, or its backups can read your
+                  encrypted mail.
+                </label>
+              </fieldset>
+              <button
+                type="button"
+                onClick={() =>
+                  void (pgpReadOnMobile ? handleGenerateServerPGPIdentity() : handleGeneratePGPIdentity())
+                }
+                disabled={pgpBusy}
+              >
                 Generate new identity
               </button>
               <button type="button" onClick={() => setPgpImportOpen(!pgpImportOpen)} disabled={pgpBusy}>
