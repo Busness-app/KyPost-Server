@@ -65,6 +65,11 @@ type Poller struct {
 	stateDir    string
 	configDir   string
 	imapKeyPath string
+	// pgpKeyPath is the master key sealing users' PGP private keys — the
+	// same PGP_PRIVATE_KEY_FILE the api server resolves — needed here so a
+	// send-as verification can add the newly proven address to the user's
+	// existing key (see addAliasUserIDToPGPKey).
+	pgpKeyPath string
 
 	userMu         sync.Mutex
 	stores         map[string]*state.Store
@@ -118,6 +123,7 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		stateDir:             stateDir,
 		configDir:            configDir,
 		imapKeyPath:          config.EnvOrDefault("IMAP_CONFIG_KEY_FILE", "/kypost/private/imap-config.key"),
+		pgpKeyPath:           config.EnvOrDefault("PGP_PRIVATE_KEY_FILE", "/kypost/private/pgp-private-key.key"),
 		stores:               map[string]*state.Store{},
 		mailClients:          map[string]*mailClientEntry{},
 		mailCaches:           map[string]*mailcache.Store{},
@@ -543,6 +549,9 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	}
 
 	p.checkPendingSendAsAliases(ctx, u.ID, uc.mail)
+	// Must follow the check above, so an alias verified in this very tick
+	// gets its PGP User ID without waiting for the next one.
+	p.reconcilePGPUserIDs(u.ID)
 
 	p.log.Info(
 		"user poll tick summary",

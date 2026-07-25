@@ -7,8 +7,16 @@ import (
 	"time"
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
+	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/sendas"
 )
+
+// verifyDKIMForDomain indirects imapadapter.VerifyDKIMForDomain so tests in
+// this package can reach the verified branch below at all: the real verifier
+// resolves the signing domain's public key from live DNS, which no unit test
+// here can satisfy. Production never reassigns it; the DKIM crypto itself is
+// covered in internal/adapters/imap/dkim_verify_test.go.
+var verifyDKIMForDomain = imapadapter.VerifyDKIMForDomain
 
 // userSendAsStore returns the cached send-as alias store for a user,
 // mirroring userMailCacheStore/userRulesStore — the api process
@@ -94,7 +102,7 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 					"user_id", userID, "alias_id", alias.ID, "uid", strconv.Itoa(m.UID), "error", err.Error())
 				continue
 			}
-			if imapadapter.VerifyDKIMForDomain(raw, domain) {
+			if verifyDKIMForDomain(raw, domain) {
 				verified = true
 				break
 			}
@@ -110,6 +118,121 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 	if err := store.SweepTerminal(24 * time.Hour); err != nil {
 		p.log.Error("send-as terminal sweep failed", "user_id", userID, "error", err.Error())
 	}
+}
+
+// reconcilePGPUserIDs self-signs a User ID onto the user's existing PGP key
+// for every verified send-as address the key does not already carry. It runs
+// once per user per tick (right after checkPendingSendAsAliases, see
+// runUserTick), which makes it serve two purposes with one code path:
+//
+//   - an alias verified during this very tick gets its User ID immediately;
+//   - an alias verified at any point in the past — including before keys
+//     carried alias User IDs at all — is repaired without the user having to
+//     regenerate their key or re-verify the address.
+//
+// It matters because a key that does not carry an address as a User ID is
+// unusable for it: WKD import (validateDiscoveredKey), Autocrypt
+// (buildAutocryptHeader) and GnuPG's own WKD User ID filtering all discard
+// such a key, so serving it under that address would ship bytes nobody
+// accepts. The opposite ordering — key generated after the aliases exist —
+// is handled in handlePGPIdentityGenerate.
+//
+// Only *verified* aliases are considered: a User ID is what makes the key
+// usable for an address, so an unproven address must never get one.
+//
+// Like every other late-tick step, it is skipped for a user whose inbox
+// fetch failed this tick (tickUser returns early), so an account with broken
+// IMAP is repaired on the first tick its mail works again — which is also
+// the first tick at which anything else about that account is current.
+//
+// The steady-state cost is deliberately low: the check reads only the stored
+// public key's User IDs, and nothing unseals, re-signs or persists the
+// private key unless an address is actually missing. Every failure is logged
+// and swallowed — alias verification is never rolled back over a key-update
+// problem, and the next tick simply retries. A user with no PGP identity is
+// a no-op, not an error.
+func (p *Poller) reconcilePGPUserIDs(userID string) {
+	store, err := p.userSendAsStore(userID)
+	if err != nil {
+		p.log.Error("failed to open send-as store for pgp user id reconcile",
+			"user_id", userID, "error", err.Error())
+		return
+	}
+	verifiedAliases := store.ListVerified()
+	if len(verifiedAliases) == 0 {
+		return
+	}
+
+	u, err := p.users.Get(userID)
+	if err != nil {
+		p.log.Error("failed to load user for pgp user id reconcile",
+			"user_id", userID, "error", err.Error())
+		return
+	}
+	if u.PGPPrivateKeyEnc == "" || u.PGPPublicKey == "" {
+		return
+	}
+
+	present, err := pgpmail.UserIDEmails(u.PGPPublicKey)
+	if err != nil {
+		p.log.Error("failed to read pgp key user ids",
+			"user_id", userID, "error", err.Error())
+		return
+	}
+	covered := make(map[string]bool, len(present))
+	for _, addr := range present {
+		covered[addr] = true
+	}
+	var missing []string
+	for _, alias := range verifiedAliases {
+		addr := strings.ToLower(strings.TrimSpace(alias.Email))
+		if addr == "" || covered[addr] {
+			continue
+		}
+		covered[addr] = true
+		missing = append(missing, addr)
+	}
+	if len(missing) == 0 {
+		return
+	}
+
+	identity, err := pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, p.pgpKeyPath)
+	if err != nil {
+		p.log.Error("failed to open pgp private key for user id reconcile",
+			"user_id", userID, "error", err.Error())
+		return
+	}
+	changed := false
+	for _, addr := range missing {
+		added, err := identity.AddUserID(u.Username, addr)
+		if err != nil {
+			// One bad address must not cost the others their User ID.
+			p.log.Error("failed to add send-as address as pgp user id",
+				"user_id", userID, "error", err.Error())
+			continue
+		}
+		changed = changed || added
+	}
+	if !changed {
+		return
+	}
+
+	sealed, err := identity.SealPrivateKey(p.pgpKeyPath)
+	if err != nil {
+		p.log.Error("failed to re-seal pgp private key after user id reconcile",
+			"user_id", userID, "error", err.Error())
+		return
+	}
+	// Fingerprint, key ID, source and creation time are all unchanged — the
+	// primary key is the same key, only its User ID set grew.
+	if _, err := p.users.SetPGPIdentity(userID, identity.Fingerprint, identity.KeyID,
+		identity.ArmoredPublicKey, sealed, u.PGPKeySource, u.PGPKeyCreatedAt); err != nil {
+		p.log.Error("failed to store pgp identity after user id reconcile",
+			"user_id", userID, "error", err.Error())
+		return
+	}
+	p.log.Info("added verified send-as addresses to pgp key",
+		"user_id", userID, "count", strconv.Itoa(len(missing)))
 }
 
 // domainOf returns the portion of email after '@', lowercased, or "" if

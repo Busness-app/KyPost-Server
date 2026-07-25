@@ -6,11 +6,76 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 )
+
+// keyUserIDEmails returns the sorted, lowercased User ID emails of an
+// armored key — the set WKD serving and Autocrypt advertising match a mail
+// address against before they will use the key for that address.
+func keyUserIDEmails(t *testing.T, armored string) []string {
+	t.Helper()
+	key, err := crypto.NewKeyFromArmored(armored)
+	if err != nil {
+		t.Fatalf("parse armored key: %v", err)
+	}
+	var out []string
+	for _, uid := range key.GetEntity().Identities {
+		out = append(out, strings.ToLower(uid.UserId.Email))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestPGPIdentityGenerateCarriesVerifiedSendAsAliases covers generating a
+// key AFTER aliases already exist: the account address plus every verified
+// send-as alias must land on the key as User IDs, or the key can never be
+// served over WKD (or advertised via Autocrypt) for those aliases. A still-
+// pending alias is not the user's proven address yet, so it must be left
+// off.
+func TestPGPIdentityGenerateCarriesVerifiedSendAsAliases(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+
+	store, err := srv.userSendAsStore(userID)
+	if err != nil {
+		t.Fatalf("userSendAsStore: %v", err)
+	}
+	verified, err := store.Create(userID, "alice@other.example", "")
+	if err != nil {
+		t.Fatalf("Create verified alias: %v", err)
+	}
+	if err := store.MarkVerified(verified.ID); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	if _, err := store.Create(userID, "alice@pending.example", ""); err != nil {
+		t.Fatalf("Create pending alias: %v", err)
+	}
+
+	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", nil)
+	authRequest(srv, genReq)
+	genRec := httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPIdentityGenerate)(genRec, genReq)
+	if genRec.Code != http.StatusOK {
+		t.Fatalf("generate: expected 200, got %d: %s", genRec.Code, genRec.Body.String())
+	}
+	var genResp pgpIdentityResponse
+	if err := json.NewDecoder(genRec.Body).Decode(&genResp); err != nil {
+		t.Fatalf("decode generate response: %v", err)
+	}
+
+	got := keyUserIDEmails(t, genResp.PublicKey)
+	want := []string{"alice@example.com", "alice@other.example"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("generated key user IDs: got %v want %v", got, want)
+	}
+}
 
 func TestPGPIdentityGenerateThenGetThenDelete(t *testing.T) {
 	srv := newTestServer(t)

@@ -8,7 +8,9 @@ package pgpmail
 import (
 	"errors"
 	"fmt"
+	"strings"
 
+	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 
 	"kypost-server/backend/internal/cryptutil"
@@ -26,17 +28,107 @@ type Identity struct {
 	key *crypto.Key
 }
 
+// normalizeAddress lowercases and trims an email address for User ID
+// comparison, matching how the address-binding checks elsewhere (WKD's
+// validateDiscoveredKey, Autocrypt's buildAutocryptHeader) normalize before
+// matching a key's User IDs against a mail address.
+func normalizeAddress(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// hasUserIDEmail reports whether entity already carries target (already
+// normalized) as the email of one of its User IDs.
+func hasUserIDEmail(entity *openpgp.Entity, target string) bool {
+	for _, uid := range entity.Identities {
+		if normalizeAddress(uid.UserId.Email) == target {
+			return true
+		}
+	}
+	return false
+}
+
 // GenerateIdentity creates a new OpenPGP keypair for name/email using
 // gopenpgp's default profile (EdDSA/Curve25519 + SHA256, RFC4880-compatible
 // and interoperable with the openpgp.js keys already used client-side for
 // contacts).
-func GenerateIdentity(name, email string) (*Identity, error) {
-	keyGen := crypto.PGP().KeyGeneration().AddUserId(name, email).New()
-	key, err := keyGen.GenerateKey()
+//
+// email becomes the primary User ID; each of additionalEmails becomes a
+// further User ID on the same key, so one key can be published and
+// advertised for every address its owner actually sends and receives as
+// (WKD serving and Autocrypt both require the key to carry the address in
+// question as a User ID). Blank entries and addresses already covered —
+// case-insensitively, including email itself — are skipped rather than
+// producing duplicate or empty User IDs.
+func GenerateIdentity(name, email string, additionalEmails ...string) (*Identity, error) {
+	gen := crypto.PGP().KeyGeneration().AddUserId(name, email)
+	seen := map[string]bool{normalizeAddress(email): true}
+	for _, extra := range additionalEmails {
+		addr := normalizeAddress(extra)
+		if addr == "" || seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		gen = gen.AddUserId(name, addr)
+	}
+	key, err := gen.New().GenerateKey()
 	if err != nil {
 		return nil, fmt.Errorf("pgpmail: generate key: %w", err)
 	}
 	return identityFromKey(key)
+}
+
+// UserIDEmails returns the normalized email of every User ID carried by an
+// armored public (or private) key. It reads only public material, which is
+// what makes it usable as a cheap gate: callers can decide whether a key
+// already covers a set of addresses before paying to unseal and parse the
+// private key.
+func UserIDEmails(armoredKey string) ([]string, error) {
+	key, err := crypto.NewKeyFromArmored(armoredKey)
+	if err != nil {
+		return nil, fmt.Errorf("pgpmail: parse key: %w", err)
+	}
+	entity := key.GetEntity()
+	if entity == nil {
+		return nil, errors.New("pgpmail: key has no entity")
+	}
+	out := make([]string, 0, len(entity.Identities))
+	for _, uid := range entity.Identities {
+		out = append(out, normalizeAddress(uid.UserId.Email))
+	}
+	return out, nil
+}
+
+// AddUserID self-signs an additional User ID for email onto an existing
+// key, keeping the same primary key and therefore the same fingerprint —
+// this is what lets a send-as alias verified *after* key generation still be
+// published over WKD and advertised via Autocrypt, both of which refuse a
+// key that does not carry the address as a User ID.
+//
+// It returns added=false with a nil error when the key already carries the
+// address, so callers can skip the re-seal/persist. Callers MUST persist the
+// updated ArmoredPublicKey and a freshly sealed private key afterwards; this
+// only mutates the in-memory identity.
+func (id *Identity) AddUserID(name, email string) (bool, error) {
+	target := normalizeAddress(email)
+	if target == "" {
+		return false, errors.New("pgpmail: cannot add an empty user id email")
+	}
+	entity := id.key.GetEntity()
+	if entity == nil {
+		return false, errors.New("pgpmail: key has no entity")
+	}
+	if hasUserIDEmail(entity, target) {
+		return false, nil
+	}
+	if err := entity.AddUserId(name, "", target, nil); err != nil {
+		return false, fmt.Errorf("pgpmail: add user id: %w", err)
+	}
+	armoredPub, err := id.key.GetArmoredPublicKey()
+	if err != nil {
+		return false, fmt.Errorf("pgpmail: armor public key: %w", err)
+	}
+	id.ArmoredPublicKey = armoredPub
+	return true, nil
 }
 
 // ImportIdentity parses an armored private key, unlocking it with passphrase

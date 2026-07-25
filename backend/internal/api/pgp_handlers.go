@@ -48,7 +48,29 @@ func (s *Server) handlePGPIdentityGenerate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	id, err := pgpmail.GenerateIdentity(u.Username, imapPayload.Username)
+	// Every address this account has already proven it owns — the IMAP
+	// account address plus each verified send-as alias — goes onto the key
+	// as a User ID, because both WKD serving (validateDiscoveredKey) and
+	// Autocrypt advertising (buildAutocryptHeader) refuse a key that does
+	// not carry the address in question. Aliases verified *after* this key
+	// is generated get their User ID added to the existing key at
+	// verification time instead (see the poller's send-as check), so the two
+	// orderings converge on the same key.
+	//
+	// A failure to read the alias store is surfaced rather than swallowed:
+	// silently minting a key missing its alias User IDs is invisible to the
+	// user and only fixable by regenerating the key.
+	sendAsStore, err := s.userSendAsStore(ac.UserID)
+	if err != nil {
+		http.Error(w, "failed to open send-as store", http.StatusInternalServerError)
+		return
+	}
+	var aliasEmails []string
+	for _, alias := range sendAsStore.ListVerified() {
+		aliasEmails = append(aliasEmails, alias.Email)
+	}
+
+	id, err := pgpmail.GenerateIdentity(u.Username, imapPayload.Username, aliasEmails...)
 	if err != nil {
 		http.Error(w, "failed to generate pgp identity", http.StatusInternalServerError)
 		return
