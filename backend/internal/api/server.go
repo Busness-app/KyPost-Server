@@ -24,7 +24,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"kypost-server/backend/internal/adapters/classifier"
@@ -61,10 +60,28 @@ import (
 // and mirrored into the non-HttpOnly csrf_token cookie so the frontend can
 // read and echo it back as a header.
 type Session struct {
-	UserID    string
+	UserID string
+	// IssuedAt is when this session was minted. ExpiresAt slides forward on
+	// every request so an active user is not logged out mid-work, but
+	// IssuedAt never moves, and sessionMaxLifetime past it the session dies
+	// regardless of activity. Without that cap a stolen cookie is valid
+	// forever: the thief's own polling keeps renewing it, and the legitimate
+	// user has no way to see it or end it short of changing their password.
+	IssuedAt  time.Time
 	ExpiresAt time.Time
 	CSRFToken string
 }
+
+const (
+	// sessionIdleTimeout is how long a session survives with no requests.
+	sessionIdleTimeout = 24 * time.Hour
+	// sessionMaxLifetime is the absolute ceiling from IssuedAt, renewals
+	// notwithstanding.
+	sessionMaxLifetime = 7 * 24 * time.Hour
+	// sessionSweepInterval is how often StartSessionSweeper reclaims
+	// sessions that expired without anyone presenting them again.
+	sessionSweepInterval = time.Hour
+)
 
 // AuthContext identifies the caller of an authenticated request.
 type AuthContext struct {
@@ -74,6 +91,18 @@ type AuthContext struct {
 	MustChangePassword bool
 }
 
+// Server holds the HTTP surface and its process-wide state.
+//
+// LOCK ORDER: mu before userMu. Never the reverse.
+//
+// These are two independent mutexes guarding two independent groups of
+// fields — mu covers cfg/sessions/httpServer, userMu covers the per-user
+// store caches and the subscriber/device indexes. Nothing currently takes
+// both, which is the only reason there is no deadlock to find today. The
+// moment one handler reads s.cfg (mu) inside a userMu critical section
+// while another does the reverse, that becomes an ABBA deadlock that only
+// shows up under concurrent load in production. Stating the order here is
+// cheaper than discovering it there.
 type Server struct {
 	mu                     sync.RWMutex
 	cfg                    config.Config
@@ -269,11 +298,28 @@ func (s *Server) wkdPublishStore() (*wkdpublish.Store, error) {
 // routes builds the API's route table. Split out from Run so tests can
 // dispatch through the exact same registration (middleware included)
 // instead of calling handlers directly and assuming the wiring matches.
+// routes builds the full HTTP surface. It is split into one function per
+// area rather than one 130-line block so the auth posture of a given
+// group -- which middleware wraps it, and which endpoints deliberately
+// have none -- can be read at a glance instead of scanned for.
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/health", s.handleHealth)
-	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
-	mux.HandleFunc("POST /api/admin/mail/poll-now", s.withAdmin(s.handlePollNow))
+	s.routesAuth(mux)
+	s.routesAdmin(mux)
+	s.routesMail(mux)
+	s.routesContacts(mux)
+	s.routesPGP(mux)
+	s.routesNotifications(mux)
+	s.routesRules(mux)
+	s.routesFrontend(mux)
+
+	return withSecurityHeaders(mux)
+}
+
+// routesAuth registers sign-in, session, and second-factor endpoints.
+// The pre-session ones (login, the MFA challenge completions, captcha
+// config) are deliberately unwrapped: they run before a session exists.
+func (s *Server) routesAuth(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("GET /api/auth/captcha-config", s.handleCaptchaConfig)
 	mux.HandleFunc("POST /api/auth/mfa/totp", s.handleMFATOTP)
@@ -287,23 +333,24 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/mfa/totp/disable", s.withAuth(s.handleMFADisable))
 	mux.HandleFunc("POST /api/mfa/recovery-codes/regenerate", s.withAuth(s.handleMFARecoveryCodesRegenerate))
 	mux.HandleFunc("PUT /api/mfa/push/enabled", s.withAuth(s.handleMFAPushEnabled))
-	mux.HandleFunc("PUT /api/notifications/native/devices/{deviceId}/mfa", s.withAuth(s.handleNativeDeviceMFA))
 	mux.HandleFunc("GET /api/auth/me", s.handleMe)
 	mux.HandleFunc("GET /api/auth/csrf", s.handleCSRFToken)
 	mux.HandleFunc("POST /api/auth/logout", s.withAuth(s.handleLogout))
 	mux.HandleFunc("POST /api/auth/password", s.withAuth(s.handleChangePassword))
+}
+
+// routesAdmin registers instance administration and observability:
+// health, users, config, logs, tuning, the classifier/Ollama controls, and
+// the pre-login setup hint.
+func (s *Server) routesAdmin(mux *http.ServeMux) {
+	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
+	mux.HandleFunc("POST /api/admin/mail/poll-now", s.withAdmin(s.handlePollNow))
 	mux.HandleFunc("/api/status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("GET /api/config", s.withAuth(s.handleConfig))
 	mux.HandleFunc("PUT /api/config", s.withAdmin(s.handleConfig))
 	mux.HandleFunc("GET /api/labels", s.withAuth(s.handleLabels))
 	mux.HandleFunc("GET /api/decisions", s.withAuth(s.handleDecisions))
-	mux.HandleFunc("GET /api/inbox", s.withMailAuth(s.handleInbox))
-	mux.HandleFunc("GET /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
-	mux.HandleFunc("POST /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
-	mux.HandleFunc("PUT /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
-	mux.HandleFunc("DELETE /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
-	mux.HandleFunc("POST /api/inbox/actions", s.withMailAuth(s.handleInboxActions))
-	mux.HandleFunc("GET /api/mail/search", s.withMailAuth(s.handleMailSearch))
 	mux.HandleFunc("GET /api/logs", s.withAdmin(s.handleLogs))
 	mux.HandleFunc("GET /api/logs/list", s.withAdmin(s.handleLogsList))
 	mux.HandleFunc("GET /api/users", s.withAdmin(s.handleUsersList))
@@ -313,38 +360,46 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/users/{id}/deactivate", s.withAdmin(s.handleUsersDeactivate))
 	mux.HandleFunc("POST /api/users/{id}/reactivate", s.withAdmin(s.handleUsersReactivate))
 	mux.HandleFunc("POST /api/users/{id}/clear-mfa", s.withAdmin(s.handleUsersClearMFA))
+	mux.HandleFunc("POST /api/classifier/test", s.withAdmin(s.handleClassifierTest))
+	mux.HandleFunc("GET /api/ollama/version", s.withAuth(s.handleOllamaVersion))
+	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
+	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
+	mux.HandleFunc("GET /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
+	mux.HandleFunc("PUT /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
+	mux.HandleFunc("GET /api/setup", s.handleSetup)
+}
+
+// routesMail registers mailbox reading and sending, plus IMAP/SMTP
+// account setup. The read/act paths use withMailAuth so paired mobile
+// devices reach them without a web session; credential setup stays on
+// withAuth (web UI only).
+func (s *Server) routesMail(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/inbox", s.withMailAuth(s.handleInbox))
+	mux.HandleFunc("GET /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("POST /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("PUT /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("DELETE /api/inbox/folders", s.withMailAuth(s.handleInboxFolders))
+	mux.HandleFunc("POST /api/inbox/actions", s.withMailAuth(s.handleInboxActions))
+	mux.HandleFunc("GET /api/mail/search", s.withMailAuth(s.handleMailSearch))
 	mux.HandleFunc("GET /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("POST /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("DELETE /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("POST /api/imap/test", s.withAuth(s.handleIMAPTest))
 	mux.HandleFunc("POST /api/mail/draft", s.withMailAuth(s.handleMailDraft))
 	mux.HandleFunc("POST /api/mail/send", s.withMailAuth(s.handleMailSend))
+	// Send path for end-to-end keys: the browser has already encrypted and
+	// signed, the server only relays over SMTP. See pgp_send_client.go.
+	mux.HandleFunc("POST /api/mail/send-pgp", s.withMailAuth(s.handleMailSendPGP))
 	mux.HandleFunc("GET /api/mail/send-as", s.withAuth(s.handleSendAs))
 	mux.HandleFunc("POST /api/mail/send-as", s.withAuth(s.handleSendAs))
 	mux.HandleFunc("DELETE /api/mail/send-as/{id}", s.withAuth(s.handleSendAsByID))
 	mux.HandleFunc("GET /api/mail/attachments", s.withMailAuth(s.handleMailAttachmentList))
 	mux.HandleFunc("GET /api/mail/attachment", s.withMailAuth(s.handleMailAttachmentDownload))
-	mux.HandleFunc("POST /api/classifier/test", s.withAdmin(s.handleClassifierTest))
-	mux.HandleFunc("GET /api/ollama/version", s.withAuth(s.handleOllamaVersion))
-	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
-	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
-	mux.HandleFunc("GET /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
-	mux.HandleFunc("PUT /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
-	mux.HandleFunc("GET /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
-	mux.HandleFunc("PUT /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
-	mux.HandleFunc("GET /api/notifications/vapid-public-key", s.withAuth(s.handleNotificationVAPIDPublicKey))
-	mux.HandleFunc("POST /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
-	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
-	mux.HandleFunc("POST /api/notifications/test", s.withAuth(s.handleNotificationTest))
-	mux.HandleFunc("GET /api/notifications/pairing", s.withAuth(s.handleNotificationPairing))
-	mux.HandleFunc("POST /api/notifications/native/register", s.handleNotificationNativeRegister)
-	mux.HandleFunc("GET /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
-	mux.HandleFunc("DELETE /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
-	mux.HandleFunc("POST /api/notifications/native/unpair", s.withAuth(s.handleNotificationNativeUnpair))
-	mux.HandleFunc("POST /api/notifications/native/deregister", s.handleNotificationNativeDeregister)
-	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
-	mux.HandleFunc("GET /api/notifications/native/pull", s.handleNotificationNativePull)
-	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
+}
+
+// routesContacts registers the address book, groups, and the CardDAV
+// server surface (which authenticates via HTTP Basic, not a session).
+func (s *Server) routesContacts(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/contacts", s.withAuth(s.handleContacts))
 	mux.HandleFunc("POST /api/contacts", s.withAuth(s.handleContacts))
 	mux.HandleFunc("POST /api/contacts/dedupe", s.withMailAuth(s.handleContactsDedupe))
@@ -368,9 +423,27 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/contacts/{id}/photo", s.withMailAuth(s.handleContactPhoto))
 	mux.HandleFunc("DELETE /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
 	mux.HandleFunc("POST /api/contacts/{id}/self", s.withAuth(s.handleContactSelf))
+	mux.HandleFunc("GET /api/groups", s.withMailAuth(s.handleGroups))
+	mux.HandleFunc("POST /api/groups", s.withAuth(s.handleGroups))
+	mux.HandleFunc("PUT /api/groups/{id}", s.withAuth(s.handleGroupByID))
+	mux.HandleFunc("DELETE /api/groups/{id}", s.withAuth(s.handleGroupByID))
+	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
+	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
+}
+
+// routesPGP registers key management, recipient/keyserver lookup,
+// discovery settings, WKD publishing, and the two token-gated public
+// endpoints (QR key exchange and one-time pickup links).
+func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/pgp/identity/generate", s.withAuth(s.handlePGPIdentityGenerate))
 	mux.HandleFunc("POST /api/pgp/identity/import", s.withAuth(s.handlePGPIdentityImport))
 	mux.HandleFunc("GET /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
+	// End-to-end key handling: the browser wraps and unwraps the private
+	// half, the server only stores an opaque envelope. See pgp_client_keys.go.
+	mux.HandleFunc("GET /api/pgp/identity/wrapped", s.withAuth(s.handlePGPWrappedKey))
+	mux.HandleFunc("POST /api/pgp/identity/client", s.withAuth(s.handlePGPIdentityClient))
+	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withAuth(s.handlePGPRewrapKey))
+	mux.HandleFunc("POST /api/pgp/identity/export-legacy", s.withAuth(s.handlePGPExportLegacyKey))
 	mux.HandleFunc("DELETE /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
 	mux.HandleFunc("GET /api/pgp/keyserver/lookup", s.withAuth(s.handlePGPKeyserverLookup))
 	mux.HandleFunc("POST /api/pgp/recipients/check", s.withAuth(s.handlePGPRecipientsCheck))
@@ -385,10 +458,35 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/pgp/wkd/domains/{domain}", s.withAdmin(s.handleWKDDomainDelete))
 	mux.HandleFunc("GET /api/pgp/qr/token", s.withMailAuth(s.handlePGPQRToken))
 	mux.HandleFunc("GET /api/pgp/qr/key", s.handlePGPQRKey)
-	mux.HandleFunc("GET /api/groups", s.withMailAuth(s.handleGroups))
-	mux.HandleFunc("POST /api/groups", s.withAuth(s.handleGroups))
-	mux.HandleFunc("PUT /api/groups/{id}", s.withAuth(s.handleGroupByID))
-	mux.HandleFunc("DELETE /api/groups/{id}", s.withAuth(s.handleGroupByID))
+	mux.HandleFunc("GET /.well-known/openpgpkey/", s.withWKDRateLimit(s.handleWKD))
+	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
+}
+
+// routesNotifications registers web push, native device pairing, and the
+// App Pull queue. The register/deregister/pull endpoints authenticate with
+// per-device credentials rather than a session, so they carry no middleware
+// here and check inside the handler.
+func (s *Server) routesNotifications(mux *http.ServeMux) {
+	mux.HandleFunc("PUT /api/notifications/native/devices/{deviceId}/mfa", s.withAuth(s.handleNativeDeviceMFA))
+	mux.HandleFunc("GET /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
+	mux.HandleFunc("PUT /api/notifications/preferences", s.withAuth(s.handleNotificationPreferences))
+	mux.HandleFunc("GET /api/notifications/vapid-public-key", s.withAuth(s.handleNotificationVAPIDPublicKey))
+	mux.HandleFunc("POST /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
+	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
+	mux.HandleFunc("POST /api/notifications/test", s.withAuth(s.handleNotificationTest))
+	mux.HandleFunc("GET /api/notifications/pairing", s.withAuth(s.handleNotificationPairing))
+	mux.HandleFunc("POST /api/notifications/native/register", s.handleNotificationNativeRegister)
+	mux.HandleFunc("GET /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
+	mux.HandleFunc("DELETE /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
+	mux.HandleFunc("POST /api/notifications/native/unpair", s.withAuth(s.handleNotificationNativeUnpair))
+	mux.HandleFunc("POST /api/notifications/native/deregister", s.handleNotificationNativeDeregister)
+	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
+	mux.HandleFunc("GET /api/notifications/native/pull", s.handleNotificationNativePull)
+	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
+}
+
+// routesRules registers the filter-rule builder and the Sieve editor.
+func (s *Server) routesRules(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/rules", s.withMailAuth(s.handleRules))
 	mux.HandleFunc("POST /api/rules", s.withAuth(s.handleRules))
 	mux.HandleFunc("PUT /api/rules/{id}", s.withAuth(s.handleRuleByID))
@@ -397,14 +495,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/rules/{id}/sieve", s.withMailAuth(s.handleRuleSieve))
 	mux.HandleFunc("PUT /api/rules/{id}/sieve", s.withAuth(s.handleRuleSieve))
 	mux.HandleFunc("POST /api/rules/run", s.withMailAuth(s.handleRulesRun))
-	mux.Handle("/.well-known/carddav", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
-	mux.Handle(davPrefix+"/", s.withDAVBasicAuth(http.HandlerFunc(s.handleCardDAV)))
-	mux.HandleFunc("GET /.well-known/openpgpkey/", s.withWKDRateLimit(s.handleWKD))
-	mux.HandleFunc("GET /api/setup", s.handleSetup)
-	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
-	mux.HandleFunc("/", s.handleFrontend)
+}
 
-	return withSecurityHeaders(mux)
+// routesFrontend registers the SPA fallback. "/" is the least specific
+// pattern, so Go's mux only reaches it when nothing else matches.
+func (s *Server) routesFrontend(mux *http.ServeMux) {
+	mux.HandleFunc("/", s.handleFrontend)
 }
 
 // Prepare constructs the underlying *http.Server (Addr + Handler) without
@@ -486,6 +582,44 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// StartSessionSweeper reclaims sessions that passed their idle timeout or
+// absolute lifetime without anyone presenting them again, mirroring
+// StartPickupSweeper's ticker/select pattern. Call once after NewServer.
+//
+// Without it, s.sessions only ever shrinks when a token is presented again
+// (currentUser), logged out, or revoked — so every session belonging to a
+// user who simply closed the tab is pinned for the process lifetime. Every
+// other bounded map in this package already has a sweep (loginLockout,
+// nativePairingNonces, sendAsCooldown, pickupStore); the one holding live
+// credentials was the exception.
+func (s *Server) StartSessionSweeper(ctx context.Context) {
+	ticker := time.NewTicker(sessionSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.sweepSessions(time.Now())
+		}
+	}
+}
+
+// sweepSessions drops every session dead as of now. Split out so tests can
+// drive it directly instead of waiting on the ticker.
+func (s *Server) sweepSessions(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for token, sess := range s.sessions {
+		if now.After(sess.ExpiresAt) || now.Sub(sess.IssuedAt) >= sessionMaxLifetime {
+			delete(s.sessions, token)
+			removed++
+		}
+	}
+	return removed
 }
 
 // sendAsCooldownSweepInterval is a var rather than an inline literal (unlike
@@ -1028,7 +1162,19 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	var signer *pgpmail.Identity
 	if req.Sign || req.Encrypt {
 		u, uerr := s.users.Get(ac.UserID)
-		if uerr == nil && u.PGPPrivateKeyEnc != "" {
+		// An end-to-end key cannot be used here: the server has no way to
+		// open it, by design. Refuse loudly and point at the browser path
+		// rather than falling through to sending the message unsigned and
+		// unencrypted, which is the one outcome a user who ticked those
+		// boxes must never silently get.
+		if uerr == nil && u.PGPProtection() == users.PGPProtectionClient {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":            "this account's PGP key is end-to-end protected, so the server cannot sign or encrypt on your behalf",
+				"clientSideNeeded": true,
+			})
+			return
+		}
+		if uerr == nil && u.HasServerReadableKey() {
 			signer, err = pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, s.pgpPrivateKeyPath)
 			if err != nil {
 				http.Error(w, "failed to load pgp identity", http.StatusInternalServerError)
@@ -1327,18 +1473,12 @@ func writeEncryptedPayload(path, keyPath string, payload []byte) error {
 	return fsutil.AtomicWriteFile(path, b, 0o600)
 }
 
+// decryptEncryptedPayload reverses writeEncryptedPayload. It is a thin
+// alias for cryptutil.OpenBytes, kept so the several call sites in this
+// package read symmetrically with their write side; see OpenBytes for why
+// there is no plaintext fallback.
 func decryptEncryptedPayload(raw []byte, keyPath string) ([]byte, error) {
-	env, ok := cryptutil.ParseEnvelope(raw)
-	if !ok {
-		// Backward-compatibility with plaintext credentials.
-		return raw, nil
-	}
-
-	key, err := cryptutil.LoadOrCreateKey(keyPath)
-	if err != nil {
-		return nil, err
-	}
-	return cryptutil.Open(env, key)
+	return cryptutil.OpenBytes(raw, keyPath)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -3441,8 +3581,14 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID str
 	if err != nil {
 		return err
 	}
+	now := time.Now()
 	s.mu.Lock()
-	s.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
+	s.sessions[token] = Session{
+		UserID:    userID,
+		IssuedAt:  now,
+		ExpiresAt: now.Add(sessionIdleTimeout),
+		CSRFToken: csrfToken,
+	}
 	s.mu.Unlock()
 	secure := isRequestSecure(r)
 	http.SetCookie(w, &http.Cookie{Name: "kypost_session", Value: token, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
@@ -3679,8 +3825,8 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(req.NewPassword) == "" {
-		http.Error(w, "new password required", http.StatusBadRequest)
+	if err := users.ValidatePassword(req.NewPassword); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	u, err := s.users.Get(ac.UserID)
@@ -3775,15 +3921,31 @@ func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 
 	result, err := client.Classify(ctx, allowed, "", "", prompt, tuning)
 	if err != nil {
+		// The model answered but off-allowlist: that is a successful round
+		// trip as far as connectivity goes, which is all this endpoint
+		// tests. Show the operator what it actually said.
+		var noLabel *classifier.NoAllowedLabelError
+		if errors.As(err, &noLabel) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":             true,
+				"response":       noLabel.Output,
+				"matchedAllowed": false,
+				"baseUrl":        baseURL,
+				"path":           path,
+				"allowedLabels":  allowed,
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"response": result,
-		"baseUrl":  baseURL,
-		"path":     path,
+		"ok":             true,
+		"response":       result,
+		"matchedAllowed": true,
+		"baseUrl":        baseURL,
+		"path":           path,
 	})
 }
 
@@ -3931,19 +4093,24 @@ func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
 		return AuthContext{}, false
 	}
 
+	now := time.Now()
 	s.mu.Lock()
 	sess, ok := s.sessions[cookie.Value]
 	if !ok {
 		s.mu.Unlock()
 		return AuthContext{}, false
 	}
-	if time.Now().After(sess.ExpiresAt) {
+	// Idle timeout, then the absolute cap. The cap is checked separately so
+	// that renewing below can never push a session past sessionMaxLifetime.
+	if now.After(sess.ExpiresAt) || now.Sub(sess.IssuedAt) >= sessionMaxLifetime {
 		delete(s.sessions, cookie.Value)
 		s.mu.Unlock()
 		return AuthContext{}, false
 	}
-	// Sliding window session expiry for active users.
-	s.sessions[cookie.Value] = Session{UserID: sess.UserID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: sess.CSRFToken}
+	// Sliding idle window for active users; IssuedAt is deliberately carried
+	// through unchanged so the absolute ceiling still applies.
+	sess.ExpiresAt = now.Add(sessionIdleTimeout)
+	s.sessions[cookie.Value] = sess
 	s.mu.Unlock()
 
 	u, err := s.users.Get(sess.UserID)
@@ -3972,13 +4139,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// scheduleContainerRestart exits this process after delay so supervisord's
+// autorestart brings it back with fresh state.
+//
+// It does NOT signal PID 1. The previous version called
+// syscall.Kill(1, SIGTERM) and discarded the error — which was always EPERM,
+// because this process runs unprivileged while PID 1 does not belong to it.
+// The call had never once worked; the restart came entirely from the
+// os.Exit below plus supervisord's autorestart. Naming that honestly beats
+// keeping a line that implies the whole container gets recycled.
 func scheduleContainerRestart(logger *logging.Logger, reason string, delay time.Duration) {
 	go func() {
 		time.Sleep(delay)
 		if logger != nil {
-			logger.Error("container restart requested", "reason", reason)
+			logger.Error("restarting process; supervisord will bring it back", "reason", reason)
 		}
-		_ = syscall.Kill(1, syscall.SIGTERM)
 		os.Exit(2)
 	}()
 }

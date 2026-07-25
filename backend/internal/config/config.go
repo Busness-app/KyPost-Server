@@ -103,6 +103,28 @@ type UserSettings struct {
 type UserNotificationSettings struct {
 	Mode     string   `yaml:"mode" json:"mode"`
 	Keywords []string `yaml:"keywords" json:"keywords"`
+	// ContentPreview controls whether the sender and subject of a message
+	// are placed in the push payload, or whether the notification is
+	// generic ("KyPost" / "You have a new email.").
+	//
+	// It defaults to FALSE, and that default is the point. A push
+	// notification is not delivered by this server: it travels
+	// backend -> Cloudflare Worker relay -> Google FCM or Apple APNs, in
+	// cleartext to each of those hops. Putting the sender and subject in it
+	// hands the correspondence graph of a self-hosted, PGP-advertising mail
+	// product to exactly the third parties its users chose self-hosting to
+	// avoid. Encrypting the body buys nothing if the Subject header is
+	// couriered to Google on arrival.
+	//
+	// Users who want previews can have them — this is their mail and their
+	// call — but it must be a decision they made, not a default they never
+	// saw. See the copy on the Notifications page.
+	//
+	// Note the absence of omitempty: false must serialize, or a user who
+	// turns previews off round-trips back to "unset" and the field reads as
+	// absent rather than as the choice they made. (Absent still means
+	// false, so an older settings file is private by default too.)
+	ContentPreview bool `yaml:"contentPreview" json:"contentPreview"`
 }
 
 // UserLabelSettings controls whether the AI classification pipeline

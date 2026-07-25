@@ -1,6 +1,10 @@
 package pgpdiscovery
 
-import "sync"
+import (
+	"sync"
+
+	"kypost-server/backend/internal/fsutil"
+)
 
 // Every file in this package is mutated read-modify-write: load the current
 // contents, change them, write the whole file back. Two callers doing that
@@ -15,11 +19,15 @@ import "sync"
 // this package must hold it for the whole load-modify-save sequence, not just
 // the individual reads and writes.
 //
-// This is a within-process lock. It is sufficient because every writer lives
-// in the api process (the poller only ever reads these files) — if a future
-// caller in another process starts writing them, this needs to become a file
-// lock instead. The keyed map is not swept: keys are user state directories,
-// so the map is bounded by the account count and is not attacker-influenced.
+// dirMu alone is a within-process lock, so Update pairs it with an
+// inter-process file lock (fsutil.WithFileLock). The previous note here said
+// a process-local lock was sufficient because every writer lives in the api
+// process; that is a property of today's call sites, not of the file, and it
+// is exactly the kind of assumption that rots silently the first time the
+// poller grows a write path. The file lock costs one uncontended syscall.
+//
+// The keyed map is not swept: keys are user state directories, so the map is
+// bounded by the account count and is not attacker-influenced.
 var (
 	dirMuMu sync.Mutex
 	dirMus  = map[string]*sync.Mutex{}
@@ -46,12 +54,16 @@ func Update(dir string, mutate func(Settings) Settings) (Settings, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	current, err := Load(dir)
+	var next Settings
+	err := fsutil.WithFileLock(path(dir), func() error {
+		current, err := Load(dir)
+		if err != nil {
+			return err
+		}
+		next = mutate(current)
+		return Save(dir, next)
+	})
 	if err != nil {
-		return Settings{}, err
-	}
-	next := mutate(current)
-	if err := Save(dir, next); err != nil {
 		return Settings{}, err
 	}
 	return next, nil

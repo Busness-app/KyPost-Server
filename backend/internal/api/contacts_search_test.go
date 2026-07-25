@@ -152,7 +152,7 @@ func TestContactsSearchScopedToCaller(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
 
-	other, err := srv.users.Create("other", "pw-other", users.RoleUser)
+	other, err := srv.users.Create("other", "pw-other-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create other user: %v", err)
 	}

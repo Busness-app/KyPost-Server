@@ -4,27 +4,54 @@ import (
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/pgpmail"
+	"kypost-server/backend/internal/users"
 )
 
-// decryptPGPMessageContent decrypts c's PGPEncryptedPayload with userID's
-// stored private key and, if the sender is a known contact with a PGP key,
-// verifies an embedded signature. On any failure (no identity configured,
-// wrong key, corrupt payload) it returns c with a PGPDecryptError set rather
-// than erroring the whole inbox fetch — one bad message must not break the
-// list.
-func (s *Server) decryptPGPMessageContent(userID string, c imapadapter.MessageContent) imapadapter.MessageContent {
-	c.PGPEncrypted = true
+// pgpDecryptResult is the subset of fields both imapadapter.MessageContent
+// and imapadapter.UnreadMessage carry for an encrypted message. The two
+// shapes are structurally identical here, so the decrypt logic lives once
+// and each caller copies fields in and out.
+type pgpDecryptResult struct {
+	Body              string
+	HasAttachments    bool
+	Signed            bool
+	Verified          bool
+	SignerFingerprint string
+	ProtectedSubject  string
+	DecryptError      string
+	// KeepPayload tells the caller to leave PGPEncryptedPayload in place for
+	// the client to decrypt itself, rather than clearing it. True exactly
+	// when the account's key is client-protected.
+	KeepPayload bool
+}
+
+// decryptPGPPayload decrypts payload with userID's private key, when the
+// server still holds one it can open.
+//
+// Under client-side key protection it does NOT decrypt, because there is
+// nothing here to decrypt with — that is the entire point of the mode. It
+// returns KeepPayload so the ciphertext travels to the browser untouched,
+// and the browser unwraps its own key and decrypts there. A server that
+// could still read this would not be end-to-end encrypted, whatever the
+// README said.
+func (s *Server) decryptPGPPayload(userID, payload string) pgpDecryptResult {
 	u, err := s.users.Get(userID)
-	if err != nil || u.PGPPrivateKeyEnc == "" {
-		c.PGPDecryptError = "no pgp identity configured for this account"
-		c.PGPEncryptedPayload = ""
-		return c
+	if err != nil || u.PGPFingerprint == "" {
+		return pgpDecryptResult{DecryptError: "no pgp identity configured for this account"}
 	}
+
+	if u.PGPProtection() == users.PGPProtectionClient {
+		// Hand the ciphertext through. No error: this is the healthy path.
+		return pgpDecryptResult{KeepPayload: true}
+	}
+
+	if !u.HasServerReadableKey() {
+		return pgpDecryptResult{DecryptError: "no pgp private key available for this account"}
+	}
+
 	identity, err := pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, s.pgpPrivateKeyPath)
 	if err != nil {
-		c.PGPDecryptError = "failed to load pgp identity"
-		c.PGPEncryptedPayload = ""
-		return c
+		return pgpDecryptResult{DecryptError: "failed to load pgp identity"}
 	}
 
 	var signerKeys []string
@@ -32,28 +59,51 @@ func (s *Server) decryptPGPMessageContent(userID string, c imapadapter.MessageCo
 		signerKeys = allKnownPGPKeys(contactsStore)
 	}
 
-	result, err := pgpmail.DecryptMIME(c.PGPEncryptedPayload, identity, signerKeys)
+	result, err := pgpmail.DecryptMIME(payload, identity, signerKeys)
 	if err != nil {
-		c.PGPDecryptError = "failed to decrypt message"
-		c.PGPEncryptedPayload = ""
-		return c
+		return pgpDecryptResult{DecryptError: "failed to decrypt message"}
 	}
 	body, attachments, err := pgpmail.ParseContent(result.Content)
 	if err != nil {
-		c.PGPDecryptError = "failed to parse decrypted message"
-		c.PGPEncryptedPayload = ""
-		return c
+		return pgpDecryptResult{DecryptError: "failed to parse decrypted message"}
 	}
 
-	c.Body = body
-	c.HasAttachments = len(attachments) > 0
-	c.PGPSigned = result.Signed
-	c.PGPVerified = result.Verified
-	c.PGPSignerFingerprint = result.SignerFingerprint
+	out := pgpDecryptResult{
+		Body:              body,
+		HasAttachments:    len(attachments) > 0,
+		Signed:            result.Signed,
+		Verified:          result.Verified,
+		SignerFingerprint: result.SignerFingerprint,
+	}
 	if subject, ok := pgpmail.ExtractProtectedSubject(result.Content); ok {
-		c.PGPProtectedSubject = subject
+		out.ProtectedSubject = subject
+	}
+	return out
+}
+
+// decryptPGPMessageContent decrypts c's PGPEncryptedPayload where the server
+// is able to, and otherwise leaves the ciphertext for the client. On any
+// failure it returns c with a PGPDecryptError set rather than erroring the
+// whole inbox fetch — one bad message must not break the list.
+func (s *Server) decryptPGPMessageContent(userID string, c imapadapter.MessageContent) imapadapter.MessageContent {
+	c.PGPEncrypted = true
+	r := s.decryptPGPPayload(userID, c.PGPEncryptedPayload)
+	if r.KeepPayload {
+		return c
 	}
 	c.PGPEncryptedPayload = ""
+	if r.DecryptError != "" {
+		c.PGPDecryptError = r.DecryptError
+		return c
+	}
+	c.Body = r.Body
+	c.HasAttachments = r.HasAttachments
+	c.PGPSigned = r.Signed
+	c.PGPVerified = r.Verified
+	c.PGPSignerFingerprint = r.SignerFingerprint
+	if r.ProtectedSubject != "" {
+		c.PGPProtectedSubject = r.ProtectedSubject
+	}
 	return c
 }
 
@@ -62,54 +112,32 @@ func (s *Server) decryptPGPMessageContent(userID string, c imapadapter.MessageCo
 // (non-delta) inbox path.
 func (s *Server) decryptPGPUnreadMessage(userID string, msg imapadapter.UnreadMessage) imapadapter.UnreadMessage {
 	msg.PGPEncrypted = true
-	u, err := s.users.Get(userID)
-	if err != nil || u.PGPPrivateKeyEnc == "" {
-		msg.PGPDecryptError = "no pgp identity configured for this account"
-		msg.PGPEncryptedPayload = ""
+	r := s.decryptPGPPayload(userID, msg.PGPEncryptedPayload)
+	if r.KeepPayload {
 		return msg
-	}
-	identity, err := pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, s.pgpPrivateKeyPath)
-	if err != nil {
-		msg.PGPDecryptError = "failed to load pgp identity"
-		msg.PGPEncryptedPayload = ""
-		return msg
-	}
-
-	var signerKeys []string
-	if contactsStore, cerr := s.userContactsStore(userID); cerr == nil {
-		signerKeys = allKnownPGPKeys(contactsStore)
-	}
-
-	result, err := pgpmail.DecryptMIME(msg.PGPEncryptedPayload, identity, signerKeys)
-	if err != nil {
-		msg.PGPDecryptError = "failed to decrypt message"
-		msg.PGPEncryptedPayload = ""
-		return msg
-	}
-	body, attachments, err := pgpmail.ParseContent(result.Content)
-	if err != nil {
-		msg.PGPDecryptError = "failed to parse decrypted message"
-		msg.PGPEncryptedPayload = ""
-		return msg
-	}
-
-	msg.Body = body
-	msg.HasAttachments = len(attachments) > 0
-	msg.PGPSigned = result.Signed
-	msg.PGPVerified = result.Verified
-	msg.PGPSignerFingerprint = result.SignerFingerprint
-	if subject, ok := pgpmail.ExtractProtectedSubject(result.Content); ok {
-		msg.PGPProtectedSubject = subject
 	}
 	msg.PGPEncryptedPayload = ""
+	if r.DecryptError != "" {
+		msg.PGPDecryptError = r.DecryptError
+		return msg
+	}
+	msg.Body = r.Body
+	msg.HasAttachments = r.HasAttachments
+	msg.PGPSigned = r.Signed
+	msg.PGPVerified = r.Verified
+	msg.PGPSignerFingerprint = r.SignerFingerprint
+	if r.ProtectedSubject != "" {
+		msg.PGPProtectedSubject = r.ProtectedSubject
+	}
 	return msg
 }
 
 // verifySignedOnlyMessageContent verifies c's PGPSignaturePayload — a
 // detached signature from an RFC 3156 multipart/signed (signed but not
 // encrypted) message — against every known contact's public key, the same
-// signer lookup decryptPGPMessageContent uses. Verification is best-effort
-// per pgpmail.VerifyDetached's doc comment: third-party MIME
+// signer lookup decryptPGPPayload uses. This needs only public keys, so it
+// works identically under both protection modes. Verification is
+// best-effort per pgpmail.VerifyDetached's doc comment: third-party MIME
 // canonicalization can differ from what was actually signed, so a
 // verification failure just leaves PGPVerified false rather than erroring
 // the whole inbox fetch.
@@ -117,21 +145,9 @@ func (s *Server) verifySignedOnlyMessageContent(userID string, c imapadapter.Mes
 	c.PGPSigned = true
 	sig := c.PGPSignaturePayload
 	c.PGPSignaturePayload = ""
-
-	contactsStore, err := s.userContactsStore(userID)
-	if err != nil {
-		return c
-	}
-	signerKeys := allKnownPGPKeys(contactsStore)
-	if len(signerKeys) == 0 {
-		return c
-	}
-	result, err := pgpmail.VerifyDetached([]byte(c.Body), sig, signerKeys)
-	if err != nil {
-		return c
-	}
-	c.PGPVerified = result.Verified
-	c.PGPSignerFingerprint = result.SignerFingerprint
+	verified, fingerprint := s.verifyDetachedForUser(userID, c.Body, sig)
+	c.PGPVerified = verified
+	c.PGPSignerFingerprint = fingerprint
 	return c
 }
 
@@ -142,22 +158,26 @@ func (s *Server) verifySignedOnlyUnreadMessage(userID string, msg imapadapter.Un
 	msg.PGPSigned = true
 	sig := msg.PGPSignaturePayload
 	msg.PGPSignaturePayload = ""
+	verified, fingerprint := s.verifyDetachedForUser(userID, msg.Body, sig)
+	msg.PGPVerified = verified
+	msg.PGPSignerFingerprint = fingerprint
+	return msg
+}
 
+func (s *Server) verifyDetachedForUser(userID, body, sig string) (verified bool, fingerprint string) {
 	contactsStore, err := s.userContactsStore(userID)
 	if err != nil {
-		return msg
+		return false, ""
 	}
 	signerKeys := allKnownPGPKeys(contactsStore)
 	if len(signerKeys) == 0 {
-		return msg
+		return false, ""
 	}
-	result, err := pgpmail.VerifyDetached([]byte(msg.Body), sig, signerKeys)
+	result, err := pgpmail.VerifyDetached([]byte(body), sig, signerKeys)
 	if err != nil {
-		return msg
+		return false, ""
 	}
-	msg.PGPVerified = result.Verified
-	msg.PGPSignerFingerprint = result.SignerFingerprint
-	return msg
+	return result.Verified, result.SignerFingerprint
 }
 
 // allKnownPGPKeys returns every contact's armored public key, offered as the

@@ -328,30 +328,70 @@ func normalizeDeliveryMode(mode string) string {
 	return DeliveryModePush
 }
 
+// update runs mutate as one read-modify-write cycle over state.json,
+// holding both the in-process mutex and the inter-process file lock for the
+// whole cycle, refreshing from disk first and persisting after.
+//
+// Both halves of that lock are required. Per-user state.json is written by
+// the api process (device pairing, notification subscriptions, delivery
+// mode) AND by the daemon process (MarkProcessed on every classified
+// message, pull-notification enqueue) — see supervisord.conf. Refreshing
+// from disk before mutating narrows the lost-update window but does not
+// close it; only holding a lock across read, mutate, and write does.
+//
+// Every mutator in this file must go through here rather than hand-rolling
+// the refresh/persist pair.
+func (s *Store) update(mutate func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fsutil.WithFileLock(s.path(), func() error {
+		if err := s.refreshStateFromDiskLocked(); err != nil {
+			return err
+		}
+		if err := mutate(); err != nil {
+			return err
+		}
+		return s.persistLocked()
+	})
+}
+
+// Cleanup is the one operation here that touches both files, so it takes
+// both locks. Lock order is state.json then decisions.json; nothing takes
+// them the other way round (AddDecision takes decisions.json alone), so
+// there is no deadlock. Both are refreshed from disk before trimming — a
+// stale in-memory decisions slice trimmed and written back would silently
+// drop everything the other process appended since this Store last read it.
 func (s *Store) Cleanup(keepDays int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return err
-	}
-	cutoff := time.Now().Add(-time.Duration(keepDays) * 24 * time.Hour)
-	for id, ts := range s.processedSet {
-		if ts.Before(cutoff) {
-			delete(s.processedSet, id)
+	return fsutil.WithFileLock(s.path(), func() error {
+		if err := s.refreshStateFromDiskLocked(); err != nil {
+			return err
 		}
-	}
-	trimmed := make([]Decision, 0, len(s.decisions))
-	for _, d := range s.decisions {
-		t, err := time.Parse(time.RFC3339, d.AtUTC)
-		if err != nil || !t.Before(cutoff) {
-			trimmed = append(trimmed, d)
-		}
-	}
-	s.decisions = trimmed
-	if err := s.persistDecisionsLocked(); err != nil {
-		return err
-	}
-	return s.persistLocked()
+		return fsutil.WithFileLock(s.decisionsPath(), func() error {
+			if err := s.refreshDecisionsFromDiskLocked(); err != nil {
+				return err
+			}
+			cutoff := time.Now().Add(-time.Duration(keepDays) * 24 * time.Hour)
+			for id, ts := range s.processedSet {
+				if ts.Before(cutoff) {
+					delete(s.processedSet, id)
+				}
+			}
+			trimmed := make([]Decision, 0, len(s.decisions))
+			for _, d := range s.decisions {
+				t, err := time.Parse(time.RFC3339, d.AtUTC)
+				if err != nil || !t.Before(cutoff) {
+					trimmed = append(trimmed, d)
+				}
+			}
+			s.decisions = trimmed
+			if err := s.persistDecisionsLocked(); err != nil {
+				return err
+			}
+			return s.persistLocked()
+		})
+	})
 }
 
 func (s *Store) Seen(id string) bool {
@@ -362,23 +402,17 @@ func (s *Store) Seen(id string) bool {
 }
 
 func (s *Store) MarkProcessed(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return err
-	}
-	s.processedSet[id] = time.Now().UTC()
-	return s.persistLocked()
+	return s.update(func() error {
+		s.processedSet[id] = time.Now().UTC()
+		return nil
+	})
 }
 
 func (s *Store) SetCheckpoint(value string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return err
-	}
-	s.checkpoint = value
-	return s.persistLocked()
+	return s.update(func() error {
+		s.checkpoint = value
+		return nil
+	})
 }
 
 func (s *Store) Checkpoint() string {
@@ -388,25 +422,24 @@ func (s *Store) Checkpoint() string {
 }
 
 func (s *Store) GetOrCreateSubscriberID() (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return "", err
-	}
-	if s.subscriberID != "" {
-		return s.subscriberID, nil
-	}
-
-	id, err := fsutil.NewUUIDv4()
+	var id string
+	err := s.update(func() error {
+		if s.subscriberID != "" {
+			id = s.subscriberID
+			return nil
+		}
+		fresh, err := fsutil.NewUUIDv4()
+		if err != nil {
+			return err
+		}
+		s.subscriberID = fresh
+		id = fresh
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-	s.subscriberID = id
-	if err := s.persistLocked(); err != nil {
-		return "", err
-	}
-	return s.subscriberID, nil
+	return id, nil
 }
 
 // NativeDeliveryMode returns the active native delivery mode ("push" or
@@ -422,35 +455,29 @@ func (s *Store) NativeDeliveryMode() string {
 // SetNativeDeliveryMode persists the native delivery mode. Unknown values are
 // coerced to push.
 func (s *Store) SetNativeDeliveryMode(mode string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return err
-	}
-	s.nativeDeliveryMode = normalizeDeliveryMode(mode)
-	s.pullDirty = true
-	return s.persistLocked()
+	return s.update(func() error {
+		s.nativeDeliveryMode = normalizeDeliveryMode(mode)
+		s.pullDirty = true
+		return nil
+	})
 }
 
 // EnqueuePullNotification appends a notification to the App Pull queue, stamping
 // it with the next sequence number and trimming the queue to its bound.
 func (s *Store) EnqueuePullNotification(n PullNotification) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return err
-	}
-	s.pullSeq++
-	n.Seq = s.pullSeq
-	if strings.TrimSpace(n.CreatedAt) == "" {
-		n.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	s.pullNotifications = append(s.pullNotifications, n)
-	if len(s.pullNotifications) > maxPullNotifications {
-		s.pullNotifications = s.pullNotifications[len(s.pullNotifications)-maxPullNotifications:]
-	}
-	s.pullDirty = true
-	return s.persistLocked()
+	return s.update(func() error {
+		s.pullSeq++
+		n.Seq = s.pullSeq
+		if strings.TrimSpace(n.CreatedAt) == "" {
+			n.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		s.pullNotifications = append(s.pullNotifications, n)
+		if len(s.pullNotifications) > maxPullNotifications {
+			s.pullNotifications = s.pullNotifications[len(s.pullNotifications)-maxPullNotifications:]
+		}
+		s.pullDirty = true
+		return nil
+	})
 }
 
 // PullNotificationsAfter returns queued notifications with Seq greater than
@@ -472,11 +499,39 @@ func (s *Store) PullNotificationsAfter(after int64) ([]PullNotification, int64) 
 func (s *Store) AddDecision(d Decision) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if d.AtUTC == "" {
-		d.AtUTC = time.Now().UTC().Format(time.RFC3339)
+	// decisions.json is its own file with its own lock. It is appended to by
+	// the daemon on every classification and read by the api for the audit
+	// view, so it needs the same cross-process serialization as state.json —
+	// and it must re-read before appending, or the daemon's in-memory slice
+	// silently overwrites anything the api wrote.
+	return fsutil.WithFileLock(s.decisionsPath(), func() error {
+		if err := s.refreshDecisionsFromDiskLocked(); err != nil {
+			return err
+		}
+		if d.AtUTC == "" {
+			d.AtUTC = time.Now().UTC().Format(time.RFC3339)
+		}
+		s.decisions = append(s.decisions, d)
+		return s.persistDecisionsLocked()
+	})
+}
+
+// refreshDecisionsFromDiskLocked re-reads decisions.json. A missing file is
+// not an error (nothing has been recorded yet).
+func (s *Store) refreshDecisionsFromDiskLocked() error {
+	b, err := os.ReadFile(s.decisionsPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
-	s.decisions = append(s.decisions, d)
-	return s.persistDecisionsLocked()
+	var d []Decision
+	if err := json.Unmarshal(b, &d); err != nil {
+		return err
+	}
+	s.decisions = d
+	return nil
 }
 
 func (s *Store) Decisions(limit int) []Decision {
@@ -487,8 +542,21 @@ func (s *Store) Decisions(limit int) []Decision {
 	}
 	out := make([]Decision, len(s.decisions))
 	copy(out, s.decisions)
+	// Compare parsed instants, not RFC3339 strings. String ordering only
+	// happens to work while every value is UTC with identical formatting;
+	// one offset-bearing or fractional-second timestamp written by any
+	// future call site would silently scramble the ordering instead of
+	// failing. An unparseable timestamp sorts last (zero time) rather than
+	// taking the whole sort with it.
+	at := func(d Decision) time.Time {
+		t, err := time.Parse(time.RFC3339, d.AtUTC)
+		if err != nil {
+			return time.Time{}
+		}
+		return t
+	}
 	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].AtUTC > out[j].AtUTC
+		return at(out[i]).After(at(out[j]))
 	})
 	if limit > 0 && len(out) > limit {
 		return out[:limit]
@@ -547,7 +615,7 @@ func (s *Store) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.path(), b, 0o600); err != nil {
+	if err := fsutil.AtomicWriteFile(s.path(), b, 0o600); err != nil {
 		return fmt.Errorf("write state: %w", err)
 	}
 	s.notificationsDirty = false
@@ -566,41 +634,37 @@ func (s *Store) ListNotificationSubscriptions() []NotificationSubscription {
 }
 
 func (s *Store) UpsertNotificationSubscription(sub NotificationSubscription) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return err
-	}
-	for i, existing := range s.notifications {
-		if existing.Endpoint == sub.Endpoint {
-			s.notifications[i] = sub
-			s.notificationsDirty = true
-			return s.persistLocked()
+	return s.update(func() error {
+		s.notificationsDirty = true
+		for i, existing := range s.notifications {
+			if existing.Endpoint == sub.Endpoint {
+				s.notifications[i] = sub
+				return nil
+			}
 		}
-	}
-	s.notifications = append(s.notifications, sub)
-	s.notificationsDirty = true
-	return s.persistLocked()
+		s.notifications = append(s.notifications, sub)
+		return nil
+	})
 }
 
 func (s *Store) RemoveNotificationSubscription(endpoint string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
+	removed := false
+	err := s.update(func() error {
+		for i, sub := range s.notifications {
+			if sub.Endpoint != endpoint {
+				continue
+			}
+			s.notifications = append(s.notifications[:i], s.notifications[i+1:]...)
+			s.notificationsDirty = true
+			removed = true
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
 		return false, err
 	}
-	for i, sub := range s.notifications {
-		if sub.Endpoint != endpoint {
-			continue
-		}
-		s.notifications = append(s.notifications[:i], s.notifications[i+1:]...)
-		s.notificationsDirty = true
-		if err := s.persistLocked(); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	return false, nil
+	return removed, nil
 }
 
 func (s *Store) ListNativeDevices() []NativeDevice {
@@ -613,12 +677,10 @@ func (s *Store) ListNativeDevices() []NativeDevice {
 }
 
 func (s *Store) UpsertNativeDevice(device NativeDevice) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return err
-	}
+	return s.update(func() error { return s.upsertNativeDeviceLocked(device) })
+}
 
+func (s *Store) upsertNativeDeviceLocked(device NativeDevice) error {
 	device.DeviceID = strings.TrimSpace(device.DeviceID)
 	device.Platform = strings.ToLower(strings.TrimSpace(device.Platform))
 	device.PushToken = strings.TrimSpace(device.PushToken)
@@ -647,7 +709,7 @@ func (s *Store) UpsertNativeDevice(device NativeDevice) error {
 			device.MFAApprover = existing.MFAApprover
 			s.nativeDevices[i] = device
 			s.nativeDevicesDirty = true
-			return s.persistLocked()
+			return nil
 		}
 	}
 
@@ -662,48 +724,57 @@ func (s *Store) UpsertNativeDevice(device NativeDevice) error {
 				device.MFAApprover = existing.MFAApprover
 				s.nativeDevices[i] = device
 				s.nativeDevicesDirty = true
-				return s.persistLocked()
+				return nil
 			}
 		}
 	}
 
 	s.nativeDevices = append(s.nativeDevices, device)
 	s.nativeDevicesDirty = true
-	return s.persistLocked()
+	return nil
 }
 
 func (s *Store) RemoveNativeDevice(deviceID string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return false, err
-	}
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" {
 		return false, nil
 	}
-
-	for i, device := range s.nativeDevices {
-		if device.DeviceID != deviceID {
-			continue
+	removed := false
+	err := s.update(func() error {
+		for i, device := range s.nativeDevices {
+			if device.DeviceID != deviceID {
+				continue
+			}
+			s.nativeDevices = append(s.nativeDevices[:i], s.nativeDevices[i+1:]...)
+			s.nativeDevicesDirty = true
+			removed = true
+			return nil
 		}
-		s.nativeDevices = append(s.nativeDevices[:i], s.nativeDevices[i+1:]...)
-		s.nativeDevicesDirty = true
-		if err := s.persistLocked(); err != nil {
-			return false, err
-		}
-		return true, nil
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	return false, nil
+	return removed, nil
 }
 
 // GetNativeDevice returns a single device by ID, reading through to disk.
+//
+// A failed disk read fails CLOSED — no device, rather than whatever this
+// Store happened to have in memory. This is the lookup that
+// api.deviceAuthFromRequest authenticates against, so serving a stale list
+// here means a device the user just unpaired still authenticates: revoking
+// a stolen phone would silently do nothing for as long as the read kept
+// failing (a full disk, a read-only volume). Every other reader in this
+// file may serve stale data on a failed refresh; this one may not.
 func (s *Store) GetNativeDevice(deviceID string) (NativeDevice, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshNativeDevicesFromDiskLocked()
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" {
+		return NativeDevice{}, false
+	}
+	if err := s.refreshNativeDevicesFromDiskLocked(); err != nil {
 		return NativeDevice{}, false
 	}
 	for _, d := range s.nativeDevices {
@@ -717,24 +788,27 @@ func (s *Store) GetNativeDevice(deviceID string) (NativeDevice, bool) {
 // SetNativeDeviceMFAApprover flips a device's MFAApprover flag. It returns
 // updated=false (and no error) when no device matches deviceID.
 func (s *Store) SetNativeDeviceMFAApprover(deviceID string, approver bool) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return false, err
-	}
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" {
 		return false, nil
 	}
-	for i := range s.nativeDevices {
-		if s.nativeDevices[i].DeviceID == deviceID {
-			s.nativeDevices[i].MFAApprover = approver
-			s.nativeDevices[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-			s.nativeDevicesDirty = true
-			return true, s.persistLocked()
+	updated := false
+	err := s.update(func() error {
+		for i := range s.nativeDevices {
+			if s.nativeDevices[i].DeviceID == deviceID {
+				s.nativeDevices[i].MFAApprover = approver
+				s.nativeDevices[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				s.nativeDevicesDirty = true
+				updated = true
+				return nil
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	return false, nil
+	return updated, nil
 }
 
 // SetAICreditsExhausted marks that the classifier reported the weekly chat limit / out of
@@ -742,36 +816,42 @@ func (s *Store) SetNativeDeviceMFAApprover(deviceID string, approver bool) (bool
 // notify exactly once until the flag is reset. The flag is persisted so it
 // survives a restart.
 func (s *Store) SetAICreditsExhausted(atUTC string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
+	transitioned := false
+	err := s.update(func() error {
+		if s.aiCreditsExhausted {
+			return nil
+		}
+		if strings.TrimSpace(atUTC) == "" {
+			atUTC = time.Now().UTC().Format(time.RFC3339)
+		}
+		s.aiCreditsExhausted = true
+		s.aiCreditsExhaustedAt = atUTC
+		transitioned = true
+		return nil
+	})
+	if err != nil {
 		return false, err
 	}
-	if s.aiCreditsExhausted {
-		return false, nil
-	}
-	if strings.TrimSpace(atUTC) == "" {
-		atUTC = time.Now().UTC().Format(time.RFC3339)
-	}
-	s.aiCreditsExhausted = true
-	s.aiCreditsExhaustedAt = atUTC
-	return true, s.persistLocked()
+	return transitioned, nil
 }
 
 // ClearAICreditsExhausted resets the AI-credits flag. It returns true only when
 // the flag was previously set (true->false transition).
 func (s *Store) ClearAICreditsExhausted() (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
+	transitioned := false
+	err := s.update(func() error {
+		if !s.aiCreditsExhausted {
+			return nil
+		}
+		s.aiCreditsExhausted = false
+		s.aiCreditsExhaustedAt = ""
+		transitioned = true
+		return nil
+	})
+	if err != nil {
 		return false, err
 	}
-	if !s.aiCreditsExhausted {
-		return false, nil
-	}
-	s.aiCreditsExhausted = false
-	s.aiCreditsExhaustedAt = ""
-	return true, s.persistLocked()
+	return transitioned, nil
 }
 
 // AICreditsExhausted reports whether the AI-credits flag is set and when it was
@@ -788,17 +868,23 @@ func (s *Store) AICreditsExhausted() (bool, string) {
 // periodic upstream-release check emails exactly once per newly-seen
 // upstream version rather than on every poll until the operator rebuilds.
 func (s *Store) SetOllamaUpdateNotified(latestVersion string) (notify bool, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return false, err
-	}
 	latestVersion = strings.TrimSpace(latestVersion)
-	if latestVersion == "" || latestVersion == s.ollamaUpdateNotifiedVersion {
+	if latestVersion == "" {
 		return false, nil
 	}
-	s.ollamaUpdateNotifiedVersion = latestVersion
-	return true, s.persistLocked()
+	newlySeen := false
+	err = s.update(func() error {
+		if latestVersion == s.ollamaUpdateNotifiedVersion {
+			return nil
+		}
+		s.ollamaUpdateNotifiedVersion = latestVersion
+		newlySeen = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return newlySeen, nil
 }
 
 func (s *Store) loadDecisions() error {
@@ -822,7 +908,7 @@ func (s *Store) persistDecisionsLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.decisionsPath(), b, 0o600); err != nil {
+	if err := fsutil.AtomicWriteFile(s.decisionsPath(), b, 0o600); err != nil {
 		return fmt.Errorf("write decisions: %w", err)
 	}
 	return nil
@@ -830,81 +916,66 @@ func (s *Store) persistDecisionsLocked() error {
 
 // SetDesktopPairingCode stores a pairing code with 5-minute expiration
 func (s *Store) SetDesktopPairingCode(code string, ttl time.Duration) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return err
-	}
-
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
-	expiresAt := time.Now().UTC().Add(ttl)
-	s.desktopPairingCodes[strings.TrimSpace(code)] = expiresAt.Format(time.RFC3339)
-	s.pairingCodesDirty = true
-	return s.persistLocked()
+	return s.update(func() error {
+		expiresAt := time.Now().UTC().Add(ttl)
+		s.desktopPairingCodes[strings.TrimSpace(code)] = expiresAt.Format(time.RFC3339)
+		s.pairingCodesDirty = true
+		return nil
+	})
 }
 
 // ValidateDesktopPairingCode checks if a code is valid and not expired.
 // Returns true if valid, false if expired or not found.
+//
+// This is a pure read: it refreshes from disk like every other reader here
+// (so a code minted by the other process is visible), and it does NOT prune
+// expired entries. An earlier version deleted the expired entry in memory
+// without setting pairingCodesDirty or persisting, so the delete was silently
+// reverted by the next refresh — housekeeping that only looked like it
+// worked. Expired codes are pruned for real on load, in applyStateFile.
 func (s *Store) ValidateDesktopPairingCode(code string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_ = s.refreshStateFromDiskLocked()
 
-	cleaned := strings.TrimSpace(code)
-	expiresAtStr, ok := s.desktopPairingCodes[cleaned]
+	expiresAtStr, ok := s.desktopPairingCodes[strings.TrimSpace(code)]
 	if !ok {
 		return false
 	}
-
 	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
 	if err != nil {
 		return false
 	}
-
-	if time.Now().UTC().After(expiresAt) {
-		// Code has expired, clean it up
-		delete(s.desktopPairingCodes, cleaned)
-		return false
-	}
-
-	return true
+	return time.Now().UTC().Before(expiresAt)
 }
 
 // ConsumeDesktopPairingCode validates and removes a pairing code.
 // Returns true if code was valid, false if expired or not found.
 func (s *Store) ConsumeDesktopPairingCode(code string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return false, err
-	}
-
 	cleaned := strings.TrimSpace(code)
-	expiresAtStr, ok := s.desktopPairingCodes[cleaned]
-	if !ok {
-		return false, nil
-	}
-
-	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
+	consumed := false
+	err := s.update(func() error {
+		expiresAtStr, ok := s.desktopPairingCodes[cleaned]
+		if !ok {
+			return nil
+		}
+		// Whether the code was valid or merely unparseable/expired, it is
+		// removed and the removal is persisted — consuming under the file
+		// lock is what makes "redeemable exactly once" hold against a
+		// concurrent redemption of the same code.
+		delete(s.desktopPairingCodes, cleaned)
+		s.pairingCodesDirty = true
+		expiresAt, parseErr := time.Parse(time.RFC3339, expiresAtStr)
+		consumed = parseErr == nil && time.Now().UTC().Before(expiresAt)
+		return nil
+	})
 	if err != nil {
-		delete(s.desktopPairingCodes, cleaned)
-		return false, nil
+		return consumed, err
 	}
-
-	if time.Now().UTC().After(expiresAt) {
-		// Code has expired
-		delete(s.desktopPairingCodes, cleaned)
-		return false, nil
-	}
-
-	// Code is valid, consume it
-	delete(s.desktopPairingCodes, cleaned)
-	s.pairingCodesDirty = true
-	if err := s.persistLocked(); err != nil {
-		return true, err
-	}
-	return true, nil
+	return consumed, nil
 }
 
 // CheckDesktopPairingRateLimit checks if a user can attempt pairing.
@@ -944,24 +1015,17 @@ func (s *Store) CheckDesktopPairingRateLimit() (bool, int, error) {
 
 // RecordDesktopPairingAttempt records a pairing attempt for rate limiting.
 func (s *Store) RecordDesktopPairingAttempt(code string, success bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshStateFromDiskLocked(); err != nil {
-		return err
-	}
-
-	attempt := PairingAttempt{
-		Code:      strings.TrimSpace(code),
-		AttemptAt: time.Now().UTC().Format(time.RFC3339),
-		Success:   success,
-	}
-	s.desktopPairingAttempts = append(s.desktopPairingAttempts, attempt)
-
-	// Keep only last 100 attempts to avoid unbounded growth
-	if len(s.desktopPairingAttempts) > 100 {
-		s.desktopPairingAttempts = s.desktopPairingAttempts[len(s.desktopPairingAttempts)-100:]
-	}
-
-	s.pairingAttemptsDirty = true
-	return s.persistLocked()
+	return s.update(func() error {
+		s.desktopPairingAttempts = append(s.desktopPairingAttempts, PairingAttempt{
+			Code:      strings.TrimSpace(code),
+			AttemptAt: time.Now().UTC().Format(time.RFC3339),
+			Success:   success,
+		})
+		// Keep only last 100 attempts to avoid unbounded growth
+		if len(s.desktopPairingAttempts) > 100 {
+			s.desktopPairingAttempts = s.desktopPairingAttempts[len(s.desktopPairingAttempts)-100:]
+		}
+		s.pairingAttemptsDirty = true
+		return nil
+	})
 }

@@ -93,6 +93,11 @@ func (s *Store) Get(id string) (Rule, bool) {
 func (s *Store) Upsert(r Rule) (Rule, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return Rule{}, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return Rule{}, err
 	}
@@ -145,6 +150,11 @@ func (s *Store) Upsert(r Rule) (Rule, error) {
 func (s *Store) Delete(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return false, err
 	}
@@ -167,6 +177,11 @@ func (s *Store) Delete(id string) (bool, error) {
 func (s *Store) Reorder(ids []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return err
 	}

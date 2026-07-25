@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,15 +65,64 @@ type User struct {
 	// Milestone 1 sets or reads it.
 	PushMFAEnabled bool `json:"pushMfaEnabled,omitempty"`
 
-	// PGP identity (backend-only encryption/signing — see internal/pgpmail).
-	// PGPPrivateKeyEnc is a cryptutil envelope JSON string sealed with the
-	// dedicated PGP private key master key; it is never exposed via Public().
-	PGPFingerprint   string `json:"pgpFingerprint,omitempty"`
-	PGPKeyID         string `json:"pgpKeyId,omitempty"`
-	PGPPublicKey     string `json:"pgpPublicKey,omitempty"`
+	// PGP identity. The public key is not sensitive. The private key is
+	// stored one of two ways, distinguished by PGPKeyProtection:
+	//
+	//   "client" — PGPPrivateKeyWrapped holds an envelope the BROWSER
+	//     produced, sealed under a key derived from the user's password
+	//     (see frontend/src/lib/keyVault.ts). The server cannot open it and
+	//     has no code that tries. This is the end-to-end mode: possession of
+	//     the disk, a backup, or this process's memory does not yield the
+	//     private key or anything encrypted to it.
+	//
+	//   "server" — LEGACY. PGPPrivateKeyEnc holds a cryptutil envelope
+	//     sealed with a master key sitting on the same volume, which means
+	//     the server (and anyone who can read that volume) can decrypt every
+	//     message. Retained only so existing installs keep working until the
+	//     owner logs in and migrates; see MigratePGPKeyToClientProtection.
+	//
+	// Neither private field is ever exposed via Public().
+	PGPFingerprint string `json:"pgpFingerprint,omitempty"`
+	PGPKeyID       string `json:"pgpKeyId,omitempty"`
+	PGPPublicKey   string `json:"pgpPublicKey,omitempty"`
+	// PGPPrivateKeyEnc is the legacy server-sealed private key. Empty for
+	// any identity created or migrated since client-side protection landed.
 	PGPPrivateKeyEnc string `json:"pgpPrivateKeyEnc,omitempty"`
-	PGPKeySource     string `json:"pgpKeySource,omitempty"`
-	PGPKeyCreatedAt  string `json:"pgpKeyCreatedAt,omitempty"`
+	// PGPPrivateKeyWrapped is the client-wrapped private key envelope,
+	// opaque to the server: it is stored, returned to the owning user, and
+	// never interpreted here.
+	PGPPrivateKeyWrapped string `json:"pgpPrivateKeyWrapped,omitempty"`
+	PGPKeyProtection     string `json:"pgpKeyProtection,omitempty"`
+	PGPKeySource         string `json:"pgpKeySource,omitempty"`
+	PGPKeyCreatedAt      string `json:"pgpKeyCreatedAt,omitempty"`
+}
+
+// PGP key protection modes. See User's PGP block.
+const (
+	PGPProtectionClient = "client"
+	PGPProtectionServer = "server"
+)
+
+// PGPProtection returns the effective protection mode for u's identity.
+// An identity with no explicit mode but a legacy sealed key is "server";
+// this keeps pre-existing users.json files readable without a migration
+// pass.
+func (u User) PGPProtection() string {
+	if u.PGPKeyProtection == PGPProtectionClient || u.PGPPrivateKeyWrapped != "" {
+		return PGPProtectionClient
+	}
+	if u.PGPPrivateKeyEnc != "" {
+		return PGPProtectionServer
+	}
+	return ""
+}
+
+// HasServerReadableKey reports whether the server can still decrypt this
+// user's mail on their behalf. Every server-side PGP operation must check
+// this and refuse rather than assume — under client protection there is no
+// key here to use.
+func (u User) HasServerReadableKey() bool {
+	return u.PGPProtection() == PGPProtectionServer
 }
 
 // Public is the JSON-safe view returned to API clients (no password hash).
@@ -90,6 +140,10 @@ type Public struct {
 	PGPKeyID           string `json:"pgpKeyId,omitempty"`
 	PGPKeySource       string `json:"pgpKeySource,omitempty"`
 	PGPKeyCreatedAt    string `json:"pgpKeyCreatedAt,omitempty"`
+	// PGPKeyProtection tells the client whether it must unwrap the private
+	// key itself ("client") or whether this is a legacy server-held key
+	// ("server") the UI should prompt the user to migrate.
+	PGPKeyProtection string `json:"pgpKeyProtection,omitempty"`
 }
 
 func (u User) Public() Public {
@@ -107,22 +161,62 @@ func (u User) Public() Public {
 		PGPKeyID:           u.PGPKeyID,
 		PGPKeySource:       u.PGPKeySource,
 		PGPKeyCreatedAt:    u.PGPKeyCreatedAt,
+		PGPKeyProtection:   u.PGPProtection(),
 	}
 }
 
 var (
 	ErrNotFound      = errors.New("user not found")
 	ErrUsernameTaken = errors.New("username already in use")
+	ErrPasswordWeak  = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 )
+
+// MinPasswordLen is the minimum length of any password this store will
+// accept. Length is the only rule enforced: character-class requirements
+// push users toward predictable substitutions without adding real entropy,
+// while a length floor is what actually defeats the online guessing this
+// server's lockout only slows down.
+const MinPasswordLen = 14
+
+// ValidatePassword enforces MinPasswordLen. It is called by every store
+// method that sets a password (Create, SetPassword) rather than by each API
+// handler, so a new call site cannot forget it. Length is counted in runes,
+// not bytes, so a passphrase in a non-Latin script is not penalized.
+func ValidatePassword(password string) error {
+	if len([]rune(password)) < MinPasswordLen {
+		return ErrPasswordWeak
+	}
+	return nil
+}
+
+// normalizeUsername folds a username to its comparison form. Usernames are
+// stored as the user typed them (minus surrounding whitespace) but compared
+// case-insensitively, so "admin", "Admin", and "ADMIN" can never coexist as
+// separate accounts on a system where the admin role can reach every other
+// user's configuration. Comparing rather than rewriting means accounts
+// created before this rule existed keep working without a migration.
+func normalizeUsername(username string) string {
+	return strings.ToLower(strings.TrimSpace(username))
+}
 
 type usersFile struct {
 	Version int    `json:"version"`
 	Users   []User `json:"users"`
 }
 
-// Store is the on-disk users.json store. It re-reads from disk before every
-// mutation so the api and daemon processes (which never share memory, see
-// supervisord.conf) never race a lost update against each other.
+// Store is the on-disk users.json store.
+//
+// Every mutation is a read-modify-write of the whole file, and this file is
+// written by BOTH processes supervisord starts: the api process (password
+// changes, TOTP enrollment, recovery-code consumption) and the daemon
+// process (processor/sendas_check.go's SetPGPIdentity, when a verified
+// send-as alias is added to a user's key). mu only serializes goroutines
+// within one process, so every mutator additionally takes an inter-process
+// file lock for the whole read-modify-write cycle — see
+// fsutil.WithFileLock. Without it, two overlapping mutations each read the
+// same starting state and the second write silently discards the first: a
+// lost password change, or a recovery code that stays usable after being
+// consumed.
 type Store struct {
 	mu   sync.RWMutex
 	path string
@@ -349,6 +443,9 @@ func (s *Store) List() ([]User, error) {
 	if err != nil {
 		return nil, err
 	}
+	sort.Slice(f.Users, func(i, j int) bool {
+		return normalizeUsername(f.Users[i].Username) < normalizeUsername(f.Users[j].Username)
+	})
 	return f.Users, nil
 }
 
@@ -368,7 +465,8 @@ func (s *Store) Get(id string) (User, error) {
 	return User{}, ErrNotFound
 }
 
-// GetByUsername returns a user by username (case-sensitive).
+// GetByUsername returns a user by username, compared case-insensitively —
+// see normalizeUsername.
 func (s *Store) GetByUsername(username string) (User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -376,8 +474,9 @@ func (s *Store) GetByUsername(username string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
+	want := normalizeUsername(username)
 	for _, u := range f.Users {
-		if u.Username == username {
+		if normalizeUsername(u.Username) == want {
 			return u, nil
 		}
 	}
@@ -386,41 +485,50 @@ func (s *Store) GetByUsername(username string) (User, error) {
 
 // Create adds a new user with the given username/password/role.
 func (s *Store) Create(username, password string, role Role) (User, error) {
+	if err := ValidatePassword(password); err != nil {
+		return User{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f, err := s.readLocked()
-	if err != nil {
-		return User{}, err
-	}
-	for _, u := range f.Users {
-		if u.Username == username {
-			return User{}, ErrUsernameTaken
+	var created User
+	err := fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readLocked()
+		if err != nil {
+			return err
 		}
-	}
-	hash, err := HashPassword(password)
+		username = strings.TrimSpace(username)
+		want := normalizeUsername(username)
+		for _, u := range f.Users {
+			if normalizeUsername(u.Username) == want {
+				return ErrUsernameTaken
+			}
+		}
+		hash, err := HashPassword(password)
+		if err != nil {
+			return err
+		}
+		id, err := fsutil.NewUUIDv4()
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		created = User{
+			ID:                 id,
+			Username:           username,
+			PasswordHash:       hash,
+			Role:               role,
+			Active:             true,
+			MustChangePassword: true,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+		f.Users = append(f.Users, created)
+		return s.writeLocked(f)
+	})
 	if err != nil {
 		return User{}, err
 	}
-	id, err := fsutil.NewUUIDv4()
-	if err != nil {
-		return User{}, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	u := User{
-		ID:                 id,
-		Username:           username,
-		PasswordHash:       hash,
-		Role:               role,
-		Active:             true,
-		MustChangePassword: true,
-		CreatedAt:          now,
-		UpdatedAt:          now,
-	}
-	f.Users = append(f.Users, u)
-	if err := s.writeLocked(f); err != nil {
-		return User{}, err
-	}
-	return u, nil
+	return created, nil
 }
 
 // mutate re-reads the store, applies fn to the matching user, and persists
@@ -428,23 +536,32 @@ func (s *Store) Create(username, password string, role Role) (User, error) {
 func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f, err := s.readLocked()
-	if err != nil {
-		return User{}, err
-	}
-	for i := range f.Users {
-		if f.Users[i].ID == id {
+	var updated User
+	err := fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readLocked()
+		if err != nil {
+			return err
+		}
+		for i := range f.Users {
+			if f.Users[i].ID != id {
+				continue
+			}
 			if err := fn(&f.Users[i]); err != nil {
-				return User{}, err
+				return err
 			}
 			f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			if err := s.writeLocked(f); err != nil {
-				return User{}, err
+				return err
 			}
-			return f.Users[i], nil
+			updated = f.Users[i]
+			return nil
 		}
+		return ErrNotFound
+	})
+	if err != nil {
+		return User{}, err
 	}
-	return User{}, ErrNotFound
+	return updated, nil
 }
 
 // SetRole updates a user's role.
@@ -458,6 +575,9 @@ func (s *Store) SetRole(id string, role Role) (User, error) {
 // SetPassword sets a new password. If requireChange is true the user must
 // change it again on next login (used for admin-initiated resets).
 func (s *Store) SetPassword(id, newPassword string, requireChange bool) (User, error) {
+	if err := ValidatePassword(newPassword); err != nil {
+		return User{}, err
+	}
 	hash, err := HashPassword(newPassword)
 	if err != nil {
 		return User{}, err
@@ -573,17 +693,64 @@ func (s *Store) SetLastUsedTOTPStep(id string, step int64) (User, error) {
 	})
 }
 
-// SetPGPIdentity stores a user's own PGP identity: the armored public key
-// (not sensitive) and the sealed private key envelope (from
-// pgpmail.Identity.SealPrivateKey), replacing any existing identity.
+// SetPGPIdentity stores a legacy, SERVER-READABLE PGP identity: the armored
+// public key plus a private key sealed with the server's own master key.
+//
+// New identities must not use this. It exists for the send-as User ID
+// reconcile, which can only run against a key the server can already open,
+// and which skips client-protected identities entirely.
 func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, privateKeyEnc, source, createdAt string) (User, error) {
 	return s.mutate(id, func(u *User) error {
 		u.PGPFingerprint = fingerprint
 		u.PGPKeyID = keyID
 		u.PGPPublicKey = armoredPublicKey
 		u.PGPPrivateKeyEnc = privateKeyEnc
+		u.PGPPrivateKeyWrapped = ""
+		u.PGPKeyProtection = PGPProtectionServer
 		u.PGPKeySource = source
 		u.PGPKeyCreatedAt = createdAt
+		return nil
+	})
+}
+
+// SetPGPIdentityClientProtected stores an end-to-end PGP identity. wrapped
+// is an opaque envelope the browser produced under a key derived from the
+// user's password; this store never interprets it, and clearing
+// PGPPrivateKeyEnc is the point — after this call there is no copy of the
+// private key on this server that this server can open.
+func (s *Store) SetPGPIdentityClientProtected(id, fingerprint, keyID, armoredPublicKey, wrapped, source, createdAt string) (User, error) {
+	if strings.TrimSpace(wrapped) == "" {
+		return User{}, errors.New("wrapped private key is required for client-protected identities")
+	}
+	return s.mutate(id, func(u *User) error {
+		u.PGPFingerprint = fingerprint
+		u.PGPKeyID = keyID
+		u.PGPPublicKey = armoredPublicKey
+		u.PGPPrivateKeyWrapped = wrapped
+		u.PGPPrivateKeyEnc = ""
+		u.PGPKeyProtection = PGPProtectionClient
+		u.PGPKeySource = source
+		u.PGPKeyCreatedAt = createdAt
+		return nil
+	})
+}
+
+// RewrapPGPPrivateKey replaces only the wrapped private key envelope,
+// leaving the identity (fingerprint, public key, provenance) untouched.
+// Used when the user changes their password: the wrapping key is derived
+// from that password, so the browser unwraps with the old one and rewraps
+// with the new one, and this stores the result.
+func (s *Store) RewrapPGPPrivateKey(id, wrapped string) (User, error) {
+	if strings.TrimSpace(wrapped) == "" {
+		return User{}, errors.New("wrapped private key is required")
+	}
+	return s.mutate(id, func(u *User) error {
+		if u.PGPFingerprint == "" {
+			return errors.New("no pgp identity to rewrap")
+		}
+		u.PGPPrivateKeyWrapped = wrapped
+		u.PGPPrivateKeyEnc = ""
+		u.PGPKeyProtection = PGPProtectionClient
 		return nil
 	})
 }
@@ -595,6 +762,8 @@ func (s *Store) ClearPGPIdentity(id string) (User, error) {
 		u.PGPKeyID = ""
 		u.PGPPublicKey = ""
 		u.PGPPrivateKeyEnc = ""
+		u.PGPPrivateKeyWrapped = ""
+		u.PGPKeyProtection = ""
 		u.PGPKeySource = ""
 		u.PGPKeyCreatedAt = ""
 		return nil

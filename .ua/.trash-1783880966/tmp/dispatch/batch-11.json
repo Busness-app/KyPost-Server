@@ -1,7 +1,0 @@
-{
- "batchIndex": 11,
- "totalBatches": 12,
- "fileList": "  - path: worker/README.md (190 lines, language: markdown, fileCategory: docs)\n  - path: worker/package.json (16 lines, language: json, fileCategory: config)\n  - path: worker/tsconfig.json (15 lines, language: json, fileCategory: config)",
- "batchImportData": "{\"worker/README.md\":[],\"worker/package.json\":[],\"worker/tsconfig.json\":[]}",
- "neighborMap": "{}"
-}

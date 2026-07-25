@@ -63,13 +63,19 @@ type NativeDevicesResponse = {
 type NotificationPrefs = {
   mode: "all" | "keywords" | "none";
   keywords: string[];
+  // Off by default. See the copy rendered next to this toggle, and
+  // UserNotificationSettings.ContentPreview on the server, for why.
+  contentPreview: boolean;
 };
 
 function normalizePrefs(input: unknown): NotificationPrefs {
   const source = (input ?? {}) as Record<string, unknown>;
   const mode = source.mode === "all" || source.mode === "keywords" ? source.mode : "none";
   const keywords = Array.isArray(source.keywords) ? source.keywords.map(String) : [];
-  return { mode, keywords };
+  // Anything other than an explicit true is off: an older settings file with
+  // no such field must read as private, not as opted in.
+  const contentPreview = source.contentPreview === true;
+  return { mode, keywords, contentPreview };
 }
 
 const QR_CODE_WIDTH_PX = 220;
@@ -307,7 +313,8 @@ export function NotificationsPage() {
 
     const next: NotificationPrefs = {
       mode: prefs.mode,
-      keywords: uniqueLabels(prefs.keywords)
+      keywords: uniqueLabels(prefs.keywords),
+      contentPreview: prefs.contentPreview
     };
 
     try {
@@ -649,6 +656,40 @@ export function NotificationsPage() {
                   <span className="notifications-mode-copy">Notify only for selected keywords.</span>
                 </label>
               </div>
+
+              <h3 style={{ marginTop: "1.5rem" }}>Notification Content</h3>
+              <label className="notifications-preview-toggle" style={{ display: "flex", gap: "0.6rem", alignItems: "flex-start" }}>
+                <input
+                  type="checkbox"
+                  checked={prefs.contentPreview}
+                  onChange={(event) => setPrefs({ ...prefs, contentPreview: event.target.checked })}
+                  style={{ marginTop: "0.25rem" }}
+                />
+                <span>
+                  <span className="notifications-mode-title">Show sender and subject in notifications</span>
+                  <span className="notifications-mode-copy" style={{ display: "block" }}>
+                    Off by default. When off, notifications read &ldquo;You have a new email.&rdquo; and carry no
+                    sender, subject, or keyword.
+                  </span>
+                </span>
+              </label>
+              <p className="notifications-muted" style={{ marginTop: "0.5rem" }}>
+                {deliveryMode === "pull" ? (
+                  <>
+                    You are on <strong>App Pull</strong>: your phone fetches notifications directly from this
+                    server, so turning this on keeps sender and subject between your device and your own server.
+                  </>
+                ) : (
+                  <>
+                    <strong>Read this before turning it on.</strong> Mobile push is not delivered by this server.
+                    It travels through the push relay and then Google (Android) or Apple (iOS), and the sender and
+                    subject are readable at every hop. Turning this on tells those companies who emails you and
+                    what about &mdash; which PGP encryption does not prevent, because the Subject header is not
+                    encrypted. Switch the mobile delivery mode to <strong>App Pull</strong> below to get previews
+                    without involving them. Browser notifications are encrypted to your browser either way.
+                  </>
+                )}
+              </p>
             </div>
           ) : (
             <div role="tabpanel" className="notifications-settings-panel">

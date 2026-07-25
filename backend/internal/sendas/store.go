@@ -21,8 +21,9 @@ const pendingExpiry = 5 * time.Minute
 
 // Store is one user's set of send-as alias records, persisted as
 // send_as_aliases.json in the user's state directory. The API and daemon
-// processes share no memory, so every read and mutation re-reads the file
-// from disk first, matching contacts.Store's convention.
+// processes share no memory, so every read re-reads the file from disk
+// first and every mutation runs through update, which additionally holds an
+// inter-process file lock for the whole read-modify-write cycle.
 type Store struct {
 	mu      sync.Mutex
 	baseDir string
@@ -66,6 +67,27 @@ func (s *Store) persistLocked() error {
 		return fmt.Errorf("write send-as aliases: %w", err)
 	}
 	return nil
+}
+
+// update runs mutate as one read-modify-write cycle, holding the in-process
+// mutex and the inter-process file lock across the whole cycle and
+// refreshing from disk first. mutate is responsible for calling
+// persistLocked when it actually changes something.
+//
+// This file is written by both processes: the api process creates and
+// deletes aliases from the settings UI, and the daemon process verifies and
+// expires them (processor/sendas_check.go). Without the file lock, a
+// verification landing at the same moment as a user deleting a different
+// alias loses one of the two writes. See fsutil.WithFileLock.
+func (s *Store) update(mutate func() error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fsutil.WithFileLock(s.path(), func() error {
+		if err := s.refreshFromDiskLocked(); err != nil {
+			return err
+		}
+		return mutate()
+	})
 }
 
 // List returns all alias records regardless of status (pending, verified,
@@ -165,38 +187,34 @@ func newVerificationCode() (string, error) {
 // to lowercase before storing) with the given displayName, generating a
 // random VerificationCode and setting ExpiresAt to 5 minutes from now.
 func (s *Store) Create(userID, email, displayName string) (Alias, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshFromDiskLocked(); err != nil {
-		return Alias{}, err
-	}
-
-	id, err := fsutil.NewUUIDv4()
+	var created Alias
+	err := s.update(func() error {
+		id, err := fsutil.NewUUIDv4()
+		if err != nil {
+			return err
+		}
+		code, err := newVerificationCode()
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		created = Alias{
+			ID:               id,
+			UserID:           userID,
+			Email:            strings.ToLower(email),
+			DisplayName:      displayName,
+			VerificationCode: code,
+			Status:           "pending",
+			CreatedAt:        now.Format(time.RFC3339),
+			ExpiresAt:        now.Add(pendingExpiry).Format(time.RFC3339),
+		}
+		s.aliases = append(s.aliases, created)
+		return s.persistLocked()
+	})
 	if err != nil {
 		return Alias{}, err
 	}
-	code, err := newVerificationCode()
-	if err != nil {
-		return Alias{}, err
-	}
-	now := time.Now().UTC()
-
-	a := Alias{
-		ID:               id,
-		UserID:           userID,
-		Email:            strings.ToLower(email),
-		DisplayName:      displayName,
-		VerificationCode: code,
-		Status:           "pending",
-		CreatedAt:        now.Format(time.RFC3339),
-		ExpiresAt:        now.Add(pendingExpiry).Format(time.RFC3339),
-	}
-
-	s.aliases = append(s.aliases, a)
-	if err := s.persistLocked(); err != nil {
-		return Alias{}, err
-	}
-	return a, nil
+	return created, nil
 }
 
 // MarkVerified sets Status to "verified" and stamps VerifiedAt. Calling it
@@ -205,23 +223,20 @@ func (s *Store) Create(userID, email, displayName string) (Alias, error) {
 // match in the same tick window in future extensions — idempotency here
 // costs nothing). Returns an error if no record with that ID exists.
 func (s *Store) MarkVerified(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshFromDiskLocked(); err != nil {
-		return err
-	}
-	for i, a := range s.aliases {
-		if a.ID != id {
-			continue
+	return s.update(func() error {
+		for i, a := range s.aliases {
+			if a.ID != id {
+				continue
+			}
+			if a.Status == "verified" {
+				return nil
+			}
+			s.aliases[i].Status = "verified"
+			s.aliases[i].VerifiedAt = time.Now().UTC().Format(time.RFC3339)
+			return s.persistLocked()
 		}
-		if a.Status == "verified" {
-			return nil
-		}
-		s.aliases[i].Status = "verified"
-		s.aliases[i].VerifiedAt = time.Now().UTC().Format(time.RFC3339)
-		return s.persistLocked()
-	}
-	return fmt.Errorf("sendas: no alias with id %q", id)
+		return fmt.Errorf("sendas: no alias with id %q", id)
+	})
 }
 
 // MarkFailed sets Status to "failed" and stamps FailedAt. Only meaningful on
@@ -230,69 +245,60 @@ func (s *Store) MarkVerified(id string) error {
 // already-verified alias to failed would be a real bug, not a race. Returns
 // an error if no record with that ID exists.
 func (s *Store) MarkFailed(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshFromDiskLocked(); err != nil {
-		return err
-	}
-	for i, a := range s.aliases {
-		if a.ID != id {
-			continue
+	return s.update(func() error {
+		for i, a := range s.aliases {
+			if a.ID != id {
+				continue
+			}
+			if a.Status != "pending" {
+				return fmt.Errorf("sendas: alias %q is %q, not pending", id, a.Status)
+			}
+			s.aliases[i].Status = "failed"
+			s.aliases[i].FailedAt = time.Now().UTC().Format(time.RFC3339)
+			return s.persistLocked()
 		}
-		if a.Status != "pending" {
-			return fmt.Errorf("sendas: alias %q is %q, not pending", id, a.Status)
-		}
-		s.aliases[i].Status = "failed"
-		s.aliases[i].FailedAt = time.Now().UTC().Format(time.RFC3339)
-		return s.persistLocked()
-	}
-	return fmt.Errorf("sendas: no alias with id %q", id)
+		return fmt.Errorf("sendas: no alias with id %q", id)
+	})
 }
 
 // Delete removes the record entirely. Unlike contacts.Store.Delete, which
 // tombstones for sync consumers, there is no sync-consumer concept for
 // aliases, so a real delete is correct and simpler.
 func (s *Store) Delete(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshFromDiskLocked(); err != nil {
-		return err
-	}
-	for i, a := range s.aliases {
-		if a.ID != id {
-			continue
+	return s.update(func() error {
+		for i, a := range s.aliases {
+			if a.ID != id {
+				continue
+			}
+			s.aliases = append(s.aliases[:i], s.aliases[i+1:]...)
+			return s.persistLocked()
 		}
-		s.aliases = append(s.aliases[:i], s.aliases[i+1:]...)
-		return s.persistLocked()
-	}
-	return fmt.Errorf("sendas: no alias with id %q", id)
+		return fmt.Errorf("sendas: no alias with id %q", id)
+	})
 }
 
 // SweepTerminal removes records with Status == "failed" whose FailedAt is
 // older than retention. "verified" and "pending" records are left untouched
 // regardless of age.
 func (s *Store) SweepTerminal(retention time.Duration) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshFromDiskLocked(); err != nil {
-		return err
-	}
-	cutoff := time.Now().Add(-retention)
-	kept := make([]Alias, 0, len(s.aliases))
-	changed := false
-	for _, a := range s.aliases {
-		if a.Status == "failed" {
-			failedAt, err := time.Parse(time.RFC3339, a.FailedAt)
-			if err == nil && failedAt.Before(cutoff) {
-				changed = true
-				continue
+	return s.update(func() error {
+		cutoff := time.Now().Add(-retention)
+		kept := make([]Alias, 0, len(s.aliases))
+		changed := false
+		for _, a := range s.aliases {
+			if a.Status == "failed" {
+				failedAt, err := time.Parse(time.RFC3339, a.FailedAt)
+				if err == nil && failedAt.Before(cutoff) {
+					changed = true
+					continue
+				}
 			}
+			kept = append(kept, a)
 		}
-		kept = append(kept, a)
-	}
-	if !changed {
-		return nil
-	}
-	s.aliases = kept
-	return s.persistLocked()
+		if !changed {
+			return nil
+		}
+		s.aliases = kept
+		return s.persistLocked()
+	})
 }

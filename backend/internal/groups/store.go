@@ -91,6 +91,11 @@ func (s *Store) Get(id string) (Group, bool) {
 func (s *Store) Upsert(g Group) (Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return Group{}, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return Group{}, err
 	}
@@ -142,6 +147,11 @@ func (s *Store) Upsert(g Group) (Group, error) {
 func (s *Store) Delete(id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return false, err
 	}

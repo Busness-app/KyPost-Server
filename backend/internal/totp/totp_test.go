@@ -19,7 +19,7 @@ func TestValidateRFC6238Vectors(t *testing.T) {
 		code string
 		step int64
 	}{
-		{59, "287082", 1},          // RFC 94287082
+		{59, "287082", 1},                // RFC 94287082
 		{1111111109, "081804", 37037036}, // RFC 07081804
 	}
 	for _, c := range cases {

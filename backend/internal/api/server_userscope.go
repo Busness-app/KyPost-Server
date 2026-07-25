@@ -338,7 +338,13 @@ func (s *Server) rescanSubscriberIndex() {
 		}
 	}
 	s.userMu.Lock()
-	s.subIndex = next
+	// Merge rather than replace, for the same reason as rescanDeviceIndex:
+	// never let a rescan discard an in-memory entry a concurrent request is
+	// still relying on. Both indexes are owner-resolution hints; neither
+	// grants access on its own.
+	for id, owner := range next {
+		s.subIndex[id] = owner
+	}
 	s.userMu.Unlock()
 }
 
@@ -381,7 +387,11 @@ func (s *Server) reserveDeviceID(ownerID, deviceID string) bool {
 	}
 	// Warm the index from disk on a miss, so a device registered before this
 	// process started, or by a prior request, is still honored by the check
-	// below.
+	// below. This runs outside the critical section because it does disk I/O
+	// and takes userMu itself — which is precisely why rescanDeviceIndex
+	// must merge rather than replace: a rescan triggered here by one
+	// in-flight registration must not wipe the reservation another one has
+	// already made but not yet persisted.
 	s.lookupUserByDevice(deviceID)
 
 	s.userMu.Lock()
@@ -448,6 +458,21 @@ func (s *Server) rescanDeviceIndex() {
 		}
 	}
 	s.userMu.Lock()
-	s.deviceIndex = next
+	// Merge into the live index rather than replacing it. A reservation made
+	// by reserveDeviceID for an in-flight registration has not reached disk
+	// yet, so replacing the map would silently drop it — and two concurrent
+	// registrations racing the same client-chosen deviceId would then BOTH
+	// see a free slot and both succeed, which is exactly the device-ID
+	// hijack reserveDeviceID exists to prevent.
+	//
+	// Merging can leave an entry for a device that was since unpaired by the
+	// other process. That is safe: the index only resolves deviceId -> owner
+	// so the owner's store can be opened; authorization is decided by
+	// state.Store.GetNativeDevice + the secret-hash check in
+	// deviceAuthFromRequest, both of which read through to disk and fail
+	// closed on a device that is no longer there.
+	for id, owner := range next {
+		s.deviceIndex[id] = owner
+	}
 	s.userMu.Unlock()
 }

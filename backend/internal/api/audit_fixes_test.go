@@ -96,7 +96,7 @@ func TestMustChangePasswordBlocksOtherEndpoints(t *testing.T) {
 	token := "mcp-session"
 	csrf := "mcp-csrf"
 	srv.mu.Lock()
-	srv.sessions[token] = Session{UserID: u.ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrf}
+	srv.sessions[token] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrf}
 	srv.mu.Unlock()
 
 	// A normal authenticated endpoint must be refused.

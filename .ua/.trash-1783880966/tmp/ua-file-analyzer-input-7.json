@@ -1,9 +1,0 @@
-{
-  "projectRoot": "/home/yoshi/git/llama labels",
-  "batchFiles": [
-    {"path": "backend/AGENTS.md", "language": "markdown", "sizeLines": 178, "fileCategory": "docs"},
-    {"path": "backend/go.mod", "language": "mod", "sizeLines": 48, "fileCategory": "config"},
-    {"path": "backend/go.sum", "language": "sum", "sizeLines": 156, "fileCategory": "config"}
-  ],
-  "batchImportData": {"backend/AGENTS.md":[],"backend/go.mod":[],"backend/go.sum":[]}
-}

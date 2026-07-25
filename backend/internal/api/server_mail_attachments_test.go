@@ -34,7 +34,7 @@ func TestServeAttachmentList(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		OK          bool                          `json:"ok"`
+		OK          bool                         `json:"ok"`
 		Attachments []imapadapter.AttachmentInfo `json:"attachments"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {

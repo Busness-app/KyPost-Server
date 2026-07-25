@@ -7,8 +7,13 @@ RUN cd backend && go build -o /app/bin/kypost-server ./cmd/main.go
 
 FROM node:26.5.0-slim AS frontend-builder
 WORKDIR /frontend
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+# `npm ci` (not `npm install`) and a required, non-globbed lockfile: the
+# lockfile is the point. `npm install` re-resolves every caret range at build
+# time, so two builds of the same commit could ship different code — and one
+# of those ranges is dompurify, which is the only thing standing between a
+# hostile email and the session cookie.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
 COPY frontend .
 RUN npm run build
 
@@ -18,7 +23,7 @@ FROM node:26.5.0-slim
 # base image tag was built — apt-get install re-resolves already-installed
 # packages to the latest version available from the configured repos.
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends supervisor tzdata curl ca-certificates zstd liblzma5 tar \
+	&& apt-get install -y --no-install-recommends supervisor tzdata curl ca-certificates zstd liblzma5 tar util-linux \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& useradd -m -s /bin/bash kypost
 
@@ -38,7 +43,24 @@ COPY scripts /opt/kypost/scripts
 
 RUN chmod +x /opt/kypost/scripts/*.sh
 
-RUN curl -fsSL https://ollama.com/install.sh | sh
+# Ollama is installed from a pinned release tarball verified against its
+# published SHA-256, not by piping a remote install script into a shell.
+# `curl https://ollama.com/install.sh | sh` is arbitrary remote code
+# execution at build time from a URL this project does not control, with no
+# version pin: every rebuild installed a different Ollama, so builds were
+# not reproducible and a compromise of that host was a compromise of this
+# image.
+#
+# OLLAMA_VERSION/OLLAMA_SHA256 are bumped by .github/workflows/ollama-bump.yml,
+# which only advances to a release that has been public for at least 3 days.
+ARG OLLAMA_VERSION=0.32.1
+ARG OLLAMA_SHA256=83b1f22841eb7f6c4900c6797f960ebaa09466874442ea5b8ae3da6980d3914c
+RUN curl -fsSL -o /tmp/ollama.tar.zst \
+	"https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
+	&& echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c - \
+	&& tar -C /usr/local -xaf /tmp/ollama.tar.zst \
+	&& rm /tmp/ollama.tar.zst \
+	&& ollama --version
 
 ENV CONFIG_DIR=/kypost/config
 ENV SECRET_DIR=/kypost/private
@@ -58,4 +80,8 @@ RUN mkdir -p /kypost/config /kypost/private /kypost/logs /kypost/state \
 VOLUME ["/kypost/config", "/kypost/private", "/kypost/logs", "/kypost/state"]
 EXPOSE 5866
 
+# There is deliberately no `USER kypost` here. entrypoint.sh must start as
+# root to chown the mounted volumes (which arrive owned by whoever created
+# them on the host); it drops to kypost via setpriv before exec'ing
+# supervisord, so PID 1 and every service run unprivileged.
 CMD ["/opt/kypost/scripts/entrypoint.sh"]

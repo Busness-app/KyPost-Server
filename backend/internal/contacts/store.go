@@ -117,6 +117,11 @@ func (s *Store) Get(uid string) (Contact, bool) {
 func (s *Store) Upsert(c Contact) (Contact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return Contact{}, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return Contact{}, err
 	}
@@ -147,6 +152,11 @@ type ContactPrecondition struct {
 func (s *Store) UpsertWithPrecondition(c Contact, precondition ContactPrecondition) (Contact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return Contact{}, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return Contact{}, err
 	}
@@ -226,6 +236,11 @@ func (s *Store) upsertLocked(c Contact) (Contact, error) {
 func (s *Store) Delete(uid string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return false, err
 	}
@@ -258,6 +273,11 @@ func (s *Store) Delete(uid string) (bool, error) {
 func (s *Store) SetSelf(uid string, self bool) (Contact, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return Contact{}, false, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return Contact{}, false, err
 	}
@@ -371,6 +391,11 @@ type DedupeReport struct {
 func (s *Store) Dedupe() (DedupeReport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return DedupeReport{}, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return DedupeReport{}, err
 	}
@@ -445,6 +470,11 @@ func (s *Store) GC(retention time.Duration) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return err
 	}

@@ -95,21 +95,84 @@ func ResolveSMTPTarget(payload IMAPConfigPayload) (smtpHost string, smtpPort int
 	return smtpHost, smtpPort, fmt.Sprintf("%s:%d", smtpHost, smtpPort), nil
 }
 
-// SMTPSendWithTimeout wraps smtp.SendMail with a hard timeout, since the
-// standard library call has none of its own and would otherwise be able to
-// hang a request indefinitely on an unresponsive server.
+// SMTPSendWithTimeout delivers msg over a STARTTLS (or, for a server that
+// does not advertise it, plain) SMTP connection with a hard timeout on the
+// whole conversation.
+//
+// It does NOT wrap smtp.SendMail in a goroutine with a select on
+// time.After. That pattern times out the *caller* while the goroutine stays
+// blocked in SendMail forever, holding its TCP connection, its TLS session,
+// and its copy of msg — which can be MaxInboundMessageBytes (25 MiB). One
+// unresponsive upstream then leaks a goroutine and 25 MiB per send attempt,
+// and the poller and the user both retry. Setting a deadline on the
+// connection instead makes every subsequent operation time-bounded, which
+// is what "hard timeout" has to mean.
+//
+// STARTTLS is used whenever the server advertises it. If it does not,
+// smtp.Auth's own refusal to send credentials over an unencrypted link
+// (net/smtp returns "unencrypted connection") fails the send closed rather
+// than leaking the password.
 func SMTPSendWithTimeout(addr string, auth smtp.Auth, from string, recipients []string, msg []byte, timeout time.Duration) error {
-	result := make(chan error, 1)
-	go func() {
-		result <- smtp.SendMail(addr, auth, from, recipients, msg)
-	}()
-
-	select {
-	case err := <-result:
-		return err
-	case <-time.After(timeout):
-		return fmt.Errorf("smtp send timed out after %s", timeout)
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid smtp address %q: %w", addr, err)
 	}
+
+	conn, err := (&net.Dialer{Timeout: timeout}).Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	// One deadline for the entire conversation: dial, greeting, STARTTLS,
+	// auth, and the DATA body all have to finish inside it.
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
+			return err
+		}
+	}
+	if auth != nil {
+		if ok, _ := client.Extension("AUTH"); ok {
+			if err := client.Auth(auth); err != nil {
+				return err
+			}
+		}
+	}
+	return writeSMTPMessage(client, from, recipients, msg)
+}
+
+// writeSMTPMessage runs the MAIL/RCPT/DATA/QUIT half of a send, shared by
+// the STARTTLS and implicit-TLS paths.
+func writeSMTPMessage(client *smtp.Client, from string, recipients []string, msg []byte) error {
+	if err := client.Mail(from); err != nil {
+		return err
+	}
+	for _, recipient := range recipients {
+		if err := client.Rcpt(recipient); err != nil {
+			return err
+		}
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(msg); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
 }
 
 // SMTPSendWithImplicitTLS delivers msg over an implicit-TLS (port 465 style)
@@ -138,31 +201,7 @@ func SMTPSendWithImplicitTLS(host string, port int, username, password, from str
 		}
 	}
 
-	if err := client.Mail(from); err != nil {
-		return err
-	}
-	for _, recipient := range recipients {
-		if err := client.Rcpt(recipient); err != nil {
-			return err
-		}
-	}
-
-	writer, err := client.Data()
-	if err != nil {
-		return err
-	}
-	if _, err := writer.Write(msg); err != nil {
-		_ = writer.Close()
-		return err
-	}
-	if err := writer.Close(); err != nil {
-		return err
-	}
-
-	if err := client.Quit(); err != nil {
-		return err
-	}
-	return nil
+	return writeSMTPMessage(client, from, recipients, msg)
 }
 
 // SMTPDeliver sends msg over SMTP to recipients, choosing implicit TLS (port
@@ -175,25 +214,12 @@ func SMTPDeliver(smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword
 	return SMTPSendWithTimeout(addr, auth, from, recipients, msg, 45*time.Second)
 }
 
-// decryptEncryptedPayload reverses the AES-GCM envelope api.writeEncryptedPayload
-// (and the equivalent private write path in package api) produces, falling
-// back to treating raw as plaintext for backward compatibility with config
-// files written before encryption-at-rest was introduced. Kept as a small,
-// private duplicate of api's own decryptEncryptedPayload (rather than an
-// export from api, which mailmsg cannot import without an import cycle, or a
-// relocation of api's helper, which is also used by an unrelated feature —
-// the CardDAV client config — that has no reason to depend on mailmsg).
-func decryptEncryptedPayload(raw []byte, keyPath string) ([]byte, error) {
-	env, ok := cryptutil.ParseEnvelope(raw)
-	if !ok {
-		return raw, nil
-	}
-	key, err := cryptutil.LoadOrCreateKey(keyPath)
-	if err != nil {
-		return nil, err
-	}
-	return cryptutil.Open(env, key)
-}
+// ErrIMAPConfigNotEncrypted is returned by ReadIMAPConfigPayload when the
+// stored config is not a valid encryption envelope. The message names the
+// remedy because an operator hitting this needs to know it is fixable.
+var ErrIMAPConfigNotEncrypted = errors.New(
+	"IMAP config is not encrypted (written before encryption-at-rest, or corrupt); " +
+		"re-save your IMAP/SMTP settings to rewrite it encrypted")
 
 // ReadIMAPConfigPayload reads and decrypts the IMAP/SMTP config payload
 // stored at path, decrypting it with the master key at keyPath. exists is
@@ -207,7 +233,10 @@ func ReadIMAPConfigPayload(path, keyPath string) (IMAPConfigPayload, bool, error
 		return IMAPConfigPayload{}, false, err
 	}
 
-	plain, err := decryptEncryptedPayload(b, keyPath)
+	plain, err := cryptutil.OpenBytes(b, keyPath)
+	if errors.Is(err, cryptutil.ErrNotEncrypted) {
+		return IMAPConfigPayload{}, false, fmt.Errorf("%s: %w", path, ErrIMAPConfigNotEncrypted)
+	}
 	if err != nil {
 		return IMAPConfigPayload{}, false, err
 	}

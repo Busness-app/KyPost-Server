@@ -91,12 +91,12 @@ func Run(args []string) error {
 	healthSvc := health.NewService()
 	healthSvc.MarkHealthy()
 
-	// wkdStore is the single instance-level WKD domain-claim store shared by
-	// the api server and the poller — both run as goroutines in the same
-	// binary in "all" mode, and wkdpublish.Store's own mutex only actually
-	// serializes their read-modify-write calls if they share one instance
-	// (see wkdpublish.Store's doc comment). Constructed once here and
-	// injected into both api.NewServer and processor.New below.
+	// wkdStore is the instance-level WKD domain-claim store. In "all" mode
+	// the api server and the poller run as goroutines in one binary and
+	// share this instance; under supervisord they are two separate
+	// processes (`--mode server` and `--mode daemon`) and each builds its
+	// own. Both are correct: wkdpublish.Store serializes every
+	// read-modify-write with an inter-process file lock, not just a mutex.
 	wkdStore, err := wkdpublish.New(paths.StateDir)
 	if err != nil {
 		return fmt.Errorf("create wkd publish store: %w", err)
@@ -170,6 +170,7 @@ func runServer(d runDeps) error {
 	defer cancelSweepers()
 	go srv.StartPickupSweeper(sweeperCtx)
 	go srv.StartSendAsCooldownSweeper(sweeperCtx)
+	go srv.StartSessionSweeper(sweeperCtx)
 	go srv.StartOllamaVersionMonitor(sweeperCtx)
 
 	stop := make(chan os.Signal, 1)
@@ -234,6 +235,7 @@ func runAll(d runDeps) error {
 	d.logger.Info("poller goroutine started")
 	go srv.StartPickupSweeper(sweeperCtx)
 	go srv.StartSendAsCooldownSweeper(sweeperCtx)
+	go srv.StartSessionSweeper(sweeperCtx)
 	go srv.StartOllamaVersionMonitor(sweeperCtx)
 	go monitorHealth(d.logger, d.health)
 	go func() {

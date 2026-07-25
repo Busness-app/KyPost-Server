@@ -10,7 +10,15 @@ import (
 )
 
 // AtomicWriteFile writes payload to path via a temp file + rename so readers
-// never observe a partially-written file.
+// never observe a partially-written file, and fsyncs both the temp file and
+// the containing directory so the write survives a crash.
+//
+// Both fsyncs matter and they are not the same guarantee. Without the file
+// fsync, the rename can reach the disk while the data behind it has not,
+// leaving a file that exists and is empty or garbage. Without the directory
+// fsync, the rename itself can be lost. This is not theoretical for files
+// like users.json: it holds every account, and the failure mode is a server
+// that will not start because the only copy no longer parses.
 func AtomicWriteFile(path string, payload []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
@@ -33,10 +41,32 @@ func AtomicWriteFile(path string, payload []byte, perm os.FileMode) error {
 		_ = tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+// syncDir fsyncs a directory so a rename into it is durable. A failure to
+// open the directory read-only is not fatal on filesystems that don't allow
+// it; a failed Sync on a directory we did open is.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("sync dir %s: %w", dir, err)
+	}
+	return nil
 }
 
 // LoadJSONFile reads path and json-unmarshals it into a fresh V, passing it

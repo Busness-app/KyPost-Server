@@ -1,7 +1,0 @@
-{
- "batchIndex": 9,
- "totalBatches": 12,
- "fileList": "  - path: scripts/AGENTS.md (43 lines, language: markdown, fileCategory: docs)\n  - path: scripts/bootstrap.sh (32 lines, language: shell, fileCategory: script)\n  - path: scripts/entrypoint.sh (6 lines, language: shell, fileCategory: script)\n  - path: scripts/pull-ollama-model.sh (32 lines, language: shell, fileCategory: script)\n  - path: scripts/start-ollama.sh (12 lines, language: shell, fileCategory: script)",
- "batchImportData": "{\"scripts/AGENTS.md\":[],\"scripts/bootstrap.sh\":[],\"scripts/entrypoint.sh\":[],\"scripts/pull-ollama-model.sh\":[],\"scripts/start-ollama.sh\":[]}",
- "neighborMap": "{}"
-}

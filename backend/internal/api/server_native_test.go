@@ -93,7 +93,7 @@ func authRequest(s *Server, req *http.Request) {
 	token := "session-token"
 	csrfToken := "csrf-token"
 	s.mu.Lock()
-	s.sessions[token] = Session{UserID: all[0].ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
+	s.sessions[token] = Session{UserID: all[0].ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	s.mu.Unlock()
 	// Model an onboarded session; the must-change gate (withAuth) has its own
 	// dedicated test.

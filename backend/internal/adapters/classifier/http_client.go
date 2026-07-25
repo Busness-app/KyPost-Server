@@ -202,6 +202,21 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 		searchText := stripTransientNoise(labelSearchScope(normalized))
 		c.logServer(fmt.Sprintf("[CLASSIFY RESPONSE] %s", strings.SplitN(searchText, "\n", 2)[0]))
 
+		// With no allowlist configured there is nothing to bound the answer
+		// to, so the model's own output is all a caller can get.
+		if len(allowedLabels) == 0 {
+			return normalized, nil, false
+		}
+
+		// Bind the answer to the allowlist HERE, inside the function whose
+		// signature promises a label. First an exact line match, then the
+		// lenient substring matcher (so "This is Important" still resolves to
+		// "Important"). Anything else is not a label, and an earlier version
+		// of this code returned the model's last non-empty line as if it
+		// were one — laundering arbitrary model output into a value callers
+		// treat as an allowlisted label. The only thing standing between
+		// that and an arbitrary IMAP keyword was one caller remembering to
+		// re-validate.
 		for _, line := range strings.Split(searchText, "\n") {
 			line = strings.TrimSpace(line)
 			for _, label := range allowedLabels {
@@ -210,14 +225,10 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 				}
 			}
 		}
-
-		lines := strings.Split(searchText, "\n")
-		for i := len(lines) - 1; i >= 0; i-- {
-			if l := strings.TrimSpace(lines[i]); l != "" {
-				return l, nil, false
-			}
+		if label := SelectLabelFromText(allowedLabels, searchText); label != "" {
+			return label, nil, false
 		}
-		return normalized, nil, false
+		return "", &NoAllowedLabelError{Output: normalized}, false
 	}
 
 	return retry.Loop(ctx, 3, classifyBackoff, classifyAttempt)

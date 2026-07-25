@@ -36,18 +36,19 @@ type Claim struct {
 }
 
 // Store is the instance's set of WKD domain claims, admin-managed and
-// persisted as a single wkd-domains.json at the instance's state root. Every
-// read and mutation re-reads the file from disk first (matching
-// sendas.Store's convention), but that alone is NOT sufficient to make two
-// independent *Store values over the same file safe to mutate concurrently:
-// refresh-then-mutate-then-rewrite-whole-file is a read-modify-write, and
-// two independent Stores each hold their own mutex, so an interleaving
-// between an admin request and the poller's periodic re-check could lose a
-// write (e.g. the poller re-persisting a stale copy of a claim an admin just
-// deleted). The api server and the poller (both running as goroutines in the
-// same binary — see app.go) therefore MUST share exactly one *Store
-// instance, so mu actually serializes every read-modify-write call between
-// them. Callers must not construct a second Store over the same baseDir.
+// persisted as a single wkd-domains.json at the instance's state root.
+//
+// Every read re-reads the file from disk first, and every mutation
+// additionally holds an inter-process file lock across the whole
+// read-modify-write cycle (see fsutil.WithFileLock). That lock is what makes
+// concurrent mutation safe, and it is required: an admin request runs in the
+// api process while the periodic claim re-check runs in the daemon process
+// (supervisord starts `--mode server` and `--mode daemon` separately), so a
+// mutex — shared instance or not — never serialized them.
+//
+// app.go still injects one shared instance into both api.NewServer and
+// processor.New. That is now a convenience (one warm in-memory copy), not a
+// correctness requirement: a second Store over the same baseDir is safe.
 type Store struct {
 	mu      sync.Mutex
 	baseDir string
@@ -126,6 +127,11 @@ func (s *Store) Create(domain string) (Claim, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return Claim{}, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return Claim{}, err
 	}
@@ -164,6 +170,11 @@ func (s *Store) SetVerified(domain string, verified bool, checkedAt time.Time) e
 	d := normalizeDomain(domain)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return err
 	}
@@ -187,6 +198,11 @@ func (s *Store) Delete(domain string) (bool, error) {
 	d := normalizeDomain(domain)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return false, err
 	}

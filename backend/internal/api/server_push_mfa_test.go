@@ -21,7 +21,7 @@ func pairApproverDevice(t *testing.T, srv *Server, userID, deviceID string) (id,
 
 func TestPushEnableRequiresTOTP(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("nina", "pw-nina", users.RoleUser)
+	u, err := srv.users.Create("nina", "pw-nina-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestPushEnableRequiresTOTP(t *testing.T) {
 
 func TestPushEnableRequiresDevice(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("omar", "pw-omar", users.RoleUser)
+	u, err := srv.users.Create("omar", "pw-omar-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestPushEnableRequiresDevice(t *testing.T) {
 
 func TestPushEnableAndStatusAndDeviceToggle(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("pia", "pw-pia", users.RoleUser)
+	u, err := srv.users.Create("pia", "pw-pia-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -163,7 +163,7 @@ func enablePush(t *testing.T, srv *Server, userID string) {
 
 func TestPushLoginApproveFlow(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("quinn", "pw-quinn", users.RoleUser)
+	u, err := srv.users.Create("quinn", "pw-quinn-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestPushLoginApproveFlow(t *testing.T) {
 	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-quinn")
 	enablePush(t, srv, u.ID)
 
-	challengeID, methods := loginChallenge(t, srv, "quinn", "pw-quinn")
+	challengeID, methods := loginChallenge(t, srv, "quinn", "pw-quinn-testpassword")
 	if !methodsContain(methods, "push") || !methodsContain(methods, "totp") {
 		t.Fatalf("methods = %v, want both push and totp", methods)
 	}
@@ -199,7 +199,7 @@ func TestPushLoginApproveFlow(t *testing.T) {
 
 func TestPushLoginDenyFlow(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("rex", "pw-rex", users.RoleUser)
+	u, err := srv.users.Create("rex", "pw-rex-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestPushLoginDenyFlow(t *testing.T) {
 	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-rex")
 	enablePush(t, srv, u.ID)
 
-	challengeID, _ := loginChallenge(t, srv, "rex", "pw-rex")
+	challengeID, _ := loginChallenge(t, srv, "rex", "pw-rex-testpassword")
 	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, false); rec.Code != http.StatusOK {
 		t.Fatalf("respond deny: status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -223,11 +223,11 @@ func TestPushLoginDenyFlow(t *testing.T) {
 
 func TestPushRespondCrossUserRejected(t *testing.T) {
 	srv := newTestServer(t)
-	a, err := srv.users.Create("alice", "pw-alice", users.RoleUser)
+	a, err := srv.users.Create("alice", "pw-alice-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create alice: %v", err)
 	}
-	b, err := srv.users.Create("bob", "pw-bob", users.RoleUser)
+	b, err := srv.users.Create("bob", "pw-bob-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create bob: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestPushRespondCrossUserRejected(t *testing.T) {
 	deviceB, secretB := pairApproverDevice(t, srv, b.ID, "dev-bob")
 
 	// Alice logs in; Bob's device tries to approve her challenge.
-	challengeID, _ := loginChallenge(t, srv, "alice", "pw-alice")
+	challengeID, _ := loginChallenge(t, srv, "alice", "pw-alice-testpassword")
 	rec := respondPush(srv, challengeID, deviceB, secretB, true)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-user respond: status=%d, want 403 (body=%s)", rec.Code, rec.Body.String())
@@ -257,7 +257,7 @@ func TestPushRespondCrossUserRejected(t *testing.T) {
 // ResolvePush never ran and the challenge stays "pending".
 func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("tara", "pw-tara", users.RoleUser)
+	u, err := srv.users.Create("tara", "pw-tara-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-tara")
 	// Deliberately do NOT call enablePush: PushMFAEnabled stays false.
 
-	challengeID, methods := loginChallenge(t, srv, "tara", "pw-tara")
+	challengeID, methods := loginChallenge(t, srv, "tara", "pw-tara-testpassword")
 	if methodsContain(methods, "push") {
 		t.Fatalf("methods = %v, want push absent for a push-disabled user", methods)
 	}
@@ -287,7 +287,7 @@ func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 // still be able to retry) — only the underlying push dispatch is rate-limited.
 func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("uma", "pw-uma", users.RoleUser)
+	u, err := srv.users.Create("uma", "pw-uma-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
 		t.Fatal("expected no push recorded before any login")
 	}
 
-	first, methods := loginChallenge(t, srv, "uma", "pw-uma")
+	first, methods := loginChallenge(t, srv, "uma", "pw-uma-testpassword")
 	if !methodsContain(methods, "push") {
 		t.Fatalf("methods = %v, want push offered on first login", methods)
 	}
@@ -311,7 +311,7 @@ func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
 	// A second login attempt shortly after must still succeed and issue a
 	// fresh challenge (TOTP retry must never be blocked) but must not push
 	// again — the cooldown timestamp must not move.
-	second, methods := loginChallenge(t, srv, "uma", "pw-uma")
+	second, methods := loginChallenge(t, srv, "uma", "pw-uma-testpassword")
 	if second == first {
 		t.Fatal("expected a distinct challenge id for the second login")
 	}
@@ -330,7 +330,7 @@ func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
 // cut off access, including any in-flight authentication attempt.
 func TestPushFinishRejectsAfterAdminClearsMFA(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("sam", "pw-sam", users.RoleUser)
+	u, err := srv.users.Create("sam", "pw-sam-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestPushFinishRejectsAfterAdminClearsMFA(t *testing.T) {
 	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-sam")
 	enablePush(t, srv, u.ID)
 
-	challengeID, _ := loginChallenge(t, srv, "sam", "pw-sam")
+	challengeID, _ := loginChallenge(t, srv, "sam", "pw-sam-testpassword")
 	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, true); rec.Code != http.StatusOK {
 		t.Fatalf("respond approve: status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -368,7 +368,7 @@ func TestPushFinishRejectsAfterAdminClearsMFA(t *testing.T) {
 
 func TestPushFirstResponseWins(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("sam", "pw-sam", users.RoleUser)
+	u, err := srv.users.Create("sam", "pw-sam-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestPushFirstResponseWins(t *testing.T) {
 	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-sam")
 	enablePush(t, srv, u.ID)
 
-	challengeID, _ := loginChallenge(t, srv, "sam", "pw-sam")
+	challengeID, _ := loginChallenge(t, srv, "sam", "pw-sam-testpassword")
 	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, true); rec.Code != http.StatusOK {
 		t.Fatalf("first respond: status=%d body=%s", rec.Code, rec.Body.String())
 	}

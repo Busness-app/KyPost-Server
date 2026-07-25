@@ -169,7 +169,17 @@ func (p *Poller) reconcilePGPUserIDs(userID string) {
 			"user_id", userID, "error", err.Error())
 		return
 	}
-	if u.PGPPrivateKeyEnc == "" || u.PGPPublicKey == "" {
+	if u.PGPPublicKey == "" {
+		return
+	}
+	// An end-to-end key cannot be edited here: adding a User ID re-signs the
+	// key, which needs the private half, and under client protection this
+	// process has no way to obtain it. The browser does this instead, when
+	// the user's vault is unlocked. Skipping quietly is correct — this is a
+	// background convenience, not something to fail a verification over.
+	if !u.HasServerReadableKey() {
+		p.log.Info("skipping pgp user id reconcile for client-protected key; the browser will add verified aliases",
+			"user_id", userID)
 		return
 	}
 

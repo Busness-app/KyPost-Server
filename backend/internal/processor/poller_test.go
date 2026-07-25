@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"kypost-server/backend/internal/cryptutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,7 +107,7 @@ func TestBuildNativeNotificationText(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			title, body := buildNativeNotificationText(tc.msg)
+			title, body := buildNativeNotificationText(tc.msg, true)
 			if title != tc.wantTitle || body != tc.wantBody {
 				t.Fatalf("buildNativeNotificationText() = (%q, %q), want (%q, %q)", title, body, tc.wantTitle, tc.wantBody)
 			}
@@ -162,7 +163,7 @@ func TestBuildNativePushData(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildNativePushData(tc.msg, tc.keywords, tc.title, tc.body)
+			got := buildNativePushData(tc.msg, tc.keywords, tc.title, tc.body, true)
 			for key, want := range tc.want {
 				if got[key] != want {
 					t.Errorf("buildNativePushData()[%q] = %q, want %q", key, got[key], want)
@@ -682,12 +683,13 @@ func TestHandleMessage_AutoLabelDisabledUsesConfiguredLabel(t *testing.T) {
 	}
 }
 
-// writeTestIMAPConfig writes a plaintext (unencrypted) IMAP/SMTP config
-// payload at the path notifyMessageTooLarge reads via
-// mailmsg.ReadIMAPConfigPayload for userID. Plaintext is enough:
-// decryptEncryptedPayload falls back to treating unparseable input as
-// plaintext, so this test doesn't need a real encryption-at-rest key file.
-func writeTestIMAPConfig(t *testing.T, configDir, userID, username, password string) {
+// writeTestIMAPConfig writes an encrypted IMAP/SMTP config payload at the
+// path notifyMessageTooLarge reads via mailmsg.ReadIMAPConfigPayload for
+// userID, sealed with a throwaway master key under keyPath. It writes a real
+// envelope because the read path no longer accepts plaintext: silently
+// treating an unparseable config as cleartext credentials is exactly the
+// behavior that was removed (see cryptutil.OpenBytes).
+func writeTestIMAPConfig(t *testing.T, configDir, keyPath, userID, username, password string) {
 	t.Helper()
 	payload := mailmsg.IMAPConfigPayload{
 		Host:     "imap.example.com",
@@ -702,11 +704,23 @@ func writeTestIMAPConfig(t *testing.T, configDir, userID, username, password str
 	if err != nil {
 		t.Fatalf("marshal test imap config: %v", err)
 	}
+	key, err := cryptutil.LoadOrCreateKey(keyPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreateKey: %v", err)
+	}
+	env, err := cryptutil.Seal(b, key)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	sealed, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
 	dir := filepath.Join(configDir, "users", userID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "imap-config.json"), b, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "imap-config.json"), sealed, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 }
@@ -760,10 +774,12 @@ func TestHandleMessage_TooLargeMessageRejectsAndNotifies(t *testing.T) {
 	}
 
 	configDir := t.TempDir()
-	writeTestIMAPConfig(t, configDir, "user-1", "alice@example.com", "hunter2")
+	imapKeyPath := filepath.Join(t.TempDir(), "imap-config.key")
+	writeTestIMAPConfig(t, configDir, imapKeyPath, "user-1", "alice@example.com", "hunter2")
 	calls := stubSendRejectionNotice(t, nil)
 
-	p := &Poller{log: logger, configDir: configDir} // classifier intentionally nil: must never be reached
+	// classifier intentionally nil: must never be reached
+	p := &Poller{log: logger, configDir: configDir, imapKeyPath: imapKeyPath}
 	mail := &noopMailClient{}
 	uc := userCtx{id: "user-1", mail: mail, store: store, autoLabelEnabled: true}
 	msg := imapadapter.Message{
@@ -854,5 +870,53 @@ func TestHandleMessage_TooLargeMessageStillRecordsDecisionWhenNotifyFails(t *tes
 	}
 	if !strings.Contains(decisions[0].Detail, "rejection notice could not be sent") {
 		t.Fatalf("expected Detail to mention the notice failure, got %q", decisions[0].Detail)
+	}
+}
+
+// TestNativePushOmitsContentByDefault is the check for the privacy default.
+// A native push leaves this server for a relay Worker and then Google or
+// Apple, readable at every hop, so nothing about the message may ride along
+// unless the user asked for it.
+func TestNativePushOmitsContentByDefault(t *testing.T) {
+	msg := imapadapter.Message{
+		ID:      "42",
+		Sender:  "whistleblower@example.org",
+		Subject: "the documents",
+	}
+	keywords := []string{"Important"}
+
+	title, body := buildNativeNotificationText(msg, false)
+	if strings.Contains(title, "whistleblower") || strings.Contains(body, "documents") {
+		t.Fatalf("generic push leaked content: title=%q body=%q", title, body)
+	}
+
+	data := buildNativePushData(msg, keywords, title, body, false)
+	for key, value := range data {
+		for _, secret := range []string{"whistleblower", "example.org", "documents", "Important"} {
+			if strings.Contains(value, secret) {
+				t.Errorf("data[%q] = %q leaks %q", key, value, secret)
+			}
+		}
+	}
+	// The message id and deep link are the whole point: the app opens the
+	// right message after syncing over its own authenticated connection.
+	if data["messageId"] != "42" {
+		t.Errorf("data[messageId] = %q, want %q", data["messageId"], "42")
+	}
+	if _, ok := data["subject"]; ok {
+		t.Error("data still carries a subject key when previews are off")
+	}
+}
+
+// With the opt-in on, the payload must carry both key spellings: the mobile
+// client reads senderName/emailSubject on FCM and sender/subject on App Pull.
+func TestNativePushCarriesBothKeySpellingsWhenOptedIn(t *testing.T) {
+	msg := imapadapter.Message{ID: "7", Sender: "a@example.com", Subject: "hello"}
+	title, body := buildNativeNotificationText(msg, true)
+	data := buildNativePushData(msg, nil, title, body, true)
+	for _, key := range []string{"sender", "senderName", "subject", "emailSubject", "title", "body"} {
+		if data[key] == "" {
+			t.Errorf("data[%q] is empty; the mobile client reads this key", key)
+		}
 	}
 }

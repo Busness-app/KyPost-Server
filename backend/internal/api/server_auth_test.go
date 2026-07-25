@@ -19,7 +19,7 @@ func authRequestAs(s *Server, req *http.Request, userID string) {
 	token := "session-token-" + userID
 	csrfToken := "csrf-token-" + userID
 	s.mu.Lock()
-	s.sessions[token] = Session{UserID: userID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
+	s.sessions[token] = Session{UserID: userID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
 	s.mu.Unlock()
 	// Represent a fully-onboarded session: users are created with
 	// MustChangePassword=true, which is now enforced server-side (see withAuth),
@@ -272,18 +272,18 @@ func TestHandleCaptchaConfigReportsDisabledByDefault(t *testing.T) {
 // matching header still succeeds.
 func TestCSRFProtectionOnCookieAuthedMutations(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("heidi", "old-password", users.RoleUser)
+	u, err := srv.users.Create("heidi", "old-password-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	protected := srv.withAuth(srv.handleChangePassword)
 
 	// Cookie present, no CSRF header: rejected, even with correct password.
-	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password", "newPassword": "new-password"})
+	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password-testpassword", "newPassword": "new-password-testpassword"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
 	token := "session-token-" + u.ID
 	srv.mu.Lock()
-	srv.sessions[token] = Session{UserID: u.ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "the-real-csrf-token"}
+	srv.sessions[token] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "the-real-csrf-token"}
 	srv.mu.Unlock()
 	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: token})
 	rec := httptest.NewRecorder()
@@ -320,7 +320,7 @@ func TestCSRFProtectionOnCookieAuthedMutations(t *testing.T) {
 // credential for CSRF to exploit.
 func TestCSRFProtectionSkipsRequestsWithoutSessionCookie(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("ivan", "pw-ivan", users.RoleUser)
+	u, err := srv.users.Create("ivan", "pw-ivan-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestCSRFProtectionSkipsRequestsWithoutSessionCookie(t *testing.T) {
 
 func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("bob", "old-password", users.RoleUser)
+	u, err := srv.users.Create("bob", "old-password-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	protected := srv.withAuth(srv.handleChangePassword)
 
 	// Wrong old password is rejected.
-	body, _ := json.Marshal(map[string]string{"oldPassword": "not-it", "newPassword": "new-password"})
+	body, _ := json.Marshal(map[string]string{"oldPassword": "not-it", "newPassword": "new-password-testpassword"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
 	authRequestAs(srv, req, u.ID)
 	rec := httptest.NewRecorder()
@@ -355,7 +355,7 @@ func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	}
 
 	// Correct old password succeeds and the new password takes effect.
-	body, _ = json.Marshal(map[string]string{"oldPassword": "old-password", "newPassword": "new-password"})
+	body, _ = json.Marshal(map[string]string{"oldPassword": "old-password-testpassword", "newPassword": "new-password-testpassword"})
 	req = httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
 	authRequestAs(srv, req, u.ID)
 	rec = httptest.NewRecorder()
@@ -368,7 +368,87 @@ func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if !users.VerifyPassword(got, "new-password") {
+	if !users.VerifyPassword(got, "new-password-testpassword") {
 		t.Fatalf("expected new password to verify")
+	}
+}
+
+// newTestServerWithUser returns a test server plus one non-admin user, for
+// tests that only need "some authenticated identity".
+func newTestServerWithUser(t *testing.T) (*Server, users.User) {
+	t.Helper()
+	srv := newTestServer(t)
+	u, err := srv.users.Create("session-tester", "session-tester-testpassword", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return srv, u
+}
+
+// TestSessionAbsoluteLifetimeCapsRenewal pins that the sliding idle window
+// cannot extend a session past sessionMaxLifetime. Without the cap, a
+// stolen cookie stays valid indefinitely: the thief's own traffic renews it
+// forever and the legitimate user has no way to end it.
+func TestSessionAbsoluteLifetimeCapsRenewal(t *testing.T) {
+	srv, u := newTestServerWithUser(t)
+
+	token := "aged-session"
+	srv.mu.Lock()
+	srv.sessions[token] = Session{
+		UserID: u.ID,
+		// Issued just over the ceiling ago, but kept "fresh" by activity —
+		// exactly the state continuous renewal produces.
+		IssuedAt:  time.Now().Add(-sessionMaxLifetime - time.Minute),
+		ExpiresAt: time.Now().Add(sessionIdleTimeout),
+		CSRFToken: "csrf",
+	}
+	srv.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: token})
+	if _, ok := srv.currentUser(req); ok {
+		t.Fatal("a session past sessionMaxLifetime authenticated; the absolute cap is not enforced")
+	}
+
+	srv.mu.Lock()
+	_, still := srv.sessions[token]
+	srv.mu.Unlock()
+	if still {
+		t.Fatal("expired-by-lifetime session was not dropped from the map")
+	}
+}
+
+// TestSessionSweeperReclaimsAbandonedSessions pins that sessions belonging
+// to users who never return are reclaimed. currentUser only ever drops a
+// session when its own token is presented again, so without the sweeper
+// every abandoned session is pinned for the process lifetime.
+func TestSessionSweeperReclaimsAbandonedSessions(t *testing.T) {
+	srv, u := newTestServerWithUser(t)
+	now := time.Now()
+
+	srv.mu.Lock()
+	srv.sessions["idle-expired"] = Session{
+		UserID: u.ID, IssuedAt: now.Add(-48 * time.Hour),
+		ExpiresAt: now.Add(-time.Minute), CSRFToken: "a",
+	}
+	srv.sessions["too-old"] = Session{
+		UserID: u.ID, IssuedAt: now.Add(-sessionMaxLifetime - time.Hour),
+		ExpiresAt: now.Add(sessionIdleTimeout), CSRFToken: "b",
+	}
+	srv.sessions["healthy"] = Session{
+		UserID: u.ID, IssuedAt: now, ExpiresAt: now.Add(sessionIdleTimeout), CSRFToken: "c",
+	}
+	srv.mu.Unlock()
+
+	if removed := srv.sweepSessions(now); removed != 2 {
+		t.Fatalf("sweepSessions removed %d, want 2", removed)
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if _, ok := srv.sessions["healthy"]; !ok {
+		t.Fatal("sweeper removed a live session")
+	}
+	if len(srv.sessions) != 1 {
+		t.Fatalf("sessions left = %d, want 1", len(srv.sessions))
 	}
 }

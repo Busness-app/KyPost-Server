@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,7 +259,7 @@ func TestConfigRoundTripDoesNotCorruptChangeDetection(t *testing.T) {
 // The session that performs the change itself must stay logged in.
 func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("heidi", "old-password", users.RoleUser)
+	u, err := srv.users.Create("heidi", "old-password-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -266,11 +267,11 @@ func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 	changingToken := "changing-session-token"
 	otherToken := "other-stolen-session-token"
 	srv.mu.Lock()
-	srv.sessions[changingToken] = Session{UserID: u.ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-a"}
-	srv.sessions[otherToken] = Session{UserID: u.ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-b"}
+	srv.sessions[changingToken] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-a"}
+	srv.sessions[otherToken] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-b"}
 	srv.mu.Unlock()
 
-	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password", "newPassword": "new-password"})
+	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password-testpassword", "newPassword": "new-password-testpassword"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
 	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: changingToken})
 	req.Header.Set("X-CSRF-Token", "csrf-a")
@@ -302,7 +303,7 @@ func TestAdminResetPasswordRevokesTargetSessions(t *testing.T) {
 
 	targetToken := "target-session-token"
 	srv.mu.Lock()
-	srv.sessions[targetToken] = Session{UserID: target.ID, ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-target"}
+	srv.sessions[targetToken] = Session{UserID: target.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-target"}
 	srv.mu.Unlock()
 
 	body, _ := json.Marshal(map[string]string{"password": "brand-new-password"})
@@ -320,5 +321,40 @@ func TestAdminResetPasswordRevokesTargetSessions(t *testing.T) {
 	srv.mu.Unlock()
 	if targetStillLive {
 		t.Error("target's session survived an admin password reset; it should have been revoked")
+	}
+}
+
+// TestRoutesRegistersEveryArea guards the routes() split: each per-area
+// function must actually be called from routes(). Dropping one would compile
+// fine and silently 404 a whole feature, and the SPA fallback ("/") would
+// serve index.html for those paths rather than erroring, so nothing else
+// would notice.
+func TestRoutesRegistersEveryArea(t *testing.T) {
+	srv := newTestServer(t)
+	handler := srv.routes()
+
+	// One representative path per routes* function, chosen so a match proves
+	// that function ran. Each must resolve to something other than the SPA
+	// fallback.
+	for _, probe := range []struct{ method, path string }{
+		{http.MethodPost, "/api/auth/login"},           // routesAuth
+		{http.MethodGet, "/api/health"},                // routesAdmin
+		{http.MethodGet, "/api/inbox"},                 // routesMail
+		{http.MethodGet, "/api/contacts"},              // routesContacts
+		{http.MethodGet, "/api/pgp/identity"},          // routesPGP
+		{http.MethodGet, "/api/notifications/pairing"}, // routesNotifications
+		{http.MethodGet, "/api/rules"},                 // routesRules
+	} {
+		req := httptest.NewRequest(probe.method, probe.path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		// Unauthenticated, so 401/403/400 are all fine — what must not happen
+		// is falling through to the SPA fallback, which answers 200 with HTML
+		// (or 404 "frontend assets not found" when no build is present).
+		body := rec.Body.String()
+		if strings.Contains(body, "frontend assets not found") {
+			t.Errorf("%s %s fell through to the SPA fallback; its routes* function is not wired into routes()",
+				probe.method, probe.path)
+		}
 	}
 }
