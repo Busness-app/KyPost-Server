@@ -123,6 +123,14 @@ func TestMailSendKeylessRefusalHappensBeforeAnySend(t *testing.T) {
 // Every recipient keyless + opt-in: there is nothing to encrypt, so the send
 // becomes pickup-notifications-only. It must not 400 (the dialog would be a
 // dead end) and must not panic on deliveries[0].
+//
+// smtp.example.com is unroutable (see newPickupGateServer), so the pickup
+// notification to dave@example.com genuinely cannot be delivered here — and
+// since he is the only recipient, that failure is total. The response must
+// say so (502) rather than answer 200 for a send that delivered nothing;
+// that silent-200 case is exactly the bug this test used to lock in before
+// finishMailSend started folding pickup-notification failures into the
+// response instead of only logging them.
 func TestMailSendWithOnlyKeylessRecipientsAndOptIn(t *testing.T) {
 	srv, userID := newPickupGateServer(t)
 	if err := pgpdiscovery.AddSuppression(srv.userStateDir(userID), "dave@example.com", "test"); err != nil {
@@ -143,8 +151,33 @@ func TestMailSendWithOnlyKeylessRecipientsAndOptIn(t *testing.T) {
 	if rec.Code == http.StatusBadRequest {
 		t.Fatalf("opting in must not dead-end in the no-keyed-recipients 400: %s", rec.Body.String())
 	}
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 (every pickup notification failed, so nothing was delivered), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The opt-in test above (TestMailSendWithOnlyKeylessRecipientsAndOptIn) only
+// covers the all-keyless branch, which skips buildPGPDeliveries entirely —
+// that is not the code path a real mixed inbox hits, since most sends have
+// at least one recipient with a key. Nothing asserted that a mixed
+// keyed/keyless request with allowPickupFallback actually gets past the gate
+// into buildPGPDeliveries; an inverted "!req.AllowPickupFallback" check would
+// have passed every existing test.
+//
+// 502 rather than 409 is the success signal here, same idiom as
+// TestMailSendKeylessRefusalHappensBeforeAnySend above: smtp.example.com is
+// unroutable, so reaching finishMailSend's SMTPDeliver call for bob's
+// ciphertext proves the gate let the request through instead of refusing it.
+// A 409 would mean the opt-in flag was not honored for the mixed case.
+func TestMailSendMixedKeyedKeylessOptInReachesDelivery(t *testing.T) {
+	srv, _ := newPickupGateServer(t)
+	rec := sendEncrypted(t, srv, true)
+
+	if rec.Code == http.StatusConflict {
+		t.Fatalf("opting in on a mixed keyed/keyless send must still not 409, got: %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 (unroutable smtp host, proving delivery was attempted), got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -334,7 +334,7 @@ IMAP and inbox:
 
 Mail:
 
-- `POST /api/mail/send` (optional `attachments: [{name, mimeType, dataBase64}]`, 25 MB total; optional `encrypt`/`sign`; `allowPickupFallback` — see [Where your PGP private key lives](#where-your-pgp-private-key-lives) — refuses with 409 by default if a recipient has no usable key)
+- `POST /api/mail/send` (optional `attachments: [{name, mimeType, dataBase64}]`, 25 MB total; optional `encrypt`/`sign`; when `encrypt` is true, `allowPickupFallback` — see [Where your PGP private key lives](#where-your-pgp-private-key-lives) — refuses with 409 by default if a recipient has no usable key)
 - `POST /api/mail/draft` (same optional `attachments` shape)
 - `GET /api/mail/attachments?mailbox=&messageId=` (list a message's attachment metadata)
 - `GET /api/mail/attachment?mailbox=&messageId=&index=` (download one attachment)

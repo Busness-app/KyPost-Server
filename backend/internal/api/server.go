@@ -1239,7 +1239,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			msg = signed
 		}
 		recipients := append(append(append([]string{}, toList...), ccList...), bccList...)
-		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, recipients, msg, req)
+		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, recipients, msg, req, "")
 		return
 	}
 
@@ -1283,14 +1283,29 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "none of the recipients have a known pgp key — disable encryption or add keys to your contacts first", http.StatusBadRequest)
 			return
 		}
-		// Opted in with nothing to encrypt to: skip the PGP delivery entirely
-		// and let the pickup notifications below carry the message. Passing no
-		// recipients is safe — finishMailSend skips SMTP on an empty list and
-		// still saves the plaintext Sent copy.
-		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req) {
+		// Opted in with nothing to encrypt to: the pickup notifications ARE the
+		// entire delivery, so unlike the mixed keyed/keyless path below, their
+		// outcome has to be checked before answering, not logged best-effort
+		// after. If PAIRING_SECRET is unset, sendPickupNotification fails every
+		// recipient immediately (pickup_handlers.go) and nothing goes out at
+		// all — answering 200 in that case would silently convert a hard
+		// failure into a lie, which is exactly the failure mode a hard 400 used
+		// to prevent before this opt-in existed.
+		failed := s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password)
+		total := len(plan.withoutKeyEmails)
+		if total > 0 && failed == total {
+			http.Error(w, "failed to deliver a pickup link to any recipient; nothing was sent", http.StatusBadGateway)
 			return
 		}
-		s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password)
+		extraWarning := ""
+		if failed > 0 {
+			extraWarning = fmt.Sprintf("failed to deliver a pickup link to %d of %d recipient(s)", failed, total)
+		}
+		// Passing no recipients is safe — finishMailSend skips SMTP on an empty
+		// list and still saves the plaintext Sent copy.
+		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req, extraWarning) {
+			return
+		}
 		return
 	}
 
@@ -1313,7 +1328,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	mainRecipients, mainCiphertext := deliveries[0].Recipients, deliveries[0].Ciphertext
 	bccDeliveries := deliveries[1:]
 
-	if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, mainRecipients, mainCiphertext, req) {
+	if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, mainRecipients, mainCiphertext, req, "") {
 		return
 	}
 
@@ -1323,19 +1338,29 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Best-effort here (failures only logged, never surfaced) is deliberate and
+	// unlike the all-keyless branch above: the keyed recipients above already
+	// received the message, so this loop is topping up delivery to the
+	// keyless subset, not carrying the entire send.
 	s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password)
 }
 
-// sendPickupNotifications best-effort mails a pickup link to every keyless
-// recipient, logging (rather than aborting on) each individual failure.
-// Shared by the all-keyless opt-in path and the mixed keyed/keyless path so
-// the two call sites can't drift apart on the notification loop's behavior.
-func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients []string, subject, body, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) {
+// sendPickupNotifications mails a pickup link to every keyless recipient,
+// logging each individual failure and returning how many failed. Shared by
+// the all-keyless opt-in path and the mixed keyed/keyless path so the two
+// call sites can't drift apart on the notification loop's behavior — the two
+// differ only in what they do with the failure count: the all-keyless path
+// has nothing else to fall back on and must check it, the mixed path already
+// delivered to the keyed recipients and treats this as best-effort logging.
+func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients []string, subject, body, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) int {
+	failed := 0
 	for _, recipient := range recipients {
 		if err := s.sendPickupNotification(userID, envelopeFrom, recipient, subject, body, smtpHost, smtpPort, addr, smtpUsername, smtpPassword); err != nil {
 			s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
+			failed++
 		}
 	}
+	return failed
 }
 
 // encryptSigner decides which signer identity (if any) should be embedded
@@ -1359,7 +1384,12 @@ func encryptSigner(signer *pgpmail.Identity, sign bool) *pgpmail.Identity {
 // why the Sent copy isn't PGP-wrapped), writing the JSON response. Returns
 // false if the send itself failed (response already written), so callers
 // with follow-up work (e.g. pickup notifications) know not to proceed.
-func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest) bool {
+//
+// extraWarning is folded into the response's warning field alongside any
+// save-to-Sent warning generated here — the all-keyless opt-in path uses it
+// to report partial pickup-notification failures the caller would otherwise
+// never see; every other caller passes "".
+func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest, extraWarning string) bool {
 	s.logger.Info("mail send requested", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "recipientCount", strconv.Itoa(len(recipients)))
 
 	if len(recipients) > 0 {
@@ -1370,7 +1400,7 @@ func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, 
 		}
 	}
 
-	warning := ""
+	warning := extraWarning
 	sentSaved := true
 	if mailClient, mailErr := s.userMailClient(userID); mailErr == nil {
 		if err := mailClient.SaveSent(r.Context(), imapadapter.DraftMessage{
@@ -1383,7 +1413,10 @@ func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, 
 			Attachments: req.Attachments,
 		}); err != nil {
 			sentSaved = false
-			warning = "email sent but could not be saved to Sent folder"
+			if warning != "" {
+				warning += "; "
+			}
+			warning += "email sent but could not be saved to Sent folder"
 			s.logger.Error("mail sent but save-sent failed", "error", err.Error())
 		}
 	}

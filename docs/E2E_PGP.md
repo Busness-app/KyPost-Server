@@ -264,9 +264,13 @@ Web UI (wired):
   locally; the signature verdict comes from that decrypt, not the server.
 - **Compose**: resolves recipient keys via
   `/api/pgp/recipients/resolve`, encrypts per delivery group (BCC each in its
-  own), posts to `/api/mail/send-pgp`. **Refuses** when a recipient has no
-  usable key rather than downgrading — the pickup-link fallback stores
-  plaintext on the server, which is what this mode prevents.
+  own), posts to `/api/mail/send-pgp`. Refuses when a recipient has no usable
+  key **unless** the "secure link if no key" checkbox is ticked, in which case
+  it downgrades that recipient to a one-time link sealed in the browser — the
+  server only ever stores ciphertext for this mode, unlike the `server`-custody
+  fallback described below, which stores plaintext. The checkbox is off by
+  default, so the refusal is what a client-protected sender gets unless they
+  explicitly choose the weaker path.
 - **Password change**: rewraps the key, unwrapping before the password write
   so a failure leaves nothing half-applied.
 
@@ -281,8 +285,13 @@ Still open:
   recipient.** The unit and HTTP-level tests pass; an end-to-end manual run
   is still required before relying on this.
 
-Because the default is unchanged, this is safe to ship incrementally: existing
-installs keep working exactly as before, and nothing silently downgrades.
+Because the default *key-custody mode* (`client`) is unchanged, offering this
+choice was safe to ship incrementally: existing installs keep generating
+client-protected keys exactly as before, and no account is silently moved to
+`server` custody. That is a separate claim from the pickup-link behavior
+change above — that change is the opposite of "nothing silently downgrades"
+for the case it targets: a `server`-protected send to a keyless recipient
+used to downgrade silently, and now refuses instead unless the caller opts in.
 
 ## Mobile plan
 

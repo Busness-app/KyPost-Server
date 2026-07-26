@@ -2,7 +2,7 @@ import { type DragEvent, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import Quill from "quill";
 import "quill/dist/quill.snow.css";
-import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "./api/client";
+import { deleteJSON, getJSON, HttpError, postJSON, putJSON, toErrorMessage } from "./api/client";
 import { checkPGPRecipients, getPGPDiscoverySettings, type DiscoverySettings, type PGPRecipientTier } from "./api/pgp";
 import { listSendAsAliases, type SendAsAlias } from "./api/sendas";
 import { AuthContext, type AuthState } from "./auth";
@@ -139,6 +139,18 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Pulls the keyless-recipient list out of /api/mail/send's 409 body, if
+// that's what this error is. Returns null for anything else (a different
+// error shape, a non-JSON body, or a keyless list that came back empty) so
+// the caller can fall back to the generic message.
+function keylessRecipientsFrom409(error: unknown): string[] | null {
+  if (!(error instanceof HttpError) || error.status !== 409) return null;
+  const body = error.body as { keylessRecipients?: unknown } | undefined;
+  const list = body?.keylessRecipients;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  return list.filter((item): item is string => typeof item === "string");
+}
+
 export function App() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -186,7 +198,7 @@ export function App() {
   const [composeAttachments, setComposeAttachments] = useState<ComposeAttachment[]>([]);
   const [composeEncrypt, setComposeEncrypt] = useState(false);
   const [composeSign, setComposeSign] = useState(false);
-  const [composeRecipientKeyWarning, setComposeRecipientKeyWarning] = useState("");
+  const [composeMissingKeyRecipients, setComposeMissingKeyRecipients] = useState<string[]>([]);
   const [composeRecipientTiers, setComposeRecipientTiers] = useState<Record<string, PGPRecipientTier>>({});
   const [pgpDiscoverySettings, setPgpDiscoverySettings] = useState<DiscoverySettings | null>(null);
   const [composeEncryptOverridden, setComposeEncryptOverridden] = useState(false);
@@ -494,7 +506,8 @@ export function App() {
     setComposeEncrypt(false);
     setComposeEncryptOverridden(false);
     setComposeSign(false);
-    setComposeRecipientKeyWarning("");
+    setComposeSendLinkForKeyless(false);
+    setComposeMissingKeyRecipients([]);
     setComposeRecipientTiers({});
     if (attachmentInputRef.current) {
       attachmentInputRef.current.value = "";
@@ -634,7 +647,7 @@ export function App() {
 
   useEffect(() => {
     if (!composeEncrypt) {
-      setComposeRecipientKeyWarning("");
+      setComposeMissingKeyRecipients([]);
       setComposeRecipientTiers({});
       return;
     }
@@ -643,7 +656,7 @@ export function App() {
       .map((a) => a.trim())
       .filter(Boolean);
     if (addresses.length === 0) {
-      setComposeRecipientKeyWarning("");
+      setComposeMissingKeyRecipients([]);
       setComposeRecipientTiers({});
       return;
     }
@@ -653,18 +666,14 @@ export function App() {
         .then(({ results }) => {
           if (cancelled) return;
           const missing = results.filter((r) => !r.hasKey).map((r) => r.address);
-          setComposeRecipientKeyWarning(
-            missing.length > 0
-              ? `No PGP key on file for: ${missing.join(", ")} — they'll receive a secure link instead.`
-              : ""
-          );
+          setComposeMissingKeyRecipients(missing);
           setComposeRecipientTiers(
             Object.fromEntries(results.map((r) => [r.address.toLowerCase(), r.tier ?? "none"]))
           );
         })
         .catch(() => {
           if (!cancelled) {
-            setComposeRecipientKeyWarning("");
+            setComposeMissingKeyRecipients([]);
             setComposeRecipientTiers({});
           }
         });
@@ -674,6 +683,16 @@ export function App() {
       clearTimeout(timeoutId);
     };
   }, [composeEncrypt, composeTo, composeCc, composeBcc]);
+
+  // Derived, not stored: the wording depends on composeSendLinkForKeyless, which
+  // the user can flip without triggering a fresh recipient-key check, so this
+  // has to recompute on every render rather than lag behind the checkbox.
+  const composeRecipientKeyWarning =
+    composeMissingKeyRecipients.length === 0
+      ? ""
+      : composeSendLinkForKeyless
+      ? `No PGP key on file for: ${composeMissingKeyRecipients.join(", ")} — they'll receive a one-time pickup link instead.`
+      : `No PGP key on file for: ${composeMissingKeyRecipients.join(", ")} — sending will be refused unless you tick "Secure link if no key".`;
 
   /**
    * Seals the message for one keyless recipient and emails them a one-time
@@ -823,7 +842,11 @@ export function App() {
       setComposeOpen(false);
       resetComposeForm();
     } catch (e) {
-      const message = toErrorMessage(e, "failed to send email");
+      const keyless = keylessRecipientsFrom409(e);
+      const message =
+        keyless !== null
+          ? `No PGP key on file for: ${keyless.join(", ")}. Tick "Secure link if no key" to send those recipients a one-time pickup link instead (stored on this server in plaintext for 7 days), or remove them from the recipients.`
+          : toErrorMessage(e, "failed to send email");
       setComposeError(message);
     } finally {
       setComposeSending(false);
@@ -1244,7 +1267,7 @@ export function App() {
                       checked={composeSendLinkForKeyless}
                       onChange={(e) => setComposeSendLinkForKeyless(e.target.checked)}
                     />
-                    Secure link if no key
+                    {isClientProtected() ? "Secure link if no key (browser-sealed)" : "Secure link if no key (server-held, 7 days)"}
                   </label>
                 ) : null}
                 <input
