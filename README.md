@@ -132,10 +132,13 @@ Either way, some things are outside PGP's reach and worth stating plainly:
   exists.
 - **Mobile push notifications** are generic by default for exactly this
   reason — see the Notifications page.
-- **Recipients without a key** get a one-time pickup link instead, and that
-  message is stored on this server (encrypted with the server's own key) until
-  it is read or expires. It is not end-to-end encrypted; nothing sent to
-  someone with no key can be.
+- **Recipients without a key** can get a one-time pickup link instead, and
+  that message is stored on this server (encrypted with the server's own key)
+  until it is read or expires. It is not end-to-end encrypted; nothing sent to
+  someone with no key can be. This is opt-in, not automatic: an encrypted send
+  to a keyless recipient refuses with an error unless the request explicitly
+  asks for the pickup-link fallback, so plaintext does not land on the server
+  as a side effect of an otherwise-encrypted send.
 
 ## Session Behavior
 
@@ -331,7 +334,7 @@ IMAP and inbox:
 
 Mail:
 
-- `POST /api/mail/send` (optional `attachments: [{name, mimeType, dataBase64}]`, 25 MB total)
+- `POST /api/mail/send` (optional `attachments: [{name, mimeType, dataBase64}]`, 25 MB total; optional `encrypt`/`sign`; `allowPickupFallback` — see [Where your PGP private key lives](#where-your-pgp-private-key-lives) — refuses with 409 by default if a recipient has no usable key)
 - `POST /api/mail/draft` (same optional `attachments` shape)
 - `GET /api/mail/attachments?mailbox=&messageId=` (list a message's attachment metadata)
 - `GET /api/mail/attachment?mailbox=&messageId=&index=` (download one attachment)

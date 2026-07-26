@@ -113,6 +113,18 @@ emailing them a one-time link. Originally the server stored that message's
 plaintext (sealed with its own key, which it holds) for seven days — the exact
 property client-side protection exists to remove.
 
+**Behavior change (2026-07-25):** `/api/mail/send` no longer falls back to a
+pickup link on its own. An encrypted send to a recipient with no usable key
+refuses with 409 unless the request sets `allowPickupFallback: true`. Existing
+callers that relied on the silent fallback will start seeing refusals — that
+is the point: the fallback stores plaintext server-side for seven days. The
+refusal happens before any SMTP delivery, so a client can safely re-send with
+the flag set once the user confirms — see "What mobile apps must implement"
+below for the exact shape of that 409. This gate applies to the server-side
+encrypt path (`server`-protected senders, on web or mobile); a client-protected
+sender's browser already sealed its own pickup links before this change and
+is unaffected.
+
 For client-protected accounts the message is now sealed in the sender's
 browser instead:
 
@@ -324,7 +336,13 @@ with the usual warning that mail encrypted to the old one stops being readable.
 
 ### What mobile apps must implement
 
-Only the degradation, not the crypto:
+Degradation for `client`-custody accounts, unchanged: the phone never holds
+the unwrapped private key and cannot unwrap it without the account password,
+which pairing deliberately never learns (see "Why porting the crypto was the
+wrong shape" above), so it defers to webmail wherever that key would be
+needed. `server`-custody accounts are different — the server already holds a
+server-readable key, so a native encrypted send from the phone is the same
+request the browser makes, not a degraded one.
 
 1. Read `pgpEncrypted`, `pgpSigned`, `pgpVerified`, `pgpSignerFingerprint` and
    `pgpDecryptError` off the inbox row. They are `omitempty`, so absent means
@@ -338,17 +356,60 @@ Only the degradation, not the crypto:
    Mark the *list* row for the first two cases only — a row that opens and reads
    normally does not need a marker, and marking it would decorate most rows of a
    `server`-mode mailbox with nothing the user can act on.
-4. `POST /api/mail/send` returns **409** with `clientSideNeeded: true` when a
-   client-protected account asks the server to sign or encrypt. Treat it as
-   "not available here", not as a generic failure.
-5. The webmail deep link is `/read?mailbox=<mailbox>&message=<messageId>`, the
-   same route a web push click uses. Omit `mailbox` for INBOX. Hand it to the
-   system as a normal https intent so an installed PWA or the user's browser
-   handles it — **not** an in-app WebView, which shares no session and would put
-   an account-password field inside the app.
+4. Sending for a `server`-custody account is native encrypted send, not a
+   degradation: `POST /api/mail/send` with `encrypt`, `sign`, and (once the
+   user has confirmed sending a pickup link to a keyless recipient)
+   `allowPickupFallback` set on the request — the same fields and the same
+   endpoint the web client uses. There is no separate mobile crypto path for
+   this custody mode; the server does the encrypting either way.
+5. That request can come back **409** two different ways. Both are the same
+   status code, so discriminate by field, not by status:
+   - `clientSideNeeded: true` means the account is `client`-protected and the
+     server categorically cannot sign or encrypt for it — there is no retry
+     from the phone that fixes this. Treat it as "not available here" and
+     hand off to webmail (item 7).
+   - `keylessRecipients` (the list of addresses with no usable key) plus
+     `pickupFallbackAvailable: true` means the account is `server`-protected
+     but at least one recipient has no key. Show the user which addresses,
+     and if they confirm sending a one-time pickup link to those addresses,
+     re-send the identical request with `allowPickupFallback: true`. Nothing
+     was delivered on the first call, so the re-send is safe.
+6. Preflight, so case 5's second 409 is a confirmation rather than a surprise:
+   call `POST /api/pgp/recipients/check` before the send to learn, per
+   address, whether the caller's contacts already have a usable key. Use
+   `check`, **not** `POST /api/pgp/recipients/resolve` — `resolve` exists to
+   hand a `client`-protected browser the recipients' actual public keys so it
+   can encrypt locally, and it 409s for any account that is not
+   client-protected. A `server`-custody mobile app asking `resolve` "does this
+   recipient have a key" will always be refused; `check`'s yes/no answer is
+   the one built for this question. Getting this backwards is the exact
+   mistake this document is meant to prevent — an earlier draft of the design
+   made it.
+7. For a `client`-custody account, the phone cannot sign or encrypt at all
+   (see the opening of this section). The handoff is: `POST /api/mail/draft`
+   to save the composed message as a draft over the same paired-device
+   credentials, then hand `/read?mailbox=Drafts` to the system as a normal
+   https intent so the user finishes the send in webmail, where the browser
+   holds the unwrapped key. Same "not an in-app WebView" reasoning as item 8.
+8. The webmail deep link for reading a message is
+   `/read?mailbox=<mailbox>&message=<messageId>`, the same route a web push
+   click uses. Omit `mailbox` for INBOX. Hand it to the system as a normal
+   https intent so an installed PWA or the user's browser handles it — **not**
+   an in-app WebView, which shares no session and would put an account-password
+   field inside the app.
 
-`kypost-android` implements the above. `kypost-Linux` / `kypost-for-Mac` still
-need it.
+Encrypting needs only the recipients' public keys, not the sender's private
+one. `POST /api/pgp/recipients/resolve` and `POST /api/mail/send-pgp` are both
+`withMailAuth`, so an encrypt-only (unsigned) send built on device is possible
+with no account password and no private key on the phone. Not built: it costs
+an OpenPGP stack in two clients and produces silently unsigned mail. Recorded
+so the option is not rediscovered from scratch.
+
+`kypost-android` implements 1-3 and the read deep link (8). Native
+`server`-custody send, the two 409 shapes, the `recipients/check` preflight,
+and the `client`-custody draft handoff (4, 5, 6, 7) are new to this branch and
+not yet wired up in any mobile client. `kypost-Linux` / `kypost-for-Mac` still
+need all of it.
 
 ### Superseded: the original port-the-crypto plan
 
