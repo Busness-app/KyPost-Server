@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { processEmailHtml, sanitizeEmailHtml } from "../lib/emailHtml";
+import { firstAddressFromText, listAddressesFromText } from "../lib/addressText";
 import { isFlaggedPhishing } from "../lib/phishing";
 import { decryptMessage } from "../lib/pgpClient";
 import { getPGPMessagePayload } from "../api/pgp";
@@ -141,31 +142,6 @@ function formatUpdatedLabel(lastLoadedAt: Date | null, now: number): string {
     hour: "numeric",
     minute: "2-digit"
   })}`;
-}
-
-function firstAddressFromText(value: string): string {
-  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return match ? match[0] : value.trim();
-}
-
-function listAddressesFromText(value: string): string[] {
-  const matches = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi);
-  if (!matches || matches.length === 0) {
-    const fallback = value.trim();
-    return fallback ? [fallback] : [];
-  }
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of matches) {
-    const clean = raw.trim();
-    const key = clean.toLowerCase();
-    if (!clean || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    out.push(clean);
-  }
-  return out;
 }
 
 function ensureSubjectPrefix(subject: string | undefined, prefix: "Re:" | "Fwd:"): string {
