@@ -464,7 +464,10 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// Returns the recipients' actual public keys, for client-protected
 	// accounts whose browser does the encrypting. See pgp_resolve_handler.go.
 	mux.HandleFunc("POST /api/pgp/recipients/resolve", s.withMailAuth(s.handlePGPRecipientsResolve))
-	mux.HandleFunc("GET /api/pgp/discovery/settings", s.withAuth(s.handlePGPDiscoverySettings))
+	// GET is withMailAuth so a paired device can honor autoEncryptWhenKeyKnown;
+	// the PUT below stays session-only because a device secret is not a
+	// re-verified password and this is a policy write.
+	mux.HandleFunc("GET /api/pgp/discovery/settings", s.withMailAuth(s.handlePGPDiscoverySettings))
 	mux.HandleFunc("PUT /api/pgp/discovery/settings", s.withAuth(s.handlePGPDiscoverySettings))
 	mux.HandleFunc("GET /api/pgp/discovery/suppressions", s.withAuth(s.handlePGPDiscoverySuppressions))
 	mux.HandleFunc("DELETE /api/pgp/discovery/suppressions/{email}", s.withAuth(s.handlePGPDiscoverySuppressionByEmail))

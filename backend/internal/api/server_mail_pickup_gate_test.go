@@ -179,3 +179,42 @@ func TestClientCustody409TakesPrecedenceOverKeyless(t *testing.T) {
 		t.Fatalf("expected no keylessRecipients alongside clientSideNeeded, got %+v", got.KeylessRecipients)
 	}
 }
+
+// Mobile needs autoEncryptWhenKeyKnown or the same account auto-encrypts on
+// web and silently does not on the phone. Only the read moves to device auth.
+//
+// This dispatches through srv.routes() rather than calling withMailAuth on
+// the handler directly: the thing under test is the route *registration* in
+// server.go (GET vs PUT wired to withAuth vs withMailAuth), and calling the
+// handler directly would bypass that registration entirely, passing whether
+// or not the route change was ever made.
+func TestDiscoverySettingsReadableWithDeviceAuth(t *testing.T) {
+	srv, userID := newPickupGateServer(t)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "device-1")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/discovery/settings", nil)
+	setDeviceHeaders(req, deviceID, deviceSecret)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a device-authenticated read, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The PUT must stay session-only: a device secret is not a re-verified
+// password, and changing discovery policy is a settings write, not a read.
+func TestDiscoverySettingsPutRejectsDeviceAuth(t *testing.T) {
+	srv, userID := newPickupGateServer(t)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "device-1")
+
+	body, _ := json.Marshal(map[string]any{"autoEncryptWhenKeyKnown": true})
+	req := httptest.NewRequest(http.MethodPut, "/api/pgp/discovery/settings", bytes.NewReader(body))
+	setDeviceHeaders(req, deviceID, deviceSecret)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for a device-authenticated write, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
