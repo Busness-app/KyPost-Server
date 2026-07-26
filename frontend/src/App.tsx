@@ -784,9 +784,10 @@ export function App() {
       ...keyedBcc.map((addr) => ({ recipients: [addr], publicKeys: [keyFor.get(addr.toLowerCase())!] }))
     ].filter((g) => g.recipients.length > 0);
 
+    let warning = "";
     if (groups.length > 0) {
       const deliveries = await buildEncryptedDeliveries(envelope, "text/html; charset=UTF-8", body, groups, composeSign);
-      await sendClientEncryptedMail({
+      const result = await sendClientEncryptedMail({
         from: composeFrom || "",
         subject: composeSubject,
         deliveries,
@@ -796,6 +797,7 @@ export function App() {
         sentCopy: body,
         mode: "html"
       });
+      warning = result.warning ?? "";
     }
 
     for (const address of missing) {
@@ -804,6 +806,7 @@ export function App() {
     if (groups.length === 0 && missing.length === 0) {
       throw new Error("Nothing to send: no recipients.");
     }
+    return warning;
   }
 
   async function sendComposeEmail() {
@@ -822,10 +825,11 @@ export function App() {
       // cannot sign or encrypt on its behalf — the browser does it and posts
       // ciphertext. Falling through to /api/mail/send here would get a 409
       // (the server refuses rather than silently sending in the clear).
+      let warning = "";
       if ((composeEncrypt || composeSign) && isClientProtected()) {
-        await sendComposeEncryptedLocally(to, body);
+        warning = await sendComposeEncryptedLocally(to, body);
       } else {
-        await postJSON<{ ok: boolean; sentSaved?: boolean; warning?: string }>("/api/mail/send", {
+        const result = await postJSON<{ ok: boolean; sentSaved?: boolean; warning?: string }>("/api/mail/send", {
           from: composeFrom,
           to,
           cc: serializeRecipientField(composeCc),
@@ -838,9 +842,20 @@ export function App() {
           sign: composeSign,
           allowPickupFallback: pickupFallbackFlag(composeEncrypt, composeSendLinkForKeyless)
         });
+        warning = result.warning ?? "";
       }
-      setComposeOpen(false);
+      // A 200 with a warning means the message went out but something after
+      // it did not — the Sent copy failed to save, some BCC deliveries
+      // failed, or a pickup link could not be delivered. Closing the window
+      // on that is how it used to reach nobody. Empty the form first (so the
+      // window cannot be used to send the same message twice) and keep it
+      // open carrying the warning; a clean send still closes as before.
       resetComposeForm();
+      if (warning) {
+        setComposeNotice(`Sent — ${warning}`);
+      } else {
+        setComposeOpen(false);
+      }
     } catch (e) {
       const keyless = keylessRecipientsFrom409(e);
       const message =
