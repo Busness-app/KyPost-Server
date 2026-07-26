@@ -869,7 +869,12 @@ type mailRequest struct {
 	Attachments []mailmsg.Attachment
 	Encrypt     bool
 	Sign        bool
-	From        string
+	// AllowPickupFallback opts in to the one-time pickup link for recipients
+	// with no usable PGP key. Absent means refuse: that fallback stores the
+	// message's plaintext server-side for seven days and mails the link in
+	// the clear, so it is a downgrade the sender has to choose out loud.
+	AllowPickupFallback bool
+	From                string
 }
 
 // Attachment budget for one outgoing message (decoded bytes); the request
@@ -896,8 +901,9 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 			MimeType   string `json:"mimeType"`
 			DataBase64 string `json:"dataBase64"`
 		} `json:"attachments"`
-		Encrypt bool `json:"encrypt"`
-		Sign    bool `json:"sign"`
+		Encrypt             bool `json:"encrypt"`
+		Sign                bool `json:"sign"`
+		AllowPickupFallback bool `json:"allowPickupFallback"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxMailRequestBytes)).Decode(&raw); err != nil {
 		return mailRequest{}, "invalid request", err
@@ -939,16 +945,17 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 	}
 
 	return mailRequest{
-		Subject:     raw.Subject,
-		Body:        raw.Body,
-		Mode:        raw.Mode,
-		To:          toList,
-		CC:          ccList,
-		BCC:         bccList,
-		Attachments: attachments,
-		Encrypt:     raw.Encrypt,
-		Sign:        raw.Sign,
-		From:        raw.From,
+		Subject:             raw.Subject,
+		Body:                raw.Body,
+		Mode:                raw.Mode,
+		To:                  toList,
+		CC:                  ccList,
+		BCC:                 bccList,
+		Attachments:         attachments,
+		Encrypt:             raw.Encrypt,
+		Sign:                raw.Sign,
+		AllowPickupFallback: raw.AllowPickupFallback,
+		From:                raw.From,
 	}, "", nil
 }
 
