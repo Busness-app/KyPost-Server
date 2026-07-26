@@ -49,3 +49,13 @@ export function isPlausibleEmail(value: string): boolean {
 export function splitAddressList(raw: string): string[] {
   return parseRecipientField(raw).tokens.map((t) => t.email);
 }
+
+/**
+ * Whether the compose send should opt in to the one-time pickup link for
+ * recipients with no key. Only meaningful when encrypting: the server ignores
+ * the flag otherwise, and sending true on an unencrypted message would claim
+ * a choice the user never made.
+ */
+export function pickupFallbackFlag(encrypt: boolean, sendLinkForKeyless: boolean): boolean {
+  return encrypt && sendLinkForKeyless;
+}

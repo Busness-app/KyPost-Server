@@ -9,7 +9,7 @@ import { AuthContext, type AuthState } from "./auth";
 import { ContactPickerModal } from "./components/ContactPickerModal";
 import { RecipientField } from "./components/RecipientField";
 import { useDialogOpen } from "./hooks/useDialogOpen";
-import { contactToToken, isDuplicateInField, parseRecipientField, serializeRecipientField, splitAddressList } from "./lib/recipients";
+import { contactToToken, isDuplicateInField, parseRecipientField, pickupFallbackFlag, serializeRecipientField, splitAddressList } from "./lib/recipients";
 import { isClientProtected, needsUnlock, loadPGPSession, clearPGPSession } from "./lib/pgpSession";
 import { buildEncryptedDeliveries } from "./lib/pgpClient";
 import { sealPickup } from "./lib/pickupCrypto";
@@ -171,8 +171,13 @@ export function App() {
   const [composeHtmlBody, setComposeHtmlBody] = useState("");
   const [composeSending, setComposeSending] = useState(false);
   const [composeUnlockOpen, setComposeUnlockOpen] = useState(false);
-  // Opt-in: send keyless recipients a one-time encrypted link rather than
-  // failing the send. Off by default because it is weaker than PGP.
+  // Opt-in: send keyless recipients a one-time pickup link rather than
+  // failing the send. Off by default because it is weaker than PGP. For
+  // client-custody accounts this drives a browser-side sealed-pickup flow;
+  // for server-custody accounts it travels to the server as
+  // allowPickupFallback on the /api/mail/send body, where it is not merely a
+  // client-side branch — the server itself refuses the downgrade unless the
+  // flag is set.
   const [composeSendLinkForKeyless, setComposeSendLinkForKeyless] = useState(false);
   const [composeSavingDraft, setComposeSavingDraft] = useState(false);
   const [composeError, setComposeError] = useState("");
@@ -811,7 +816,8 @@ export function App() {
           mode: "html",
           attachments: composeAttachments.map(({ name, mimeType, dataBase64 }) => ({ name, mimeType, dataBase64 })),
           encrypt: composeEncrypt,
-          sign: composeSign
+          sign: composeSign,
+          allowPickupFallback: pickupFallbackFlag(composeEncrypt, composeSendLinkForKeyless)
         });
       }
       setComposeOpen(false);
@@ -1221,13 +1227,16 @@ export function App() {
                   <input type="checkbox" checked={composeSign} onChange={(e) => setComposeSign(e.target.checked)} />
                   Sign
                 </label>
-                {composeEncrypt && isClientProtected() ? (
+                {composeEncrypt ? (
                   <label
                     style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.85rem" }}
                     title={
-                      "Recipients with no PGP key get a one-time link instead. The message is encrypted in your browser " +
-                      "and this server only stores ciphertext — but the key is in the link, so anyone who can read that " +
-                      "email can read the message. Weaker than PGP."
+                      isClientProtected()
+                        ? "Recipients with no PGP key get a one-time link instead. The message is encrypted in your browser " +
+                          "and this server only stores ciphertext — but the key is in the link, so anyone who can read that " +
+                          "email can read the message. Weaker than PGP."
+                        : "Recipients with no PGP key get a one-time link instead. The message is stored on this server in " +
+                          "plaintext for 7 days, and the link travels as ordinary unencrypted mail. Weaker than PGP."
                     }
                   >
                     <input
