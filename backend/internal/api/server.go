@@ -1271,7 +1271,22 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(plan.toCCEmails) == 0 && len(plan.bccEmails) == 0 {
-		http.Error(w, "none of the recipients have a known pgp key — disable encryption or add keys to your contacts first", http.StatusBadRequest)
+		if !req.AllowPickupFallback {
+			http.Error(w, "none of the recipients have a known pgp key — disable encryption or add keys to your contacts first", http.StatusBadRequest)
+			return
+		}
+		// Opted in with nothing to encrypt to: skip the PGP delivery entirely
+		// and let the pickup notifications below carry the message. Passing no
+		// recipients is safe — finishMailSend skips SMTP on an empty list and
+		// still saves the plaintext Sent copy.
+		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req) {
+			return
+		}
+		for _, recipient := range plan.withoutKeyEmails {
+			if err := s.sendPickupNotification(ac.UserID, envelopeFrom, recipient, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password); err != nil {
+				s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
+			}
+		}
 		return
 	}
 
@@ -1284,12 +1299,13 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	// deliveries[0] is always the correct hard-error-gated send: buildPGPDeliveries
 	// guarantees the shared To/CC ciphertext (if any) comes first, otherwise the
 	// first BCC recipient's ciphertext is deliveries[0]. deliveries is guaranteed
-	// non-empty here because we already returned a 400 above when both
-	// plan.toCCEmails and plan.bccEmails were empty. Treating index 0 uniformly
-	// (rather than special-casing on len(plan.toCCEmails) > 0) avoids a BCC-only
-	// send picking an empty "main" delivery, which previously let finishMailSend
-	// report ok:true via its empty-recipient-list guard before any of the actual
-	// best-effort BCC sends had even been attempted.
+	// non-empty here because the branch above already returned early whenever
+	// both plan.toCCEmails and plan.bccEmails were empty, so at least one of
+	// them is non-empty by the time buildPGPDeliveries runs. Treating index 0
+	// uniformly (rather than special-casing on len(plan.toCCEmails) > 0) avoids
+	// a BCC-only send picking an empty "main" delivery, which previously let
+	// finishMailSend report ok:true via its empty-recipient-list guard before
+	// any of the actual best-effort BCC sends had even been attempted.
 	mainRecipients, mainCiphertext := deliveries[0].Recipients, deliveries[0].Ciphertext
 	bccDeliveries := deliveries[1:]
 

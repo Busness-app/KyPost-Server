@@ -118,3 +118,31 @@ func TestMailSendKeylessRefusalHappensBeforeAnySend(t *testing.T) {
 		t.Fatalf("refusal must precede SMTP delivery, got 502: %s", rec.Body.String())
 	}
 }
+
+// Every recipient keyless + opt-in: there is nothing to encrypt, so the send
+// becomes pickup-notifications-only. It must not 400 (the dialog would be a
+// dead end) and must not panic on deliveries[0].
+func TestMailSendWithOnlyKeylessRecipientsAndOptIn(t *testing.T) {
+	srv, userID := newPickupGateServer(t)
+	if err := pgpdiscovery.AddSuppression(srv.userStateDir(userID), "dave@example.com", "test"); err != nil {
+		t.Fatalf("AddSuppression: %v", err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"to":                  "dave@example.com",
+		"subject":             "hi",
+		"body":                "hello",
+		"encrypt":             true,
+		"allowPickupFallback": true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/mail/send", bytes.NewReader(body))
+	authRequest(srv, req)
+	rec := httptest.NewRecorder()
+	srv.withAuth(srv.handleMailSend)(rec, req)
+
+	if rec.Code == http.StatusBadRequest {
+		t.Fatalf("opting in must not dead-end in the no-keyed-recipients 400: %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
