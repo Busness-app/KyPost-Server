@@ -21,6 +21,7 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 - Per-user data: IMAP credentials/tuning/notification prefs/CardDAV app-password hash under `$CONFIG_DIR/users/<userID>/`; mailbox state (checkpoint, processed set, decisions, push subscriptions, native devices, pairing `subscriberId`, contacts, mail cache) under `$STATE_DIR/users/<userID>/`. Global: `config.yaml` (timezone, log level, scan interval, rate limits, redaction, labels, Remote LLM, VAPID keys), root `$STATE_DIR/state.json` (AI-credits flag only)
 - Contacts: per-user address book (`contacts/` package) synced two ways — a session-authenticated JSON CRUD API for the web UI, a real CardDAV surface (`/dav/{username}/contacts/`, HTTP Basic Auth against a separate app-specific password, not the login password) for native OS/CardDAV clients, and a per-device-credential-authenticated two-way JSON sync endpoint (`/api/contacts/sync`) mirroring the native push pull/pairing mechanism, for the companion mobile app. See [internal/contacts/AGENTS.md](internal/contacts/AGENTS.md) and root `Mobile_Contact_Sync.md`
 - Mail cache: per-mailbox metadata cache (`mailcache/` package) backing `GET /api/inbox` — warmed opportunistically by the `processor/` poller's existing ~90s fetch (INBOX only) and by `api/`'s own live-fetch fallback, so the classic (no-`since`) response is usually served with zero IMAP calls, and a `since`-based delta mode avoids re-fetching bodies for already-seen messages. Not a permanent store like contacts — see [internal/mailcache/AGENTS.md](internal/mailcache/AGENTS.md) and root `Mobile_Mail_Relay.md`
+- Anti-phishing: inbound mail that impersonates KyPost itself is flagged **in place** with the IMAP keyword `$Phishing` and recorded as a `flagged_phishing` decision (`processor/phish_scan.go`). Flagging never moves, archives, files to Junk, deletes, bounces, or re-marks a message — the mail stays in INBOX and stays unread. Detection is deterministic (kypost:// URIs, host-agnostic links to this app's own pairing/pickup paths, forged system-notice subjects) and is gated by real DKIM over the account's own domain, run **only** when the content check trips, so ordinary mail costs no DNS. The Ollama classifier is never consulted. `$Phishing` is deliberately **not** in `config.Labels.Allowlist`, so it never becomes an inbox tab. The clients refuse non-allowlisted URI schemes on their own, unconditionally — this server-side flag is advisory, which is why every step of it is best-effort
 - Secrets (IMAP passwords) are encrypted at rest with the single master key `$SECRET_DIR/imap-config.key`
 - Logs are structured JSON, written to stdout and a rotating file (16 MB max × 8 backups) under `LOG_DIR`
 
@@ -47,13 +48,14 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 
 1. Poller fires on timer; lists active users from `users.json` and fans out over those with a stored IMAP config (bounded concurrency 4, per-user panic recovery)
 2. Per user: fetch unread emails from their IMAP mailbox since their checkpoint
-3. Apply global redaction patterns to sender, subject, body
-4. POST to Ollama `/api/generate` with the user's tuning prompt + redacted email text (one shared, serialized classifier client across all users)
-5. Fuzzy-match Ollama response against the global label allowlist
-6. Apply matched label as an IMAP keyword in the user's mailbox
-7. Send browser and native push notifications using the user's notification-mode gate (`none`, `all`, `keywords`) and the shared VAPID keys
-8. Persist decision to the user's `decisions.json`
-9. Advance the user's checkpoint to next UID
+3. Scan each newly-seen message for KyPost self-impersonation and flag it with the `$Phishing` keyword if it does not authenticate to the account's own domain (`flagAppImpersonation`). Runs before every step below on purpose: a security verdict must not be rationed by the classifier rate limit, nor suppressed by a filter rule's `stop` action or a classifier outage
+4. Apply global redaction patterns to sender, subject, body
+5. POST to Ollama `/api/generate` with the user's tuning prompt + redacted email text (one shared, serialized classifier client across all users)
+6. Fuzzy-match Ollama response against the global label allowlist
+7. Apply matched label as an IMAP keyword in the user's mailbox
+8. Send browser and native push notifications using the user's notification-mode gate (`none`, `all`, `keywords`) and the shared VAPID keys
+9. Persist decision to the user's `decisions.json`
+10. Advance the user's checkpoint to next UID
 
 One failing mailbox never blocks other users; global health flips unhealthy only when every polled mailbox fails in the same tick.
 

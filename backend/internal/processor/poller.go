@@ -504,15 +504,28 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	// outcome, so a slow or rate-limited classification run never delays
 	// cache freshness. INBOX only, matching ListUnreadInbox's scope — see
 	// mailcache/AGENTS.md for why other folders are warmed lazily instead.
+	// Hoisted out of the block below so the per-message loop can also mirror an
+	// anti-phishing flag into the cache — the warm here runs before that loop,
+	// so a message flagged inside it would otherwise carry stale keywords in
+	// the cache until the next tick. Stays nil when the store won't open, which
+	// mirrorPhishKeyword tolerates.
+	var mailCache *mailcache.Store
 	if len(messages) > 0 {
-		if cache, err := p.userMailCacheStore(u.ID); err != nil {
+		var err error
+		if mailCache, err = p.userMailCacheStore(u.ID); err != nil {
 			p.log.Error("failed to open mail cache store", "user_id", u.ID, "error", err.Error())
-		} else if err := cache.Upsert("INBOX", mailCacheEntriesFromMessages(messages)); err != nil {
+			mailCache = nil
+		} else if err := mailCache.Upsert("INBOX", mailCacheEntriesFromMessages(messages)); err != nil {
 			p.log.Error("failed to warm mail cache", "user_id", u.ID, "error", err.Error())
 		}
 	}
 
 	harvestEnabled, harvestSuppressed := p.autocryptHarvestConfig(u.ID)
+
+	// Resolved once per tick rather than per message: it reads and decrypts the
+	// sealed IMAP config, and every message in this batch belongs to the same
+	// account. Empty is a valid answer — see flagAppImpersonation.
+	ownDomain := p.accountDomain(u.ID)
 
 	processedCount := 0
 	skippedSeenCount := 0
@@ -522,6 +535,20 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		if store.Seen(msg.ID) {
 			skippedSeenCount++
 			continue
+		}
+		// Anti-phishing runs here, ahead of everything below, and the ordering
+		// is the point:
+		//   - before allowByRate, which breaks this loop once the classifier
+		//     budget is spent. A security verdict must not be rationed by an
+		//     LLM quota.
+		//   - before handleMessage, whose rules engine can move or delete the
+		//     message and whose "stop" action returns early, and whose
+		//     classifier failure returns before any keyword is applied. Any of
+		//     those would silently suppress the flag.
+		// Flagging first also means the keyword travels with the message if a
+		// user rule subsequently moves it.
+		if p.flagAppImpersonation(ctx, uc, msg, ownDomain) {
+			p.mirrorPhishKeyword(mailCache, msg)
 		}
 		if harvestEnabled {
 			p.harvestAutocrypt(ctx, uc, msg, harvestSuppressed)
