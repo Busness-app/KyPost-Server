@@ -268,3 +268,59 @@ func TestGetMessageBodiesExcludesOversizedUIDFromBufferingFetch(t *testing.T) {
 		}
 	}
 }
+
+// inboxBodies is the poller's view of a fetched message's content, and it is
+// deliberately not the same view the clients get.
+//
+// ListUnreadInbox (the poller's source) prefers the text/plain part, while
+// every client-facing path — ListUnreadMessages and GetMessageBodies — prefers
+// text/html. So a multipart/alternative message can hand the poller an
+// innocuous plain-text part while the clients render a hostile HTML one. That
+// asymmetry is why Message carries both: an anti-phishing scan that read only
+// Body would systematically miss a kypost:// pairing link planted in the HTML
+// part, which is exactly the attack the scan exists to catch.
+//
+// Body's text-first preference is preserved as-is here on purpose — it is what
+// gets classified and warmed into the mail cache, and changing it is a
+// different change with different blast radius.
+func TestInboxBodies(t *testing.T) {
+	t.Run("prefers text for Body and reports HTML separately", func(t *testing.T) {
+		body, bodyHTML := inboxBodies(&goimap.Email{
+			Text: "  plain part  ",
+			HTML: "  <p>html part</p>  ",
+		})
+		if body != "plain part" {
+			t.Fatalf("Body = %q, want the trimmed text part", body)
+		}
+		if bodyHTML != "<p>html part</p>" {
+			t.Fatalf("BodyHTML = %q, want the trimmed html part", bodyHTML)
+		}
+	})
+
+	t.Run("falls back to HTML for Body when there is no text part", func(t *testing.T) {
+		body, bodyHTML := inboxBodies(&goimap.Email{HTML: "<p>only html</p>"})
+		if body != "<p>only html</p>" {
+			t.Fatalf("Body = %q, want the html fallback", body)
+		}
+		if bodyHTML != "<p>only html</p>" {
+			t.Fatalf("BodyHTML = %q, want the html part", bodyHTML)
+		}
+	})
+
+	t.Run("reports no HTML for a text-only message", func(t *testing.T) {
+		body, bodyHTML := inboxBodies(&goimap.Email{Text: "only text"})
+		if body != "only text" {
+			t.Fatalf("Body = %q, want the text part", body)
+		}
+		if bodyHTML != "" {
+			t.Fatalf("BodyHTML = %q, want empty", bodyHTML)
+		}
+	})
+
+	t.Run("empty email yields both empty", func(t *testing.T) {
+		body, bodyHTML := inboxBodies(&goimap.Email{})
+		if body != "" || bodyHTML != "" {
+			t.Fatalf("got Body=%q BodyHTML=%q, want both empty", body, bodyHTML)
+		}
+	})
+}

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { processEmailHtml, sanitizeEmailHtml } from "../lib/emailHtml";
+import { firstAddressFromText, listAddressesFromText } from "../lib/addressText";
+import { isFlaggedPhishing } from "../lib/phishing";
 import { decryptMessage } from "../lib/pgpClient";
 import { getPGPMessagePayload } from "../api/pgp";
 import { isClientProtected, needsUnlock, subscribePGPSession, type PGPSessionState } from "../lib/pgpSession";
@@ -140,31 +142,6 @@ function formatUpdatedLabel(lastLoadedAt: Date | null, now: number): string {
     hour: "numeric",
     minute: "2-digit"
   })}`;
-}
-
-function firstAddressFromText(value: string): string {
-  const match = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return match ? match[0] : value.trim();
-}
-
-function listAddressesFromText(value: string): string[] {
-  const matches = value.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi);
-  if (!matches || matches.length === 0) {
-    const fallback = value.trim();
-    return fallback ? [fallback] : [];
-  }
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of matches) {
-    const clean = raw.trim();
-    const key = clean.toLowerCase();
-    if (!clean || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    out.push(clean);
-  }
-  return out;
 }
 
 function ensureSubjectPrefix(subject: string | undefined, prefix: "Re:" | "Fwd:"): string {
@@ -1563,6 +1540,25 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
               onCancel={() => setPgpUnlockOpen(false)}
             />
             <div className="email-reader-content">
+              {/*
+                Sits above the PGP badge because it is the more urgent thing to
+                read: PGP describes how a message was protected, this says the
+                message is trying to take over the user's device.
+
+                Advisory only, and no confirm-modal friction, because the
+                dangerous capability is already gone -- processEmailHtml has
+                replaced every non-allowlisted link with a visible
+                "[Blocked link:]" marker before this renders. Friction here
+                would protect nothing and train the user to click through
+                warnings.
+              */}
+              {isFlaggedPhishing(selected) ? (
+                <p className="notice notice-error" style={{ margin: "0 0 12px" }}>
+                  <strong>This message impersonates KyPost.</strong> Links to KyPost app addresses have been blocked.
+                  KyPost will never ask you to confirm a pairing request by email — never approve one you did not start
+                  yourself, on this device.
+                </p>
+              ) : null}
               {selected.pgpEncrypted ? (
                 (() => {
                   // For client-protected accounts the signature verdict comes

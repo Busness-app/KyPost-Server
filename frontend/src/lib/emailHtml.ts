@@ -30,16 +30,37 @@ import DOMPurify from "dompurify";
 // origin, which is a mitigation, not a reason to render the form at all.
 const forbiddenTags = ["form", "input", "button", "textarea", "select", "option"];
 
+// The URI schemes an email is allowed to link to.
+//
+// Pinned here rather than left to DOMPurify's default, even though the current
+// default happens to be equivalent. This app deliberately navigates to its own
+// kypost:// scheme elsewhere (NotificationsPage's "Pair Desktop App"), and every
+// client registers itself as that scheme's system handler — so an
+// <a href="kypost://native-pair?srv=https://evil.example&pt=..."> in a message
+// body is a request to hand the user's device to an attacker's server. Leaving
+// that to a library default means one dependency bump that widened it silently
+// reopens a pairing-phishing hole, with no test to notice. Pinning it makes the
+// allowlist ours, and emailHtml.test.ts holds it in place.
+//
+// The trailing alternations are what keep ordinary mail working: relative paths,
+// bare fragments, and protocol-relative URLs all have no scheme to check. cid:
+// is required for inline image references.
+const allowedUriSchemes = /^(?:(?:https?|mailto|tel|cid):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+
+// Matches a leading "scheme:" so a refusal can name what it refused.
+const leadingScheme = /^([a-z][a-z0-9+.\-]*):/i;
+
 export function sanitizeEmailHtml(html: string, blockRemoteContent = false): string {
   return DOMPurify.sanitize(
     html,
     blockRemoteContent
       ? {
           ADD_ATTR: ["target"],
+          ALLOWED_URI_REGEXP: allowedUriSchemes,
           FORBID_ATTR: ["style", "background"],
           FORBID_TAGS: [...forbiddenTags, "style", "svg", "video", "audio"]
         }
-      : { ADD_ATTR: ["target"], FORBID_TAGS: forbiddenTags }
+      : { ADD_ATTR: ["target"], ALLOWED_URI_REGEXP: allowedUriSchemes, FORBID_TAGS: forbiddenTags }
   );
 }
 
@@ -56,6 +77,19 @@ export function processEmailHtml(html: string, showImages: boolean): string {
   }
 
   root.querySelectorAll("a[href]").forEach((anchor) => {
+    // Sanitizing alone would strip the href and leave the anchor behind: styled
+    // like a link, indistinguishable from one, and silently doing nothing when
+    // clicked. A user who just read "Confirm your account" learns nothing from
+    // a dead link, and may well go looking for another way to comply. Replace
+    // the whole anchor with a visible refusal instead — the same treatment
+    // [Image Blocked] gets below, and the same choice the Android client makes
+    // when it toasts a blocked scheme rather than swallowing the tap.
+    const href = anchor.getAttribute("href") ?? "";
+    if (!allowedUriSchemes.test(href)) {
+      const scheme = href.match(leadingScheme)?.[1]?.toLowerCase();
+      anchor.replaceWith(document.createTextNode(`[Blocked link: ${scheme ? `${scheme}:` : "unrecognized address"}]`));
+      return;
+    }
     anchor.setAttribute("target", "_blank");
     anchor.setAttribute("rel", "noopener noreferrer");
   });
