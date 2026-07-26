@@ -81,3 +81,71 @@ describe("processEmailHtml", () => {
     expect(out).not.toContain("alert");
   });
 });
+
+// Every client registers itself as the system handler for kypost://, so an
+// <a href="kypost://native-pair?srv=https://evil.example&pt=..."> in a message
+// body is a request to hand the user's device to an attacker's server. This app
+// deliberately navigates to kypost:// itself (NotificationsPage's "Pair Desktop
+// App"), which is exactly why the allowlist is pinned here rather than left to
+// DOMPurify's default: a dependency bump that widened that default would
+// silently reopen a pairing-phishing hole.
+describe("dangerous URI schemes in links", () => {
+  it.each([
+    ["the app's own pairing scheme", "kypost://native-pair?sub=x&srv=https://evil.example&pt=y"],
+    ["the app's own scheme, uppercased", "KYPOST://native-pair?sub=x"],
+    ["javascript", "javascript:alert(1)"],
+    ["data html", "data:text/html,<script>alert(1)</script>"],
+    ["file", "file:///etc/passwd"],
+    ["android intent", "intent://scan/#Intent;scheme=zxing;end"],
+    ["smb share", "smb://server/share"],
+  ])("refuses %s", (_label, href) => {
+    const out = processEmailHtml(`<p>Hi</p><a href="${href}">Confirm your account</a>`, true);
+    // No live link survives at all: no anchor element, and no href attribute
+    // for a browser to act on. The scheme may still appear inside the
+    // user-facing "[Blocked link: ...]" marker, which is the point of it.
+    expect(out).not.toContain("<a");
+    expect(out).not.toContain("href");
+    // The ordinary content around it is untouched.
+    expect(out).toContain("<p>Hi</p>");
+  });
+
+  // A stripped href leaves a styled, clickable-looking anchor that silently
+  // does nothing -- the failure mode Android rejected in favour of a toast.
+  // Say so instead.
+  it("tells the user a link was blocked rather than silently dropping it", () => {
+    const out = processEmailHtml('<a href="kypost://native-pair?sub=x">Confirm your account</a>', true);
+    expect(out).toContain("Blocked link");
+    expect(out).toContain("kypost:");
+    expect(out).not.toContain("<a");
+  });
+
+  it("leaves ordinary link schemes working", () => {
+    const out = processEmailHtml(
+      '<a href="https://ok.example/a">web</a><a href="mailto:a@b.example">mail</a><a href="tel:+15551234">call</a>',
+      true,
+    );
+    expect(out).toContain("https://ok.example/a");
+    expect(out).toContain("mailto:a@b.example");
+    expect(out).toContain("tel:+15551234");
+    expect(out).toContain('target="_blank"');
+    expect(out).toContain("noopener");
+    expect(out).not.toContain("Blocked link");
+  });
+
+  // Regression guard for the pinned regexp: relative URLs, fragments and cid:
+  // (inline image references) must keep working, or ordinary mail breaks.
+  it.each([
+    ["a relative path", "/inbox/42"],
+    ["a bare fragment", "#section-2"],
+    ["a protocol-relative url", "//ok.example/a"],
+  ])("keeps %s intact", (_label, href) => {
+    const out = processEmailHtml(`<a href="${href}">x</a>`, true);
+    expect(out).toContain(href);
+    expect(out).not.toContain("Blocked link");
+  });
+
+  it("keeps cid: inline image references when images are shown", () => {
+    const out = processEmailHtml('<img src="cid:logo@example">', true);
+    expect(out).toContain("cid:logo@example");
+  });
+});

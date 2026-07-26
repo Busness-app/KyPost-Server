@@ -72,6 +72,8 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 - Dragging an email row from ReadPage and dropping onto a sidebar folder (including Inbox and Archive buckets) sends `POST /api/inbox/actions` with `action=move` and refreshes mailbox views via a `mailbox-move-complete` window event
 - ReadPage no longer shows a manual refresh button; it shows a centered clickable "Updated Just Now" label at the bottom of the inbox page and switches to a localized time once the last inbox refresh is older than 3 minutes
 - Rendered email HTML in ReadPage forces all links to open in a new tab with `target="_blank"` and `rel="noopener noreferrer"`
+- `emailHtml.ts` pins its own URI-scheme allowlist (`ALLOWED_URI_REGEXP`: http/https/mailto/tel/cid plus scheme-less URLs) instead of relying on DOMPurify's default, because this app deliberately navigates to its own `kypost://` scheme in `NotificationsPage.tsx` and every client is that scheme's registered system handler — a widened library default would silently reopen a pairing-phishing hole. A link with a refused scheme is replaced by a visible `[Blocked link: <scheme>:]` text marker rather than having its `href` stripped, which would leave a dead link that looks live. Held in place by `emailHtml.test.ts`
+- ReadPage shows a `notice notice-error` banner above the PGP badge when a message carries the `$Phishing` IMAP keyword (`lib/phishing.ts`, matched case-insensitively — IMAP keywords are case-insensitive). Advisory only, with no confirm-modal friction, because `processEmailHtml` has already neutralized the dangerous links before render
 
 ## Verification
 
