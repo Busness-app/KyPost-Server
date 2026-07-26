@@ -1252,6 +1252,24 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	}
 	resolver := &keyResolver{store: contactsStore, settings: discoverySettings, discover: req.Encrypt, suppressed: suppressed}
 	plan := buildPGPRecipientPlan(r.Context(), toList, ccList, bccList, resolver)
+
+	// Refuse before any delivery when a recipient has no usable key and the
+	// caller did not opt in. The pickup fallback stores this message's
+	// plaintext server-side for seven days and mails the link in the clear,
+	// so it is a downgrade the sender chooses, not one they discover later.
+	//
+	// Ordering matters: nothing has been sent at this point, so a client may
+	// re-send with allowPickupFallback set once the user confirms, with no
+	// risk of a duplicate or half-delivered message.
+	if len(plan.withoutKeyEmails) > 0 && !req.AllowPickupFallback {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":                   "some recipients have no usable PGP key; sending them a one-time link stores this message's plaintext on the server for 7 days",
+			"keylessRecipients":       plan.withoutKeyEmails,
+			"pickupFallbackAvailable": true,
+		})
+		return
+	}
+
 	if len(plan.toCCEmails) == 0 && len(plan.bccEmails) == 0 {
 		http.Error(w, "none of the recipients have a known pgp key — disable encryption or add keys to your contacts first", http.StatusBadRequest)
 		return
