@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
@@ -216,5 +217,32 @@ func TestDiscoverySettingsPutRejectsDeviceAuth(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for a device-authenticated write, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Mobile compose needs to warn about keyless recipients before the user hits
+// send. resolve is unavailable to these accounts by design (it 409s for
+// anything but client custody), so check is the endpoint, and it has to be
+// reachable from a paired device.
+//
+// This dispatches through srv.routes() rather than calling withMailAuth on
+// the handler directly: the thing under test is the route *registration* in
+// server.go, and calling the handler directly would bypass that registration
+// entirely, passing whether or not the route change was ever made.
+func TestRecipientsCheckReadableWithDeviceAuth(t *testing.T) {
+	srv, userID := newPickupGateServer(t)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "device-1")
+
+	body, _ := json.Marshal(map[string]any{"addresses": []string{"bob@example.com", "carol@example.com"}})
+	req := httptest.NewRequest(http.MethodPost, "/api/pgp/recipients/check", bytes.NewReader(body))
+	setDeviceHeaders(req, deviceID, deviceSecret)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a device-authenticated check, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "carol@example.com") {
+		t.Fatalf("expected every address echoed back, got %s", rec.Body.String())
 	}
 }

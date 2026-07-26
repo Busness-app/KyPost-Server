@@ -460,7 +460,12 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/pgp/identity/export-legacy", s.withAuth(s.handlePGPExportLegacyKey))
 	mux.HandleFunc("DELETE /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
 	mux.HandleFunc("GET /api/pgp/keyserver/lookup", s.withAuth(s.handlePGPKeyserverLookup))
-	mux.HandleFunc("POST /api/pgp/recipients/check", s.withAuth(s.handlePGPRecipientsCheck))
+	// withMailAuth: mobile compose calls this to warn about keyless recipients
+	// before sending. It is a read of the caller's own contacts answering the
+	// same question the send path answers by refusing, only asked earlier.
+	// (recipients/resolve below stays unusable here — it 409s for anything but
+	// a client-protected account.)
+	mux.HandleFunc("POST /api/pgp/recipients/check", s.withMailAuth(s.handlePGPRecipientsCheck))
 	// Returns the recipients' actual public keys, for client-protected
 	// accounts whose browser does the encrypting. See pgp_resolve_handler.go.
 	mux.HandleFunc("POST /api/pgp/recipients/resolve", s.withMailAuth(s.handlePGPRecipientsResolve))
