@@ -146,3 +146,36 @@ func TestMailSendWithOnlyKeylessRecipientsAndOptIn(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// A client-custody account cannot encrypt server-side at all, so naming its
+// keyless recipients would answer a question it never got to ask. Clients
+// discriminate the two 409s by field, so exactly one must be present.
+func TestClientCustody409TakesPrecedenceOverKeyless(t *testing.T) {
+	srv, userID := newPickupGateServer(t)
+	_, err := srv.users.SetPGPIdentityClientProtected(userID,
+		"FPR123", "KID123",
+		"-----BEGIN PGP PUBLIC KEY BLOCK-----\npub\n-----END PGP PUBLIC KEY BLOCK-----",
+		`{"v":2,"kdf":"PBKDF2-SHA256","iterations":600000,"salt":"c2FsdA==","iv":"aXY=","ciphertext":"Y3Q="}`,
+		"generated", "2026-07-25T00:00:00Z")
+	if err != nil {
+		t.Fatalf("SetPGPIdentityClientProtected: %v", err)
+	}
+	rec := sendEncrypted(t, srv, false)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		ClientSideNeeded  bool     `json:"clientSideNeeded"`
+		KeylessRecipients []string `json:"keylessRecipients"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.ClientSideNeeded {
+		t.Fatal("expected clientSideNeeded on a client-custody account")
+	}
+	if len(got.KeylessRecipients) != 0 {
+		t.Fatalf("expected no keylessRecipients alongside clientSideNeeded, got %+v", got.KeylessRecipients)
+	}
+}
