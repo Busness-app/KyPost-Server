@@ -1282,11 +1282,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req) {
 			return
 		}
-		for _, recipient := range plan.withoutKeyEmails {
-			if err := s.sendPickupNotification(ac.UserID, envelopeFrom, recipient, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password); err != nil {
-				s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
-			}
-		}
+		s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password)
 		return
 	}
 
@@ -1319,8 +1315,16 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for _, recipient := range plan.withoutKeyEmails {
-		if err := s.sendPickupNotification(ac.UserID, envelopeFrom, recipient, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password); err != nil {
+	s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password)
+}
+
+// sendPickupNotifications best-effort mails a pickup link to every keyless
+// recipient, logging (rather than aborting on) each individual failure.
+// Shared by the all-keyless opt-in path and the mixed keyed/keyless path so
+// the two call sites can't drift apart on the notification loop's behavior.
+func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients []string, subject, body, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) {
+	for _, recipient := range recipients {
+		if err := s.sendPickupNotification(userID, envelopeFrom, recipient, subject, body, smtpHost, smtpPort, addr, smtpUsername, smtpPassword); err != nil {
 			s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
 		}
 	}
