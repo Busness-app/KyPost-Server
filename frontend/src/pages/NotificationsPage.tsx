@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
 import { normalizeConfig, uniqueLabels, type AppConfig } from "../api/config";
+import { ContentPreviewWarningDialog } from "../components/ContentPreviewWarningDialog";
 
 type LabelsResponse = {
   configured: string[];
@@ -182,6 +183,9 @@ export function NotificationsPage() {
   const [deliveryMode, setDeliveryMode] = useState<NativeDeliveryMode>("push");
   const [deliveryModeBusy, setDeliveryModeBusy] = useState(false);
   const [desktopPairingBusy, setDesktopPairingBusy] = useState(false);
+  // Turning previews on is gated behind a warning the user has to sit through;
+  // turning them back off is not.
+  const [previewWarningOpen, setPreviewWarningOpen] = useState(false);
 
   const statusTone = status.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
@@ -662,7 +666,13 @@ export function NotificationsPage() {
                 <input
                   type="checkbox"
                   checked={prefs.contentPreview}
-                  onChange={(event) => setPrefs({ ...prefs, contentPreview: event.target.checked })}
+                  onChange={(event) => {
+                    if (event.target.checked) {
+                      setPreviewWarningOpen(true);
+                      return;
+                    }
+                    setPrefs({ ...prefs, contentPreview: false });
+                  }}
                   style={{ marginTop: "0.25rem" }}
                 />
                 <span>
@@ -673,23 +683,12 @@ export function NotificationsPage() {
                   </span>
                 </span>
               </label>
-              <p className="notifications-muted" style={{ marginTop: "0.5rem" }}>
-                {deliveryMode === "pull" ? (
-                  <>
-                    You are on <strong>App Pull</strong>: your phone fetches notifications directly from this
-                    server, so turning this on keeps sender and subject between your device and your own server.
-                  </>
-                ) : (
-                  <>
-                    <strong>Read this before turning it on.</strong> Mobile push is not delivered by this server.
-                    It travels through the push relay and then Google (Android) or Apple (iOS), and the sender and
-                    subject are readable at every hop. Turning this on tells those companies who emails you and
-                    what about &mdash; which PGP encryption does not prevent, because the Subject header is not
-                    encrypted. Switch the mobile delivery mode to <strong>App Pull</strong> below to get previews
-                    without involving them. Browser notifications are encrypted to your browser either way.
-                  </>
-                )}
-              </p>
+              {deliveryMode === "pull" ? (
+                <p className="notifications-muted" style={{ marginTop: "0.5rem" }}>
+                  You are on <strong>App Pull</strong>: your phone fetches notifications directly from this
+                  server, so turning this on keeps sender and subject between your device and your own server.
+                </p>
+              ) : null}
             </div>
           ) : (
             <div role="tabpanel" className="notifications-settings-panel">
@@ -867,6 +866,15 @@ export function NotificationsPage() {
       </div>
 
       {status ? <p className={statusTone}>{status}</p> : null}
+
+      <ContentPreviewWarningDialog
+        open={previewWarningOpen}
+        onConfirm={() => {
+          setPreviewWarningOpen(false);
+          setPrefs((prev) => (prev ? { ...prev, contentPreview: true } : prev));
+        }}
+        onCancel={() => setPreviewWarningOpen(false)}
+      />
     </section>
   );
 }

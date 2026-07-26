@@ -48,6 +48,40 @@ therefore cannot derive the wrapping key, and there is no code path that
 tries. `cryptutil.OpenString` uses `LoadKey`, not `LoadOrCreateKey`, so a
 missing master key is a loud error rather than a silently-minted new one.
 
+### Decrypted mail is never cached
+
+`mailcache.json` is plain JSON on disk. In `server` mode the daemon's warm path
+would otherwise write decrypted PGP bodies straight into it, so the sealed
+private key sat next to a plaintext copy of everything it had ever opened — a
+larger disclosure than the key itself.
+
+`mailcache.Store.Upsert` now drops the body of any entry flagged
+`PGPEncrypted`, keeping the flags so clients still render the badge. This is
+enforced in the store rather than at the `internal/api` call sites, so a future
+caller cannot bypass it. Correctness is unaffected: an empty `Body` has always
+meant "not warmed, fetch if needed" rather than "empty message", and every read
+path already falls back to a live fetch.
+
+**The cost is larger than one fetch per message, and worth knowing.**
+`Store.Snapshot` reports a window as warmed only when *every* entry has a body
+(`store.go:102-106`). A single encrypted message therefore makes the whole
+mailbox read as cold, so `handleInbox`'s cache-first branch is skipped and the
+non-delta path does a full live `ListUnreadMessages` plus decrypt on every load.
+For an account that receives encrypted mail regularly, the fast path is
+effectively off.
+
+That is the correct trade as it stands — serving the cache-first branch from a
+window with empty PGP bodies would hand clients `pgpEncrypted: true` with no
+body and no `pgpDecryptError`, which is precisely the wire signature of a
+*client*-protected message, and every client would then tell a `server`-mode
+user their own mail is unreadable.
+
+If the fast path is wanted back, the fix is to teach `Snapshot` that a PGP
+entry's empty body is expected rather than cold, and have the cache-first
+branch live-fetch just those UIDs — not to relax what gets stored.
+
+This applies to both modes and is independent of which one an account uses.
+
 ### Session handling
 
 The unwrapped key lives in module memory for the life of the page and is
@@ -78,6 +112,18 @@ A recipient with no PGP key has nothing to encrypt to, so KyPost falls back to
 emailing them a one-time link. Originally the server stored that message's
 plaintext (sealed with its own key, which it holds) for seven days — the exact
 property client-side protection exists to remove.
+
+**Behavior change (2026-07-25):** `/api/mail/send` no longer falls back to a
+pickup link on its own. An encrypted send to a recipient with no usable key
+refuses with 409 unless the request sets `allowPickupFallback: true`. Existing
+callers that relied on the silent fallback will start seeing refusals — that
+is the point: the fallback stores plaintext server-side for seven days. The
+refusal happens before any SMTP delivery, so a client can safely re-send with
+the flag set once the user confirms — see "What mobile apps must implement"
+below for the exact shape of that 409. This gate applies to the server-side
+encrypt path (`server`-protected senders, on web or mobile); a client-protected
+sender's browser already sealed its own pickup links before this change and
+is unaffected.
 
 For client-protected accounts the message is now sealed in the sender's
 browser instead:
@@ -218,9 +264,13 @@ Web UI (wired):
   locally; the signature verdict comes from that decrypt, not the server.
 - **Compose**: resolves recipient keys via
   `/api/pgp/recipients/resolve`, encrypts per delivery group (BCC each in its
-  own), posts to `/api/mail/send-pgp`. **Refuses** when a recipient has no
-  usable key rather than downgrading — the pickup-link fallback stores
-  plaintext on the server, which is what this mode prevents.
+  own), posts to `/api/mail/send-pgp`. Refuses when a recipient has no usable
+  key **unless** the "secure link if no key" checkbox is ticked, in which case
+  it downgrades that recipient to a one-time link sealed in the browser — the
+  server only ever stores ciphertext for this mode, unlike the `server`-custody
+  fallback described below, which stores plaintext. The checkbox is off by
+  default, so the refusal is what a client-protected sender gets unless they
+  explicitly choose the weaker path.
 - **Password change**: rewraps the key, unwrapping before the password write
   so a failure leaves nothing half-applied.
 
@@ -235,10 +285,144 @@ Still open:
   recipient.** The unit and HTTP-level tests pass; an end-to-end manual run
   is still required before relying on this.
 
-Because the default is unchanged, this is safe to ship incrementally: existing
-installs keep working exactly as before, and nothing silently downgrades.
+Because the default *key-custody mode* (`client`) is unchanged, offering this
+choice was safe to ship incrementally: existing installs keep generating
+client-protected keys exactly as before, and no account is silently moved to
+`server` custody. That is a separate claim from the pickup-link behavior
+change above — that change is the opposite of "nothing silently downgrades"
+for the case it targets: a `server`-protected send to a keyless recipient
+used to downgrade silently, and now refuses instead unless the caller opts in.
 
 ## Mobile plan
+
+**Superseded.** An earlier version of this section prescribed porting the
+browser's crypto to Android and Qt. It ran into a constraint it had not
+accounted for, described below, and the answer changed. The old prescription is
+kept at the end of this section, marked as such, because the analysis behind it
+is still the right starting point if the decision is ever revisited.
+
+### Why porting the crypto was the wrong shape
+
+A phone pairs by QR or deep link and never learns the account password. The
+wrapped envelope is sealed under a key derived from that password, so unwrapping
+on device means introducing password entry on the least-trusted device, for the
+credential that also gates web login and admin.
+
+Every way around that is worse:
+
+- **Per-device PGP keys** break inbound mail. A sender encrypts to one key,
+  whichever they discovered through WKD or Autocrypt. This is why Autocrypt's
+  multi-device story transfers the same key rather than minting one per device.
+- **A device key held in the Keystore/Keychain** makes mail recoverable without
+  any user secret, which is the property "Cold start" above exists to remove.
+- **Server-side re-encryption to per-device keys** requires the server to
+  decrypt first, so it holds the account key anyway, in `SECRET_DIR` beside
+  `users.json`. An attacker with the disk decrypts from IMAP directly. The
+  layer sits downstream of the secret it would be protecting.
+
+### What we do instead
+
+Offer the user the choice, in the terms they can actually evaluate, and make the
+mobile app honest about which one is in force. Both modes already exist; this is
+a UI and copy problem, not new cryptography.
+
+| | `server` | `client` (default) |
+|---|---|---|
+| Server can read your mail | Yes | No |
+| Readable in the native mobile app | Yes | No — deep-links to webmail |
+
+The question the Security page asks is "read encrypted mail on your phone?", not
+"pick a key custody model". The mode follows from the answer. `client` stays the
+default so nothing downgrades by inattention, and the `server` branch is never
+described as end-to-end — advertising it that way is the defect this whole split
+exists to close.
+
+The choice is offered **at key creation only**. There is deliberately no
+downgrade path: `export-legacy` already refuses once an account is
+client-protected, and reversing that invariant to save a re-key is not a trade
+worth making. Switching from `client` to `server` means generating a new key,
+with the usual warning that mail encrypted to the old one stops being readable.
+
+### What mobile apps must implement
+
+Degradation for `client`-custody accounts, unchanged: the phone never holds
+the unwrapped private key and cannot unwrap it without the account password,
+which pairing deliberately never learns (see "Why porting the crypto was the
+wrong shape" above), so it defers to webmail wherever that key would be
+needed. `server`-custody accounts are different — the server already holds a
+server-readable key, so a native encrypted send from the phone is the same
+request the browser makes, not a degraded one.
+
+1. Read `pgpEncrypted`, `pgpSigned`, `pgpVerified`, `pgpSignerFingerprint` and
+   `pgpDecryptError` off the inbox row. They are `omitempty`, so absent means
+   "no OpenPGP content".
+2. `pgpEncrypted` with an **empty** `pgpDecryptError` means client-protected:
+   there is no body, and the app cannot produce one. Say so, and offer a link to
+   webmail. A **non-empty** `pgpDecryptError` is the different case where the
+   server tried and failed — show that error.
+3. `pgpEncrypted` **with** a body means the server decrypted it. Surface that
+   too: the user should be able to tell that the server read their mail.
+   Mark the *list* row for the first two cases only — a row that opens and reads
+   normally does not need a marker, and marking it would decorate most rows of a
+   `server`-mode mailbox with nothing the user can act on.
+4. Sending for a `server`-custody account is native encrypted send, not a
+   degradation: `POST /api/mail/send` with `encrypt`, `sign`, and (once the
+   user has confirmed sending a pickup link to a keyless recipient)
+   `allowPickupFallback` set on the request — the same fields and the same
+   endpoint the web client uses. There is no separate mobile crypto path for
+   this custody mode; the server does the encrypting either way.
+5. That request can come back **409** two different ways. Both are the same
+   status code, so discriminate by field, not by status:
+   - `clientSideNeeded: true` means the account is `client`-protected and the
+     server categorically cannot sign or encrypt for it — there is no retry
+     from the phone that fixes this. Treat it as "not available here" and
+     hand off to webmail (item 7).
+   - `keylessRecipients` (the list of addresses with no usable key) plus
+     `pickupFallbackAvailable: true` means the account is `server`-protected
+     but at least one recipient has no key. Show the user which addresses,
+     and if they confirm sending a one-time pickup link to those addresses,
+     re-send the identical request with `allowPickupFallback: true`. Nothing
+     was delivered on the first call, so the re-send is safe.
+6. Preflight, so case 5's second 409 is a confirmation rather than a surprise:
+   call `POST /api/pgp/recipients/check` before the send to learn, per
+   address, whether the caller's contacts already have a usable key. Use
+   `check`, **not** `POST /api/pgp/recipients/resolve` — `resolve` exists to
+   hand a `client`-protected browser the recipients' actual public keys so it
+   can encrypt locally, and it 409s for any account that is not
+   client-protected. A `server`-custody mobile app asking `resolve` "does this
+   recipient have a key" will always be refused; `check`'s yes/no answer is
+   the one built for this question. Getting this backwards is the exact
+   mistake this document is meant to prevent — an earlier draft of the design
+   made it.
+7. For a `client`-custody account, the phone cannot sign or encrypt at all
+   (see the opening of this section). The handoff is: `POST /api/mail/draft`
+   to save the composed message as a draft over the same paired-device
+   credentials, then hand `/read?mailbox=Drafts` to the system as a normal
+   https intent so the user finishes the send in webmail, where the browser
+   holds the unwrapped key. Same "not an in-app WebView" reasoning as item 8.
+8. The webmail deep link for reading a message is
+   `/read?mailbox=<mailbox>&message=<messageId>`, the same route a web push
+   click uses. Omit `mailbox` for INBOX. Hand it to the system as a normal
+   https intent so an installed PWA or the user's browser handles it — **not**
+   an in-app WebView, which shares no session and would put an account-password
+   field inside the app.
+
+Encrypting needs only the recipients' public keys, not the sender's private
+one. `POST /api/pgp/recipients/resolve` and `POST /api/mail/send-pgp` are both
+`withMailAuth`, so an encrypt-only (unsigned) send built on device is possible
+with no account password and no private key on the phone. Not built: it costs
+an OpenPGP stack in two clients and produces silently unsigned mail. Recorded
+so the option is not rediscovered from scratch.
+
+`kypost-android` implements 1-3 and the read deep link (8). Native
+`server`-custody send, the two 409 shapes, the `recipients/check` preflight,
+and the `client`-custody draft handoff (4, 5, 6, 7) are new to this branch and
+not yet wired up in any mobile client. `kypost-Linux` / `kypost-for-Mac` still
+need all of it.
+
+### Superseded: the original port-the-crypto plan
+
+Retained for the analysis, not as instructions.
 
 Both apps need the same three capabilities. Neither can keep using the
 server-side decrypt path once its user migrates, because there will be

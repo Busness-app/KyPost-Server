@@ -1,6 +1,8 @@
 package mailcache
 
 import (
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -256,6 +258,90 @@ func TestPGPProtectedSubject_WarmedWithoutChurnAndPreserved(t *testing.T) {
 	entries, _ = s.Snapshot("INBOX", 1)
 	if entries[0].PGPProtectedSubject != "Quarterly numbers" {
 		t.Fatalf("metadata-only overview change must preserve the protected subject, got %+v", entries[0])
+	}
+}
+
+// TestPGPBody_NeverPersisted proves the warm path stores a decrypted OpenPGP
+// message's flags but not its plaintext, for both a brand-new UID and one
+// already in the window. The assertion is against the file on disk, not just
+// the in-memory snapshot, because the whole point is what an attacker holding
+// the volume can read.
+func TestPGPBody_NeverPersisted(t *testing.T) {
+	s := newTestStore(t)
+
+	// New UID: straight to Upsert without a prior Sync, so this exercises the
+	// append branch rather than the update branch.
+	fresh := entry(1, "[Encrypted] Email Sent by KyPost", "unread", "the secret plaintext")
+	fresh.PGPEncrypted = true
+	fresh.PGPSigned = true
+	fresh.PGPVerified = true
+	fresh.PGPSignerFingerprint = "ABCD"
+	if err := s.Upsert("INBOX", []Entry{fresh}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	entries, _ := s.Snapshot("INBOX", 10)
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %+v", entries)
+	}
+	if entries[0].Body != "" {
+		t.Fatalf("a decrypted PGP body must not be stored, got %q", entries[0].Body)
+	}
+	// The flags are the reason we do not simply drop the whole entry: clients
+	// render the badge from them and know to fetch the body live.
+	if !entries[0].PGPEncrypted || !entries[0].PGPSigned || !entries[0].PGPVerified {
+		t.Fatalf("PGP flags must survive alongside the dropped body, got %+v", entries[0])
+	}
+	if entries[0].PGPSignerFingerprint != "ABCD" {
+		t.Fatalf("signer fingerprint must survive, got %+v", entries[0])
+	}
+
+	raw, err := os.ReadFile(s.path())
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(raw), "the secret plaintext") {
+		t.Fatalf("decrypted plaintext reached %s", s.path())
+	}
+
+	// Existing UID: an older build may already have written plaintext for this
+	// message, so a re-warm must clear it rather than leave it behind.
+	stale := entry(2, "s", "unread", "previously cached plaintext")
+	if err := s.Upsert("INBOX", []Entry{stale}); err != nil {
+		t.Fatalf("Upsert stale: %v", err)
+	}
+	rewarm := entry(2, "s", "unread", "the secret plaintext")
+	rewarm.PGPEncrypted = true
+	if err := s.Upsert("INBOX", []Entry{rewarm}); err != nil {
+		t.Fatalf("Upsert rewarm: %v", err)
+	}
+	entries, _ = s.Snapshot("INBOX", 10)
+	for _, e := range entries {
+		if e.UID == 2 && e.Body != "" {
+			t.Fatalf("re-warming an encrypted message must clear a previously cached body, got %q", e.Body)
+		}
+	}
+
+	raw, err = os.ReadFile(s.path())
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(raw), "previously cached plaintext") {
+		t.Fatalf("stale plaintext survived a re-warm in %s", s.path())
+	}
+}
+
+// TestNonPGPBody_StillWarmed guards the other side: dropping PGP bodies must
+// not turn into dropping every body, which would silently cost a live fetch on
+// every open for ordinary mail.
+func TestNonPGPBody_StillWarmed(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Upsert("INBOX", []Entry{entry(1, "s", "unread", "ordinary body")}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	entries, _ := s.Snapshot("INBOX", 10)
+	if len(entries) != 1 || entries[0].Body != "ordinary body" {
+		t.Fatalf("expected an ordinary body warmed into the cache, got %+v", entries)
 	}
 }
 

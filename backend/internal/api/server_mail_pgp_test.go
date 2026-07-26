@@ -439,3 +439,37 @@ func TestBuildPGPRecipientPlanDedupesAcrossToCcBccKeepingFirstOccurrence(t *test
 		t.Fatalf("expected bob counted once in toCCEmails and not duplicated into bccEmails, got toCC=%v bcc=%v", plan.toCCEmails, plan.bccEmails)
 	}
 }
+
+func TestDecodeMailRequestParsesAllowPickupFallback(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"to":                  "bob@example.com",
+		"subject":             "hi",
+		"body":                "hello",
+		"encrypt":             true,
+		"allowPickupFallback": true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/mail/send", bytes.NewReader(body))
+	decoded, errMsg, err := decodeMailRequest(req)
+	if err != nil {
+		t.Fatalf("decodeMailRequest: %v (%s)", err, errMsg)
+	}
+	if !decoded.AllowPickupFallback {
+		t.Fatalf("expected AllowPickupFallback true, got %+v", decoded)
+	}
+}
+
+// Absent must mean false. The whole gate depends on it: a flag that defaults
+// to the unsafe branch protects nobody who forgets to set it.
+func TestDecodeMailRequestDefaultsAllowPickupFallbackFalse(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"to": "bob@example.com", "subject": "hi", "body": "hello", "encrypt": true,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/mail/send", bytes.NewReader(body))
+	decoded, _, err := decodeMailRequest(req)
+	if err != nil {
+		t.Fatalf("decodeMailRequest: %v", err)
+	}
+	if decoded.AllowPickupFallback {
+		t.Fatal("expected AllowPickupFallback to default to false")
+	}
+}

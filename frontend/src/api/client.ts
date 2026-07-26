@@ -2,6 +2,24 @@ export function toErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+// HttpError carries the parsed JSON error body alongside the usual Error
+// message, so a caller that needs more than the flattened `data.error` string
+// (e.g. the mail-send 409's `keylessRecipients` list) can read it without a
+// second round-trip. It stays a plain Error subclass — same .message shape as
+// before, same `instanceof Error` — so every existing caller that only ever
+// read `.message` via toErrorMessage() is unaffected.
+export class HttpError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(message: string, status: number, body: unknown) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
 // readCsrfToken reads the non-HttpOnly csrf_token cookie the backend sets
 // alongside the session cookie at login (double-submit CSRF pattern — see
 // backend's csrfCheckOK). It carries no authority on its own; it only proves
@@ -43,11 +61,13 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     let detail = "";
+    let body: unknown;
     try {
       const contentType = response.headers.get("content-type") || "";
       if (contentType.includes("application/json")) {
         const data = await response.json() as { error?: string; message?: string };
         detail = data.error || data.message || "";
+        body = data;
       } else {
         const rawText = (await response.text()).trim();
         // Gateways/CDNs (e.g. Cloudflare) sometimes substitute their own
@@ -62,7 +82,8 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       detail = "";
     }
-    throw new Error(detail ? `request failed: ${response.status} - ${detail}` : `request failed: ${response.status}`);
+    const message = detail ? `request failed: ${response.status} - ${detail}` : `request failed: ${response.status}`;
+    throw new HttpError(message, response.status, body);
   }
   if (response.status === 204) {
     // No body to parse (e.g. DELETE endpoints that answer 204 No Content).
