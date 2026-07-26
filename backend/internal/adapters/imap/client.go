@@ -29,6 +29,20 @@ type Message struct {
 	Keywords []string
 	AtUTC    string
 	Body     string
+	// BodyHTML is the message's text/html part, when it has one, and is empty
+	// otherwise. It exists because Body above is NOT the body the clients
+	// render: ListUnreadInbox (which fills this struct) prefers the text/plain
+	// part, while every client-facing path — ListUnreadMessages,
+	// GetMessageBodies — prefers text/html. A multipart/alternative message can
+	// therefore show the poller an innocuous plain-text part while the clients
+	// display a hostile HTML one.
+	//
+	// The anti-phishing scan (processor.scanForAppImpersonation) needs both for
+	// exactly that reason: a kypost:// pairing link planted only in the HTML
+	// part would otherwise be invisible to the server while being one click
+	// away in the UI. Filled from the same GetEmails parse as Body, so it costs
+	// no extra IMAP round trip.
+	BodyHTML string
 	// HasAttachments is set from the same GetEmails parse that fills Body, so
 	// the poller's cache-warm path can carry it into mailcache.Entry without
 	// any extra IMAP round trip.
@@ -607,10 +621,7 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 			}
 			continue
 		}
-		body := strings.TrimSpace(e.Text)
-		if body == "" {
-			body = strings.TrimSpace(e.HTML)
-		}
+		body, bodyHTML := inboxBodies(e)
 		out = append(out, Message{
 			ID:             ov.MessageID,
 			Subject:        ov.Subject,
@@ -621,6 +632,7 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 			Keywords:       ov.Keywords,
 			AtUTC:          ov.AtUTC,
 			Body:           body,
+			BodyHTML:       bodyHTML,
 			HasAttachments: len(e.Attachments) > 0,
 		})
 		if uid > maxUID {
@@ -1515,6 +1527,24 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action, mai
 // which both call fetchAttachments) — a single message with many small
 // attachments that add up past the cap is exactly as much of an OOM risk as
 // one huge attachment, so the check is on the total, not any single part.
+// inboxBodies splits one parsed email into the two body views ListUnreadInbox
+// reports: Body, which keeps this path's long-standing text/plain preference
+// (it is what gets classified, redacted, and warmed into the mail cache), and
+// BodyHTML, which is the text/html part verbatim or empty. See Message.BodyHTML
+// for why both are needed.
+//
+// Extracted as a pure function rather than left inline so it can be tested
+// without a live *goimap.Dialer, matching partitionUIDsBySize and
+// parseHeaderFieldsRecords in this package.
+func inboxBodies(e *goimap.Email) (body, bodyHTML string) {
+	bodyHTML = strings.TrimSpace(e.HTML)
+	body = strings.TrimSpace(e.Text)
+	if body == "" {
+		body = bodyHTML
+	}
+	return body, bodyHTML
+}
+
 func emailContentSize(e *goimap.Email) int64 {
 	total := int64(len(e.HTML)) + int64(len(e.Text))
 	for _, a := range e.Attachments {
