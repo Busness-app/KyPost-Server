@@ -34,6 +34,19 @@ const maxSealedPickupBytes = 34 << 20
 // the key is never written to disk, so an attacker who obtains the volume,
 // a backup, or the box later gets ciphertext. Only a server compromised at
 // the moment of sending sees the key. See docs/E2E_PGP.md.
+//
+// "Never written to disk" is not free, and was briefly untrue: the notice is
+// ordinary unencrypted mail, so the mail cache persisted it — link, key and
+// all — as plain JSON on the same volume as the ciphertext, the moment anyone
+// opened the mailbox holding it. mailcache.warmBody now drops Sent bodies
+// outright and redacts pickup-link fragments from every body it stores, which
+// is what makes the sentence above hold. If a third body-caching path is ever
+// added, it has to preserve that.
+//
+// One residue this cannot reach: the copy in the sender's own Sent folder on
+// their remote IMAP provider keeps the full link, so the sender (or anyone who
+// can read the sender's mailbox) can reopen the message. That is outside this
+// server, and is not a new exposure — the sender wrote the message.
 func (s *Server) handlePickupCreate(w http.ResponseWriter, r *http.Request) {
 	ac, ok := authFromContext(r)
 	if !ok {
