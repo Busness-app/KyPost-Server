@@ -307,7 +307,11 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     (async () => {
       try {
         const payload = await getPGPMessagePayload(sourceMailbox, message.messageId);
-        const result = await decryptMessage(payload.encryptedPayload, payload.signerPublicKeys ?? []);
+        const result = await decryptMessage(
+          payload.encryptedPayload,
+          payload.signerPublicKeys ?? [],
+          firstAddressFromText(message.sender || "")
+        );
         if (cancelled) return;
         setDecrypted((prev) => ({
           ...prev,
@@ -1601,7 +1605,12 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                       {!decryptFailed && !decryptingNow && signed ? (
                         <span className={`security-badge ${verified ? "security-badge-on" : "security-badge-off"}`} style={{ marginLeft: 6 }}>
                           <span className="security-dot" aria-hidden="true" />
-                          {verified ? "signature verified" : "signature not verified"}
+                          {verified ? "signature verified" : "signature does not match sender"}
+                        </span>
+                      ) : null}
+                      {signed && !verified && local?.signerFingerprint ? (
+                        <span className="contacts-muted" style={{ marginLeft: 6 }}>
+                          signed by {local.signerFingerprint.slice(-16)}
                         </span>
                       ) : null}
                       {local?.error ? (

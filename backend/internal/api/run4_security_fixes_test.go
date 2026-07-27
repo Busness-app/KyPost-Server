@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -398,5 +399,39 @@ func TestWebPushSubscriptionEndpointIsScreened(t *testing.T) {
 			t.Errorf("endpoint %q: status = %d, want %d — a push endpoint must be screened the "+
 				"same way the UnifiedPush endpoint already is", endpoint, rec.Code, http.StatusBadRequest)
 		}
+	}
+}
+
+// run-4 finding H2: POST /api/imap/config stores payload.Username after only a
+// non-empty check — no connection, no challenge — and publishableAddressesAt,
+// whose own comment calls it "the anti-impersonation gate at serve time", then
+// treats that self-declared string as a proven address alongside genuinely
+// verified send-as aliases. On an instance whose admin has DNS-verified the
+// organization's domain, any ordinary user could therefore have their public
+// key served over WKD as any colleague's address — silent key substitution for
+// every correspondent who uses WKD discovery.
+func TestUnverifiedIMAPAddressIsNotPublishable(t *testing.T) {
+	srv, u := newTestServerWithUser(t)
+	srv.imapConfigKeyPath = filepath.Join(t.TempDir(), "imap-config.key")
+
+	// Stored exactly as the handler stores it: no connection is attempted and
+	// no ownership challenge is issued, so this string is entirely
+	// self-declared.
+	if err := writeIMAPConfigPayload(srv.userIMAPConfigPath(u.ID), srv.imapConfigKeyPath, imapConfigPayload{
+		Host:     "imap.attacker.test",
+		Port:     993,
+		Username: "ceo@example.com",
+		Password: "anything",
+	}); err != nil {
+		t.Fatalf("writeIMAPConfigPayload: %v", err)
+	}
+
+	full, err := srv.users.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := srv.publishableAddressesAt(full, "example.com"); len(got) != 0 {
+		t.Fatalf("publishableAddressesAt returned %v for a merely self-declared IMAP username; "+
+			"an address must be proven before this gate honors it", got)
 	}
 }

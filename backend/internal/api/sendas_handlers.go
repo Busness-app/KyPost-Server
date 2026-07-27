@@ -80,11 +80,15 @@ func (s *Server) handleSendAsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Reject the caller's own address.
-	if normalizedEmail == strings.ToLower(strings.TrimSpace(imapCfg.Username)) {
-		http.Error(w, "this is already your account address", http.StatusBadRequest)
-		return
-	}
+	// 4. The caller's own account address is allowed here, deliberately.
+	//
+	// It used to be rejected as redundant — sending as your own address needs
+	// no alias. But WKD publication now requires every address to have passed
+	// this same challenge (see publishableAddressesAt), because the IMAP
+	// username it previously trusted is self-declared and provably nothing.
+	// Rejecting the account address would leave users with no way to prove the
+	// one address they most need published. One verification mechanism, every
+	// address, including your own.
 
 	// 5. Enforce the per-user cap.
 	store, err := s.sendAsFor(r)

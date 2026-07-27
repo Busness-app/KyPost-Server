@@ -236,10 +236,31 @@ func doRaw(t *testing.T, srv *Server, method, path, body string, headers map[str
 	return rec
 }
 
+// seedVerifiedSendAs marks addr as a verified send-as alias for userID.
+// WKD publication requires this: the IMAP username it used to accept is
+// self-declared (POST /api/imap/config performs no ownership check), so the
+// send-as challenge is now the single proof of an address, including the
+// account's own. See publishableAddressesAt.
+func seedVerifiedSendAs(t *testing.T, srv *Server, userID, addr string) {
+	t.Helper()
+	store, err := srv.userSendAsStore(userID)
+	if err != nil {
+		t.Fatalf("userSendAsStore: %v", err)
+	}
+	alias, err := store.Create(userID, strings.ToLower(addr), "")
+	if err != nil {
+		t.Fatalf("sendas Create: %v", err)
+	}
+	if err := store.MarkVerified(alias.ID); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+}
+
 func TestWKDServing(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
 	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+	seedVerifiedSendAs(t, srv, userID, "alice@example.com")
 	seedUserPGPKey(t, srv, userID, "alice@example.com")
 
 	// Claim + verify example.com in the instance-level store.
@@ -304,6 +325,7 @@ func TestWKDServingDomainScoping(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
 	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+	seedVerifiedSendAs(t, srv, userID, "alice@example.com")
 	seedUserPGPKey(t, srv, userID, "alice@example.com")
 
 	sendAsStore, err := srv.userSendAsStore(userID)
@@ -372,6 +394,7 @@ func TestWKDServingRespectsPublishWKDOptOut(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
 	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+	seedVerifiedSendAs(t, srv, userID, "alice@example.com")
 	seedUserPGPKey(t, srv, userID, "alice@example.com")
 
 	store, err := srv.wkdPublishStore()
@@ -419,6 +442,7 @@ func TestLookupPublishedKeySkipsCorruptKeyContinuesToNextUser(t *testing.T) {
 	corruptUserID := srv.mustBootstrapUserID(t)
 
 	writeUnreachableSMTPIMAPConfig(t, srv, corruptUserID, "alice@example.com")
+	seedVerifiedSendAs(t, srv, corruptUserID, "alice@example.com")
 	if _, err := srv.users.SetPGPIdentity(corruptUserID, "fp", "kid", "not a real armored key", "", "generated", "2026-07-24T00:00:00Z"); err != nil {
 		t.Fatalf("SetPGPIdentity corrupt: %v", err)
 	}
@@ -441,6 +465,7 @@ func TestLookupPublishedKeySkipsCorruptKeyContinuesToNextUser(t *testing.T) {
 		t.Fatalf("Create valid user: %v", err)
 	}
 	writeUnreachableSMTPIMAPConfig(t, srv, validUser.ID, "alice@example.com")
+	seedVerifiedSendAs(t, srv, validUser.ID, "alice@example.com")
 	seedUserPGPKey(t, srv, validUser.ID, "alice@example.com")
 
 	hu := wkdHashLocalPart("alice")
@@ -464,6 +489,7 @@ func TestWKDServedAliasKeyIsAcceptedByDiscovery(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
 	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
+	seedVerifiedSendAs(t, srv, userID, "alice@example.com")
 
 	sendAsStore, err := srv.userSendAsStore(userID)
 	if err != nil {

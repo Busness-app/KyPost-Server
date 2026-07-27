@@ -103,13 +103,16 @@ export type DecryptedMessage = {
  * Decrypts a PGP/MIME payload the server handed through untouched, using the
  * unlocked key. Throws VaultLockedError if the vault is locked.
  *
- * signerPublicKeys are every known contact key: the sender is not known in
- * advance, so all are offered and whichever actually produced the signature
- * is the one that verifies.
+ * signerPublicKeys are every known contact key: which one signed is not known
+ * in advance, so all are offered and whichever actually produced the signature
+ * is identified. senderAddress is what the verdict is then bound to — see the
+ * comment at the verification loop. `verified` means "the sender signed this",
+ * not "somebody did".
  */
 export async function decryptMessage(
   payload: string,
-  signerPublicKeys: string[]
+  signerPublicKeys: string[],
+  senderAddress: string
 ): Promise<DecryptedMessage> {
   const pgp = await openpgp();
   const privateKey = await pgp.readPrivateKey({ armoredKey: requireUnlockedKey() });
@@ -131,16 +134,30 @@ export async function decryptMessage(
   const signatures = result.signatures ?? [];
   if (signatures.length > 0) {
     signed = true;
+    const wanted = senderAddress.trim().toLowerCase();
     for (const signature of signatures) {
       try {
         // `verified` rejects rather than returning false on a bad signature.
         await signature.verified;
-        verified = true;
         const keyID = signature.keyID.toHex().toUpperCase();
         const match = verificationKeys.find((k) =>
           k.getKeys().some((sub) => sub.getKeyID().toHex().toUpperCase() === keyID)
         );
         signerFingerprint = match ? match.getFingerprint().toUpperCase() : keyID;
+        // A cryptographically valid signature from SOME key in the address
+        // book proves only that someone signed this. The badge claims the
+        // SENDER signed it, so the key that actually produced the signature
+        // must carry the sender's address as a User ID. Without this, an
+        // attacker whose key the reader had auto-pinned — Autocrypt harvest
+        // and WKD auto-trust both pin without asking — could sign a message,
+        // put anyone in the From header, and be vouched for by the UI.
+        verified = Boolean(
+          match &&
+            wanted &&
+            match
+              .getUserIDs()
+              .some((uid) => uid.toLowerCase().includes(`<${wanted}>`))
+        );
         break;
       } catch {
         // Try the next signature; an unverifiable one is not fatal.
