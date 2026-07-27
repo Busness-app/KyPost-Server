@@ -41,10 +41,14 @@ jobs:
 
           # Newest non-draft, non-prerelease release published at least
           # MIN_RELEASE_AGE_DAYS ago. Releases come back newest-first.
+          # Scratch files go to the runner temp dir, never the working tree:
+          # create-pull-request commits everything it finds changed, so writing
+          # them here put 232 lines of release metadata and a checksum listing
+          # into the repo on every bump (see f7f1cdb).
           gh api repos/ollama/ollama/releases --paginate \
             --jq '.[] | select(.draft == false and .prerelease == false)
                       | {tag: .tag_name, published: .published_at}' \
-            > releases.jsonl
+            > "$RUNNER_TEMP/releases.jsonl"
 
           version="$(python3 - <<'PY'
           import json, os, sys
@@ -52,7 +56,7 @@ jobs:
 
           min_age = timedelta(days=int(os.environ["MIN_RELEASE_AGE_DAYS"]))
           now = datetime.now(timezone.utc)
-          for line in open("releases.jsonl"):
+          for line in open(os.path.join(os.environ["RUNNER_TEMP"], "releases.jsonl")):
               rel = json.loads(line)
               published = datetime.fromisoformat(rel["published"].replace("Z", "+00:00"))
               if now - published >= min_age:
@@ -90,10 +94,10 @@ jobs:
           # Take the SHA from the release's own sha256sum.txt rather than
           # downloading 1.4 GB just to hash it. The Docker build re-checks it
           # against the real tarball, so a wrong value fails CI, not users.
-          curl -fsSL -o sha256sum.txt \
+          curl -fsSL -o "$RUNNER_TEMP/sha256sum.txt" \
             "https://github.com/ollama/ollama/releases/download/v${VERSION}/sha256sum.txt"
 
-          sha="$(awk -v asset="./${OLLAMA_ASSET}" '$2 == asset { print $1 }' sha256sum.txt)"
+          sha="$(awk -v asset="./${OLLAMA_ASSET}" '$2 == asset { print $1 }' "$RUNNER_TEMP/sha256sum.txt")"
           if [ -z "$sha" ]; then
             echo "no checksum for ${OLLAMA_ASSET} in v${VERSION}/sha256sum.txt" >&2
             exit 1

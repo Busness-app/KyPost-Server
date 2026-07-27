@@ -25,7 +25,28 @@ func SetReleasesURLForTest(url string) {
 	releasesURLOverrideForTest = url
 }
 
-const releasesURL = "https://api.github.com/repos/ollama/ollama/releases/latest"
+// releasesURL is the LIST endpoint, not /releases/latest, because the newest
+// release is not necessarily the one to report — see MinReleaseAge.
+const releasesURL = "https://api.github.com/repos/ollama/ollama/releases"
+
+// MinReleaseAge is how long an upstream release must have been public before
+// this checker will mention it.
+//
+// It exists to match .github/workflows/ollama-bump.yml's MIN_RELEASE_AGE_DAYS.
+// The Dockerfile pins Ollama to a specific tarball and SHA-256, and that pin is
+// only ever advanced to a release that has soaked for this long — so a release
+// younger than this is one no rebuild can deliver, because the project has not
+// pinned it and will not for days.
+//
+// Without the match, the check reported an upgrade within minutes of every
+// upstream release and told the operator to rebuild, which changed nothing.
+// A notification that is guaranteed to be premature on every single release
+// teaches people to ignore it, and this one shares a mailbox with the security
+// notices.
+//
+// Keep in step with the workflow. TestSoakWindowMatchesTheBumpWorkflow fails if
+// one moves without the other.
+const MinReleaseAge = 3 * 24 * time.Hour
 
 // LatestVersion queries GitHub for the most recently published Ollama
 // release and returns its version with any leading "v" stripped — GitHub
@@ -55,17 +76,35 @@ func LatestVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("github releases lookup failed: status %d", resp.StatusCode)
 	}
 
-	var out struct {
-		TagName string `json:"tag_name"`
+	var releases []struct {
+		TagName     string    `json:"tag_name"`
+		Draft       bool      `json:"draft"`
+		Prerelease  bool      `json:"prerelease"`
+		PublishedAt time.Time `json:"published_at"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
 		return "", err
 	}
-	version := strings.TrimPrefix(strings.TrimSpace(out.TagName), "v")
-	if version == "" {
-		return "", fmt.Errorf("github release response missing tag_name")
+
+	// Releases come back newest-first; take the first that has soaked. An empty
+	// return means "nothing to report yet", not a failure — every release being
+	// too fresh is an ordinary state, and reporting it as an error would put a
+	// spurious checkError in front of the operator.
+	cutoff := time.Now().UTC().Add(-MinReleaseAge)
+	for _, r := range releases {
+		if r.Draft || r.Prerelease {
+			continue
+		}
+		if r.PublishedAt.IsZero() || r.PublishedAt.After(cutoff) {
+			continue
+		}
+		version := strings.TrimPrefix(strings.TrimSpace(r.TagName), "v")
+		if version == "" {
+			continue
+		}
+		return version, nil
 	}
-	return version, nil
+	return "", nil
 }
 
 // IsNewer reports whether latest is a strictly newer dotted-numeric version

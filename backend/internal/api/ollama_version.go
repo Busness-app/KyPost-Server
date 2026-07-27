@@ -93,6 +93,19 @@ func (s *Server) refreshOllamaVersionStatus(ctx context.Context) {
 		return
 	}
 
+	// An empty latest means every upstream release is still inside the soak
+	// window (see ollamaupdate.MinReleaseAge) — nothing to report, not a
+	// failure. IsNewer already fails closed on it; this keeps the empty string
+	// out of the status the UI renders.
+	if latest == "" {
+		s.setOllamaStatus(ollamaVersionStatus{
+			installedVersion: installed,
+			latestVersion:    installed,
+			checkedAt:        time.Now().UTC(),
+		})
+		return
+	}
+
 	upgradeAvailable := ollamaupdate.IsNewer(latest, installed)
 	s.setOllamaStatus(ollamaVersionStatus{
 		installedVersion: installed,
@@ -174,11 +187,25 @@ func (s *Server) notifyAdminOllamaUpdateAvailable(installed, latest string) erro
 		From:    from,
 		To:      []string{from},
 		Subject: "A newer Ollama version is available for your kypost container",
+		// What this says has to be true, or the operator does it, sees no
+		// change, and stops believing the next one. Rebuilding your existing
+		// checkout does NOT change the Ollama version: the Dockerfile pins it
+		// to a specific tarball and SHA-256 (deliberately — an unpinned
+		// install.sh is arbitrary remote code and made builds
+		// unreproducible), so a rebuild reinstalls exactly the same release.
+		// What moves it is the pin itself moving.
 		Body: fmt.Sprintf(
-			"Your kypost-server container is currently running Ollama %s. Version %s is now available upstream.\n\n"+
-				"This container doesn't update itself — pull and rebuild/redeploy the latest kypost-server image "+
-				"to pick up the newer Ollama (and any other patched dependencies) baked into a fresh build.",
-			installed, latest,
+			"Your kypost-server container is currently running Ollama %s. Version %s has been available upstream "+
+				"for at least %d days.\n\n"+
+				"Rebuilding your current checkout will NOT change this: the Dockerfile pins Ollama to a specific "+
+				"release and checksum, so a rebuild reinstalls the same version. To pick up the newer one, either:\n\n"+
+				"  1. Pull a kypost-server image built after the pin was bumped (the pin is advanced by an automated "+
+				"PR that a maintainer merges), or\n"+
+				"  2. Build with the pin overridden yourself:\n"+
+				"     docker build --build-arg OLLAMA_VERSION=%s --build-arg OLLAMA_SHA256=<sha> .\n"+
+				"     The checksum is in that release's published sha256sum.txt; the build verifies it.\n\n"+
+				"This container does not update itself, and nothing here happens automatically.",
+			installed, latest, int(ollamaupdate.MinReleaseAge.Hours()/24), latest,
 		),
 		Mode: "plain",
 	}.Build()
