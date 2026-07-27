@@ -469,8 +469,16 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// out of the feature built for it.
 	mux.HandleFunc("GET /api/pgp/bootstrap", s.withMailAuth(s.handlePGPBootstrap))
 	mux.HandleFunc("GET /api/pgp/identity/wrapped", s.withMailAuth(s.handlePGPWrappedKey))
-	mux.HandleFunc("POST /api/pgp/identity/client", s.withMailAuth(s.handlePGPIdentityClient))
-	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withMailAuth(s.handlePGPRewrapKey))
+	// These two WRITE key material: identity/client replaces the account's
+	// public key (and clears the server-sealed private half), and rewrap
+	// replaces the wrapped envelope. They are session-only for the same reason
+	// export-legacy below is — a device secret is not a re-verified password —
+	// and the asymmetry of gating the endpoint that *reads* a key while
+	// leaving the two that *destroy* one open to a device secret was a real
+	// hole: a stolen device secret could substitute the key all future mail is
+	// encrypted to, or wipe the private half irrecoverably.
+	mux.HandleFunc("POST /api/pgp/identity/client", s.withAuth(s.handlePGPIdentityClient))
+	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withAuth(s.handlePGPRewrapKey))
 	// export-legacy stays session-only on purpose. It is the one endpoint
 	// that returns a private key in the clear, and it re-verifies the account
 	// password before doing so — a device secret is not that password, and a
@@ -828,7 +836,21 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 	var req imapConfigPayload
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
 
-	if strings.TrimSpace(req.Host) == "" || strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
+	// All-or-nothing, deliberately. The fallback used to be applied per field,
+	// so a caller who supplied only a host — leaving username and password
+	// blank — got the *stored* credentials filled in around their chosen
+	// destination, and the server then performed an IMAP LOGIN with the
+	// victim's real mail password against a server the caller controlled.
+	// GET /api/imap/config never returns that password precisely because it is
+	// the account's most durable secret (it is the SMTP password too, and it
+	// survives every KyPost-side revocation), and this was the one path that
+	// handed it out. A caller-chosen destination must never be paired with a
+	// server-held secret.
+	suppliedHost := strings.TrimSpace(req.Host) != ""
+	suppliedUser := strings.TrimSpace(req.Username) != ""
+	suppliedPass := strings.TrimSpace(req.Password) != ""
+	switch {
+	case !suppliedHost && !suppliedUser && !suppliedPass:
 		stored, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
 		if err != nil {
 			http.Error(w, "failed to load imap configuration", http.StatusInternalServerError)
@@ -838,21 +860,14 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "host, username, and password are required (or store IMAP config first)", http.StatusBadRequest)
 			return
 		}
-		if strings.TrimSpace(req.Host) == "" {
-			req.Host = stored.Host
+		mailbox := strings.TrimSpace(req.Mailbox)
+		req = stored
+		if mailbox != "" {
+			req.Mailbox = mailbox
 		}
-		if req.Port <= 0 {
-			req.Port = stored.Port
-		}
-		if strings.TrimSpace(req.Username) == "" {
-			req.Username = stored.Username
-		}
-		if strings.TrimSpace(req.Password) == "" {
-			req.Password = stored.Password
-		}
-		if strings.TrimSpace(req.Mailbox) == "" {
-			req.Mailbox = stored.Mailbox
-		}
+	case !(suppliedHost && suppliedUser && suppliedPass):
+		http.Error(w, "supply host, username, and password together, or none of them", http.StatusBadRequest)
+		return
 	}
 
 	req = mailmsg.NormalizeIMAPPayload(req)

@@ -243,5 +243,9 @@ func writeUserStoreError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if errors.Is(err, users.ErrNotClientProtected) || errors.Is(err, users.ErrWouldDowngradeCustody) {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	http.Error(w, "user store error", http.StatusInternalServerError)
 }

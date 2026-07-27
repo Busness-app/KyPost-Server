@@ -259,3 +259,112 @@ func TestContactPhotoRefIsNotClientSettable(t *testing.T) {
 		}
 	}
 }
+
+// run-4 finding H1: handleMailSendPGP called resolveMailFrom — the function
+// that enforces "this From is a verified send-as alias" — and discarded its
+// headerFrom return, keeping only envelopeFrom. The delivery bytes are relayed
+// verbatim, so the From the recipient sees was entirely caller-chosen, and the
+// only gate checked that a few header names appeared as substrings and that
+// the armor marker appeared *anywhere* (an HTML comment satisfies it). On a
+// shared organizational smarthost the result is DKIM-aligned spoofing, and a
+// paired device — explicitly denied send-as management — could do it.
+func TestPGPDeliveryFromMustMatchAuthorizedSender(t *testing.T) {
+	authorized := "alice@example.com"
+
+	spoofed := "From: CEO <ceo@example.com>\r\n" +
+		"To: victim@example.com\r\n" +
+		"Reply-To: attacker@evil.test\r\n" +
+		"Subject: Wire transfer approval\r\n" +
+		"Date: Sat, 26 Jul 2026 10:00:00 +0000\r\n" +
+		"Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=b\r\n" +
+		"\r\n" +
+		"-----BEGIN PGP MESSAGE-----\r\nx\r\n-----END PGP MESSAGE-----\r\n"
+	if err := validatePGPMimeDelivery(spoofed, authorized); err == nil {
+		t.Error("a delivery whose From is not the authorized sender was accepted; " +
+			"the relayed headers must be bound to what resolveMailFrom authorized")
+	}
+
+	cleartext := "From: " + authorized + "\r\n" +
+		"To: victim@example.com\r\n" +
+		"Subject: hello\r\n" +
+		"Date: Sat, 26 Jul 2026 10:00:00 +0000\r\n" +
+		"Content-Type: text/html; charset=UTF-8\r\n" +
+		"\r\n" +
+		"<html><body>plain text<!-- -----BEGIN PGP MESSAGE----- --></body></html>\r\n"
+	if err := validatePGPMimeDelivery(cleartext, authorized); err == nil {
+		t.Error("a cleartext text/html body with the armor marker hidden in a comment was " +
+			"accepted; the endpoint must require a real RFC 3156 encrypted part")
+	}
+
+	good := "From: " + authorized + "\r\n" +
+		"To: victim@example.com\r\n" +
+		"Subject: hello\r\n" +
+		"Date: Sat, 26 Jul 2026 10:00:00 +0000\r\n" +
+		"Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=b\r\n" +
+		"\r\n" +
+		"-----BEGIN PGP MESSAGE-----\r\nx\r\n-----END PGP MESSAGE-----\r\n"
+	if err := validatePGPMimeDelivery(good, authorized); err != nil {
+		t.Errorf("a well-formed delivery from the authorized sender was rejected: %v", err)
+	}
+
+	dupFrom := "From: " + authorized + "\r\n" + good
+	if err := validatePGPMimeDelivery(dupFrom, authorized); err == nil {
+		t.Error("a delivery carrying two From headers was accepted; which one the receiving " +
+			"MTA honors is not ours to guess")
+	}
+}
+
+// run-4 finding H4: identity/client and identity/rewrap are withMailAuth, so a
+// device secret reached them — and they replace the account's public key or
+// clear PGPPrivateKeyEnc outright. server.go's own routing comment says a
+// device secret "is not that password" and must not be exchangeable for the
+// key; the endpoint that *reads* a key is gated on a re-verified password
+// while the two that destroy one were not.
+func TestDeviceCannotReplaceOrDestroyPGPIdentity(t *testing.T) {
+	srv, u := newTestServerWithUser(t)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, u.ID, "attacker-device")
+
+	rewrap, _ := json.Marshal(map[string]string{"wrapped": "GARBAGE-NOT-AN-ENVELOPE"})
+	req := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/rewrap", bytes.NewReader(rewrap))
+	setDeviceHeaders(req, deviceID, deviceSecret)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Error("a paired device rewrapped (and thereby destroyed) the account's private key")
+	}
+
+	client, _ := json.Marshal(map[string]string{"publicKey": "not-a-key", "wrapped": "x"})
+	req2 := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/client", bytes.NewReader(client))
+	setDeviceHeaders(req2, deviceID, deviceSecret)
+	rec2 := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec2, req2)
+	if rec2.Code == http.StatusOK {
+		t.Error("a paired device replaced the account's PGP identity")
+	}
+}
+
+// run-4 finding H8: the "use my saved config" fallback was evaluated per
+// field, so a caller supplying only a host got the victim's stored username
+// and password sent to it. GET /api/imap/config deliberately never returns the
+// password; this was the one path that handed it out, and it is the same
+// credential used for SMTP, surviving every KyPost-side revocation.
+func TestIMAPTestRefusesPartialCredentialOverride(t *testing.T) {
+	srv, u := newTestServerWithUser(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"host":     "mail.attacker.test",
+		"port":     993,
+		"username": "",
+		"password": "",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/imap/test", bytes.NewReader(body))
+	authRequestAs(srv, req, u.ID)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("host-only override: status = %d, want %d — supplying a destination without "+
+			"credentials must not pair the caller's host with the stored password",
+			rec.Code, http.StatusBadRequest)
+	}
+}

@@ -172,6 +172,14 @@ var (
 	// with no active administrator. Enforced inside the store's write lock
 	// rather than by the caller — see guardNotLastActiveAdmin.
 	ErrLastActiveAdmin = errors.New("cannot remove the last active admin")
+	// ErrNotClientProtected is returned when an operation that only makes
+	// sense for a browser-held key is attempted against a server-custody
+	// account.
+	ErrNotClientProtected = errors.New("account is not client-protected")
+	// ErrWouldDowngradeCustody is returned when storing a server-readable
+	// identity would silently discard a browser-wrapped private key. There is
+	// deliberately no downgrade path (docs/E2E_PGP.md); this enforces it.
+	ErrWouldDowngradeCustody = errors.New("account uses a client-held key: delete the existing identity first")
 	ErrPasswordWeak  = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 )
 
@@ -745,6 +753,13 @@ func (s *Store) SetLastUsedTOTPStep(id string, step int64) (User, error) {
 // and which skips client-protected identities entirely.
 func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, privateKeyEnc, source, createdAt string) (User, error) {
 	return s.mutate(id, func(u *User) error {
+		// Refuse to overwrite a client-held identity with a server-readable
+		// one. This used to clear PGPPrivateKeyWrapped unconditionally, so
+		// generate/import silently downgraded custody and destroyed the
+		// browser envelope — the opposite of what docs/E2E_PGP.md promises.
+		if u.PGPProtection() == PGPProtectionClient {
+			return ErrWouldDowngradeCustody
+		}
 		u.PGPFingerprint = fingerprint
 		u.PGPKeyID = keyID
 		u.PGPPublicKey = armoredPublicKey
@@ -792,8 +807,17 @@ func (s *Store) RewrapPGPPrivateKey(id, wrapped string) (User, error) {
 		if u.PGPFingerprint == "" {
 			return errors.New("no pgp identity to rewrap")
 		}
+		// Rewrap exists for a password change on an account that is ALREADY
+		// client-protected: unwrap with the old password, rewrap with the new,
+		// store the result. Reaching it with a server-custody account instead
+		// cleared PGPPrivateKeyEnc — the only copy of the private key anyone
+		// could open — while leaving the identity advertised, so every message
+		// ever encrypted to it became permanently unreadable and senders kept
+		// encrypting to a key nobody held.
+		if u.PGPProtection() != PGPProtectionClient {
+			return ErrNotClientProtected
+		}
 		u.PGPPrivateKeyWrapped = wrapped
-		u.PGPPrivateKeyEnc = ""
 		u.PGPKeyProtection = PGPProtectionClient
 		return nil
 	})
