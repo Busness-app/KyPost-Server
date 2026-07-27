@@ -1601,9 +1601,21 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
               */}
               {isFlaggedPhishing(selected) ? (
                 <p className="notice notice-error" style={{ margin: "0 0 12px" }}>
-                  <strong>This message impersonates KyPost.</strong> Links to KyPost app addresses have been blocked.
-                  KyPost will never ask you to confirm a pairing request by email — never approve one you did not start
-                  yourself, on this device.
+                  {/*
+                    run-4 M17: this used to assert "Links to KyPost app
+                    addresses have been blocked." That is only true for a
+                    kypost:// deep link, which the scheme allowlist refuses. The
+                    other two rules fire on ordinary https links and on subject
+                    lines, and an allowlisted https link renders live and
+                    untouched — so the sentence was telling the user something
+                    protective had happened when nothing had. A warning that
+                    overstates itself is worse than a quieter accurate one,
+                    because the first time a user checks and finds the link
+                    working, the banner stops meaning anything.
+                  */}
+                  <strong>This message looks like it is impersonating KyPost.</strong> Treat anything it asks you to
+                  open or confirm as untrusted, and check the sender before acting. KyPost will never ask you to confirm
+                  a pairing request by email — never approve one you did not start yourself, on this device.
                 </p>
               ) : null}
               {selected.pgpEncrypted ? (

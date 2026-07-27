@@ -119,7 +119,7 @@ func TestFlagAppImpersonationDoesNotFlagMailAuthenticatedToTheOwnAddress(t *test
 		ID:      "42",
 		Subject: "Your secure message",
 		Sender:  "noreply@corp.example",
-		Body:    "Pick it up: https://corp.example/pickup/abc123",
+		Body:    "Pick it up: https://corp.example/pickup/2f1b9a3c-1111-4222-8333-444455556666?t=abc.def",
 	}
 
 	if p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
@@ -162,7 +162,7 @@ func TestFlagAppImpersonationFlagsWhenDKIMCannotBeResolved(t *testing.T) {
 	store := newPhishTestStore(t)
 	client := &phishStubClient{raw: map[int][]byte{42: []byte("raw message")}}
 	uc := userCtx{id: "u1", store: store, mail: client}
-	msg := imapadapter.Message{ID: "42", Subject: "Your secure message", Sender: "noreply@corp.example", Body: "https://corp.example/pickup/abc"}
+	msg := imapadapter.Message{ID: "42", Subject: "Your secure message", Sender: "noreply@corp.example", Body: "https://corp.example/pickup/2f1b9a3c-1111-4222-8333-444455556666?t=abc.def"}
 
 	if !p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
 		t.Fatal("expected an unresolvable DKIM check to leave the message flagged")
@@ -445,7 +445,7 @@ func TestFlagAppImpersonationClearsOwnAddressWithDisplayName(t *testing.T) {
 		ID:      "42",
 		Subject: "Your secure message",
 		Sender:  `KyPost <NoReply@Corp.Example>`,
-		Body:    "Pick it up: https://corp.example/pickup/abc123",
+		Body:    "Pick it up: https://corp.example/pickup/2f1b9a3c-1111-4222-8333-444455556666?t=abc.def",
 	}
 
 	if p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
