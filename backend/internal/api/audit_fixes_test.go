@@ -133,7 +133,7 @@ func TestMFALockoutIsPerAccountAcrossChallenges(t *testing.T) {
 		if ok, _ := srv.mfaLockout.allowed(userID); !ok {
 			t.Fatalf("attempt %d: should be allowed before the cap", i+1)
 		}
-		srv.mfaLockout.recordFailure(userID)
+		_, _ = srv.mfaLockout.tryAttempt(userID)
 	}
 	if ok, _ := srv.mfaLockout.allowed(userID); ok {
 		t.Fatal("second-factor attempts must be locked out for the account after the cap, regardless of new challenges")

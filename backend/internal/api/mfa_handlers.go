@@ -201,7 +201,7 @@ func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return users.User{}, false
 	}
-	if allowed, retryAfter := s.loginLockout.allowed(ac.Username); !allowed {
+	if allowed, retryAfter := s.loginLockout.tryAttempt(ac.Username); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
 		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
@@ -214,16 +214,18 @@ func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) 
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		// Never reached a password check, so give the strike back.
+		s.loginLockout.cancelAttempt(ac.Username)
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return users.User{}, false
 	}
 	u, err := s.users.Get(ac.UserID)
 	if err != nil {
+		s.loginLockout.cancelAttempt(ac.Username)
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return users.User{}, false
 	}
 	if !users.VerifyPassword(u, req.Password) {
-		s.loginLockout.recordFailure(ac.Username)
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid credentials"})
 		return users.User{}, false
 	}

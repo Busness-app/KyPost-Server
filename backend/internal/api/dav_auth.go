@@ -92,13 +92,18 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		// hopeless. Checked before the credential cache so a locked-out IP is
 		// refused outright.
 		ip := clientIP(r)
-		if allowed, retryAfter := s.davLockout.allowed(ip); !allowed {
+		if allowed, retryAfter := s.davLockout.tryAttempt(ip); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 			http.Error(w, "too many failed attempts, try again later", http.StatusTooManyRequests)
 			return
 		}
 
 		if ac, cached := s.davCredentials.get(username, password); cached {
+			// A cache hit is a successful authentication and must settle the
+			// strike tryAttempt just reserved. Without this, a CardDAV client
+			// polling with correct credentials would spend a strike per
+			// request and lock itself out within seconds.
+			s.davLockout.recordSuccess(ip)
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 			return
 		}
@@ -109,7 +114,6 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// response timing doesn't reveal whether the username exists —
 			// mirrors equalizeLoginTiming's use on the login endpoint.
 			equalizeLoginTiming(password)
-			s.davLockout.recordFailure(ip)
 			s.requireDAVAuth(w)
 			return
 		}
@@ -119,12 +123,10 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// the scrypt cost so this path isn't distinguishable by timing
 			// from a wrong-password attempt against a configured account.
 			equalizeLoginTiming(password)
-			s.davLockout.recordFailure(ip)
 			s.requireDAVAuth(w)
 			return
 		}
 		if !users.VerifySecretHash(passFile.Hash, password) {
-			s.davLockout.recordFailure(ip)
 			s.requireDAVAuth(w)
 			return
 		}

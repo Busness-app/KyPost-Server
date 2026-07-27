@@ -101,12 +101,13 @@ func (s *Server) handleSendAsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 6. Rate limit. Check, then immediately record — nothing else runs
-	// between the two calls — to avoid two concurrent POSTs for the same
-	// (user, email) pair both slipping through before either records (the
-	// same TOCTOU-avoidance pattern mfaPushCooldown uses in handleLogin).
+	// 6. Rate limit. One atomic check-and-record: adjacent allowed()/record()
+	// calls still left a window in which two concurrent POSTs for the same
+	// (user, email) pair both observed "allowed" and both mailed the candidate
+	// address, which belongs to a third party who did not ask to hear from this
+	// server.
 	key := ac.UserID + "|" + normalizedEmail
-	if allowed, retryAfter := s.sendAsCooldown.allowed(key); !allowed {
+	if allowed, retryAfter := s.sendAsCooldown.tryConsume(key); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
 			"error":             "too many verification attempts for this address, try again later",
@@ -114,8 +115,6 @@ func (s *Server) handleSendAsCreate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	s.sendAsCooldown.recordSent(key)
-
 	// 7. Create the pending record before attempting to send the probe
 	// email. Do not roll this back if sending fails (step 9) — a send
 	// failure just means the record sits pending until the (later,

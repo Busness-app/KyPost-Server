@@ -41,11 +41,11 @@ func TestLoginLockoutScopedToClientIP(t *testing.T) {
 
 func TestFailureLockoutCustomThreshold(t *testing.T) {
 	l := newFailureLockout(2, time.Minute)
-	l.recordFailure("key")
+	_, _ = l.tryAttempt("key")
 	if ok, _ := l.allowed("key"); !ok {
 		t.Fatal("one failure below a threshold of two must not lock")
 	}
-	l.recordFailure("key")
+	_, _ = l.tryAttempt("key")
 	ok, retryAfter := l.allowed("key")
 	if ok {
 		t.Fatal("expected lockout after reaching the custom threshold")

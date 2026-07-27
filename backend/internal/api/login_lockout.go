@@ -92,8 +92,81 @@ func newLoginLockout() *failureLockout {
 	return newFailureLockout(loginMaxFailures, loginLockoutFor)
 }
 
-// allowed reports whether username may attempt a login right now. When
-// false, retryAfter is how much longer the lockout has to run.
+// tryAttempt reports whether username may attempt right now and, if so, spends
+// one strike in the same critical section.
+//
+// Reserving at check time is the point. This used to be allowed() at the top of
+// a handler and recordFailure() much later, once the credential check had
+// finished — so a burst of concurrent requests all observed "allowed" before any
+// of them had recorded anything, and sailed past the budget together. The audit
+// measured roughly 7x the login budget and 3.8x the MFA budget that way, which
+// is most of what a three-strike lockout is supposed to prevent.
+//
+// The caller settles the reservation:
+//
+//   - recordSuccess on a correct credential, clearing the whole entry
+//   - cancelAttempt on a path that never became a credential check (see its
+//     doc), returning the strike
+//   - nothing at all on a failure — the strike is already counted
+func (l *failureLockout) tryAttempt(username string) (ok bool, retryAfter time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.sweepIfCrowdedLocked()
+
+	e, exists := l.entries[username]
+	if !exists {
+		e = &loginLockoutEntry{}
+		l.entries[username] = e
+	} else if remaining := time.Until(e.lockedUntil); remaining > 0 {
+		return false, remaining
+	} else if !e.lockedUntil.IsZero() {
+		// The lockout ran its course; start a fresh set of strikes rather than
+		// leaving the old ones to trip the very next attempt.
+		e.failures = 0
+		e.lockedUntil = time.Time{}
+	}
+
+	e.failures++
+	if e.failures >= l.maxFailures {
+		e.lockedUntil = time.Now().Add(l.lockoutFor)
+	}
+	return true, 0
+}
+
+// cancelAttempt returns a strike reserved by tryAttempt, for a path that turned
+// out not to be a credential attempt at all.
+//
+// The case this exists for is the login handler's "captcha verification
+// unavailable" 503: the operator's CAPTCHA provider is down, the user never got
+// as far as offering a password, and counting it would lock every user of the
+// instance out for the duration of someone else's outage.
+//
+// A failed CAPTCHA is deliberately NOT cancelled — that is a failed attempt and
+// should cost one.
+func (l *failureLockout) cancelAttempt(username string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, exists := l.entries[username]
+	if !exists {
+		return
+	}
+	if e.failures > 0 {
+		e.failures--
+	}
+	if e.failures < l.maxFailures {
+		e.lockedUntil = time.Time{}
+	}
+	// Never let cancels accumulate into credit for extra attempts: an entry
+	// back at zero is simply gone.
+	if e.failures == 0 {
+		delete(l.entries, username)
+	}
+}
+
+// allowed reports whether username may attempt right now WITHOUT spending a
+// strike. Read-only; use tryAttempt on any path that is about to make an
+// attempt.
 func (l *failureLockout) allowed(username string) (ok bool, retryAfter time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -107,32 +180,18 @@ func (l *failureLockout) allowed(username string) (ok bool, retryAfter time.Dura
 	return true, 0
 }
 
-// recordFailure counts one failed attempt for username, locking it out for
-// loginLockoutFor once it reaches loginMaxFailures. A lockout that has
-// already expired resets the strike count first, so failures don't
-// accumulate forever across unrelated attempts long after the last lockout.
-func (l *failureLockout) recordFailure(username string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.entries) >= loginLockoutSweepThreshold {
-		now := time.Now()
-		for k, e := range l.entries {
-			if e.lockedUntil.IsZero() || !now.Before(e.lockedUntil) {
-				delete(l.entries, k)
-			}
+// sweepIfCrowdedLocked drops entries that are not currently locked out once the
+// map grows past the threshold, bounding it without a background goroutine.
+// Callers must hold l.mu.
+func (l *failureLockout) sweepIfCrowdedLocked() {
+	if len(l.entries) < loginLockoutSweepThreshold {
+		return
+	}
+	now := time.Now()
+	for k, e := range l.entries {
+		if e.lockedUntil.IsZero() || !now.Before(e.lockedUntil) {
+			delete(l.entries, k)
 		}
-	}
-	e, exists := l.entries[username]
-	if !exists {
-		e = &loginLockoutEntry{}
-		l.entries[username] = e
-	} else if !e.lockedUntil.IsZero() && !time.Now().Before(e.lockedUntil) {
-		e.failures = 0
-		e.lockedUntil = time.Time{}
-	}
-	e.failures++
-	if e.failures >= l.maxFailures {
-		e.lockedUntil = time.Now().Add(l.lockoutFor)
 	}
 }
 

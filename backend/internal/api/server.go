@@ -1757,15 +1757,16 @@ func (s *Server) handleNotificationPreferences(w http.ResponseWriter, r *http.Re
 			http.Error(w, "invalid preferences payload", http.StatusBadRequest)
 			return
 		}
-		settings, err := config.LoadUserSettings(path)
-		if err != nil {
-			settings = config.DefaultUserSettings()
-		}
 		if prefs.Keywords == nil {
 			prefs.Keywords = []string{}
 		}
-		settings.Notifications = prefs
-		if err := config.SaveUserSettings(path, settings); err != nil {
+		// One locked read-modify-write, not Load+Save: the label handler below
+		// writes the same file, and interleaving the two lost whichever section
+		// landed first — including the contentPreview privacy opt-out.
+		if err := config.UpdateUserSettings(path, func(settings *config.UserSettings) error {
+			settings.Notifications = prefs
+			return nil
+		}); err != nil {
 			http.Error(w, "failed to save notification preferences", http.StatusInternalServerError)
 			return
 		}
@@ -1796,12 +1797,10 @@ func (s *Server) handleLabelPreferences(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "invalid preferences payload", http.StatusBadRequest)
 			return
 		}
-		settings, err := config.LoadUserSettings(path)
-		if err != nil {
-			settings = config.DefaultUserSettings()
-		}
-		settings.Labels = prefs
-		if err := config.SaveUserSettings(path, settings); err != nil {
+		if err := config.UpdateUserSettings(path, func(settings *config.UserSettings) error {
+			settings.Labels = prefs
+			return nil
+		}); err != nil {
 			http.Error(w, "failed to save label preferences", http.StatusInternalServerError)
 			return
 		}
@@ -3707,7 +3706,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// client IP (so an attacker hammering a known username can't lock the
 	// real owner out from their own machine).
 	lockoutKey := req.Username + "\x00" + clientIP(r)
-	if allowed, retryAfter := s.loginLockout.allowed(lockoutKey); !allowed {
+	if allowed, retryAfter := s.loginLockout.tryAttempt(lockoutKey); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
 		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
@@ -3723,6 +3722,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if s.captchaVerifier != nil {
 		ok, err := s.captchaVerifier.Verify(r.Context(), req.CaptchaToken, clientIP(r))
 		if err != nil {
+			// The operator's CAPTCHA provider is down; the user never got as
+			// far as offering a password. Give the strike back, or an outage
+			// would lock out every user of the instance.
+			s.loginLockout.cancelAttempt(lockoutKey)
 			s.logger.Error("captcha verification failed", "error", err.Error())
 			http.Error(w, "captcha verification unavailable", http.StatusServiceUnavailable)
 			return
@@ -3738,12 +3741,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// Pay the same scrypt cost a real password check would, so response
 		// timing doesn't reveal whether the username exists (or is inactive).
 		equalizeLoginTiming(req.Password)
-		s.loginLockout.recordFailure(lockoutKey)
+		// No recordFailure: tryAttempt already spent the strike.
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 	if !users.VerifyPassword(u, req.Password) {
-		s.loginLockout.recordFailure(lockoutKey)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -3889,25 +3891,29 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 	// Per-account throttle spanning challenges: the per-challenge attempt cap
 	// alone can be reset by minting a new challenge, so a password-holding
 	// attacker could otherwise brute force TOTP online.
-	if allowed, _ := s.mfaLockout.allowed(ch.UserID); !allowed {
+	if allowed, _ := s.mfaLockout.tryAttempt(ch.UserID); !allowed {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
 
 	u, err := s.users.Get(ch.UserID)
 	if err != nil || !u.Active || !u.TOTPEnabled || u.TOTPSecretEnc == "" {
+		// The account changed underneath the challenge; no code was offered,
+		// so the strike tryAttempt reserved goes back.
+		s.mfaLockout.cancelAttempt(ch.UserID)
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
 	secret, err := mfa.OpenTOTPSecret(u.TOTPSecretEnc, s.totpSecretKeyPath)
 	if err != nil {
+		s.mfaLockout.cancelAttempt(ch.UserID)
 		http.Error(w, "failed to load second factor", http.StatusInternalServerError)
 		return
 	}
 
 	step, valid := totp.Validate(secret, req.Code, time.Now())
 	if !valid {
-		s.mfaLockout.recordFailure(ch.UserID)
+		// tryAttempt already spent the strike.
 		if err := s.mfaChallenges.RecordTOTPAttempt(ch.ID); errors.Is(err, mfa.ErrTooManyAttempts) {
 			http.Error(w, "too many attempts", http.StatusUnauthorized)
 			return
@@ -3943,11 +3949,11 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 	// recordSuccess (which clears the account's brute-force lockout throttle)
 	// is deliberately deferred until after this guard passes: a replayed code
 	// is a rejected attempt, exactly like a wrong code, and must count against
-	// the lockout (recordFailure) rather than clearing it — otherwise a
-	// captured valid code let an attacker keep the lockout counter at zero
-	// indefinitely while brute-forcing the real, still-unknown current code.
+	// the lockout rather than clearing it — otherwise a captured valid code let
+	// an attacker keep the lockout counter at zero indefinitely while brute
+	// forcing the real, still-unknown current code. tryAttempt spent the strike
+	// on the way in, so simply not clearing it is what counts it.
 	if _, err := s.users.SetLastUsedTOTPStep(u.ID, step); err != nil {
-		s.mfaLockout.recordFailure(ch.UserID)
 		s.mfaChallenges.Delete(ch.ID)
 		http.Error(w, "invalid code", http.StatusUnauthorized)
 		return
@@ -3978,23 +3984,24 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
-	if allowed, _ := s.mfaLockout.allowed(ch.UserID); !allowed {
+	if allowed, _ := s.mfaLockout.tryAttempt(ch.UserID); !allowed {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
 	u, err := s.users.Get(ch.UserID)
 	if err != nil || !u.Active || !u.TOTPEnabled {
+		s.mfaLockout.cancelAttempt(ch.UserID)
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
 
 	_, matched, err := s.users.ConsumeRecoveryCode(u.ID, strings.TrimSpace(req.Code))
 	if err != nil {
+		s.mfaLockout.cancelAttempt(ch.UserID)
 		http.Error(w, "failed to verify recovery code", http.StatusInternalServerError)
 		return
 	}
 	if !matched {
-		s.mfaLockout.recordFailure(ch.UserID)
 		if err := s.mfaChallenges.RecordTOTPAttempt(ch.ID); errors.Is(err, mfa.ErrTooManyAttempts) {
 			http.Error(w, "too many attempts", http.StatusUnauthorized)
 			return

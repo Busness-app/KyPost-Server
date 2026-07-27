@@ -174,12 +174,11 @@ func (s *Server) handlePGPExportLegacyKey(w http.ResponseWriter, r *http.Request
 	}
 	// Rate-limit against the same per-account throttle the MFA path uses, so
 	// this cannot become an unmetered password oracle.
-	if allowed, _ := s.mfaLockout.allowed(ac.UserID); !allowed {
+	if allowed, _ := s.mfaLockout.tryAttempt(ac.UserID); !allowed {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
 	if !users.VerifyPassword(u, req.Password) {
-		s.mfaLockout.recordFailure(ac.UserID)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}

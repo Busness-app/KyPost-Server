@@ -62,26 +62,22 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 		return "", state.NativeDevice{}, false, 0
 	}
 	lockoutKey := s.deviceLockoutKey(deviceID, r)
-	if allowed, wait := s.deviceLockout.allowed(lockoutKey); !allowed {
+	if allowed, wait := s.deviceLockout.tryAttempt(lockoutKey); !allowed {
 		return "", state.NativeDevice{}, false, wait
 	}
 	ownerID, okOwner := s.lookupUserByDevice(deviceID)
 	if !okOwner {
-		s.deviceLockout.recordFailure(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
 	store, err := s.userStore(ownerID)
 	if err != nil {
-		s.deviceLockout.recordFailure(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
 	dev, okDev := store.GetNativeDevice(deviceID)
 	if !okDev {
-		s.deviceLockout.recordFailure(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
 	if !users.VerifySecretHash(dev.SecretHash, deviceSecret) {
-		s.deviceLockout.recordFailure(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
 	// Honor account deactivation on the device path the same way currentUser

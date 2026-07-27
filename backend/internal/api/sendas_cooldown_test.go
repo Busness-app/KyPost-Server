@@ -10,7 +10,7 @@ func TestSendAsVerificationCooldownBlocksWithinWindow(t *testing.T) {
 	c := newSendAsVerificationCooldown()
 	const key = "user-1|alice@example.com"
 
-	ok, retryAfter := c.allowed(key)
+	ok, retryAfter := c.tryConsume(key)
 	if !ok {
 		t.Fatal("expected first verification probe to be allowed")
 	}
@@ -18,9 +18,7 @@ func TestSendAsVerificationCooldownBlocksWithinWindow(t *testing.T) {
 		t.Fatalf("retryAfter = %v, want 0 when allowed", retryAfter)
 	}
 
-	c.recordSent(key)
-
-	ok, retryAfter = c.allowed(key)
+	ok, retryAfter = c.tryConsume(key)
 	if ok {
 		t.Fatal("expected a second probe within the cooldown window to be blocked")
 	}
@@ -38,12 +36,12 @@ func TestSendAsVerificationCooldownIsPerKey(t *testing.T) {
 	const aliceKey = "user-a|alice@example.com"
 	const bobKey = "user-a|bob@example.com"
 
-	c.recordSent(aliceKey)
+	_, _ = c.tryConsume(aliceKey)
 
-	if ok, _ := c.allowed(aliceKey); ok {
+	if ok, _ := c.tryConsume(aliceKey); ok {
 		t.Fatal("user-a's probe to alice@example.com should be in cooldown")
 	}
-	if ok, _ := c.allowed(bobKey); !ok {
+	if ok, _ := c.tryConsume(bobKey); !ok {
 		t.Fatal("user-a's probe to a different candidate address (bob@example.com) must not be affected by the cooldown on alice@example.com")
 	}
 }
@@ -51,13 +49,13 @@ func TestSendAsVerificationCooldownIsPerKey(t *testing.T) {
 func TestSendAsVerificationCooldownExpiresAfterWindow(t *testing.T) {
 	c := newSendAsVerificationCooldown()
 	const key = "user-2|carol@example.com"
-	c.recordSent(key)
+	_, _ = c.tryConsume(key)
 	// Simulate the window having already elapsed.
 	c.mu.Lock()
 	c.lastSent[key] = time.Now().Add(-sendAsVerificationCooldownFor - time.Second)
 	c.mu.Unlock()
 
-	if ok, _ := c.allowed(key); !ok {
+	if ok, _ := c.tryConsume(key); !ok {
 		t.Fatal("expected probe to be allowed again once the cooldown window has elapsed")
 	}
 }
@@ -72,8 +70,8 @@ func TestSendAsVerificationCooldownSweepRemovesStaleEntries(t *testing.T) {
 	const staleKey = "user-1|stale@example.com"
 	const freshKey = "user-1|fresh@example.com"
 
-	c.recordSent(staleKey)
-	c.recordSent(freshKey)
+	_, _ = c.tryConsume(staleKey)
+	_, _ = c.tryConsume(freshKey)
 
 	// Backdate staleKey's timestamp so it's older than maxAge; leave freshKey
 	// as just recorded.
@@ -104,7 +102,7 @@ func TestStartSendAsCooldownSweeperRunsOnTickerAndStopsOnCancel(t *testing.T) {
 	srv := newTestServer(t)
 
 	const staleKey = "user-1|stale@example.com"
-	srv.sendAsCooldown.recordSent(staleKey)
+	_, _ = srv.sendAsCooldown.tryConsume(staleKey)
 	srv.sendAsCooldown.mu.Lock()
 	srv.sendAsCooldown.lastSent[staleKey] = time.Now().Add(-2 * time.Hour)
 	srv.sendAsCooldown.mu.Unlock()
