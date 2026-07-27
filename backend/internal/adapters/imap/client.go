@@ -211,6 +211,17 @@ type DraftMessage struct {
 	Body        string
 	Mode        string
 	Attachments []mailmsg.Attachment
+	// Raw is a complete RFC 5322 message to append verbatim. When set, every
+	// other field except To (which saveMessage requires) is ignored and no
+	// message is built.
+	//
+	// This exists for the client-custody Sent copy, which arrives already
+	// wrapped as PGP/MIME by the browser. Running it back through
+	// mailmsg.Message.Build would nest a complete multipart/encrypted message
+	// inside a freshly generated envelope, so no reader would decrypt it — and
+	// it would need the real Subject to rebuild a header, which is exactly the
+	// value the encryption exists to hide.
+	Raw []byte
 }
 
 // AttachmentInfo is one attachment's metadata, without its content. JSON
@@ -1683,16 +1694,19 @@ func (c *APIClient) saveMessage(ctx context.Context, draft DraftMessage, targets
 		return err
 	}
 
-	raw := mailmsg.Message{
-		From:        c.username,
-		To:          draft.To,
-		CC:          draft.CC,
-		BCC:         draft.BCC,
-		Subject:     draft.Subject,
-		Body:        draft.Body,
-		Mode:        draft.Mode,
-		Attachments: draft.Attachments,
-	}.Build()
+	raw := draft.Raw
+	if len(raw) == 0 {
+		raw = mailmsg.Message{
+			From:        c.username,
+			To:          draft.To,
+			CC:          draft.CC,
+			BCC:         draft.BCC,
+			Subject:     draft.Subject,
+			Body:        draft.Body,
+			Mode:        draft.Mode,
+			Attachments: draft.Attachments,
+		}.Build()
+	}
 
 	var lastErr error
 	for _, folder := range targets {

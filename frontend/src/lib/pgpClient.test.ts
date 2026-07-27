@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import * as openpgp from "openpgp";
 
-import { decryptMessage } from "./pgpClient";
+import { buildEncryptedSentCopy, decryptMessage } from "./pgpClient";
 import { unlockWithArmoredKey, lock } from "./keyVault";
 
 // run-4 finding H7: decryptMessage offered every contact public key as a
@@ -81,6 +81,73 @@ describe("signature verification is bound to the sender", () => {
 
       expect(result.signed).toBe(true);
       expect(result.verified).toBe(true);
+    } finally {
+      lock();
+    }
+  }, 30000);
+});
+
+// run-4 M5: the client-custody send path posted the composer's raw HTML to the
+// server as the Sent copy, alongside deliveries the server could not read. On
+// an account whose stated property is "Server can decrypt mail: No", that
+// handed over the cleartext of every message and its real subject.
+//
+// The copy is now encrypted here, to the sender's own key, so the server relays
+// bytes it cannot open — the same as it already does for the deliveries.
+describe("the Sent copy is encrypted to the sender's own key (run-4 M5)", () => {
+  it("produces a PGP/MIME message the sender can decrypt", async () => {
+    const alice = await generateTestKey("Alice", "alice@example.com");
+    unlockWithArmoredKey(alice.privateKey);
+    try {
+      const sentCopy = await buildEncryptedSentCopy(
+        { from: "alice@example.com", to: ["bob@example.com"], subject: "Quarterly numbers" },
+        "text/html; charset=UTF-8",
+        "<p>the actual message</p>",
+        false
+      );
+
+      // Neither the body nor the real subject may appear anywhere in it.
+      expect(sentCopy).not.toContain("the actual message");
+      expect(sentCopy).not.toContain("Quarterly numbers");
+      expect(sentCopy).toContain("multipart/encrypted");
+      expect(sentCopy).toContain("[Encrypted] Email Sent by KyPost");
+
+      // And the sender must still be able to read their own outbox.
+      const armored = sentCopy.slice(
+        sentCopy.indexOf("-----BEGIN PGP MESSAGE-----"),
+        sentCopy.indexOf("-----END PGP MESSAGE-----") + "-----END PGP MESSAGE-----".length
+      );
+      const decrypted = await decryptMessage(armored, [], "alice@example.com");
+      expect(decrypted.body).toContain("the actual message");
+    } finally {
+      lock();
+    }
+  }, 30000);
+
+  it("cannot be read by anyone but the sender", async () => {
+    const alice = await generateTestKey("Alice", "alice@example.com");
+    const mallory = await generateTestKey("Mallory", "mallory@evil.example");
+
+    unlockWithArmoredKey(alice.privateKey);
+    let sentCopy: string;
+    try {
+      sentCopy = await buildEncryptedSentCopy(
+        { from: "alice@example.com", to: ["bob@example.com"], subject: "s" },
+        "text/plain",
+        "secret",
+        false
+      );
+    } finally {
+      lock();
+    }
+
+    const armored = sentCopy.slice(
+      sentCopy.indexOf("-----BEGIN PGP MESSAGE-----"),
+      sentCopy.indexOf("-----END PGP MESSAGE-----") + "-----END PGP MESSAGE-----".length
+    );
+    unlockWithArmoredKey(mallory.privateKey);
+    try {
+      await expect(decryptMessage(armored, [], "alice@example.com")).rejects.toThrow();
     } finally {
       lock();
     }

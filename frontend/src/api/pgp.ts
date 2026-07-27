@@ -234,7 +234,10 @@ export function sendClientEncryptedMail(payload: {
   to: string[];
   cc: string[];
   bcc: string[];
+  /** A complete PGP/MIME message encrypted to the sender's own key. */
   sentCopy: string;
+  /** Asserts sentCopy is ciphertext. The server refuses to store it otherwise. */
+  sentCopyEncrypted: boolean;
   mode: string;
 }): Promise<{ ok: boolean; sentSaved?: boolean; warning?: string }> {
   return postJSON("/api/mail/send-pgp", payload);

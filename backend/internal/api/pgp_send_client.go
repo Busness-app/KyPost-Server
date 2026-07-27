@@ -15,6 +15,7 @@ import (
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/mailmsg"
+	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/sendas"
 )
 
@@ -28,7 +29,12 @@ const maxClientCiphertextBytes = 34 << 20
 // SMTP recipients it goes to; the server relays them and does not (cannot)
 // look inside.
 type clientEncryptedSendRequest struct {
-	From    string `json:"from"`
+	From string `json:"from"`
+	// Subject is accepted and IGNORED. The real subject lives inside the
+	// ciphertext as a protected header, both for the deliveries and now for the
+	// Sent copy, so this server has no use for it and no business receiving it.
+	// The field stays only so an older client's request still parses; the
+	// current client sends the placeholder. Do not start reading it.
 	Subject string `json:"subject"`
 	// Deliveries are pre-encrypted. Multiple entries exist so BCC recipients
 	// each get their own ciphertext and never appear in each other's
@@ -41,11 +47,21 @@ type clientEncryptedSendRequest struct {
 	To  []string `json:"to"`
 	CC  []string `json:"cc"`
 	BCC []string `json:"bcc"`
-	// SentCopy is the plaintext body stored in the Sent folder, matching the
-	// server-side path's behavior of saving Sent unencrypted so the user can
-	// still read their own outbox.
+	// SentCopy is the complete PGP/MIME message to store in the Sent folder,
+	// encrypted by the browser to the sender's own key.
+	//
+	// It used to be the plaintext body, mirroring the server-side path's habit
+	// of saving Sent unencrypted. On a client-custody account that quietly
+	// undid the whole arrangement: the deliveries were ciphertext the server
+	// could not read, and then the same message arrived beside them in the
+	// clear, with its real subject, on every send. docs/E2E_PGP.md says
+	// "Server can decrypt mail: No"; this field was the counterexample.
 	SentCopy string `json:"sentCopy"`
-	Mode     string `json:"mode"`
+	// SentCopyEncrypted asserts that SentCopy is that ciphertext rather than a
+	// plaintext body. A copy that does not claim it is not stored — see
+	// sentCopyDraft.
+	SentCopyEncrypted bool   `json:"sentCopyEncrypted"`
+	Mode              string `json:"mode"`
 }
 
 type clientEncryptedDelivery struct {
@@ -161,22 +177,25 @@ func (s *Server) handleMailSendPGP(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("client-encrypted bcc send failed", "recipient", recipients[0], "error", sendErr.Error())
 	}
 
-	// Best-effort Sent copy, saved in plaintext exactly as the server-side
-	// encrypted path does, so the user can still read their own outbox.
+	// Best-effort Sent copy. Only an encrypted one is stored; see sentCopyDraft.
 	sentSaved := true
 	warning := ""
-	if mailClient, mailErr := s.userMailClient(ac.UserID); mailErr == nil {
-		if err := mailClient.SaveSent(r.Context(), imapadapter.DraftMessage{
-			To:      req.To,
-			CC:      req.CC,
-			BCC:     req.BCC,
-			Subject: req.Subject,
-			Body:    req.SentCopy,
-			Mode:    req.Mode,
-		}); err != nil {
-			sentSaved = false
-			warning = "email sent but could not be saved to Sent folder"
-			s.logger.Error("client-encrypted send: save-sent failed", "error", err.Error())
+	draft, wantSent := sentCopyDraft(req)
+	if !wantSent && strings.TrimSpace(req.SentCopy) != "" {
+		// The client sent something, and it was not ciphertext. Delivery
+		// already succeeded, so this is not worth failing the request over —
+		// but the copy is dropped rather than stored, and the user is told.
+		sentSaved = false
+		warning = "email sent, but the Sent copy was not saved: reload the page to update this client"
+		s.logger.Error("client-encrypted send: refused an unencrypted sent copy", "user_id", ac.UserID)
+	}
+	if wantSent {
+		if mailClient, mailErr := s.userMailClient(ac.UserID); mailErr == nil {
+			if err := mailClient.SaveSent(r.Context(), draft); err != nil {
+				sentSaved = false
+				warning = "email sent but could not be saved to Sent folder"
+				s.logger.Error("client-encrypted send: save-sent failed", "error", err.Error())
+			}
 		}
 	}
 	if failed > 0 && warning == "" {
@@ -379,4 +398,36 @@ func validateDeliveryFrom(delivery, authorizedFrom string) error {
 		return errors.New("delivery From is not an address this account may send as")
 	}
 	return nil
+}
+
+// sentCopyDraft decides what, if anything, to append to the Sent folder for a
+// client-custody send, and reports false when nothing should be.
+//
+// The copy is appended verbatim as Raw. Rebuilding it from Subject/Body would
+// wrap an already-complete multipart/encrypted message in a fresh envelope
+// (nothing would decrypt it) and would need the real Subject to write a header
+// — the very value the encryption is hiding. The draft therefore carries the
+// placeholder subject, matching what the browser already put in the ciphertext's
+// outer headers and what the server-side path mails for pickup notices.
+//
+// A copy that does not claim to be encrypted is refused. This server has no key
+// for a client-custody account by construction, so accepting cleartext here
+// would mean the one thing the mode promises not to do, on every send. Dropping
+// the copy is the lesser harm: the message itself is already delivered, and a
+// client that is behind fixes itself on reload.
+//
+// Recipient lists stay in the clear. SMTP needs them, they are already in the
+// request as the envelope, and the Sent folder listing is unusable without them.
+func sentCopyDraft(req clientEncryptedSendRequest) (imapadapter.DraftMessage, bool) {
+	copyBytes := strings.TrimSpace(req.SentCopy)
+	if copyBytes == "" || !req.SentCopyEncrypted {
+		return imapadapter.DraftMessage{}, false
+	}
+	return imapadapter.DraftMessage{
+		To:      req.To,
+		CC:      req.CC,
+		BCC:     req.BCC,
+		Subject: pgpmail.OuterPlaceholderSubject,
+		Raw:     []byte(req.SentCopy),
+	}, true
 }

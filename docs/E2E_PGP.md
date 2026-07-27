@@ -103,7 +103,19 @@ test asserting nothing lands in either store.
 - **The pickup-link fallback is weaker than PGP.** See "Sealed pickup links"
   below for exactly how much weaker.
 - **Subject headers are still cleartext** outside the encrypted part, as with
-  any PGP/MIME mail.
+  any PGP/MIME mail. The real subject travels *inside* the ciphertext as a
+  protected header (`buildProtectedContent` / `pgpmail.protectContent`); what a
+  passing MTA sees is the placeholder.
+- **Recipient addresses are cleartext.** SMTP needs them to route, they are in
+  the send request as the envelope, and the Sent-folder listing is unusable
+  without them. Nothing can be done about this within PGP.
+- **The Sent copy is encrypted to yourself, so the server cannot read it —
+  and neither can anyone without your key.** If you lose your key you lose your
+  outbox along with your inbox. Until run-4 this copy was uploaded as
+  *plaintext*, which meant the server received the cleartext and real subject of
+  every message on a mode whose whole claim is the opposite; see M5. A client
+  that has not been reloaded since that change will have its Sent copy refused
+  rather than stored — the message still sends, and the warning says to reload.
 
 
 ## Sealed pickup links
