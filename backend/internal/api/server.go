@@ -514,6 +514,7 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// Client-sealed pickup: the browser encrypts, the server stores an opaque
 	// blob, and the key travels in the link fragment it never receives.
 	// See pickup_client_sealed.go.
+	mux.HandleFunc("POST /pickup/{id}/open", s.handlePickupOpen)
 	mux.HandleFunc("GET /pickup/{id}/blob", s.handlePickupBlob)
 	mux.HandleFunc("POST /api/pgp/pickup", s.withMailAuth(s.handlePickupCreate))
 }
@@ -643,7 +644,13 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.pickupStore.Sweep(30 * 24 * time.Hour); err != nil {
+			// pickupLinkTTL, not a separate longer number. The notification
+			// email tells the recipient the link "expires in 7 days or as soon
+			// as it's opened", and a record is unusable past its ExpiresAt
+			// anyway — so a 30-day sweep only meant the message sat on disk for
+			// 23 days after the last moment anyone could read it, contradicting
+			// what the recipient was told.
+			if err := s.pickupStore.Sweep(pickupLinkTTL); err != nil {
 				s.logger.Error("pickup sweep failed", "error", err.Error())
 			}
 		}

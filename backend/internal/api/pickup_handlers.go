@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"html"
+	"html/template"
 	"net/http"
 	"net/smtp"
 	"strings"
@@ -47,6 +50,59 @@ func (s *Server) handlePickup(w http.ResponseWriter, r *http.Request) {
 		s.servePickupDecryptPage(w, id, token)
 		return
 	}
+	// Kind reads without consuming, so a record that is gone can be reported as
+	// gone here rather than sending the recipient to a button that will only
+	// tell them the same thing one click later. This discloses nothing: the
+	// token is scoped to this one ID, so anyone who can reach this line already
+	// knows the ID.
+	if errors.Is(kindErr, pgpmail.ErrPickupNotFound) || errors.Is(kindErr, pgpmail.ErrPickupExpired) {
+		http.Error(w, "this message has already been viewed or has expired", http.StatusGone)
+		return
+	}
+
+	// A server-sealed record is NOT read here. This used to render the message
+	// and consume the record in one plain GET, which meant anything that
+	// follows a link in an email read the whole message and left the human a
+	// permanent 410 — and the enterprise URL-detonation scanners that do
+	// exactly that (Safe Links, Proofpoint, Mimecast) sit in the recipient's
+	// own mail path, so this was the common case rather than a corner. HEAD
+	// was worse: Go's ServeMux routes it here, so a scanner could destroy the
+	// message without even being shown it.
+	//
+	// Consumption moved to POST .../open, which needs a deliberate click. That
+	// is the same shape the client-sealed sibling already had (see
+	// handlePickupBlob, whose comment says it consumes on a second call "so a
+	// link-preview bot that fetches the HTML does not burn the message") — the
+	// defense simply was never carried across to the default path.
+	//
+	s.serveServerSealedLandingPage(w, id, token)
+}
+
+// handlePickupOpen consumes a server-sealed pickup record and renders it.
+//
+// POST /pickup/{id}/open?t=<token>
+//
+// POST rather than GET on purpose: this is the call that burns the message, and
+// it must not be reachable by a crawler, a prefetch, a link-preview fetch, or a
+// HEAD probe. There is no CSRF concern to trade against — the endpoint is
+// unauthenticated and carries no ambient authority, so the token in the URL is
+// the entire capability, and an attacker who has it does not need the victim's
+// browser.
+func (s *Server) handlePickupOpen(w http.ResponseWriter, r *http.Request) {
+	if !s.pairingSecretConfigured() {
+		http.Error(w, "pickup links are not configured", http.StatusServiceUnavailable)
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	token := strings.TrimSpace(r.URL.Query().Get("t"))
+	if id == "" || token == "" {
+		http.Error(w, "invalid pickup link", http.StatusBadRequest)
+		return
+	}
+	if err := s.validatePairingToken(id, token, pairingPurposePickupLink, time.Now()); err != nil {
+		http.Error(w, "this link is invalid or has expired", http.StatusForbidden)
+		return
+	}
 
 	subject, body, mode, err := s.pickupStore.View(id)
 	if err != nil {
@@ -56,12 +112,52 @@ func (s *Server) handlePickup(w http.ResponseWriter, r *http.Request) {
 	body = s.pickupDisplayBody(body, mode)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>%s</title></head>`+
 		`<body style="font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px">`+
 		`<h1>%s</h1><pre style="white-space:pre-wrap;font-family:inherit">%s</pre>`+
 		`<p style="color:#666">This message has now been marked as viewed and cannot be retrieved again.</p>`+
 		`</body></html>`,
 		html.EscapeString(subject), html.EscapeString(subject), html.EscapeString(body))
+}
+
+// serverSealedLandingPage is the shell shown before the message is read. It
+// contains no message content — not even the subject — so fetching it
+// discloses nothing, and it consumes nothing, so fetching it costs nothing.
+//
+// A plain form rather than script: the app-wide CSP forbids inline script, and
+// this needs to work for a recipient who has no account here and may well be
+// reading in a stripped-down client. A form POST is also precisely the thing
+// automated link-followers do not do.
+const serverSealedLandingPage = `<!doctype html><html><head><meta charset="utf-8">` +
+	`<title>You have a message</title><meta name="robots" content="noindex,nofollow"></head>` +
+	`<body style="font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px">` +
+	`<h1>You have a message</h1>` +
+	`<p>Someone sent you a message that can be read <strong>once</strong>. ` +
+	`Opening it marks it as read, and it cannot be retrieved again afterwards.</p>` +
+	`<form method="post" action="/pickup/{{.PickupID}}/open?t={{.PickupToken}}">` +
+	`<button type="submit" style="font-size:1rem;padding:10px 18px;cursor:pointer">Read the message</button>` +
+	`</form>` +
+	`<p style="color:#666">If you did not expect this, you can close this page — ` +
+	`the message stays unread and expires on its own.</p>` +
+	`</body></html>`
+
+// serverSealedLandingTemplate is parsed once at startup, using html/template
+// for the same reason its client-sealed counterpart does: the escaping is
+// context-aware, and a hand-rolled fmt.Sprintf here would put an
+// attacker-adjacent value into a format string.
+var serverSealedLandingTemplate = template.Must(template.New("pickupLanding").Parse(serverSealedLandingPage))
+
+func (s *Server) serveServerSealedLandingPage(w http.ResponseWriter, id, token string) {
+	var buf bytes.Buffer
+	if err := serverSealedLandingTemplate.Execute(&buf, struct{ PickupID, PickupToken string }{id, token}); err != nil {
+		s.logger.Error("failed to render pickup landing page", "error", err.Error())
+		http.Error(w, "failed to render pickup page", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(buf.Bytes())
 }
 
 // pickupDisplayBody turns a stored body into what the pickup page shows.

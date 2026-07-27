@@ -14,7 +14,17 @@ import (
 func pickupMux(srv *Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /pickup/{id}", srv.handlePickup)
+	mux.HandleFunc("POST /pickup/{id}/open", srv.handlePickupOpen)
 	return mux
+}
+
+// openPickup drives the reveal step. run-4 M2 moved rendering off the GET
+// landing page and onto this POST, so every test that asserts on message
+// content goes through here now — the GET deliberately shows nothing.
+func openPickup(srv *Server, id, token string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	pickupMux(srv).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/pickup/"+id+"/open?t="+token, nil))
+	return rec
 }
 
 func TestHandlePickupHappyPath(t *testing.T) {
@@ -29,9 +39,7 @@ func TestHandlePickupHappyPath(t *testing.T) {
 		t.Fatalf("createPairingToken: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil)
-	rec := httptest.NewRecorder()
-	pickupMux(srv).ServeHTTP(rec, req)
+	rec := openPickup(srv, id, token)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
@@ -66,9 +74,7 @@ func TestHandlePickupRendersHTMLBodyAsReadableText(t *testing.T) {
 		t.Fatalf("createPairingToken: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil)
-	rec := httptest.NewRecorder()
-	pickupMux(srv).ServeHTTP(rec, req)
+	rec := openPickup(srv, id, token)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
@@ -108,9 +114,7 @@ func TestHandlePickupEscapesPlainBody(t *testing.T) {
 		t.Fatalf("createPairingToken: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil)
-	rec := httptest.NewRecorder()
-	pickupMux(srv).ServeHTTP(rec, req)
+	rec := openPickup(srv, id, token)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
@@ -165,20 +169,22 @@ func TestHandlePickupSecondViewIsGone(t *testing.T) {
 		t.Fatalf("createPairingToken: %v", err)
 	}
 
+	// The landing page may be fetched any number of times — that is the point
+	// of M2's split — so the one-time property is asserted on the reveal step.
 	mux := pickupMux(srv)
-
-	firstReq := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil)
-	firstRec := httptest.NewRecorder()
-	mux.ServeHTTP(firstRec, firstReq)
-	if firstRec.Code != http.StatusOK {
-		t.Fatalf("first view status = %d, want %d; body=%s", firstRec.Code, http.StatusOK, firstRec.Body.String())
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("landing fetch %d status = %d, want 200", i, rec.Code)
+		}
 	}
 
-	secondReq := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil)
-	secondRec := httptest.NewRecorder()
-	mux.ServeHTTP(secondRec, secondReq)
-	if secondRec.Code != http.StatusGone {
-		t.Fatalf("second view status = %d, want %d; body=%s", secondRec.Code, http.StatusGone, secondRec.Body.String())
+	if firstRec := openPickup(srv, id, token); firstRec.Code != http.StatusOK {
+		t.Fatalf("first open status = %d, want %d; body=%s", firstRec.Code, http.StatusOK, firstRec.Body.String())
+	}
+	if secondRec := openPickup(srv, id, token); secondRec.Code != http.StatusGone {
+		t.Fatalf("second open status = %d, want %d; body=%s", secondRec.Code, http.StatusGone, secondRec.Body.String())
 	}
 }
 

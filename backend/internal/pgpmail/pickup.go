@@ -20,11 +20,25 @@ type PickupRecord struct {
 	ID             string `json:"id"`
 	SenderUserID   string `json:"senderUserId"`
 	RecipientEmail string `json:"recipientEmail"`
-	// Subject and BodyEnc are the SERVER-sealed form: the server holds the
+	// SubjectEnc and BodyEnc are the SERVER-sealed form: the server holds the
 	// key, so it can read both. Used only by legacy server-protected
 	// accounts, for which the server can already read the mailbox anyway.
-	Subject string                     `json:"subject"`
-	BodyEnc cryptutil.EncryptedPayload `json:"bodyEnc"`
+	//
+	// The subject is sealed rather than stored plainly because for most mail it
+	// gives away the substance of the message. The send path already treats it
+	// that way — sendPickupNotification mails OuterPlaceholderSubject instead
+	// of the real subject specifically so the cleartext notification does not
+	// leak it — and writing it unsealed here put it on the same volume as the
+	// ciphertext it was protecting. The client-sealed mode reaches the same
+	// conclusion differently, by putting the subject inside the blob.
+	//
+	// Subject is the legacy cleartext field, still read (never written) so
+	// records created before SubjectEnc existed keep their subject for the
+	// remainder of their TTL. A pointer so "absent" is distinguishable from
+	// "empty envelope" without inspecting the envelope's fields.
+	Subject    string                      `json:"subject,omitempty"`
+	SubjectEnc *cryptutil.EncryptedPayload `json:"subjectEnc,omitempty"`
+	BodyEnc    cryptutil.EncryptedPayload  `json:"bodyEnc"`
 	// Mode is the composed body's format — "html" or "plain" — carried from
 	// the send request so the pickup page can present the body the way it was
 	// written. Without it every body was treated as plain text, which showed
@@ -82,13 +96,17 @@ func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body, mode s
 	if err != nil {
 		return "", err
 	}
+	subjectEnc, err := cryptutil.Seal([]byte(subject), key)
+	if err != nil {
+		return "", err
+	}
 
 	now := time.Now().UTC()
 	record := PickupRecord{
 		ID:             id,
 		SenderUserID:   senderUserID,
 		RecipientEmail: recipientEmail,
-		Subject:        subject,
+		SubjectEnc:     &subjectEnc,
 		BodyEnc:        bodyEnc,
 		Mode:           mode,
 		CreatedAt:      now.Format(time.RFC3339),
@@ -150,13 +168,22 @@ var ErrPickupExpired = errors.New("pgpmail: pickup record expired or already vie
 var ErrPickupClientSealed = errors.New("pgpmail: pickup record is client-sealed; the server cannot decrypt it")
 var ErrPickupNotClientSealed = errors.New("pgpmail: pickup record is server-sealed")
 
-// consumeLocked loads a record and marks it viewed, enforcing
-// "expire after N days or first view, whichever comes first". Shared by both
-// view paths so the one-time semantics cannot drift between them.
+// wantKind selects which of the two record shapes a consume call will accept,
+// checked BEFORE the record is tombstoned.
+type wantKind int
+
+const (
+	wantServerSealed wantKind = iota
+	wantClientSealed
+)
+
+// consumeLocked loads a record of the requested kind and marks it viewed,
+// enforcing "expire after N days or first view, whichever comes first". Shared
+// by both view paths so the one-time semantics cannot drift between them.
 //
 // Marking viewed does not require reading the payload, which is what lets the
 // server enforce single-use on a blob it cannot decrypt.
-func (s *PickupStore) consumeLocked(id string) (PickupRecord, error) {
+func (s *PickupStore) consumeLocked(id string, want wantKind) (PickupRecord, error) {
 	b, err := os.ReadFile(s.recordPath(id))
 	if os.IsNotExist(err) {
 		return PickupRecord{}, ErrPickupNotFound
@@ -172,9 +199,25 @@ func (s *PickupStore) consumeLocked(id string) (PickupRecord, error) {
 		return PickupRecord{}, ErrPickupExpired
 	}
 
+	// Refuse the wrong-shaped request before tombstoning, not after. This used
+	// to be checked by the callers on the returned record — by which point the
+	// message had already been destroyed, so asking the client-sealed route for
+	// a server-sealed record burned it and answered 409. Reaching either route
+	// needs a valid token for that record, so this was never a disclosure, but
+	// a store whose entire job is "readable exactly once" must not spend that
+	// one read on a request it is going to refuse.
+	isClientSealed := record.ClientSealed != ""
+	switch {
+	case want == wantClientSealed && !isClientSealed:
+		return PickupRecord{}, ErrPickupNotClientSealed
+	case want == wantServerSealed && isClientSealed:
+		return PickupRecord{}, ErrPickupClientSealed
+	}
+
 	tombstone := func(r PickupRecord) PickupRecord {
 		r.Viewed = true
 		r.BodyEnc = cryptutil.EncryptedPayload{}
+		r.SubjectEnc = nil
 		r.ClientSealed = ""
 		r.Subject = ""
 		r.Mode = ""
@@ -203,12 +246,9 @@ func (s *PickupStore) View(id string) (subject, body, mode string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record, err := s.consumeLocked(id)
+	record, err := s.consumeLocked(id, wantServerSealed)
 	if err != nil {
 		return "", "", "", err
-	}
-	if record.ClientSealed != "" {
-		return "", "", "", ErrPickupClientSealed
 	}
 
 	key, err := cryptutil.LoadKey(s.keyPath)
@@ -219,7 +259,18 @@ func (s *PickupStore) View(id string) (subject, body, mode string, err error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	return record.Subject, string(plain), record.Mode, nil
+	// Records written before the subject was sealed carry it in the legacy
+	// cleartext field. They predate this by at most one TTL, and losing their
+	// subject would be a worse outcome for the recipient than the leak was.
+	subject = record.Subject
+	if record.SubjectEnc != nil {
+		plainSubject, serr := cryptutil.Open(*record.SubjectEnc, key)
+		if serr != nil {
+			return "", "", "", serr
+		}
+		subject = string(plainSubject)
+	}
+	return subject, string(plain), record.Mode, nil
 }
 
 // ViewClientSealed returns a client-sealed blob exactly once, for the browser
@@ -229,12 +280,9 @@ func (s *PickupStore) ViewClientSealed(id string) (sealed string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record, err := s.consumeLocked(id)
+	record, err := s.consumeLocked(id, wantClientSealed)
 	if err != nil {
 		return "", err
-	}
-	if record.ClientSealed == "" {
-		return "", ErrPickupNotClientSealed
 	}
 	return record.ClientSealed, nil
 }
