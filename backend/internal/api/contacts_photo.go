@@ -56,8 +56,10 @@ func (s *Server) handleContactPhoto(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.handleContactPhotoGet(w, r, ac.UserID, c)
 	case http.MethodDelete:
-		c.PhotoRef = ""
-		if _, err := store.Upsert(c); err != nil {
+		// SetPhotoRef, not Upsert: the store carries PhotoRef forward on an
+		// ordinary write so no contact update can change it, and this handler
+		// is one of the two legitimate writers.
+		if _, _, err := store.SetPhotoRef(c.UID, ""); err != nil {
 			http.Error(w, "failed to update contact", http.StatusInternalServerError)
 			return
 		}
@@ -92,10 +94,13 @@ func (s *Server) handleContactPhotoUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	c.PhotoRef = ref
-	updated, err := store.Upsert(c)
+	updated, ok, err := store.SetPhotoRef(c.UID, ref)
 	if err != nil {
 		http.Error(w, "failed to update contact", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "contact not found", http.StatusNotFound)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"photoRef": updated.PhotoRef, "photoUrl": "/api/contacts/" + updated.UID + "/photo"})

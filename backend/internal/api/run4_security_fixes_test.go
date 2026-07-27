@@ -208,3 +208,54 @@ func TestDeviceLockoutScopedToClientIP(t *testing.T) {
 			"attempt budget; the lockout must be scoped to (deviceID, clientIP)")
 	}
 }
+
+// run-4 finding H9 (second half): the http.Server was constructed with no
+// timeouts at all, so a header-drip connection is held indefinitely. Go's zero
+// values mean "no limit", which net/http's own docs warn about, and the
+// shipped compose file publishes the port directly with no reverse proxy in
+// front to absorb it.
+func TestHTTPServerHasTimeouts(t *testing.T) {
+	srv := newTestServer(t)
+	srv.Prepare()
+	if srv.httpServer.ReadHeaderTimeout <= 0 {
+		t.Error("ReadHeaderTimeout is unset: a slow-header connection can be held open forever")
+	}
+	if srv.httpServer.ReadTimeout <= 0 {
+		t.Error("ReadTimeout is unset")
+	}
+	if srv.httpServer.IdleTimeout <= 0 {
+		t.Error("IdleTimeout is unset")
+	}
+}
+
+// run-4 finding LOW-3: contactPayload documents PhotoRef as read-only but
+// copies it straight into the stored record, and it is the value
+// userContactPhotoPath joins onto the photo directory. filepath.Base blocks
+// traversal, but ".." survives it and resolves to the user's own state
+// directory, which http.ServeFile will then render. The containment is
+// accidental; the field should not be client-settable at all.
+func TestContactPhotoRefIsNotClientSettable(t *testing.T) {
+	srv, u := newTestServerWithUser(t)
+
+	body, _ := json.Marshal(map[string]any{
+		"fn":       "Mallory",
+		"photoRef": "..",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/contacts", bytes.NewReader(body))
+	authRequestAs(srv, req, u.ID)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create contact status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	store, err := srv.userContactsStore(u.ID)
+	if err != nil {
+		t.Fatalf("userContactsStore: %v", err)
+	}
+	for _, c := range store.List() {
+		if c.PhotoRef != "" {
+			t.Fatalf("client-supplied photoRef %q was stored; the server owns this field", c.PhotoRef)
+		}
+	}
+}

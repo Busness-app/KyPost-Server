@@ -1719,6 +1719,26 @@ func (c *APIClient) SaveSent(ctx context.Context, draft DraftMessage) error {
 	return c.saveMessage(ctx, draft, targets, []string{"\\Seen"}, "save sent mail")
 }
 
+// goimapDefaults sets the vendored library's package-level tunables exactly
+// once.
+//
+// DialTimeout/CommandTimeout/RetryCount are globals inside go-imap, and this
+// assignment used to run inline on every first-connect. Each APIClient has its
+// own mutex but there is one of them per user, and the poller runs several
+// user ticks concurrently, so -race flagged concurrent writes here. Every
+// writer wrote the same constants, which is why it never misbehaved — but the
+// project runs -race in CI, and it stops being benign the moment any of these
+// becomes configurable.
+var goimapDefaults sync.Once
+
+func configureGoIMAPDefaults() {
+	goimapDefaults.Do(func() {
+		goimap.DialTimeout = 10 * time.Second
+		goimap.CommandTimeout = 45 * time.Second
+		goimap.RetryCount = 3
+	})
+}
+
 func (c *APIClient) ensureConnectedLocked() (*goimap.Dialer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1732,9 +1752,7 @@ func (c *APIClient) ensureConnectedLocked() (*goimap.Dialer, error) {
 	}
 
 	if c.dialer == nil {
-		goimap.DialTimeout = 10 * time.Second
-		goimap.CommandTimeout = 45 * time.Second
-		goimap.RetryCount = 3
+		configureGoIMAPDefaults()
 
 		d, err := goimap.New(c.username, c.password, c.host, c.port)
 		if err != nil {

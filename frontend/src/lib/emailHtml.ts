@@ -50,16 +50,18 @@ const allowedUriSchemes = /^(?:(?:https?|mailto|tel|cid):|[^a-z]|[a-z+.\-]+(?:[^
 // Matches a leading "scheme:" so a refusal can name what it refused.
 const leadingScheme = /^([a-z][a-z0-9+.\-]*):/i;
 
-// DOMPurify strips every character in \x00-\x20 from an attribute value before
-// testing it against ALLOWED_URI_REGEXP. The pre-check in processEmailHtml must
-// do the same, or the two disagree: `href="java&#10;script:alert(1)"` parses to
-// a value containing a raw newline, which satisfies the regex's
-// `[a-z+.\-]+[^a-z+.\-:]` branch and so is judged *allowed* here — but
-// DOMPurify collapses it to "javascript:", refuses it, and strips the href.
-// The result was the exact dead-but-live-looking anchor the [Blocked link]
-// marker exists to prevent. Normalizing first makes one decision, not two.
+// The exact character class DOMPurify strips from an attribute value before
+// testing it against ALLOWED_URI_REGEXP (its ATTR_WHITESPACE). Mirrored rather
+// than approximated: this pre-check used to strip only [\x00-\x20], so a URL
+// split by U+00A0 (or U+2028, U+3000, ...) was judged *allowed* here — no
+// [Blocked link] marker emitted — and then normalized to "javascript:" and
+// refused by DOMPurify. The result was the silent dead-but-clickable-looking
+// anchor this marker exists to prevent. Two normalizations, one decision.
+const attrWhitespace =
+  /[\u0000-\u0020\u00A0\u1680\u180E\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/g;
+
 function isAllowedUri(href: string): boolean {
-  return allowedUriSchemes.test(href.replace(/[\x00-\x20]/g, ""));
+  return allowedUriSchemes.test(href.replace(attrWhitespace, ""));
 }
 
 // blockRemoteContent defaults to TRUE, and that default is the security
@@ -114,7 +116,7 @@ export function processEmailHtml(html: string, showImages: boolean): string {
     // when it toasts a blocked scheme rather than swallowing the tap.
     const href = anchor.getAttribute("href") ?? "";
     if (!isAllowedUri(href)) {
-      const scheme = href.replace(/[\x00-\x20]/g, "").match(leadingScheme)?.[1]?.toLowerCase();
+      const scheme = href.replace(attrWhitespace, "").match(leadingScheme)?.[1]?.toLowerCase();
       anchor.replaceWith(document.createTextNode(`[Blocked link: ${scheme ? `${scheme}:` : "unrecognized address"}]`));
       return;
     }

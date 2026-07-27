@@ -566,9 +566,19 @@ func (s *Server) routesFrontend(mux *http.ServeMux) {
 // just call Run.
 func (s *Server) Prepare() {
 	port := config.EnvInt("WEB_PORT", 5866)
+	// Timeouts are set explicitly because net/http's zero values mean "no
+	// limit": without them a connection that dribbles one header line every
+	// few seconds is held open indefinitely, and the shipped compose file
+	// publishes this port directly with no reverse proxy in front to absorb
+	// it. WriteTimeout is deliberately generous rather than absent — large
+	// attachment downloads stream through this same server.
 	s.httpServer = &http.Server{
-		Addr:    ":" + strconv.Itoa(port),
-		Handler: s.routes(),
+		Addr:              ":" + strconv.Itoa(port),
+		Handler:           s.routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      10 * time.Minute,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
@@ -1621,7 +1631,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPut:
 		var next config.Config
-		if err := json.NewDecoder(r.Body).Decode(&next); err != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&next); err != nil {
 			http.Error(w, "invalid config payload", http.StatusBadRequest)
 			return
 		}
@@ -3510,7 +3520,7 @@ func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Content string `json:"content"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
@@ -4001,7 +4011,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		OldPassword string `json:"oldPassword"`
 		NewPassword string `json:"newPassword"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -4063,7 +4073,7 @@ func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Prompt string `json:"prompt"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}

@@ -273,7 +273,13 @@ func Save(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	// Atomic temp+rename like every other persisted file in this project.
+	// os.WriteFile truncates in place, and the daemon calls Load on every
+	// tick — a read landing inside that window sees an empty file, which
+	// unmarshals successfully into the zero value, so Load silently returns
+	// Default() rather than an error. That drops any operator-configured
+	// redaction pattern from what gets fed to the classifier, for a tick.
+	return fsutil.AtomicWriteFile(path, b, 0o600)
 }
 
 func ensureNotificationKeyMaterial(configDir string, cfg *Config) (bool, error) {

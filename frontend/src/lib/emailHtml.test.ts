@@ -193,3 +193,31 @@ describe("obfuscated scheme handling", () => {
     expect(out).toContain("<a");
   });
 });
+
+// run-4 finding LOW-1: isAllowedUri strips only [\x00-\x20] before testing,
+// while DOMPurify's ATTR_WHITESPACE also strips U+00A0, U+1680, U+180E,
+// U+2000-U+200A, U+2028, U+2029, U+202F, U+205F and U+3000. The two therefore
+// disagree: this pre-check judges "java<U+00A0>script:" allowed and skips the
+// [Blocked link] marker, then DOMPurify normalizes it to "javascript:",
+// refuses it, and strips the href — producing exactly the dead-but-clickable-
+// looking anchor the marker exists to prevent.
+describe("isAllowedUri whitespace normalization matches DOMPurify", () => {
+  const separators: Array<[string, string]> = [
+    ["U+00A0", " "],
+    ["U+1680", " "],
+    ["U+2000", " "],
+    ["U+2028", " "],
+    ["U+2029", " "],
+    ["U+202F", " "],
+    ["U+205F", " "],
+    ["U+3000", "　"],
+  ];
+
+  for (const [name, ch] of separators) {
+    it(`marks a javascript: URL split by ${name} as blocked`, () => {
+      const html = `<a href="java${ch}script:alert(1)">Confirm your account</a>`;
+      const out = processEmailHtml(html, false);
+      expect(out).toContain("[Blocked link:");
+    });
+  }
+});

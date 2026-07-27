@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -88,7 +89,7 @@ func (s *Server) handlePGPIdentityImport(w http.ResponseWriter, r *http.Request)
 		ArmoredPrivateKey string `json:"armoredPrivateKey"`
 		Passphrase        string `json:"passphrase"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}

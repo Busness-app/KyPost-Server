@@ -128,6 +128,39 @@ func (s *Store) Upsert(c Contact) (Contact, error) {
 	return s.upsertLocked(c)
 }
 
+// SetPhotoRef sets (or, with an empty ref, clears) the server-owned photo
+// reference for uid.
+//
+// Separate from Upsert because upsertLocked deliberately carries PhotoRef
+// forward from the stored record, so no ordinary contact write can change it.
+// The photo upload and delete handlers are the only legitimate writers, and
+// this is their door in. Returns false if uid is unknown.
+func (s *Store) SetPhotoRef(uid, ref string) (Contact, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return Contact{}, false, err
+	}
+	defer release()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return Contact{}, false, err
+	}
+	for i := range s.contacts {
+		if s.contacts[i].UID != uid {
+			continue
+		}
+		s.contacts[i].PhotoRef = ref
+		s.contacts[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		s.contacts[i].Rev++
+		if err := s.persistLocked(); err != nil {
+			return Contact{}, false, err
+		}
+		return s.contacts[i], true, nil
+	}
+	return Contact{}, false, nil
+}
+
 // ErrPreconditionFailed is returned by UpsertWithPrecondition when the
 // caller's precondition (If-Match / If-None-Match) doesn't hold.
 var ErrPreconditionFailed = errors.New("contact precondition failed")
@@ -212,6 +245,12 @@ func (s *Store) upsertLocked(c Contact) (Contact, error) {
 				c.CreatedAt = existing.CreatedAt
 			}
 			c.IsSelf = existing.IsSelf
+			// PhotoRef names a file this server wrote; it is set by the photo
+			// upload handler and cleared by the delete handler, never by a
+			// contact write. Carrying it forward here — rather than letting
+			// callers echo it back — means no write path can drop a photo by
+			// omitting the field, and none can point it somewhere else.
+			c.PhotoRef = existing.PhotoRef
 			s.contacts[i] = c
 			if err := s.persistLocked(); err != nil {
 				return Contact{}, err

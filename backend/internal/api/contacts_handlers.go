@@ -34,8 +34,13 @@ type contactPayload struct {
 	Notes         string                    `json:"notes,omitempty"`
 	Birthday      string                    `json:"birthday,omitempty"`
 
-	// PhotoRef is read-only in practice — set via POST /api/contacts/{id}/photo
-	// — but accepted/echoed here so it round-trips through GET/PUT unchanged.
+	// PhotoRef is server-owned: it is set only by POST /api/contacts/{id}/photo
+	// and cleared by DELETE. It is serialized so a GET response carries it, but
+	// toContact deliberately ignores whatever a client sends back — see the
+	// comment there. It used to be copied through, which made the one thing
+	// standing between a client string and an os.Stat + http.ServeFile a lone
+	// filepath.Base; that blocks traversal but not "..", which resolves to the
+	// caller's own state directory.
 	PhotoRef           string                        `json:"photoRef,omitempty"`
 	GroupIDs           []string                      `json:"groupIDs,omitempty"`
 	PGPKey             string                        `json:"pgpKey,omitempty"`
@@ -67,7 +72,10 @@ func (p contactPayload) toContact(uid string) contacts.Contact {
 		Addresses:          p.Addresses,
 		Notes:              p.Notes,
 		Birthday:           p.Birthday,
-		PhotoRef:           p.PhotoRef,
+		// PhotoRef is intentionally NOT copied from the payload. It names a
+		// file the server writes and later serves; callers do not get to
+		// choose it. Callers that need to preserve an existing photo across an
+		// update get it carried forward by the store, not echoed by the client.
 		GroupIDs:           p.GroupIDs,
 		PGPKey:             p.PGPKey,
 		IMs:                p.IMs,
