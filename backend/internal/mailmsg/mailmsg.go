@@ -161,7 +161,18 @@ func (m Message) Build() []byte {
 	_, _ = io.WriteString(text, m.Body)
 
 	for _, a := range m.Attachments {
-		contentType := strings.TrimSpace(a.MimeType)
+		// Sanitized like every other header value here. mime/multipart writes
+		// header values verbatim, so a CRLF in the caller-supplied MIME type
+		// injects arbitrary part headers, a premature body break and a forged
+		// boundary. This was the one value in Build that reached a header
+		// writer with only TrimSpace. Re-parsed as well, so a syntactically
+		// broken type falls back rather than being emitted as-is.
+		contentType := SanitizeHeaderValue(a.MimeType)
+		if parsed, _, err := mime.ParseMediaType(contentType); err == nil {
+			contentType = parsed
+		} else {
+			contentType = ""
+		}
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}

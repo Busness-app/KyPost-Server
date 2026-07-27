@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"kypost-server/backend/internal/mfa"
 	"kypost-server/backend/internal/processor"
@@ -108,6 +110,41 @@ func (s *Server) handleNativeDeviceMFA(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deviceId": deviceID, "approver": req.Approver})
 }
 
+// loginContext is the "where is this sign-in coming from" detail shown on the
+// approval screen. Both fields are attacker-influenced (a User-Agent is
+// whatever the client sent; the IP is the connection's, or a proxy header the
+// deployment trusts), so both are length-capped before they travel — the client
+// caps them too, but a security screen should not depend on the far end for
+// that.
+type loginContext struct {
+	ipAddress string
+	userAgent string
+}
+
+// maxPushContextLen mirrors MfaChallengePayloadParser.MAX_CONTEXT_LENGTH.
+const maxPushContextLen = 120
+
+func newLoginContext(r *http.Request) loginContext {
+	if r == nil {
+		return loginContext{}
+	}
+	return loginContext{
+		ipAddress: truncateContext(clientIP(r)),
+		userAgent: truncateContext(r.UserAgent()),
+	}
+}
+
+func truncateContext(v string) string {
+	v = strings.TrimSpace(v)
+	// Rune-wise, so a multi-byte character is never cut in half into invalid
+	// UTF-8 that the client then renders as replacement glyphs.
+	runes := []rune(v)
+	if len(runes) > maxPushContextLen {
+		return string(runes[:maxPushContextLen])
+	}
+	return v
+}
+
 // dispatchPushChallenge fans an MFA-challenge push out to every approver-eligible
 // device of userID. Best-effort and asynchronous: it runs in its own goroutine so
 // relay latency never blocks login, and dispatch failures are logged only (the
@@ -120,7 +157,7 @@ func (s *Server) handleNativeDeviceMFA(w http.ResponseWriter, r *http.Request) {
 // UnifiedPush devices are excluded from MFA challenges pending end-to-end encryption
 // support; MFA metadata is sensitive and should not traverse unencrypted public
 // UnifiedPush brokers (e.g., ntfy.sh). Devices remain usable for mail notifications.
-func (s *Server) dispatchPushChallenge(userID, challengeID string) {
+func (s *Server) dispatchPushChallenge(userID, challengeID string, ctx loginContext, issuedAt time.Time, matchDigits string, decoyDigits []string) {
 	store, err := s.userStore(userID)
 	if err != nil {
 		s.logger.Error("push mfa: open user state failed", "error", err.Error())
@@ -144,13 +181,40 @@ func (s *Server) dispatchPushChallenge(userID, challengeID string) {
 		return
 	}
 
+	// Everything past challengeId is context for the human, and it is the point
+	// of the approval screen. The payload used to be the id alone, so the person
+	// approving had no origin, no time, and no way to tell their own sign-in
+	// from an attacker's — every anti-fatigue control around it (the five-minute
+	// window, the push cooldown, per-challenge re-auth) guarded a decision made
+	// blind, which is the gap MFA-fatigue attacks walk through.
+	//
+	// The field names and formats are the shipped client's contract; see
+	// MfaChallengePayloadParser in kypost-android. It caps context strings at
+	// 120 characters and discards matchDigits that are not exactly two digits,
+	// falling back to a bare Approve button — so sending a malformed value is
+	// the same as sending nothing.
+	data := map[string]string{
+		"type":        "mfa_challenge",
+		"challengeId": challengeID,
+		"issuedAt":    strconv.FormatInt(issuedAt.UnixMilli(), 10),
+	}
+	if ctx.ipAddress != "" {
+		data["ipAddress"] = ctx.ipAddress
+	}
+	if ctx.userAgent != "" {
+		data["userAgent"] = ctx.userAgent
+	}
+	if matchDigits != "" {
+		data["matchDigits"] = matchDigits
+		if len(decoyDigits) > 0 {
+			data["decoyDigits"] = strings.Join(decoyDigits, ",")
+		}
+	}
+
 	message := processor.NativePushMessage{
 		Title: "Approve sign-in",
 		Body:  "Tap to approve or deny a sign-in to your account.",
-		Data: map[string]string{
-			"type":        "mfa_challenge",
-			"challengeId": challengeID,
-		},
+		Data:  data,
 	}
 	_, err = processor.SendNativePushToDevices(context.Background(), s.nativePushDispatcher, s.health, store, filteredDevices, message,
 		func(device state.NativeDevice, platform string, sendErr error) {
@@ -240,6 +304,9 @@ func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ChallengeID string `json:"challengeId"`
 		Approve     bool   `json:"approve"`
+		// MatchDigits is the number the approver read off the browser that
+		// started the sign-in. Required to approve, ignored to deny.
+		MatchDigits string `json:"matchDigits"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -299,10 +366,28 @@ func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, err := s.mfaChallenges.ResolvePush(challengeID, device.DeviceID, req.Approve)
+	// The number match is verified HERE, not on the device. The device decides
+	// which tile the human pressed; only the server knows which one was right,
+	// and this endpoint is reachable by anyone holding device credentials — so
+	// a client-side comparison would be decoration.
+	status, err := s.mfaChallenges.ResolvePushWithMatch(challengeID, device.DeviceID, req.Approve, strings.TrimSpace(req.MatchDigits))
 	if err != nil {
 		if errors.Is(err, mfa.ErrChallengeAlreadyResolved) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "challenge already resolved", "status": status})
+			return
+		}
+		if errors.Is(err, mfa.ErrMatchDigitsMismatch) {
+			// Not 401: the credentials were fine and the challenge is still
+			// live. The client should re-prompt, not re-authenticate.
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": "that is not the number shown in the browser",
+			})
+			return
+		}
+		if errors.Is(err, mfa.ErrMatchAttemptsExhausted) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error": "too many incorrect attempts; start the sign-in again",
+			})
 			return
 		}
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)

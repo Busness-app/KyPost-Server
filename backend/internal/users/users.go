@@ -168,7 +168,24 @@ func (u User) Public() Public {
 var (
 	ErrNotFound      = errors.New("user not found")
 	ErrUsernameTaken = errors.New("username already in use")
-	ErrPasswordWeak  = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
+	// ErrLastActiveAdmin is returned when a write would leave the instance
+	// with no active administrator. Enforced inside the store's write lock
+	// rather than by the caller — see guardNotLastActiveAdmin.
+	ErrLastActiveAdmin = errors.New("cannot remove the last active admin")
+	// ErrNotClientProtected is returned when an operation that only makes
+	// sense for a browser-held key is attempted against a server-custody
+	// account.
+	ErrNotClientProtected = errors.New("account is not client-protected")
+	// ErrWouldDowngradeCustody is returned when storing a server-readable
+	// identity would silently discard a browser-wrapped private key. There is
+	// deliberately no downgrade path (docs/E2E_PGP.md); this enforces it.
+	ErrWouldDowngradeCustody = errors.New("account uses a client-held key: delete the existing identity first")
+	// ErrPGPFingerprintChanged is returned when a caller that read one key
+	// tries to write its result back after a different key has replaced it.
+	// The caller's copy is stale, not wrong; retrying against the current key
+	// is the correct response.
+	ErrPGPFingerprintChanged = errors.New("the account's pgp key changed while this update was in flight")
+	ErrPasswordWeak          = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 )
 
 // MinPasswordLen is the minimum length of any password this store will
@@ -534,6 +551,20 @@ func (s *Store) Create(username, password string, role Role) (User, error) {
 // mutate re-reads the store, applies fn to the matching user, and persists
 // the result. fn returns an error to abort without writing.
 func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
+	return s.mutateGuarded(id, nil, fn)
+}
+
+// mutateGuarded is mutate with a whole-file precondition evaluated inside the
+// same lock as the write. guard receives every user as freshly read from disk
+// plus the target; returning an error aborts without writing.
+//
+// This exists because a precondition checked in the handler and enforced by a
+// separate write is not a precondition at all. isLastActiveAdmin used to be
+// evaluated before calling Deactivate/SetRole, so two concurrent requests each
+// saw one other active admin and both proceeded — leaving an instance with
+// zero admins, no delete-user endpoint, and LoadOrMigrate only minting an
+// admin when users.json is absent. Recovery meant hand-editing the volume.
+func (s *Store) mutateGuarded(id string, guard func(all []User, target User) error, fn func(*User) error) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var updated User
@@ -545,6 +576,11 @@ func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
 		for i := range f.Users {
 			if f.Users[i].ID != id {
 				continue
+			}
+			if guard != nil {
+				if err := guard(f.Users, f.Users[i]); err != nil {
+					return err
+				}
 			}
 			if err := fn(&f.Users[i]); err != nil {
 				return err
@@ -566,7 +602,12 @@ func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
 
 // SetRole updates a user's role.
 func (s *Store) SetRole(id string, role Role) (User, error) {
-	return s.mutate(id, func(u *User) error {
+	guard := guardNotLastActiveAdmin
+	if role == RoleAdmin {
+		// Promoting to admin can never remove the last one.
+		guard = nil
+	}
+	return s.mutateGuarded(id, guard, func(u *User) error {
 		u.Role = role
 		return nil
 	})
@@ -602,11 +643,27 @@ func (s *Store) ClearMustChangePassword(id string) (User, error) {
 // Deactivate soft-deletes a user: their sessions stop being accepted and
 // they can no longer log in, but their data is retained.
 func (s *Store) Deactivate(id string) (User, error) {
-	return s.mutate(id, func(u *User) error {
+	return s.mutateGuarded(id, guardNotLastActiveAdmin, func(u *User) error {
 		u.Active = false
 		u.DeactivatedAt = time.Now().UTC().Format(time.RFC3339)
 		return nil
 	})
+}
+
+// guardNotLastActiveAdmin refuses a write that would leave the instance with
+// no active admin. Evaluated inside mutateGuarded's lock against the file as
+// just read, so concurrent callers cannot each observe the other's admin as
+// still active and both proceed.
+func guardNotLastActiveAdmin(all []User, target User) error {
+	if target.Role != RoleAdmin || !target.Active {
+		return nil
+	}
+	for _, u := range all {
+		if u.ID != target.ID && u.Role == RoleAdmin && u.Active {
+			return nil
+		}
+	}
+	return ErrLastActiveAdmin
 }
 
 // Reactivate restores a previously deactivated user.
@@ -701,6 +758,13 @@ func (s *Store) SetLastUsedTOTPStep(id string, step int64) (User, error) {
 // and which skips client-protected identities entirely.
 func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, privateKeyEnc, source, createdAt string) (User, error) {
 	return s.mutate(id, func(u *User) error {
+		// Refuse to overwrite a client-held identity with a server-readable
+		// one. This used to clear PGPPrivateKeyWrapped unconditionally, so
+		// generate/import silently downgraded custody and destroyed the
+		// browser envelope — the opposite of what docs/E2E_PGP.md promises.
+		if u.PGPProtection() == PGPProtectionClient {
+			return ErrWouldDowngradeCustody
+		}
 		u.PGPFingerprint = fingerprint
 		u.PGPKeyID = keyID
 		u.PGPPublicKey = armoredPublicKey
@@ -709,6 +773,43 @@ func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, private
 		u.PGPKeyProtection = PGPProtectionServer
 		u.PGPKeySource = source
 		u.PGPKeyCreatedAt = createdAt
+		return nil
+	})
+}
+
+// UpdatePGPKeyMaterial replaces only the public key and its sealed private half
+// for an identity whose fingerprint is still expectFingerprint, leaving key ID,
+// source, creation time and protection untouched.
+//
+// This is the narrow write the daemon's send-as reconcile needs: it adds User
+// IDs to an existing key, which changes the key's bytes but not its identity.
+// It used to reach for SetPGPIdentity, which rewrites everything — and because
+// it snapshots the user, spends hundreds of microseconds re-signing, and only
+// then writes, a key replaced during that window was silently reverted to the
+// stale copy.
+//
+// Making the expectation a required argument is what closes that window: the
+// caller states which key it read, and the write is refused under the lock if
+// that is no longer the current one. An empty expectation is rejected rather
+// than treated as "any", because a vacuous precondition is worst exactly when
+// the account has no key and a stale write would install one.
+func (s *Store) UpdatePGPKeyMaterial(id, expectFingerprint, armoredPublicKey, privateKeyEnc string) (User, error) {
+	if strings.TrimSpace(expectFingerprint) == "" {
+		return User{}, errors.New("expected fingerprint is required to update key material")
+	}
+	return s.mutate(id, func(u *User) error {
+		// Same refusal as SetPGPIdentity, restated rather than inherited so the
+		// two preconditions cannot drift apart: writing privateKeyEnc onto a
+		// client-held identity would hand the server back a readable copy of a
+		// key it is not supposed to have, and destroy the browser envelope.
+		if u.PGPProtection() == PGPProtectionClient {
+			return ErrWouldDowngradeCustody
+		}
+		if u.PGPFingerprint != expectFingerprint {
+			return ErrPGPFingerprintChanged
+		}
+		u.PGPPublicKey = armoredPublicKey
+		u.PGPPrivateKeyEnc = privateKeyEnc
 		return nil
 	})
 }
@@ -748,8 +849,17 @@ func (s *Store) RewrapPGPPrivateKey(id, wrapped string) (User, error) {
 		if u.PGPFingerprint == "" {
 			return errors.New("no pgp identity to rewrap")
 		}
+		// Rewrap exists for a password change on an account that is ALREADY
+		// client-protected: unwrap with the old password, rewrap with the new,
+		// store the result. Reaching it with a server-custody account instead
+		// cleared PGPPrivateKeyEnc — the only copy of the private key anyone
+		// could open — while leaving the identity advertised, so every message
+		// ever encrypted to it became permanently unreadable and senders kept
+		// encrypting to a key nobody held.
+		if u.PGPProtection() != PGPProtectionClient {
+			return ErrNotClientProtected
+		}
 		u.PGPPrivateKeyWrapped = wrapped
-		u.PGPPrivateKeyEnc = ""
 		u.PGPKeyProtection = PGPProtectionClient
 		return nil
 	})

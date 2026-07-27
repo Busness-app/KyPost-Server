@@ -15,11 +15,15 @@ import (
 // device path must honor it just as the session path does.
 func TestDeviceAuthRejectedAfterDeactivation(t *testing.T) {
 	srv := newTestServer(t)
-	all, err := srv.users.List()
-	if err != nil || len(all) == 0 {
-		t.Fatalf("no test user available: %v", err)
+	// A dedicated non-admin account: the store now refuses to deactivate the
+	// last active admin (see users.guardNotLastActiveAdmin), and the seeded
+	// admin this test used to borrow is exactly that. The subject here is the
+	// device path honoring deactivation, not the admin-count invariant.
+	owner, err := srv.users.Create("deactivation-subject", "deactivation-subject-pass", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
 	}
-	userID := all[0].ID
+	userID := owner.ID
 	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "revoke-device")
 
 	// Sanity: the device works while the account is active.
@@ -129,7 +133,7 @@ func TestMFALockoutIsPerAccountAcrossChallenges(t *testing.T) {
 		if ok, _ := srv.mfaLockout.allowed(userID); !ok {
 			t.Fatalf("attempt %d: should be allowed before the cap", i+1)
 		}
-		srv.mfaLockout.recordFailure(userID)
+		_, _ = srv.mfaLockout.tryAttempt(userID)
 	}
 	if ok, _ := srv.mfaLockout.allowed(userID); ok {
 		t.Fatal("second-factor attempts must be locked out for the account after the cap, regardless of new challenges")

@@ -425,7 +425,16 @@ func (s *Server) reserveDeviceID(ownerID, deviceID string) bool {
 // cheap at this project's scale and costs other users at most one extra scrypt
 // verification on their next sync.
 func (s *Server) revokeAllUserCredentials(u users.User) {
-	s.revokeUserSessions(u.ID, "")
+	s.revokeAllUserCredentialsExcept(u, "")
+}
+
+// revokeAllUserCredentialsExcept is revokeAllUserCredentials with one session
+// spared. The self-service password change needs this: it must cut off devices
+// and CardDAV exactly like the admin paths do, but logging the user out of the
+// tab they just changed their password in would be a surprising way to answer
+// "I secured my account".
+func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken string) {
+	s.revokeUserSessions(u.ID, keepSessionToken)
 	s.revokeUserDevices(u.ID)
 	s.davCredentials.invalidateUser(u.Username)
 }

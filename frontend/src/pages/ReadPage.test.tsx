@@ -1,0 +1,263 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+
+// run-4 finding M7: the "Show Remote Content" opt-in was a bare boolean cleared
+// by openEmailDetails, so it was only correct for messages opened through that
+// one function. The search-results table called setSelected directly. A user
+// who unblocked a newsletter's images and then opened an attacker's message
+// from search rendered it through the permissive branch having never opted in
+// for it — firing every tracking pixel in it, and (with M6) its CSS too.
+//
+// These are the first component tests in this project. They exist because the
+// bug was not in either piece of logic — processEmailHtml is well covered, and
+// openEmailDetails does the right thing — but in the wiring between them, which
+// is only observable by driving the component.
+
+const getJSON = vi.fn();
+const postJSON = vi.fn();
+
+vi.mock("../api/client", () => ({
+  getJSON: (url: string) => getJSON(url),
+  postJSON: (url: string, body: unknown) => postJSON(url, body),
+  toErrorMessage: (_e: unknown, fallback: string) => fallback
+}));
+
+vi.mock("../api/pgp", () => ({
+  getPGPMessagePayload: vi.fn().mockResolvedValue({ ciphertext: "" })
+}));
+
+vi.mock("../lib/pgpSession", () => ({
+  isClientProtected: () => false,
+  needsUnlock: () => false,
+  subscribePGPSession: () => () => {}
+}));
+
+vi.mock("../components/PgpUnlockDialog", () => ({
+  PgpUnlockDialog: () => null
+}));
+
+import { ReadPage } from "./ReadPage";
+
+// Testing Library only registers auto-cleanup when vitest runs with globals
+// enabled, which this project does not. Without it each test inherits the
+// previous one's mounted tree and every query matches twice.
+afterEach(cleanup);
+
+const TRACKER = "https://tracker.example/pixel.gif";
+
+// The newsletter the user legitimately unblocks.
+const newsletter = {
+  messageId: "msg-newsletter",
+  sender: "news@publisher.example",
+  subject: "Weekly Digest",
+  body: `<p>Hello</p><img src="${TRACKER}">`,
+  status: "read",
+  atUtc: "2026-07-27T10:00:00Z"
+};
+
+// The message the attacker wants rendered without an opt-in. Only reachable
+// through search, which is the path that used to bypass the reset.
+const hostile = {
+  messageId: "msg-hostile",
+  sender: "attacker@evil.example",
+  subject: "Invoice attached",
+  body: `<p>Pay now</p><img src="${TRACKER}">`,
+  status: "unread",
+  atUtc: "2026-07-27T11:00:00Z"
+};
+
+function mockEndpoints() {
+  getJSON.mockImplementation((url: string) => {
+    if (url.startsWith("/api/inbox")) {
+      return Promise.resolve({ tabs: ["Primary"], byTab: { Primary: [newsletter] } });
+    }
+    if (url.startsWith("/api/labels")) {
+      return Promise.resolve({ configured: [], imap: [] });
+    }
+    if (url.startsWith("/api/mail/search")) {
+      return Promise.resolve({ results: [hostile] });
+    }
+    if (url.startsWith("/api/mail/attachments")) {
+      return Promise.resolve({ ok: true, attachments: [] });
+    }
+    return Promise.resolve({});
+  });
+  postJSON.mockResolvedValue({ ok: true, results: [] });
+}
+
+function renderReadPage() {
+  return render(
+    <MemoryRouter>
+      <ReadPage />
+    </MemoryRouter>
+  );
+}
+
+/** The rendered message body element of the open reader. */
+function readerBody(): HTMLElement {
+  const block = document.querySelector(".email-reader-body-block");
+  if (!block) throw new Error("no message body is rendered");
+  return block as HTMLElement;
+}
+
+describe("remote-content opt-in is per message (run-4 M7)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEndpoints();
+  });
+
+  it("does not carry an opt-in from an inbox message to one opened from search", async () => {
+    const user = userEvent.setup();
+    renderReadPage();
+
+    // 1. Open the newsletter from the inbox and unblock its images, exactly as
+    //    a user reasonably would.
+    await user.click(await screen.findByText("Weekly Digest"));
+    await waitFor(() => expect(readerBody().innerHTML).toContain("[Image Blocked]"));
+
+    await user.click(screen.getByRole("button", { name: "Show Remote Content" }));
+    await waitFor(() => expect(readerBody().innerHTML).toContain(TRACKER));
+
+    await user.click(screen.getByRole("button", { name: "Close" }));
+
+    // 2. Find the hostile message by search and open it from the results.
+    await user.type(screen.getByPlaceholderText("Search..."), "invoice");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.click(await screen.findByText("Invoice attached"));
+
+    // 3. It must render blocked. The user never opted in for THIS message.
+    await waitFor(() => expect(screen.getByText("Pay now")).toBeDefined());
+    expect(readerBody().innerHTML).not.toContain(TRACKER);
+    expect(readerBody().innerHTML).toContain("[Image Blocked]");
+    expect(screen.getByRole("button", { name: "Show Remote Content" })).toBeDefined();
+  });
+
+  it("re-blocks a message that was unblocked earlier in the session", async () => {
+    const user = userEvent.setup();
+    renderReadPage();
+
+    await user.click(await screen.findByText("Weekly Digest"));
+    await user.click(screen.getByRole("button", { name: "Show Remote Content" }));
+    await waitFor(() => expect(readerBody().innerHTML).toContain(TRACKER));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+
+    // Reopening costs another deliberate click — the grant does not persist
+    // across opens, even for the same message.
+    await user.click(await screen.findByText("Weekly Digest"));
+    await waitFor(() => expect(readerBody().innerHTML).toContain("[Image Blocked]"));
+    expect(readerBody().innerHTML).not.toContain(TRACKER);
+  });
+
+  it("still lets the user unblock the message opened from search", async () => {
+    const user = userEvent.setup();
+    renderReadPage();
+
+    await user.type(screen.getByPlaceholderText("Search..."), "invoice");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.click(await screen.findByText("Invoice attached"));
+
+    await waitFor(() => expect(readerBody().innerHTML).toContain("[Image Blocked]"));
+    await user.click(screen.getByRole("button", { name: "Show Remote Content" }));
+    await waitFor(() => expect(readerBody().innerHTML).toContain(TRACKER));
+  });
+});
+
+describe("opening from search goes through openEmailDetails (run-4 M7)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEndpoints();
+  });
+
+  // The other half of M7: setSelected left the previous message's attachment
+  // list in place and never loaded the new message's, so the reader showed the
+  // OLD message's filenames while every download link's href pointed at the
+  // NEW message — a link labelled statement.pdf fetching attachment #0 of the
+  // attacker's message. Both messages need attachments for this to be visible,
+  // since the section only renders when hasAttachments is set.
+  it("loads the opened message's attachments instead of keeping the previous message's", async () => {
+    getJSON.mockImplementation((url: string) => {
+      if (url.startsWith("/api/inbox")) {
+        return Promise.resolve({
+          tabs: ["Primary"],
+          byTab: { Primary: [{ ...newsletter, hasAttachments: true }] }
+        });
+      }
+      if (url.startsWith("/api/labels")) return Promise.resolve({ configured: [], imap: [] });
+      if (url.startsWith("/api/mail/search")) {
+        return Promise.resolve({ results: [{ ...hostile, hasAttachments: true }] });
+      }
+      if (url.startsWith("/api/mail/attachments")) {
+        const name = url.includes("msg-hostile") ? "payload.exe" : "statement.pdf";
+        return Promise.resolve({
+          ok: true,
+          attachments: [{ index: 0, name, mimeType: "application/octet-stream", size: 1024 }]
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    const user = userEvent.setup();
+    renderReadPage();
+
+    await user.click(await screen.findByText("Weekly Digest"));
+    await waitFor(() => expect(screen.getByText(/statement\.pdf/)).toBeDefined());
+    await user.click(screen.getByRole("button", { name: "Close" }));
+
+    await user.type(screen.getByPlaceholderText("Search..."), "invoice");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.click(await screen.findByText("Invoice attached"));
+
+    await waitFor(() => expect(screen.getByText(/payload\.exe/)).toBeDefined());
+    expect(screen.queryByText(/statement\.pdf/)).toBeNull();
+  });
+
+  // Opening from search is opening: it marks the message read, which
+  // setSelected did not do.
+  it("marks a message opened from search as read", async () => {
+    const user = userEvent.setup();
+    renderReadPage();
+
+    await user.type(screen.getByPlaceholderText("Search..."), "invoice");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.click(await screen.findByText("Invoice attached"));
+
+    await waitFor(() =>
+      expect(
+        postJSON.mock.calls.some(
+          ([url, body]) =>
+            url === "/api/inbox/actions" &&
+            (body as { action?: string; messageIds?: string[] }).action === "read" &&
+            (body as { messageIds?: string[] }).messageIds?.includes("msg-hostile")
+        )
+      ).toBe(true)
+    );
+  });
+});
+
+// Guards the assumption the search half of M7 rests on: search is scoped to the
+// current mailbox, so routing its clicks through openEmailDetails — which marks
+// the message read via the current-mailbox action endpoint — acts on the right
+// message. If search ever spans mailboxes, that read action becomes wrong and
+// this test should fail loudly rather than the bug being found in production.
+describe("search scope", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockEndpoints();
+  });
+
+  it("scopes the search request to a single mailbox", async () => {
+    const user = userEvent.setup();
+    renderReadPage();
+
+    await user.type(await screen.findByPlaceholderText("Search..."), "invoice");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => {
+      const searchCall = getJSON.mock.calls.map(([url]) => url).find((url: string) => url.startsWith("/api/mail/search"));
+      expect(searchCall).toBeDefined();
+      expect(searchCall).toContain("mailbox=");
+    });
+  });
+});

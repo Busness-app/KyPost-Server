@@ -3,7 +3,9 @@ package mailcache
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"sync"
 
 	"kypost-server/backend/internal/fsutil"
@@ -245,14 +247,69 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 // message, so clients would tell a server-mode user their own mail is
 // unreadable. See docs/E2E_PGP.md for the fix if the fast path is wanted back.
 //
+// A Sent body is never written either. That folder holds every message the
+// owner has ever sent, in plaintext, on the disk of a server whose claim for
+// client-custody mail is that it cannot read that mail — and under client
+// custody the pickup-link notice lands there carrying the key to a message the
+// server is otherwise storing as ciphertext it cannot open. Sent is opened far
+// less often than the inbox, so the cost is one live fetch on a rare path.
+//
 // This is enforced here rather than at the two internal/api call sites so a
 // future third caller cannot bypass it, and so the caller's own response
 // entry keeps the body it just fetched.
-func warmBody(in Entry) string {
-	if in.PGPEncrypted {
+func warmBody(mailboxKey string, in Entry) string {
+	if in.PGPEncrypted || isSentMailbox(mailboxKey) {
 		return ""
 	}
-	return in.Body
+	return redactPickupLinkFragments(in.Body)
+}
+
+// sentMailboxLeaf matches the last path component of a Sent folder across the
+// naming conventions in the wild: "Sent", "Sent Items", "Sent Messages",
+// "[Gmail]/Sent Mail", "INBOX.Sent". Deliberately a prefix match on the leaf
+// rather than a substring match on the whole name, so a user folder called
+// "Consent forms" or a parent named "Sent/Archive-2019" is not caught by
+// accident.
+func isSentMailbox(mailboxKey string) bool {
+	leaf := mailboxKey
+	if i := strings.LastIndexAny(leaf, "/."); i >= 0 {
+		leaf = leaf[i+1:]
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(leaf)), "sent")
+}
+
+// pickupLinkFragment matches the URL-fragment key of a pickup link this server
+// itself emitted. The character class stops at quotes and angle brackets so an
+// HTML href is redacted without swallowing its closing quote and turning the
+// cached body into broken markup.
+var pickupLinkFragment = regexp.MustCompile(`(/pickup/[^\s"'<>]*#)[^\s"'<>]+`)
+
+// redactPickupLinkFragments removes the AES key from any client-sealed pickup
+// link in a body about to be persisted.
+//
+// The pickup link's whole security claim is that the key lives only in the URL
+// fragment, which browsers never transmit, so the server storing the ciphertext
+// cannot read it — see pickup_client_sealed.go, which states the key "is never
+// written to disk". The notice carrying that link is ordinary unencrypted mail,
+// so without this it was cached verbatim onto the same volume as the ciphertext,
+// and the claim was simply false.
+//
+// Not caching Sent bodies (above) covers the sender. This covers the case that
+// does not: when the recipient is another user on this same instance, the notice
+// arrives in their INBOX and the poller warms it there.
+//
+// Content matching is unavoidable here — every cache write originates from an
+// IMAP read, so the server has no memory that a message was a pickup notice by
+// the time it caches it. What makes that acceptable is that the pattern is this
+// server's own URL shape rather than arbitrary content, and a miss is no worse
+// than the status quo it replaces.
+func redactPickupLinkFragments(body string) string {
+	// Cheap guard: the overwhelming majority of mail has no pickup link, and
+	// this runs on every cached body.
+	if !strings.Contains(body, "/pickup/") {
+		return body
+	}
+	return pickupLinkFragment.ReplaceAllString(body, "${1}[redacted]")
 }
 
 // Upsert merges freshly-known entries into mailboxKey's window without
@@ -297,7 +354,7 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 		if !ok {
 			win.Seq++
 			e := in
-			e.Body = warmBody(in)
+			e.Body = warmBody(mailboxKey, in)
 			e.Rev = win.Seq
 			e.FirstRev = win.Seq
 			win.Entries = append(win.Entries, e)
@@ -317,7 +374,7 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 			// warmBody, not in.Body: a decrypted OpenPGP body is never
 			// persisted. Assigning it here also clears any plaintext an
 			// older build already wrote for this UID.
-			updated.Body = warmBody(in)
+			updated.Body = warmBody(mailboxKey, in)
 			// PGP fields are only ever known alongside a freshly fetched
 			// body (see decryptPGPMessageContent/decryptPGPUnreadMessage in
 			// internal/api — a failed decrypt leaves Body empty and is

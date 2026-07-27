@@ -10,25 +10,48 @@ import DOMPurify from "dompurify";
 // It lives in its own module rather than inside ReadPage.tsx so it can be
 // tested directly — see emailHtml.test.ts.
 //
-// blockRemoteContent additionally forbids style/background attributes and
-// <style>, <svg>, <video>, and <audio> elements. Stripping <img> tags alone
-// does not block remote-resource loading: a legacy background="..."
-// attribute, an inline style="background-image:url(...)", a <style> block,
-// an SVG <image href="...">, a <video poster="...">, or an <audio src="...">
-// are all in DOMPurify's default allowlist and fetch a remote URL eagerly on
-// render exactly like <img src> does, so they bypass the "Show Images"
-// control (and its anti-tracking-pixel intent) unless explicitly forbidden
-// here too. svg/video/audio are all in DOMPurify's own DEFAULT_FORBID_CONTENTS
-// set, so forbidding these three tags drops their entire subtree (any
-// <source>/<track> children included) rather than hoisting children to the
-// top level — no separate child-tag entry is needed.
+// blockRemoteContent additionally forbids the background attribute and the
+// <svg>, <video>, and <audio> elements. Stripping <img> tags alone does not
+// block remote-resource loading: a legacy background="..." attribute, an SVG
+// <image href="...">, a <video poster="...">, or an <audio src="..."> are all
+// in DOMPurify's default allowlist and fetch a remote URL eagerly on render
+// exactly like <img src> does, so they bypass the "Show Images" control (and
+// its anti-tracking-pixel intent) unless explicitly forbidden here too.
+// svg/video/audio are all in DOMPurify's own DEFAULT_FORBID_CONTENTS set, so
+// forbidding these three tags drops their entire subtree (any <source>/<track>
+// children included) rather than hoisting children to the top level — no
+// separate child-tag entry is needed.
+//
+// <style> and the style attribute are NOT part of that set: they are forbidden
+// unconditionally, in forbiddenTags/forbiddenAttrs. They can carry a remote
+// url() too, but that is the lesser of the two problems they pose — see the
+// comment there.
 // Interactive form controls are forbidden unconditionally. DOMPurify allows
 // <form>/<input>/<button> by default, and no legitimate email needs them —
 // but a sender-controlled form rendered inside the authenticated app is a
 // credential-phishing surface that looks exactly like part of the client.
 // The CSP's form-action 'self' stops the submission reaching an attacker's
 // origin, which is a mitigation, not a reason to render the form at all.
-const forbiddenTags = ["form", "input", "button", "textarea", "select", "option"];
+//
+// <style> and the style attribute are forbidden unconditionally, and are in
+// this list rather than the remote-content one for that reason. They were
+// coupled to blockRemoteContent, so pressing "Show Remote Content" — which a
+// user does to see a newsletter's pictures — also handed the sender
+// document-wide CSS on the app's own origin, since the CSP allows
+// style-src 'unsafe-inline' and email CSS is not scoped to the message
+// container. That let a message hide the "This message impersonates KyPost"
+// banner with .notice-error{display:none!important}, repaint the PGP badge
+// from red to a green "verified", or cover the viewport with a fixed-position
+// body::after overlay — none of which needs script, so nothing else in this
+// pipeline would have stopped it. Roundcube rewrites and prefixes email CSS
+// selectors to prevent exactly this.
+//
+// Loading a picture and restyling the application are different decisions, and
+// only the first one is what the toggle asks the user about. Blocking CSS
+// costs unblocked mail some visual fidelity, which is the correct trade: the
+// alternative is letting the sender redraw the security UI that describes them.
+const forbiddenTags = ["form", "input", "button", "textarea", "select", "option", "style"];
+const forbiddenAttrs = ["style"];
 
 // The URI schemes an email is allowed to link to.
 //
@@ -50,16 +73,18 @@ const allowedUriSchemes = /^(?:(?:https?|mailto|tel|cid):|[^a-z]|[a-z+.\-]+(?:[^
 // Matches a leading "scheme:" so a refusal can name what it refused.
 const leadingScheme = /^([a-z][a-z0-9+.\-]*):/i;
 
-// DOMPurify strips every character in \x00-\x20 from an attribute value before
-// testing it against ALLOWED_URI_REGEXP. The pre-check in processEmailHtml must
-// do the same, or the two disagree: `href="java&#10;script:alert(1)"` parses to
-// a value containing a raw newline, which satisfies the regex's
-// `[a-z+.\-]+[^a-z+.\-:]` branch and so is judged *allowed* here — but
-// DOMPurify collapses it to "javascript:", refuses it, and strips the href.
-// The result was the exact dead-but-live-looking anchor the [Blocked link]
-// marker exists to prevent. Normalizing first makes one decision, not two.
+// The exact character class DOMPurify strips from an attribute value before
+// testing it against ALLOWED_URI_REGEXP (its ATTR_WHITESPACE). Mirrored rather
+// than approximated: this pre-check used to strip only [\x00-\x20], so a URL
+// split by U+00A0 (or U+2028, U+3000, ...) was judged *allowed* here — no
+// [Blocked link] marker emitted — and then normalized to "javascript:" and
+// refused by DOMPurify. The result was the silent dead-but-clickable-looking
+// anchor this marker exists to prevent. Two normalizations, one decision.
+const attrWhitespace =
+  /[\u0000-\u0020\u00A0\u1680\u180E\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/g;
+
 function isAllowedUri(href: string): boolean {
-  return allowedUriSchemes.test(href.replace(/[\x00-\x20]/g, ""));
+  return allowedUriSchemes.test(href.replace(attrWhitespace, ""));
 }
 
 // blockRemoteContent defaults to TRUE, and that default is the security
@@ -85,10 +110,10 @@ export function sanitizeEmailHtml(html: string, blockRemoteContent = true): stri
       ? {
           ADD_ATTR: ["target"],
           ALLOWED_URI_REGEXP: allowedUriSchemes,
-          FORBID_ATTR: ["style", "background"],
-          FORBID_TAGS: [...forbiddenTags, "style", "svg", "video", "audio"]
+          FORBID_ATTR: [...forbiddenAttrs, "background"],
+          FORBID_TAGS: [...forbiddenTags, "svg", "video", "audio"]
         }
-      : { ADD_ATTR: ["target"], ALLOWED_URI_REGEXP: allowedUriSchemes, FORBID_TAGS: forbiddenTags }
+      : { ADD_ATTR: ["target"], ALLOWED_URI_REGEXP: allowedUriSchemes, FORBID_ATTR: forbiddenAttrs, FORBID_TAGS: forbiddenTags }
   );
 }
 
@@ -114,7 +139,7 @@ export function processEmailHtml(html: string, showImages: boolean): string {
     // when it toasts a blocked scheme rather than swallowing the tap.
     const href = anchor.getAttribute("href") ?? "";
     if (!isAllowedUri(href)) {
-      const scheme = href.replace(/[\x00-\x20]/g, "").match(leadingScheme)?.[1]?.toLowerCase();
+      const scheme = href.replace(attrWhitespace, "").match(leadingScheme)?.[1]?.toLowerCase();
       anchor.replaceWith(document.createTextNode(`[Blocked link: ${scheme ? `${scheme}:` : "unrecognized address"}]`));
       return;
     }

@@ -71,7 +71,12 @@ func TestHandleSendAsCreateHappyPath(t *testing.T) {
 	}
 }
 
-func TestHandleSendAsCreateRejectsOwnAddress(t *testing.T) {
+// The caller's own account address is now ACCEPTED here, and that reversal is
+// deliberate: WKD publication requires every address to have passed this
+// challenge (publishableAddressesAt no longer trusts the self-declared IMAP
+// username), so rejecting the account address would leave users unable to
+// prove the one address they most need published.
+func TestHandleSendAsCreateAcceptsOwnAddress(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
 	writeUnreachableSMTPIMAPConfig(t, srv, userID, "alice@example.com")
@@ -79,16 +84,19 @@ func TestHandleSendAsCreateRejectsOwnAddress(t *testing.T) {
 	rec := doJSONAuth(srv, srv.withAuth(srv.handleSendAs), http.MethodPost, "/api/mail/send-as",
 		map[string]string{"email": "ALICE@Example.com"}, userID)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
-	}
-
+	// The probe send itself fails (the test IMAP/SMTP config is unreachable),
+	// but the pending alias must exist: the record is created before the probe
+	// precisely so a send failure leaves it pending rather than losing it.
 	store, err := srv.userSendAsStore(userID)
 	if err != nil {
 		t.Fatalf("userSendAsStore: %v", err)
 	}
-	if len(store.List()) != 0 {
-		t.Fatalf("expected no alias created, got %d", len(store.List()))
+	if len(store.List()) != 1 {
+		t.Fatalf("expected the own-address alias to be created, got %d (status %d, body=%s)",
+			len(store.List()), rec.Code, rec.Body.String())
+	}
+	if got := store.List()[0].Email; got != "alice@example.com" {
+		t.Fatalf("alias email = %q, want normalized %q", got, "alice@example.com")
 	}
 }
 

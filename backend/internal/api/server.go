@@ -469,8 +469,16 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// out of the feature built for it.
 	mux.HandleFunc("GET /api/pgp/bootstrap", s.withMailAuth(s.handlePGPBootstrap))
 	mux.HandleFunc("GET /api/pgp/identity/wrapped", s.withMailAuth(s.handlePGPWrappedKey))
-	mux.HandleFunc("POST /api/pgp/identity/client", s.withMailAuth(s.handlePGPIdentityClient))
-	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withMailAuth(s.handlePGPRewrapKey))
+	// These two WRITE key material: identity/client replaces the account's
+	// public key (and clears the server-sealed private half), and rewrap
+	// replaces the wrapped envelope. They are session-only for the same reason
+	// export-legacy below is — a device secret is not a re-verified password —
+	// and the asymmetry of gating the endpoint that *reads* a key while
+	// leaving the two that *destroy* one open to a device secret was a real
+	// hole: a stolen device secret could substitute the key all future mail is
+	// encrypted to, or wipe the private half irrecoverably.
+	mux.HandleFunc("POST /api/pgp/identity/client", s.withAuth(s.handlePGPIdentityClient))
+	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withAuth(s.handlePGPRewrapKey))
 	// export-legacy stays session-only on purpose. It is the one endpoint
 	// that returns a private key in the clear, and it re-verifies the account
 	// password before doing so — a device secret is not that password, and a
@@ -506,6 +514,7 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// Client-sealed pickup: the browser encrypts, the server stores an opaque
 	// blob, and the key travels in the link fragment it never receives.
 	// See pickup_client_sealed.go.
+	mux.HandleFunc("POST /pickup/{id}/open", s.handlePickupOpen)
 	mux.HandleFunc("GET /pickup/{id}/blob", s.handlePickupBlob)
 	mux.HandleFunc("POST /api/pgp/pickup", s.withMailAuth(s.handlePickupCreate))
 }
@@ -566,9 +575,19 @@ func (s *Server) routesFrontend(mux *http.ServeMux) {
 // just call Run.
 func (s *Server) Prepare() {
 	port := config.EnvInt("WEB_PORT", 5866)
+	// Timeouts are set explicitly because net/http's zero values mean "no
+	// limit": without them a connection that dribbles one header line every
+	// few seconds is held open indefinitely, and the shipped compose file
+	// publishes this port directly with no reverse proxy in front to absorb
+	// it. WriteTimeout is deliberately generous rather than absent — large
+	// attachment downloads stream through this same server.
 	s.httpServer = &http.Server{
-		Addr:    ":" + strconv.Itoa(port),
-		Handler: s.routes(),
+		Addr:              ":" + strconv.Itoa(port),
+		Handler:           s.routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      10 * time.Minute,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
@@ -625,8 +644,48 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.pickupStore.Sweep(30 * 24 * time.Hour); err != nil {
+			// pickupLinkTTL, not a separate longer number. The notification
+			// email tells the recipient the link "expires in 7 days or as soon
+			// as it's opened", and a record is unusable past its ExpiresAt
+			// anyway — so a 30-day sweep only meant the message sat on disk for
+			// 23 days after the last moment anyone could read it, contradicting
+			// what the recipient was told.
+			if err := s.pickupStore.Sweep(pickupLinkTTL); err != nil {
 				s.logger.Error("pickup sweep failed", "error", err.Error())
+			}
+		}
+	}
+}
+
+// StartContactPhotoSweeper reclaims contact-photo files no live contact
+// references, for every user, on the same hourly cadence as the pickup sweep.
+//
+// Photo filenames are content hashes, so two contacts with the same picture
+// share one file and no handler can safely delete on unlink — clearing one
+// contact's photo would blank the other's. That is why DELETE .../photo only
+// clears the reference, and why the bytes need a reference-based sweep to come
+// back at all. Without this they never did.
+//
+// One user's failure is logged and skipped rather than aborting the pass, so a
+// single corrupt contacts file cannot stop every other account being reclaimed.
+func (s *Server) StartContactPhotoSweeper(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			users, err := s.users.List()
+			if err != nil {
+				s.logger.Error("contact photo sweep could not list users", "error", err.Error())
+				continue
+			}
+			for _, u := range users {
+				if err := s.sweepContactPhotos(u.ID); err != nil {
+					s.logger.Error("contact photo sweep failed",
+						"user_id", u.ID, "error", err.Error())
+				}
 			}
 		}
 	}
@@ -818,7 +877,21 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 	var req imapConfigPayload
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
 
-	if strings.TrimSpace(req.Host) == "" || strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
+	// All-or-nothing, deliberately. The fallback used to be applied per field,
+	// so a caller who supplied only a host — leaving username and password
+	// blank — got the *stored* credentials filled in around their chosen
+	// destination, and the server then performed an IMAP LOGIN with the
+	// victim's real mail password against a server the caller controlled.
+	// GET /api/imap/config never returns that password precisely because it is
+	// the account's most durable secret (it is the SMTP password too, and it
+	// survives every KyPost-side revocation), and this was the one path that
+	// handed it out. A caller-chosen destination must never be paired with a
+	// server-held secret.
+	suppliedHost := strings.TrimSpace(req.Host) != ""
+	suppliedUser := strings.TrimSpace(req.Username) != ""
+	suppliedPass := strings.TrimSpace(req.Password) != ""
+	switch {
+	case !suppliedHost && !suppliedUser && !suppliedPass:
 		stored, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
 		if err != nil {
 			http.Error(w, "failed to load imap configuration", http.StatusInternalServerError)
@@ -828,21 +901,14 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "host, username, and password are required (or store IMAP config first)", http.StatusBadRequest)
 			return
 		}
-		if strings.TrimSpace(req.Host) == "" {
-			req.Host = stored.Host
+		mailbox := strings.TrimSpace(req.Mailbox)
+		req = stored
+		if mailbox != "" {
+			req.Mailbox = mailbox
 		}
-		if req.Port <= 0 {
-			req.Port = stored.Port
-		}
-		if strings.TrimSpace(req.Username) == "" {
-			req.Username = stored.Username
-		}
-		if strings.TrimSpace(req.Password) == "" {
-			req.Password = stored.Password
-		}
-		if strings.TrimSpace(req.Mailbox) == "" {
-			req.Mailbox = stored.Mailbox
-		}
+	case !(suppliedHost && suppliedUser && suppliedPass):
+		http.Error(w, "supply host, username, and password together, or none of them", http.StatusBadRequest)
+		return
 	}
 
 	req = mailmsg.NormalizeIMAPPayload(req)
@@ -1309,7 +1375,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		// all — answering 200 in that case would silently convert a hard
 		// failure into a lie, which is exactly the failure mode a hard 400 used
 		// to prevent before this opt-in existed.
-		failed := s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password)
+		failed := s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, req.Mode, smtpHost, smtpPort, addr, payload.Username, payload.Password)
 		total := len(plan.withoutKeyEmails)
 		if total > 0 && failed == total {
 			http.Error(w, "failed to deliver a pickup link to any recipient; nothing was sent", http.StatusBadGateway)
@@ -1360,7 +1426,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	// unlike the all-keyless branch above: the keyed recipients above already
 	// received the message, so this loop is topping up delivery to the
 	// keyless subset, not carrying the entire send.
-	s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password)
+	s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, req.Mode, smtpHost, smtpPort, addr, payload.Username, payload.Password)
 }
 
 // sendPickupNotifications mails a pickup link to every keyless recipient,
@@ -1370,10 +1436,10 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 // differ only in what they do with the failure count: the all-keyless path
 // has nothing else to fall back on and must check it, the mixed path already
 // delivered to the keyed recipients and treats this as best-effort logging.
-func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients []string, subject, body, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) int {
+func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients []string, subject, body, mode, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) int {
 	failed := 0
 	for _, recipient := range recipients {
-		if err := s.sendPickupNotification(userID, envelopeFrom, recipient, subject, body, smtpHost, smtpPort, addr, smtpUsername, smtpPassword); err != nil {
+		if err := s.sendPickupNotification(userID, envelopeFrom, recipient, subject, body, mode, smtpHost, smtpPort, addr, smtpUsername, smtpPassword); err != nil {
 			s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
 			failed++
 		}
@@ -1621,7 +1687,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPut:
 		var next config.Config
-		if err := json.NewDecoder(r.Body).Decode(&next); err != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&next); err != nil {
 			http.Error(w, "invalid config payload", http.StatusBadRequest)
 			return
 		}
@@ -1691,15 +1757,16 @@ func (s *Server) handleNotificationPreferences(w http.ResponseWriter, r *http.Re
 			http.Error(w, "invalid preferences payload", http.StatusBadRequest)
 			return
 		}
-		settings, err := config.LoadUserSettings(path)
-		if err != nil {
-			settings = config.DefaultUserSettings()
-		}
 		if prefs.Keywords == nil {
 			prefs.Keywords = []string{}
 		}
-		settings.Notifications = prefs
-		if err := config.SaveUserSettings(path, settings); err != nil {
+		// One locked read-modify-write, not Load+Save: the label handler below
+		// writes the same file, and interleaving the two lost whichever section
+		// landed first — including the contentPreview privacy opt-out.
+		if err := config.UpdateUserSettings(path, func(settings *config.UserSettings) error {
+			settings.Notifications = prefs
+			return nil
+		}); err != nil {
 			http.Error(w, "failed to save notification preferences", http.StatusInternalServerError)
 			return
 		}
@@ -1730,12 +1797,10 @@ func (s *Server) handleLabelPreferences(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "invalid preferences payload", http.StatusBadRequest)
 			return
 		}
-		settings, err := config.LoadUserSettings(path)
-		if err != nil {
-			settings = config.DefaultUserSettings()
-		}
-		settings.Labels = prefs
-		if err := config.SaveUserSettings(path, settings); err != nil {
+		if err := config.UpdateUserSettings(path, func(settings *config.UserSettings) error {
+			settings.Labels = prefs
+			return nil
+		}); err != nil {
 			http.Error(w, "failed to save label preferences", http.StatusInternalServerError)
 			return
 		}
@@ -1785,6 +1850,18 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 		payload.Keys.P256DH = strings.TrimSpace(payload.Keys.P256DH)
 		if payload.Endpoint == "" || payload.Keys.Auth == "" || payload.Keys.P256DH == "" {
 			http.Error(w, "endpoint and keys are required", http.StatusBadRequest)
+			return
+		}
+		// Screened exactly like the UnifiedPush endpoint already is. This is a
+		// user-supplied URL the poller later POSTs to, and it had only a
+		// non-empty check — so it was an authenticated SSRF into the
+		// deployment's private network, with POST /api/notifications/test
+		// returning sent/failed/removedStale as a three-state oracle. The
+		// netguard predicate lives in its own package precisely because a
+		// security check with two homes gets fixed in one of them; this was the
+		// third home.
+		if err := processor.ValidateUnifiedPushEndpointURL(payload.Endpoint); err != nil {
+			http.Error(w, "invalid push endpoint: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -3510,7 +3587,7 @@ func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Content string `json:"content"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
@@ -3612,7 +3689,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password     string `json:"password"`
 		CaptchaToken string `json:"captchaToken,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Bounded before it is buffered. This is the only unauthenticated decode in
+	// the codebase, and it runs before the lockout and captcha checks below, so
+	// an unbounded body let any anonymous caller choose the server's allocation:
+	// json.Decode buffers the whole value and then allocates the string on top,
+	// measured at ~5.6x the wire size. A login body is a username, a password
+	// and a captcha token.
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -3623,7 +3706,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// client IP (so an attacker hammering a known username can't lock the
 	// real owner out from their own machine).
 	lockoutKey := req.Username + "\x00" + clientIP(r)
-	if allowed, retryAfter := s.loginLockout.allowed(lockoutKey); !allowed {
+	if allowed, retryAfter := s.loginLockout.tryAttempt(lockoutKey); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
 		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{
@@ -3639,6 +3722,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if s.captchaVerifier != nil {
 		ok, err := s.captchaVerifier.Verify(r.Context(), req.CaptchaToken, clientIP(r))
 		if err != nil {
+			// The operator's CAPTCHA provider is down; the user never got as
+			// far as offering a password. Give the strike back, or an outage
+			// would lock out every user of the instance.
+			s.loginLockout.cancelAttempt(lockoutKey)
 			s.logger.Error("captcha verification failed", "error", err.Error())
 			http.Error(w, "captcha verification unavailable", http.StatusServiceUnavailable)
 			return
@@ -3654,12 +3741,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// Pay the same scrypt cost a real password check would, so response
 		// timing doesn't reveal whether the username exists (or is inactive).
 		equalizeLoginTiming(req.Password)
-		s.loginLockout.recordFailure(lockoutKey)
+		// No recordFailure: tryAttempt already spent the strike.
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 	if !users.VerifyPassword(u, req.Password) {
-		s.loginLockout.recordFailure(lockoutKey)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -3686,14 +3772,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			// within the cooldown window reuse the existing push rather than fanning
 			// another one out — see mfaPushCooldown's doc for why.
 			if allowed, _ := s.mfaPushCooldown.tryConsume(u.ID); allowed {
-				go s.dispatchPushChallenge(u.ID, ch.ID)
+				// Snapshot the request context before the goroutine: r is not
+				// safe to touch once this handler returns.
+				go s.dispatchPushChallenge(u.ID, ch.ID, newLoginContext(r), ch.CreatedAt, ch.MatchDigits, ch.DecoyDigits)
 			}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		resp := map[string]any{
 			"mfaRequired": true,
 			"challengeId": ch.ID,
 			"methods":     methods,
-		})
+		}
+		if u.PushMFAEnabled {
+			// The number the approving device must send back. Safe to hand to
+			// this caller: they are the one being asked to read it off this
+			// screen, and knowing it proves nothing on its own — approving
+			// still needs a paired device's credentials.
+			resp["matchDigits"] = ch.MatchDigits
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -3795,25 +3891,29 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 	// Per-account throttle spanning challenges: the per-challenge attempt cap
 	// alone can be reset by minting a new challenge, so a password-holding
 	// attacker could otherwise brute force TOTP online.
-	if allowed, _ := s.mfaLockout.allowed(ch.UserID); !allowed {
+	if allowed, _ := s.mfaLockout.tryAttempt(ch.UserID); !allowed {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
 
 	u, err := s.users.Get(ch.UserID)
 	if err != nil || !u.Active || !u.TOTPEnabled || u.TOTPSecretEnc == "" {
+		// The account changed underneath the challenge; no code was offered,
+		// so the strike tryAttempt reserved goes back.
+		s.mfaLockout.cancelAttempt(ch.UserID)
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
 	secret, err := mfa.OpenTOTPSecret(u.TOTPSecretEnc, s.totpSecretKeyPath)
 	if err != nil {
+		s.mfaLockout.cancelAttempt(ch.UserID)
 		http.Error(w, "failed to load second factor", http.StatusInternalServerError)
 		return
 	}
 
 	step, valid := totp.Validate(secret, req.Code, time.Now())
 	if !valid {
-		s.mfaLockout.recordFailure(ch.UserID)
+		// tryAttempt already spent the strike.
 		if err := s.mfaChallenges.RecordTOTPAttempt(ch.ID); errors.Is(err, mfa.ErrTooManyAttempts) {
 			http.Error(w, "too many attempts", http.StatusUnauthorized)
 			return
@@ -3849,11 +3949,11 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 	// recordSuccess (which clears the account's brute-force lockout throttle)
 	// is deliberately deferred until after this guard passes: a replayed code
 	// is a rejected attempt, exactly like a wrong code, and must count against
-	// the lockout (recordFailure) rather than clearing it — otherwise a
-	// captured valid code let an attacker keep the lockout counter at zero
-	// indefinitely while brute-forcing the real, still-unknown current code.
+	// the lockout rather than clearing it — otherwise a captured valid code let
+	// an attacker keep the lockout counter at zero indefinitely while brute
+	// forcing the real, still-unknown current code. tryAttempt spent the strike
+	// on the way in, so simply not clearing it is what counts it.
 	if _, err := s.users.SetLastUsedTOTPStep(u.ID, step); err != nil {
-		s.mfaLockout.recordFailure(ch.UserID)
 		s.mfaChallenges.Delete(ch.ID)
 		http.Error(w, "invalid code", http.StatusUnauthorized)
 		return
@@ -3884,23 +3984,24 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
-	if allowed, _ := s.mfaLockout.allowed(ch.UserID); !allowed {
+	if allowed, _ := s.mfaLockout.tryAttempt(ch.UserID); !allowed {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
 	u, err := s.users.Get(ch.UserID)
 	if err != nil || !u.Active || !u.TOTPEnabled {
+		s.mfaLockout.cancelAttempt(ch.UserID)
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
 
 	_, matched, err := s.users.ConsumeRecoveryCode(u.ID, strings.TrimSpace(req.Code))
 	if err != nil {
+		s.mfaLockout.cancelAttempt(ch.UserID)
 		http.Error(w, "failed to verify recovery code", http.StatusInternalServerError)
 		return
 	}
 	if !matched {
-		s.mfaLockout.recordFailure(ch.UserID)
 		if err := s.mfaChallenges.RecordTOTPAttempt(ch.ID); errors.Is(err, mfa.ErrTooManyAttempts) {
 			http.Error(w, "too many attempts", http.StatusUnauthorized)
 			return
@@ -3995,7 +4096,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		OldPassword string `json:"oldPassword"`
 		NewPassword string `json:"newPassword"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -4020,11 +4121,18 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to update password", http.StatusInternalServerError)
 		return
 	}
-	// A password change should cut off any other session on this account —
-	// e.g. a stolen cookie the legitimate user is trying to lock out by
-	// changing their password — while leaving the session making this very
-	// request (presumably the legitimate user) logged in.
-	s.revokeUserSessions(u.ID, currentSessionToken(r))
+	// A password change is the remediation a user reaches for when they think
+	// they have been compromised, so it must cut off *every* credential the
+	// account holds — not just sessions. A device secret minted from a stolen
+	// session is independent of the password and survived this call, keeping
+	// full mailbox access and (since every device registers MFAApprover=true)
+	// a standing second factor. The three admin recovery paths already call
+	// revokeAllUserCredentials for exactly this reason; the self-service path
+	// was the gap.
+	//
+	// The session making this request is preserved so the legitimate user is
+	// not logged out of the tab they are standing in.
+	s.revokeAllUserCredentialsExcept(u, currentSessionToken(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -4050,7 +4158,7 @@ func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Prompt string `json:"prompt"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}

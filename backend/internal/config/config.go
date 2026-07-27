@@ -172,6 +172,39 @@ func SaveUserSettings(path string, s UserSettings) error {
 	return fsutil.AtomicWriteFile(path, b, 0o600)
 }
 
+// UpdateUserSettings applies mutate to the settings at path as one
+// read-modify-write cycle, holding an inter-process file lock across the whole
+// cycle.
+//
+// Load-then-Save from a handler is not enough, and this was the only store in
+// the project with neither a mutex nor a file lock. AtomicWriteFile means a
+// reader never sees a torn file, but atomicity is not serialization: the two
+// preference handlers each load the whole settings struct, replace one section
+// and write it all back, so a PUT to /api/labels/preferences landing between
+// another request's load and save silently reverts whatever that request set —
+// including the contentPreview privacy opt-out, which is worse than never
+// having offered it, because the user ticked the box and believes it.
+//
+// A missing file starts from DefaultUserSettings rather than the zero value, so
+// sections the caller does not touch keep their intended defaults instead of
+// being written as false/empty. Nothing is persisted if mutate returns an
+// error.
+func UpdateUserSettings(path string, mutate func(*UserSettings) error) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir user settings dir: %w", err)
+	}
+	return fsutil.WithFileLock(path, func() error {
+		s, err := LoadUserSettings(path)
+		if err != nil {
+			s = DefaultUserSettings()
+		}
+		if err := mutate(&s); err != nil {
+			return err
+		}
+		return SaveUserSettings(path, s)
+	})
+}
+
 // LoadLegacyNotificationPrefs extracts the pre-multi-user mode/keywords
 // fields from a legacy global config.yaml, for one-time migration into the
 // first admin user's settings file.
@@ -273,7 +306,13 @@ func Save(path string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	// Atomic temp+rename like every other persisted file in this project.
+	// os.WriteFile truncates in place, and the daemon calls Load on every
+	// tick — a read landing inside that window sees an empty file, which
+	// unmarshals successfully into the zero value, so Load silently returns
+	// Default() rather than an error. That drops any operator-configured
+	// redaction pattern from what gets fed to the classifier, for a tick.
+	return fsutil.AtomicWriteFile(path, b, 0o600)
 }
 
 func ensureNotificationKeyMaterial(configDir string, cfg *Config) (bool, error) {

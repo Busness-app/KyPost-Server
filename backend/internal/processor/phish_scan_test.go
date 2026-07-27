@@ -92,8 +92,14 @@ func TestScanForAppImpersonationFlagsSensitiveEndpointPaths(t *testing.T) {
 			bodyText: "Pair now: https://evil.example/api/notifications/desktop/pair",
 		},
 		{
+			// run-4 M17 changed this case deliberately. It used to be
+			// ".../pickup/abc123", which is indistinguishable from a grocery
+			// store's ".../pickup/slot" — no rule can call one phishing and the
+			// other clean, which is exactly why matching the bare path was
+			// wrong. A convincing lookalike carries the token the real link
+			// has, and that is what R2 keys on now.
 			name:     "pickup path on a foreign host",
-			bodyText: "Your secure message: https://evil.example/pickup/abc123",
+			bodyText: "Your secure message: https://evil.example/pickup/2f1b9a3c-1111-4222-8333-444455556666?t=abc.def",
 		},
 		{
 			name:     "case-insensitive path match",

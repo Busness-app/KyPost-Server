@@ -14,13 +14,23 @@ import (
 func pickupMux(srv *Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /pickup/{id}", srv.handlePickup)
+	mux.HandleFunc("POST /pickup/{id}/open", srv.handlePickupOpen)
 	return mux
+}
+
+// openPickup drives the reveal step. run-4 M2 moved rendering off the GET
+// landing page and onto this POST, so every test that asserts on message
+// content goes through here now — the GET deliberately shows nothing.
+func openPickup(srv *Server, id, token string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	pickupMux(srv).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/pickup/"+id+"/open?t="+token, nil))
+	return rec
 }
 
 func TestHandlePickupHappyPath(t *testing.T) {
 	srv := newTestServer(t)
 
-	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Hello <there>", "body & stuff", time.Hour)
+	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Hello <there>", "body & stuff", "plain", time.Hour)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -29,9 +39,7 @@ func TestHandlePickupHappyPath(t *testing.T) {
 		t.Fatalf("createPairingToken: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil)
-	rec := httptest.NewRecorder()
-	pickupMux(srv).ServeHTTP(rec, req)
+	rec := openPickup(srv, id, token)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
@@ -45,10 +53,81 @@ func TestHandlePickupHappyPath(t *testing.T) {
 	}
 }
 
+// TestHandlePickupRendersHTMLBodyAsReadableText covers the case that made the
+// page useless for most real mail: the compose editor posts `mode: "html"`
+// and a body of markup, so escaping that body and dropping it in a <pre>
+// showed the recipient the tags themselves rather than the message.
+//
+// The expectation is the same one pickup-decrypt.js already holds for the
+// client-sealed twin of this page: HTML is flattened to readable text, never
+// rendered as markup.
+func TestHandlePickupRendersHTMLBodyAsReadableText(t *testing.T) {
+	srv := newTestServer(t)
+
+	html := `<p>Hello <strong>there</strong>.</p><p>Read <a href="https://example.com/x">the notes</a>.</p>`
+	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", html, "html", time.Hour)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	token, _, err := srv.createPairingToken(id, pairingPurposePickupLink, time.Hour)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+
+	rec := openPickup(srv, id, token)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	page := rec.Body.String()
+	if strings.Contains(page, "&lt;p&gt;") || strings.Contains(page, "&lt;strong&gt;") {
+		t.Fatalf("recipient was shown the escaped tags instead of the message: %s", page)
+	}
+	// Rendered as markup would be just as wrong as showing the tags: this page
+	// has no sanitizer and shares an origin with the app.
+	if strings.Contains(page, "<strong>") {
+		t.Fatalf("sender markup reached the page as live HTML: %s", page)
+	}
+	// Emphasis survives as the plain-text convention (*bold*) rather than
+	// being dropped, and a link keeps its target — text extraction alone
+	// would silently discard the href and leave "the notes" pointing nowhere.
+	if !strings.Contains(page, "Hello *there*.") {
+		t.Fatalf("expected readable text of the message, got: %s", page)
+	}
+	if !strings.Contains(page, "https://example.com/x") {
+		t.Fatalf("expected the link target to survive flattening, got: %s", page)
+	}
+}
+
+// TestHandlePickupEscapesPlainBody pins the plain-mode path: a body that was
+// never HTML must still be escaped, not run through the HTML flattener, or a
+// message that merely talks about markup would lose it.
+func TestHandlePickupEscapesPlainBody(t *testing.T) {
+	srv := newTestServer(t)
+
+	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "use <b> for bold", "plain", time.Hour)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	token, _, err := srv.createPairingToken(id, pairingPurposePickupLink, time.Hour)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+
+	rec := openPickup(srv, id, token)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "use &lt;b&gt; for bold") {
+		t.Fatalf("expected the plain body escaped verbatim, got: %s", rec.Body.String())
+	}
+}
+
 func TestHandlePickupInvalidTokenNeverConsumesRecord(t *testing.T) {
 	srv := newTestServer(t)
 
-	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "Body", time.Hour)
+	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "Body", "plain", time.Hour)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -68,7 +147,7 @@ func TestHandlePickupInvalidTokenNeverConsumesRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("createPairingToken: %v", err)
 	}
-	subject, body, err := srv.pickupStore.View(id)
+	subject, body, _, err := srv.pickupStore.View(id)
 	if err != nil {
 		t.Fatalf("View after bad-token attempt should still succeed, got err: %v", err)
 	}
@@ -81,7 +160,7 @@ func TestHandlePickupInvalidTokenNeverConsumesRecord(t *testing.T) {
 func TestHandlePickupSecondViewIsGone(t *testing.T) {
 	srv := newTestServer(t)
 
-	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "Body", time.Hour)
+	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "Body", "plain", time.Hour)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -90,20 +169,22 @@ func TestHandlePickupSecondViewIsGone(t *testing.T) {
 		t.Fatalf("createPairingToken: %v", err)
 	}
 
+	// The landing page may be fetched any number of times — that is the point
+	// of M2's split — so the one-time property is asserted on the reveal step.
 	mux := pickupMux(srv)
-
-	firstReq := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil)
-	firstRec := httptest.NewRecorder()
-	mux.ServeHTTP(firstRec, firstReq)
-	if firstRec.Code != http.StatusOK {
-		t.Fatalf("first view status = %d, want %d; body=%s", firstRec.Code, http.StatusOK, firstRec.Body.String())
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("landing fetch %d status = %d, want 200", i, rec.Code)
+		}
 	}
 
-	secondReq := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil)
-	secondRec := httptest.NewRecorder()
-	mux.ServeHTTP(secondRec, secondReq)
-	if secondRec.Code != http.StatusGone {
-		t.Fatalf("second view status = %d, want %d; body=%s", secondRec.Code, http.StatusGone, secondRec.Body.String())
+	if firstRec := openPickup(srv, id, token); firstRec.Code != http.StatusOK {
+		t.Fatalf("first open status = %d, want %d; body=%s", firstRec.Code, http.StatusOK, firstRec.Body.String())
+	}
+	if secondRec := openPickup(srv, id, token); secondRec.Code != http.StatusGone {
+		t.Fatalf("second open status = %d, want %d; body=%s", secondRec.Code, http.StatusGone, secondRec.Body.String())
 	}
 }
 
@@ -115,7 +196,7 @@ func TestHandlePickupRefusesWhenPairingSecretUnset(t *testing.T) {
 	srv := newTestServer(t)
 	srv.pairingSecret = ""
 
-	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "Body", time.Hour)
+	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "Body", "plain", time.Hour)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -127,7 +208,7 @@ func TestHandlePickupRefusesWhenPairingSecretUnset(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
 	}
 
-	if err := srv.sendPickupNotification("user-1", "from@example.com", "recipient@example.com", "Subject", "Body", "smtp.example.com", 587, "smtp.example.com:587", "user", "pass"); err == nil {
+	if err := srv.sendPickupNotification("user-1", "from@example.com", "recipient@example.com", "Subject", "Body", "plain", "smtp.example.com", 587, "smtp.example.com:587", "user", "pass"); err == nil {
 		t.Fatalf("sendPickupNotification: expected error when PAIRING_SECRET is unset, got nil")
 	}
 }

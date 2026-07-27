@@ -30,27 +30,25 @@ func newSendAsVerificationCooldown() *sendAsVerificationCooldown {
 	return &sendAsVerificationCooldown{lastSent: map[string]time.Time{}}
 }
 
-// allowed reports whether a verification probe email may be sent for key
-// right now, and if not, how much longer until it may.
-func (c *sendAsVerificationCooldown) allowed(key string) (ok bool, retryAfter time.Duration) {
+// tryConsume atomically reports whether a verification probe may be sent for
+// key right now and, if so, starts the cooldown in the same critical section.
+//
+// One call, not allowed() followed by recordSent(): the two-call form let
+// concurrent requests for the same address all observe "allowed" before any of
+// them recorded, so a burst mailed the candidate address several times. That
+// address belongs to a third party who did not ask to hear from this server —
+// the cap is there for them, not for us. Mirrors mfaPushCooldown.tryConsume,
+// which adopted this shape for the same reason.
+func (c *sendAsVerificationCooldown) tryConsume(key string) (ok bool, retryAfter time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	last, exists := c.lastSent[key]
-	if !exists {
-		return true, 0
+	if last, exists := c.lastSent[key]; exists {
+		if remaining := sendAsVerificationCooldownFor - time.Since(last); remaining > 0 {
+			return false, remaining
+		}
 	}
-	if remaining := sendAsVerificationCooldownFor - time.Since(last); remaining > 0 {
-		return false, remaining
-	}
-	return true, 0
-}
-
-// recordSent marks that a verification probe email was just dispatched for
-// key, starting a fresh cooldown window.
-func (c *sendAsVerificationCooldown) recordSent(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.lastSent[key] = time.Now()
+	return true, 0
 }
 
 // sendAsCooldownSweepMaxAge bounds how long a lastSent entry is kept before

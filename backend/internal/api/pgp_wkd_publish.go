@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/pgpdiscovery"
 	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
@@ -295,14 +294,25 @@ usersLoop:
 func (s *Server) publishableAddressesAt(u users.User, domain string) []string {
 	var out []string
 
-	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(u.ID), s.imapConfigKeyPath)
-	if err == nil && exists {
-		addr := strings.ToLower(strings.TrimSpace(payload.Username))
-		if domainOfEmail(addr) == domain {
-			out = append(out, addr)
-		}
-	}
-
+	// Only addresses proven by the send-as challenge are publishable —
+	// including the account's own.
+	//
+	// This used to also return the IMAP config's username unconditionally, and
+	// that string is entirely self-declared: POST /api/imap/config accepts any
+	// username with no connection attempt and no ownership challenge. On an
+	// instance whose admin has DNS-verified the organization's domain, any
+	// ordinary user could therefore set their IMAP username to a colleague's
+	// address and have their own public key served over WKD as that
+	// colleague's — silent key substitution for every correspondent who uses
+	// WKD discovery, which is most of the point of publishing at all.
+	//
+	// Proving an IMAP login does not fix it: the user chooses the IMAP host
+	// too, so a login only proves they control *some* mailbox, not that
+	// address at that domain. The only proof this codebase has that actually
+	// binds an address to its domain is the send-as challenge, so that is the
+	// single gate now. Users whose own address is not yet verified stop being
+	// published until they run it — fail-closed, and recoverable by a flow
+	// that already exists.
 	if store, err := s.userSendAsStore(u.ID); err == nil {
 		for _, alias := range store.ListVerified() {
 			addr := strings.ToLower(strings.TrimSpace(alias.Email))

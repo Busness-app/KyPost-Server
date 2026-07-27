@@ -11,7 +11,7 @@ import { RecipientField } from "./components/RecipientField";
 import { useDialogOpen } from "./hooks/useDialogOpen";
 import { contactToToken, isDuplicateInField, parseRecipientField, pickupFallbackFlag, serializeRecipientField, splitAddressList } from "./lib/recipients";
 import { isClientProtected, needsUnlock, loadPGPSession, clearPGPSession } from "./lib/pgpSession";
-import { buildEncryptedDeliveries } from "./lib/pgpClient";
+import { buildEncryptedDeliveries, buildEncryptedSentCopy, OUTER_PLACEHOLDER_SUBJECT } from "./lib/pgpClient";
 import { sealPickup } from "./lib/pickupCrypto";
 import { createSealedPickup, resolveRecipientKeys, sendClientEncryptedMail } from "./api/pgp";
 import { PgpUnlockDialog } from "./components/PgpUnlockDialog";
@@ -787,14 +787,23 @@ export function App() {
     let warning = "";
     if (groups.length > 0) {
       const deliveries = await buildEncryptedDeliveries(envelope, "text/html; charset=UTF-8", body, groups, composeSign);
+      // The Sent copy is encrypted to our own key before it leaves the browser.
+      // It used to be the raw composer HTML, which handed the server the
+      // cleartext of a message it had just been given only as ciphertext — and
+      // the real subject with it. The server refuses an unencrypted copy now,
+      // so this is not optional.
+      const sentCopy = await buildEncryptedSentCopy(envelope, "text/html; charset=UTF-8", body, composeSign);
       const result = await sendClientEncryptedMail({
         from: composeFrom || "",
-        subject: composeSubject,
+        // The real subject travels inside the ciphertext as a protected
+        // header, exactly as it does for the deliveries.
+        subject: OUTER_PLACEHOLDER_SUBJECT,
         deliveries,
         to: keyedTo,
         cc: keyedCc,
         bcc: keyedBcc,
-        sentCopy: body,
+        sentCopy,
+        sentCopyEncrypted: true,
         mode: "html"
       });
       warning = result.warning ?? "";

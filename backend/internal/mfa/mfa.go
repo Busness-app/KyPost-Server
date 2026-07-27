@@ -61,6 +61,26 @@ type Challenge struct {
 	PushStatus string
 	// RespondedBy is the deviceID that resolved the push challenge.
 	RespondedBy string
+
+	// MatchDigits is the two-digit number shown in the browser that started
+	// this login, which the approving device must send back. DecoyDigits are
+	// the other values that device offers alongside it.
+	//
+	// This is the anti-fatigue control. Approval was already cryptographically
+	// sound — device credentials, user binding, a live PushMFAEnabled check —
+	// but a challenge that carries only its own id asks the human to approve
+	// with no way to tell their own sign-in from an attacker's, which is
+	// exactly what an MFA-fatigue attack relies on. Requiring a number that
+	// only someone looking at the real browser can read makes a blind "yes"
+	// impossible.
+	//
+	// Generated and verified server-side. A client-side comparison would be
+	// theatre: the endpoint is reachable by anyone holding device credentials.
+	MatchDigits string
+	DecoyDigits []string
+	// MatchAttempts counts wrong digits submitted against this challenge, so a
+	// two-digit space cannot be brute-forced within the TTL.
+	MatchAttempts int
 }
 
 // Store is a concurrency-safe in-memory challenge map. Entries are swept
@@ -82,12 +102,18 @@ func (s *Store) Create(userID string) (Challenge, error) {
 	if _, err := rand.Read(idBytes); err != nil {
 		return Challenge{}, err
 	}
+	matchDigits, decoyDigits, err := newNumberMatch()
+	if err != nil {
+		return Challenge{}, err
+	}
 	now := time.Now()
 	ch := Challenge{
-		ID:        hex.EncodeToString(idBytes),
-		UserID:    userID,
-		CreatedAt: now,
-		ExpiresAt: now.Add(challengeTTL),
+		ID:          hex.EncodeToString(idBytes),
+		UserID:      userID,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(challengeTTL),
+		MatchDigits: matchDigits,
+		DecoyDigits: decoyDigits,
 	}
 	s.mu.Lock()
 	s.m[ch.ID] = ch

@@ -73,7 +73,7 @@ func TestSealedPickupIsNotServerReadable(t *testing.T) {
 	u := clientProtectedUser(t, srv)
 	id, _ := createSealedPickupFor(t, srv, u.ID)
 
-	if _, _, err := srv.pickupStore.View(id); err != pgpmail.ErrPickupClientSealed {
+	if _, _, _, err := srv.pickupStore.View(id); err != pgpmail.ErrPickupClientSealed {
 		t.Fatalf("View() on a client-sealed record = %v, want ErrPickupClientSealed", err)
 	}
 }

@@ -20,11 +20,32 @@ type PickupRecord struct {
 	ID             string `json:"id"`
 	SenderUserID   string `json:"senderUserId"`
 	RecipientEmail string `json:"recipientEmail"`
-	// Subject and BodyEnc are the SERVER-sealed form: the server holds the
+	// SubjectEnc and BodyEnc are the SERVER-sealed form: the server holds the
 	// key, so it can read both. Used only by legacy server-protected
 	// accounts, for which the server can already read the mailbox anyway.
-	Subject string                     `json:"subject"`
-	BodyEnc cryptutil.EncryptedPayload `json:"bodyEnc"`
+	//
+	// The subject is sealed rather than stored plainly because for most mail it
+	// gives away the substance of the message. The send path already treats it
+	// that way — sendPickupNotification mails OuterPlaceholderSubject instead
+	// of the real subject specifically so the cleartext notification does not
+	// leak it — and writing it unsealed here put it on the same volume as the
+	// ciphertext it was protecting. The client-sealed mode reaches the same
+	// conclusion differently, by putting the subject inside the blob.
+	//
+	// Subject is the legacy cleartext field, still read (never written) so
+	// records created before SubjectEnc existed keep their subject for the
+	// remainder of their TTL. A pointer so "absent" is distinguishable from
+	// "empty envelope" without inspecting the envelope's fields.
+	Subject    string                      `json:"subject,omitempty"`
+	SubjectEnc *cryptutil.EncryptedPayload `json:"subjectEnc,omitempty"`
+	BodyEnc    cryptutil.EncryptedPayload  `json:"bodyEnc"`
+	// Mode is the composed body's format — "html" or "plain" — carried from
+	// the send request so the pickup page can present the body the way it was
+	// written. Without it every body was treated as plain text, which showed
+	// the recipient of an HTML message its tags. Empty on records written
+	// before this field existed; those predate it by at most one TTL and are
+	// read as plain, which is exactly how they were rendered when stored.
+	Mode string `json:"mode,omitempty"`
 	// ClientSealed is the browser-sealed form: an opaque blob encrypted
 	// under a random key that never reaches this server (it travels in the
 	// URL fragment of the pickup link, which browsers do not transmit). The
@@ -55,11 +76,76 @@ func (s *PickupStore) recordPath(id string) string {
 	return filepath.Join(s.baseDir, id+".json")
 }
 
+// maxOutstandingPickupsPerUser bounds how many live pickup records one account
+// may hold at once.
+//
+// Each record carries a whole message body — the send path admits roughly
+// 34 MiB of decoded attachments — and sits on the shared state volume for its
+// full TTL. Creating one is an ordinary authenticated send, so without a cap a
+// single account (or a stolen session) can fill the volume that every other
+// user's mail cache, contacts and sealed private keys are written to, at which
+// point fsutil.AtomicWriteFile starts failing for everyone.
+//
+// 100 is set well above any plausible real use: the flow exists for the
+// occasional correspondent who has no PGP key, not for bulk sending.
+const maxOutstandingPickupsPerUser = 100
+
+// ErrPickupQuotaExceeded reports that senderUserID already holds the maximum
+// number of live pickup records. Surfaced to the sender, so the text names the
+// feature and nothing else.
+var ErrPickupQuotaExceeded = errors.New("pgpmail: too many unread pickup messages are already waiting for this account")
+
+// outstandingForLocked counts senderUserID's records that are still live —
+// neither consumed nor past their expiry.
+//
+// Tombstones and expired records are deliberately not counted. The sweeper
+// collects them on its own schedule, and letting them hold a slot would mean
+// someone who legitimately sent a week's worth of pickup links gets refused
+// over messages that have already been read.
+func (s *PickupStore) outstandingForLocked(senderUserID string) int {
+	entries, err := os.ReadDir(s.baseDir)
+	if err != nil {
+		// No directory yet means no records yet. A read failure is reported as
+		// zero rather than as "full": refusing to send because the quota could
+		// not be counted would turn an unrelated disk problem into an outage.
+		return 0
+	}
+	now := time.Now().UTC()
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join(s.baseDir, entry.Name()))
+		if rerr != nil {
+			continue
+		}
+		var record PickupRecord
+		if json.Unmarshal(b, &record) != nil {
+			continue
+		}
+		if record.SenderUserID != senderUserID || record.Viewed {
+			continue
+		}
+		if expiresAt, perr := time.Parse(time.RFC3339, record.ExpiresAt); perr == nil && now.After(expiresAt) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
 // Create seals body and persists a new pickup record, expiring after ttl.
-// Returns the record's ID, used to build the pickup link.
-func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body string, ttl time.Duration) (string, error) {
+// Returns the record's ID, used to build the pickup link. mode is the body's
+// format ("html" or "plain"), stored so the pickup page renders what the
+// sender actually composed.
+func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body, mode string, ttl time.Duration) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.outstandingForLocked(senderUserID) >= maxOutstandingPickupsPerUser {
+		return "", ErrPickupQuotaExceeded
+	}
 
 	id, err := fsutil.NewUUIDv4()
 	if err != nil {
@@ -73,14 +159,19 @@ func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body string,
 	if err != nil {
 		return "", err
 	}
+	subjectEnc, err := cryptutil.Seal([]byte(subject), key)
+	if err != nil {
+		return "", err
+	}
 
 	now := time.Now().UTC()
 	record := PickupRecord{
 		ID:             id,
 		SenderUserID:   senderUserID,
 		RecipientEmail: recipientEmail,
-		Subject:        subject,
+		SubjectEnc:     &subjectEnc,
 		BodyEnc:        bodyEnc,
+		Mode:           mode,
 		CreatedAt:      now.Format(time.RFC3339),
 		ExpiresAt:      now.Add(ttl).Format(time.RFC3339),
 	}
@@ -104,6 +195,10 @@ func (s *PickupStore) CreateClientSealed(senderUserID, recipientEmail, sealed st
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.outstandingForLocked(senderUserID) >= maxOutstandingPickupsPerUser {
+		return "", ErrPickupQuotaExceeded
+	}
 
 	id, err := fsutil.NewUUIDv4()
 	if err != nil {
@@ -140,13 +235,22 @@ var ErrPickupExpired = errors.New("pgpmail: pickup record expired or already vie
 var ErrPickupClientSealed = errors.New("pgpmail: pickup record is client-sealed; the server cannot decrypt it")
 var ErrPickupNotClientSealed = errors.New("pgpmail: pickup record is server-sealed")
 
-// consumeLocked loads a record and marks it viewed, enforcing
-// "expire after N days or first view, whichever comes first". Shared by both
-// view paths so the one-time semantics cannot drift between them.
+// wantKind selects which of the two record shapes a consume call will accept,
+// checked BEFORE the record is tombstoned.
+type wantKind int
+
+const (
+	wantServerSealed wantKind = iota
+	wantClientSealed
+)
+
+// consumeLocked loads a record of the requested kind and marks it viewed,
+// enforcing "expire after N days or first view, whichever comes first". Shared
+// by both view paths so the one-time semantics cannot drift between them.
 //
 // Marking viewed does not require reading the payload, which is what lets the
 // server enforce single-use on a blob it cannot decrypt.
-func (s *PickupStore) consumeLocked(id string) (PickupRecord, error) {
+func (s *PickupStore) consumeLocked(id string, want wantKind) (PickupRecord, error) {
 	b, err := os.ReadFile(s.recordPath(id))
 	if os.IsNotExist(err) {
 		return PickupRecord{}, ErrPickupNotFound
@@ -162,11 +266,28 @@ func (s *PickupStore) consumeLocked(id string) (PickupRecord, error) {
 		return PickupRecord{}, ErrPickupExpired
 	}
 
+	// Refuse the wrong-shaped request before tombstoning, not after. This used
+	// to be checked by the callers on the returned record — by which point the
+	// message had already been destroyed, so asking the client-sealed route for
+	// a server-sealed record burned it and answered 409. Reaching either route
+	// needs a valid token for that record, so this was never a disclosure, but
+	// a store whose entire job is "readable exactly once" must not spend that
+	// one read on a request it is going to refuse.
+	isClientSealed := record.ClientSealed != ""
+	switch {
+	case want == wantClientSealed && !isClientSealed:
+		return PickupRecord{}, ErrPickupNotClientSealed
+	case want == wantServerSealed && isClientSealed:
+		return PickupRecord{}, ErrPickupClientSealed
+	}
+
 	tombstone := func(r PickupRecord) PickupRecord {
 		r.Viewed = true
 		r.BodyEnc = cryptutil.EncryptedPayload{}
+		r.SubjectEnc = nil
 		r.ClientSealed = ""
 		r.Subject = ""
+		r.Mode = ""
 		return r
 	}
 	if expiresAt, perr := time.Parse(time.RFC3339, record.ExpiresAt); perr == nil && time.Now().UTC().After(expiresAt) {
@@ -184,30 +305,39 @@ func (s *PickupStore) consumeLocked(id string) (PickupRecord, error) {
 	return record, nil
 }
 
-// View opens a SERVER-sealed pickup record's body exactly once. Returns
-// ErrPickupClientSealed for a client-sealed record, which this server has no
-// key for — the caller must serve it to the browser instead.
-func (s *PickupStore) View(id string) (subject, body string, err error) {
+// View opens a SERVER-sealed pickup record's body exactly once, returning it
+// with the mode it was composed in. Returns ErrPickupClientSealed for a
+// client-sealed record, which this server has no key for — the caller must
+// serve it to the browser instead.
+func (s *PickupStore) View(id string) (subject, body, mode string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record, err := s.consumeLocked(id)
+	record, err := s.consumeLocked(id, wantServerSealed)
 	if err != nil {
-		return "", "", err
-	}
-	if record.ClientSealed != "" {
-		return "", "", ErrPickupClientSealed
+		return "", "", "", err
 	}
 
 	key, err := cryptutil.LoadKey(s.keyPath)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	plain, err := cryptutil.Open(record.BodyEnc, key)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return record.Subject, string(plain), nil
+	// Records written before the subject was sealed carry it in the legacy
+	// cleartext field. They predate this by at most one TTL, and losing their
+	// subject would be a worse outcome for the recipient than the leak was.
+	subject = record.Subject
+	if record.SubjectEnc != nil {
+		plainSubject, serr := cryptutil.Open(*record.SubjectEnc, key)
+		if serr != nil {
+			return "", "", "", serr
+		}
+		subject = string(plainSubject)
+	}
+	return subject, string(plain), record.Mode, nil
 }
 
 // ViewClientSealed returns a client-sealed blob exactly once, for the browser
@@ -217,12 +347,9 @@ func (s *PickupStore) ViewClientSealed(id string) (sealed string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record, err := s.consumeLocked(id)
+	record, err := s.consumeLocked(id, wantClientSealed)
 	if err != nil {
 		return "", err
-	}
-	if record.ClientSealed == "" {
-		return "", ErrPickupNotClientSealed
 	}
 	return record.ClientSealed, nil
 }

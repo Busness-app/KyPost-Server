@@ -212,9 +212,18 @@ func (s *Server) contactToVCardForUser(userID string, c contacts.Contact) vcard.
 	var groupNames []string
 	if len(c.GroupIDs) > 0 {
 		if gs, err := s.userGroupsStore(userID); err == nil {
+			// One List, then a map lookup per id. Get() re-reads and
+			// re-unmarshals the whole groups file every call, so the previous
+			// per-id loop re-paid that cost once per group on every PROPFIND
+			// and every vCard export — turning an import's one-off expense into
+			// a permanent one.
+			byID := make(map[string]string, len(c.GroupIDs))
+			for _, g := range gs.List() {
+				byID[g.ID] = g.Name
+			}
 			for _, id := range c.GroupIDs {
-				if g, ok := gs.Get(id); ok {
-					groupNames = append(groupNames, g.Name)
+				if name, ok := byID[id]; ok {
+					groupNames = append(groupNames, name)
 				}
 			}
 		}
@@ -601,31 +610,57 @@ func decodeDataURI(v string) (data []byte, contentType string) {
 	return decoded, contentType
 }
 
+// maxCategoriesPerCard bounds how many CATEGORIES entries one inbound vCard may
+// contribute.
+//
+// The size limits above it do not bound this: the import cap is 10 MiB of body
+// and 5,000 cards, but neither restricts categories *per card*, and a single
+// 1.49 MB vCard can carry 200,000 of them. 64 is far more than any real card
+// uses — address books organise people into a handful of groups, not hundreds.
+const maxCategoriesPerCard = 64
+
 // resolveGroupIDsByName maps CATEGORIES names from an inbound vCard to group
 // IDs, creating a group for any name that doesn't already exist so nothing
 // from an imported card is silently dropped.
+//
+// One batched call, not one Upsert per name. Each Upsert takes the file lock,
+// reads and unmarshals the whole file, marshals it back and writes it with two
+// fsyncs, so the old loop was quadratic in the number of categories — 5,000 on
+// a single card measured 32 seconds on tmpfs, against caps that permit far
+// more than that.
+//
+// A store already at its own ceiling does not fail the import: the batch is
+// retried with only the names that already exist, so a card's known categories
+// still resolve and only genuinely new ones are dropped. Losing a category is
+// a much smaller harm than refusing the contact.
 func resolveGroupIDsByName(store *groups.Store, names []string) []string {
-	existing := store.List()
-	byName := make(map[string]string, len(existing))
-	for _, g := range existing {
-		byName[strings.ToLower(g.Name)] = g.ID
+	if len(names) > maxCategoriesPerCard {
+		names = names[:maxCategoriesPerCard]
 	}
-	ids := make([]string, 0, len(names))
+	ids, err := store.EnsureByName(names)
+	if err == nil {
+		return ids
+	}
+	if !errors.Is(err, groups.ErrTooManyGroups) {
+		return nil
+	}
+
+	known := make(map[string]bool, len(names))
+	for _, g := range store.List() {
+		known[strings.ToLower(g.Name)] = true
+	}
+	kept := make([]string, 0, len(names))
 	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
+		if known[strings.ToLower(strings.TrimSpace(name))] {
+			kept = append(kept, name)
 		}
-		if id, ok := byName[strings.ToLower(name)]; ok {
-			ids = append(ids, id)
-			continue
-		}
-		g, err := store.Upsert(groups.Group{Name: name})
-		if err != nil {
-			continue
-		}
-		byName[strings.ToLower(name)] = g.ID
-		ids = append(ids, g.ID)
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	ids, err = store.EnsureByName(kept)
+	if err != nil {
+		return nil
 	}
 	return ids
 }

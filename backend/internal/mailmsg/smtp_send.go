@@ -112,6 +112,31 @@ func ResolveSMTPTarget(payload IMAPConfigPayload) (smtpHost string, smtpPort int
 // smtp.Auth's own refusal to send credentials over an unencrypted link
 // (net/smtp returns "unencrypted connection") fails the send closed rather
 // than leaking the password.
+// AllowInsecureSMTP opts an operator out of the mandatory-STARTTLS rule below,
+// for a genuinely plaintext relay on a trusted LAN. Off by default, and there
+// is deliberately no per-request way to set it: a downgrade has to be a
+// deployment decision, not something a caller or a remote server can trigger.
+var AllowInsecureSMTP = strings.EqualFold(strings.TrimSpace(os.Getenv("ALLOW_INSECURE_SMTP")), "true")
+
+// requireSTARTTLS decides whether a submission session that did not negotiate
+// TLS may proceed to DATA.
+//
+// Opportunistic STARTTLS is not enough for submission. The capability check is
+// advertised by the server, so an on-path attacker strips STARTTLS from the
+// EHLO response and the session silently continues in cleartext. Stripping
+// AUTH as well means client.Auth is never called, which is what would
+// otherwise trigger net/smtp's own refusal to send credentials over an
+// unencrypted link — so the one safety net that existed does not fire either,
+// and the full message goes to the attacker while the user is shown a
+// successful send. Thunderbird defaults new accounts to "STARTTLS, required"
+// for the same reason.
+func requireSTARTTLS(negotiatedTLS, allowInsecure bool) error {
+	if negotiatedTLS || allowInsecure {
+		return nil
+	}
+	return errors.New("smtp submission refused: server did not offer STARTTLS and ALLOW_INSECURE_SMTP is not set")
+}
+
 func SMTPSendWithTimeout(addr string, auth smtp.Auth, from string, recipients []string, msg []byte, timeout time.Duration) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -135,10 +160,15 @@ func SMTPSendWithTimeout(addr string, auth smtp.Auth, from string, recipients []
 	}
 	defer client.Close()
 
+	negotiatedTLS := false
 	if ok, _ := client.Extension("STARTTLS"); ok {
 		if err := client.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
 			return err
 		}
+		negotiatedTLS = true
+	}
+	if err := requireSTARTTLS(negotiatedTLS, AllowInsecureSMTP); err != nil {
+		return err
 	}
 	if auth != nil {
 		if ok, _ := client.Extension("AUTH"); ok {

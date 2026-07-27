@@ -98,7 +98,18 @@ func harvestPinAutocryptKey(store *contacts.Store, addr, armored, fingerprint st
 // crypto + DNS (the crypto itself is covered in
 // internal/adapters/imap/dkim_verify_test.go). Same test-seam idiom as
 // sendRejectionNotice in poller.go.
-var verifyAutocryptDKIM = imapadapter.VerifyDKIMForDomain
+// It checks that the signature actually covers the Autocrypt header, not
+// merely that the message carries some valid signature from the right domain.
+// A DKIM pass says nothing about a header the signer never included in h= —
+// and no ordinary sender signs Autocrypt — so the previous gate could be
+// satisfied by replaying any genuinely signed message from the target domain
+// with one Autocrypt header stapled on. DMARC still passes for such a replay,
+// because the original signature is untouched. The header must therefore be
+// inside the signed, non-duplicated set, or the "the signing domain vouches
+// for this key" claim this gate exists to make is not one we can make.
+var verifyAutocryptDKIM = func(raw []byte, domain string) bool {
+	return imapadapter.VerifyDKIMCoversHeader(raw, domain, "Autocrypt")
+}
 
 // autocryptHarvestConfig loads the per-user harvest gate once per tick:
 // harvesting is enabled only when StoreDiscoveredKeys is on, and returns the

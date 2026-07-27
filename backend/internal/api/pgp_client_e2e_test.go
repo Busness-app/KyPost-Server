@@ -208,7 +208,12 @@ func TestValidatePGPMimeDelivery(t *testing.T) {
 		{"well formed", wellFormedDelivery, ""},
 		{"header-less (the shipped regression)", headerlessDelivery, "missing required header"},
 		{"no header block at all", "-----BEGIN PGP MESSAGE-----\nx\n-----END PGP MESSAGE-----", "no header block"},
-		{"no pgp payload", "From: a@b.c\r\nTo: d@e.f\r\nSubject: s\r\nDate: now\r\nContent-Type: text/plain\r\n\r\nhi", "no OpenPGP message"},
+		// text/plain now fails the RFC 3156 shape check before the armor check
+		// is reached: this endpoint relays ciphertext, and "the marker appears
+		// somewhere in the body" was never evidence of that.
+		{"not an encrypted part", "From: alice@example.com\r\nTo: d@e.f\r\nSubject: s\r\nDate: now\r\nContent-Type: text/plain\r\n\r\nhi", "multipart/encrypted"},
+		{"encrypted shape but no armor", strings.Replace(wellFormedDelivery, "-----BEGIN PGP MESSAGE-----", "not-armor", 1), "no OpenPGP message"},
+		{"From is not the authorized sender", strings.Replace(wellFormedDelivery, "From: alice@example.com", "From: ceo@example.com", 1), "may send as"},
 		{
 			"missing only Date",
 			strings.Replace(wellFormedDelivery, "Date: Sat, 25 Jul 2026 12:00:00 GMT\r\n", "", 1),
@@ -217,7 +222,7 @@ func TestValidatePGPMimeDelivery(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validatePGPMimeDelivery(tc.input)
+			err := validatePGPMimeDelivery(tc.input, "alice@example.com")
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -238,7 +243,7 @@ func TestValidatePGPMimeDelivery(t *testing.T) {
 func TestValidatePGPMimeDeliveryAcceptsLowercaseHeaders(t *testing.T) {
 	lowered := strings.ToLower(wellFormedDelivery[:strings.Index(wellFormedDelivery, "\r\n\r\n")]) +
 		wellFormedDelivery[strings.Index(wellFormedDelivery, "\r\n\r\n"):]
-	if err := validatePGPMimeDelivery(lowered); err != nil {
+	if err := validatePGPMimeDelivery(lowered, "alice@example.com"); err != nil {
 		t.Fatalf("lowercase headers rejected: %v", err)
 	}
 }

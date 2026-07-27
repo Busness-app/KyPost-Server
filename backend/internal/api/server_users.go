@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -41,7 +42,7 @@ func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Role     string `json:"role"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -77,7 +78,7 @@ func (s *Server) handleUsersUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Role string `json:"role"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -109,7 +110,7 @@ func (s *Server) handleUsersResetPassword(w http.ResponseWriter, r *http.Request
 	var req struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -233,6 +234,17 @@ func writeUserStoreError(w http.ResponseWriter, err error) {
 	// is safe to echo verbatim since it only states the length requirement.
 	if errors.Is(err, users.ErrPasswordWeak) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// The store now enforces the last-admin invariant inside its own write
+	// lock (the handler's pre-check remains as a fast path with a friendlier
+	// message, but this is the authoritative refusal).
+	if errors.Is(err, users.ErrLastActiveAdmin) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if errors.Is(err, users.ErrNotClientProtected) || errors.Is(err, users.ErrWouldDowngradeCustody) {
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	http.Error(w, "user store error", http.StatusInternalServerError)

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"kypost-server/backend/internal/contacts"
@@ -20,6 +21,17 @@ import (
 )
 
 const maxContactPhotoBytes = 5 << 20 // 5MB
+
+// maxContactPhotoBytesPerUser caps the total size of one account's photo
+// directory.
+//
+// The per-photo limit above bounded a single upload but nothing bounded the
+// total: uploading 5 MiB, clearing the contact's ref and repeating grew the
+// shared state volume without limit, and none of it was reachable afterwards
+// to even show the user what they were using. 200 MiB is roughly forty
+// full-size photos, far past a realistic address book, while still being a
+// number the volume can absorb from every account at once.
+const maxContactPhotoBytesPerUser = 200 << 20 // 200MB
 
 var contentTypeExt = map[string]string{
 	"image/jpeg": "jpg",
@@ -56,8 +68,10 @@ func (s *Server) handleContactPhoto(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.handleContactPhotoGet(w, r, ac.UserID, c)
 	case http.MethodDelete:
-		c.PhotoRef = ""
-		if _, err := store.Upsert(c); err != nil {
+		// SetPhotoRef, not Upsert: the store carries PhotoRef forward on an
+		// ordinary write so no contact update can change it, and this handler
+		// is one of the two legitimate writers.
+		if _, _, err := store.SetPhotoRef(c.UID, ""); err != nil {
 			http.Error(w, "failed to update contact", http.StatusInternalServerError)
 			return
 		}
@@ -92,10 +106,13 @@ func (s *Server) handleContactPhotoUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	c.PhotoRef = ref
-	updated, err := store.Upsert(c)
+	updated, ok, err := store.SetPhotoRef(c.UID, ref)
 	if err != nil {
 		http.Error(w, "failed to update contact", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "contact not found", http.StatusNotFound)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"photoRef": updated.PhotoRef, "photoUrl": "/api/contacts/" + updated.UID + "/photo"})
@@ -118,10 +135,91 @@ func (s *Server) storeContactPhoto(userID string, body []byte) (string, error) {
 	sum := sha256.Sum256(body)
 	ref := hex.EncodeToString(sum[:]) + "." + ext
 
-	if err := fsutil.AtomicWriteFile(s.userContactPhotoPath(userID, ref), body, 0o600); err != nil {
+	path := s.userContactPhotoPath(userID, ref)
+	// Checked before writing, and skipped when the file is already there: the
+	// name is a content hash, so re-storing a picture the user already has
+	// overwrites it and adds nothing. Charging for it would refuse a no-op,
+	// which is how a CardDAV client that re-PUTs unchanged cards would hit the
+	// cap without ever growing anything.
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		used, uerr := s.contactPhotoBytesUsed(userID)
+		if uerr == nil && used+int64(len(body)) > maxContactPhotoBytesPerUser {
+			return "", errors.New("contact photo storage is full for this account; remove some photos and try again")
+		}
+	}
+
+	if err := fsutil.AtomicWriteFile(path, body, 0o600); err != nil {
 		return "", fmt.Errorf("failed to store photo: %w", err)
 	}
 	return ref, nil
+}
+
+// contactPhotoBytesUsed totals the bytes in a user's photo directory. A missing
+// directory is zero, not an error.
+func (s *Server) contactPhotoBytesUsed(userID string) (int64, error) {
+	entries, err := os.ReadDir(s.userContactPhotosDir(userID))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, ierr := entry.Info()
+		if ierr != nil {
+			continue
+		}
+		total += info.Size()
+	}
+	return total, nil
+}
+
+// sweepContactPhotos deletes photo files no live contact references.
+//
+// Reclamation is reference-based rather than delete-on-unlink because photo
+// filenames are content hashes: two contacts with the same picture share one
+// file, so unlinking on behalf of one would blank the other. Nothing removed
+// orphans at all before this, so DELETE .../photo cleared the ref and left the
+// bytes on disk forever.
+//
+// A contact tombstone (Deleted) holds no reference — its photo is exactly the
+// kind that should come back. Subdirectories are left alone, and one
+// unremovable file does not abort the rest of the sweep.
+func (s *Server) sweepContactPhotos(userID string) error {
+	store, err := s.userContactsStore(userID)
+	if err != nil {
+		return err
+	}
+	referenced := map[string]bool{}
+	for _, c := range store.List() {
+		if c.Deleted || c.PhotoRef == "" {
+			continue
+		}
+		referenced[filepath.Base(c.PhotoRef)] = true
+	}
+
+	dir := s.userContactPhotosDir(userID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || referenced[entry.Name()] {
+			continue
+		}
+		if rerr := os.Remove(filepath.Join(dir, entry.Name())); rerr != nil {
+			s.logger.Error("failed to remove orphaned contact photo",
+				"user_id", userID, "file", entry.Name(), "error", rerr.Error())
+		}
+	}
+	return nil
 }
 
 // loadContactPhoto reads a previously stored photo back into memory (for

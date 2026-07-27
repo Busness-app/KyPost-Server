@@ -3,7 +3,6 @@ package processor
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -47,6 +46,22 @@ func SendWebPush(store *state.Store, publicKey, privateKeyPath string, ttlSecond
 		VAPIDPublicKey:  publicKey,
 		VAPIDPrivateKey: privateKey,
 		TTL:             ttlSeconds,
+		// webpush-go otherwise builds a bare &http.Client{} and calls
+		// SendNotificationWithContext(context.Background(), ...): no timeout,
+		// redirects followed, nothing cancellable. SendWebPush runs inside the
+		// goroutine that poller.tick's wg.Wait() awaits, and tick holds a
+		// size-1 semaphore across every user — so one endpoint that accepts the
+		// connection and never answers stopped mail polling, classification and
+		// notification for the whole instance until the container restarted.
+		// A hostile endpoint is not required: any push service that hangs
+		// rather than refusing produces the same outcome.
+		HTTPClient: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: &http.Transport{DialContext: safeDialContext},
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 
 	sent := 0
@@ -156,8 +171,15 @@ func SendNativePushToDevices(ctx context.Context, dispatcher *NativePushDispatch
 					}
 				}
 			} else {
-				// Prefix the failure reason with the platform for diagnostics.
-				relayFailure[platform] = fmt.Sprintf("[%s] %s", platform, err.Error())
+				// A coarse classification, never err.Error(). This value is
+				// recorded on health.Status.NativePushLastError, which the
+				// UNAUTHENTICATED /api/health publishes — and the error text
+				// carries both the endpoint URL (which for UnifiedPush *is*
+				// the device's push credential) and up to 8 KiB of the remote
+				// server's response body, which a user pointing a device at
+				// their own host controls outright. See
+				// classifyNativePushFailure.
+				relayFailure[platform] = classifyNativePushFailure(platform, err)
 			}
 			if onDeviceError != nil {
 				onDeviceError(device, platform, err)

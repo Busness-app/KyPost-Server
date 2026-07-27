@@ -11,6 +11,12 @@
 // later compromise, and an operator reading files. The stored blob is
 // ciphertext and the key was never written down.
 //
+// "Never written down" depends on the server not caching the notification
+// email that carries the link, which for a while it did — see
+// mailcache.warmBody, which now drops Sent bodies and redacts pickup-link
+// fragments from everything else it stores. Worth knowing if this claim is
+// ever re-checked: it is a property of two files, not of this one.
+//
 // What it does NOT protect against, and the UI must not imply otherwise:
 // anyone who can read the recipient's email has both the link and the key,
 // because the key is in the email. And the server sees the key once, in

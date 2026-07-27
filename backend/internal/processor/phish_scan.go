@@ -3,6 +3,7 @@ package processor
 import (
 	"context"
 	"net/mail"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -68,17 +69,67 @@ var appDeepLinkPattern = regexp.MustCompile(`(?i)kypost\s*(?::|&#0*58;|&colon;|%
 
 // R2. Host-agnostic on purpose: the attacker's own host serving a lookalike
 // page at this app's pairing or pickup path is the whole attack, so matching
-// the path alone is the point. Trailing slash on /pickup/ keeps
-// "/pickup-truck-review" clean.
+// the path alone is the point.
 //
-// This will also fire on legitimate KyPost mail -- the server emails its own
-// /pickup/ links. That is exactly why Tier B (DKIM over the account's own
-// domain) gates the flag, and why the consequence for an https URL is advisory
-// only.
+// But it has to be a path, in a URL a client would actually resolve. This was
+// a case-insensitive substring test over subject + text body + HTML body,
+// needing no link, no scheme and no host — so a grocery store's
+// "https://grocer.example/pickup/slot?d=today", a restaurant's
+// ".../reservations/pickup/details", and the bare words "/pickup/" in a
+// sentence all flagged.
+//
+// That mattered more than a cosmetic false positive. The Tier-B clear requires
+// sameAddress(msg.Sender, ownAddress), which cannot hold for inbound
+// third-party mail, so an R2 hit on inbound mail could never be cleared; the
+// verdict then rides a durable $Phishing IMAP keyword that every other client
+// the user owns displays too. The banner is this subsystem's whole user-facing
+// product, and firing it on grocery mail teaches people to dismiss it.
 var sensitiveEndpointPaths = []string{
 	"/api/notifications/native/register",
 	"/api/notifications/desktop/pair",
-	"/pickup/",
+}
+
+// pickupPathPrefix plus a non-empty "t" query parameter is the shape this
+// server's own pickup links have (see api.sendPickupNotification:
+// "<base>/pickup/<uuid>?t=<token>"). Requiring the token is what separates a
+// lookalike from a shop's collection-slot page: an impersonation has to carry
+// one to be convincing, and a grocer has no reason to.
+const pickupPathPrefix = "/pickup/"
+
+// urlPattern finds absolute http(s) URLs. Deliberately not a full URL grammar:
+// it stops at whitespace and at the delimiters that end an href or a
+// parenthesised link in prose.
+var urlPattern = regexp.MustCompile(`(?i)\bhttps?://[^\s"'<>)\]]+`)
+
+// maxScannedURLs bounds the work one message can demand. This runs on every
+// unread message on every poll tick, and a body can carry an unbounded number
+// of links. Past the cap a hostile link goes unseen, which costs an advisory
+// banner and never a protection — the client-side scheme allowlist that
+// actually refuses navigation is not involved here.
+const maxScannedURLs = 200
+
+// linksToSensitiveEndpoint reports whether haystack contains a URL pointing at
+// one of this app's sensitive paths.
+func linksToSensitiveEndpoint(haystack string) bool {
+	matches := urlPattern.FindAllString(haystack, maxScannedURLs)
+	for _, raw := range matches {
+		// Trailing punctuation from prose ("...see https://x/y.") is not part
+		// of the URL a client would resolve.
+		u, err := url.Parse(strings.TrimRight(raw, ".,;:!?"))
+		if err != nil {
+			continue
+		}
+		path := strings.ToLower(u.Path)
+		for _, sensitive := range sensitiveEndpointPaths {
+			if path == sensitive || strings.HasPrefix(path, sensitive+"/") {
+				return true
+			}
+		}
+		if strings.HasPrefix(path, pickupPathPrefix) && strings.TrimSpace(u.Query().Get("t")) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // R3. The subjects this server actually sends to its own users. Matched whole
@@ -111,11 +162,8 @@ func scanForAppImpersonation(subject, bodyText, bodyHTML string) phishFinding {
 		return phishFinding{Reason: reasonAppDeepLink}
 	}
 
-	lowerHaystack := strings.ToLower(haystack)
-	for _, path := range sensitiveEndpointPaths {
-		if strings.Contains(lowerHaystack, path) {
-			return phishFinding{Reason: reasonSensitiveEndpoint}
-		}
+	if linksToSensitiveEndpoint(haystack) {
+		return phishFinding{Reason: reasonSensitiveEndpoint}
 	}
 
 	trimmedSubject := strings.TrimSpace(subject)

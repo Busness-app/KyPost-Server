@@ -10,6 +10,7 @@ require (
 	github.com/emersion/go-msgauth v0.7.0
 	github.com/emersion/go-vcard v0.0.0-20230815062825-8fda7d206ec9
 	github.com/emersion/go-webdav v0.7.0
+	github.com/inbucket/html2text v1.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -26,7 +27,6 @@ require (
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/gogs/chardet v0.0.0-20211120154057-b7413eaefb8f // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
-	github.com/inbucket/html2text v1.0.0 // indirect
 	github.com/jhillyerd/enmime/v2 v2.3.0 // indirect
 	github.com/kr/pretty v0.3.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect

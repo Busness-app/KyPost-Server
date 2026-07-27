@@ -1,10 +1,12 @@
 package groups
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -138,6 +140,104 @@ func (s *Store) Upsert(g Group) (Group, error) {
 		return Group{}, err
 	}
 	return g, nil
+}
+
+// MaxGroupsPerUser bounds how many groups one account may accumulate.
+//
+// Groups are created implicitly from a vCard's CATEGORIES, so without a ceiling
+// a single imported card mints as many as it likes — and every one of them is
+// re-read on every later PROPFIND and export, so the cost is permanent rather
+// than one-off. 1,000 is far past any real address book's organisational
+// scheme while keeping the whole file small enough to read cheaply.
+const MaxGroupsPerUser = 1000
+
+// ErrTooManyGroups reports that a batch would push the account past
+// MaxGroupsPerUser. The batch is refused whole; nothing partial is written.
+var ErrTooManyGroups = errors.New("groups: too many groups for this account")
+
+// EnsureByName resolves category names to group IDs, creating the missing ones,
+// in ONE locked read-modify-write.
+//
+// The caller used to loop over names calling Upsert, and each Upsert takes the
+// file lock, reads and unmarshals the whole file, marshals it back and writes it
+// with two fsyncs. That is quadratic in the number of names: 5,000 categories on
+// one card measured 32 seconds on tmpfs, and a single vCard well under the
+// import size cap can carry hundreds of thousands.
+//
+// Matching is case-insensitive and the result is de-duplicated, so a card
+// listing "Work", "work" and "Work" again resolves to one id. Order follows
+// first appearance. Blank names are skipped rather than creating an unnamed
+// group.
+func (s *Store) EnsureByName(names []string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, err
+	}
+
+	byName := make(map[string]string, len(s.groups))
+	for _, g := range s.groups {
+		byName[strings.ToLower(g.Name)] = g.ID
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	ids := make([]string, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	created := 0
+
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		if id, ok := byName[key]; ok {
+			ids = append(ids, id)
+			continue
+		}
+		// Checked per new group rather than once up front, so a batch that only
+		// references groups the account already has still succeeds at the cap —
+		// otherwise being full would break ordinary sync of existing cards.
+		// len(s.groups) already grows as this loop appends, so it alone is the
+		// running total — adding created would count each new group twice and
+		// halve the effective cap.
+		if len(s.groups) >= MaxGroupsPerUser {
+			return nil, ErrTooManyGroups
+		}
+		id, uerr := fsutil.NewUUIDv4()
+		if uerr != nil {
+			return nil, uerr
+		}
+		s.seq++
+		s.groups = append(s.groups, Group{
+			ID:        id,
+			Name:      name,
+			Rev:       s.seq,
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
+		byName[key] = id
+		ids = append(ids, id)
+		created++
+	}
+
+	if created == 0 {
+		return ids, nil
+	}
+	if err := s.persistLocked(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // Delete removes a group outright. Groups aren't sync-tracked (no CardDAV or

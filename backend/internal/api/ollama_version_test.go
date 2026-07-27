@@ -68,7 +68,12 @@ func TestRefreshOllamaVersionStatusDetectsUpgradeAndDedupesNotification(t *testi
 	srv.SetClassifier(classifier.NewHTTPClient(ollamaSrv.URL, "", "", "", 0))
 
 	githubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"tag_name":"v0.33.0"}`))
+		// run-4 N1: the checker reads the /releases LIST and skips anything
+		// inside the soak window, so the fixture is a list and the release is
+		// backdated well past it. A fresh release would correctly report
+		// nothing — that is the fix, not a broken fixture.
+		published := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339)
+		_, _ = w.Write([]byte(`[{"tag_name":"v0.33.0","published_at":"` + published + `"}]`))
 	}))
 	defer githubSrv.Close()
 	restoreReleasesURL := setOllamaReleasesURLForTest(t, githubSrv.URL)

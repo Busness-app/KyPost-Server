@@ -14,6 +14,10 @@ export type SendAsAlias = {
   expiresAt: string;
   verifiedAt?: string;
   failedAt?: string;
+  // Set on the record the server creates for your own account address, which
+  // has to pass this same check before your public key can be published for
+  // it. You didn't ask for it, so the UI says why it's there.
+  auto?: boolean;
 };
 
 type SendAsAliasesResponse = {

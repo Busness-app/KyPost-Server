@@ -103,13 +103,16 @@ export type DecryptedMessage = {
  * Decrypts a PGP/MIME payload the server handed through untouched, using the
  * unlocked key. Throws VaultLockedError if the vault is locked.
  *
- * signerPublicKeys are every known contact key: the sender is not known in
- * advance, so all are offered and whichever actually produced the signature
- * is the one that verifies.
+ * signerPublicKeys are every known contact key: which one signed is not known
+ * in advance, so all are offered and whichever actually produced the signature
+ * is identified. senderAddress is what the verdict is then bound to — see the
+ * comment at the verification loop. `verified` means "the sender signed this",
+ * not "somebody did".
  */
 export async function decryptMessage(
   payload: string,
-  signerPublicKeys: string[]
+  signerPublicKeys: string[],
+  senderAddress: string
 ): Promise<DecryptedMessage> {
   const pgp = await openpgp();
   const privateKey = await pgp.readPrivateKey({ armoredKey: requireUnlockedKey() });
@@ -131,16 +134,30 @@ export async function decryptMessage(
   const signatures = result.signatures ?? [];
   if (signatures.length > 0) {
     signed = true;
+    const wanted = senderAddress.trim().toLowerCase();
     for (const signature of signatures) {
       try {
         // `verified` rejects rather than returning false on a bad signature.
         await signature.verified;
-        verified = true;
         const keyID = signature.keyID.toHex().toUpperCase();
         const match = verificationKeys.find((k) =>
           k.getKeys().some((sub) => sub.getKeyID().toHex().toUpperCase() === keyID)
         );
         signerFingerprint = match ? match.getFingerprint().toUpperCase() : keyID;
+        // A cryptographically valid signature from SOME key in the address
+        // book proves only that someone signed this. The badge claims the
+        // SENDER signed it, so the key that actually produced the signature
+        // must carry the sender's address as a User ID. Without this, an
+        // attacker whose key the reader had auto-pinned — Autocrypt harvest
+        // and WKD auto-trust both pin without asking — could sign a message,
+        // put anyone in the From header, and be vouched for by the UI.
+        verified = Boolean(
+          match &&
+            wanted &&
+            match
+              .getUserIDs()
+              .some((uid) => uid.toLowerCase().includes(`<${wanted}>`))
+        );
         break;
       } catch {
         // Try the next signature; an unverifiable one is not fatal.
@@ -226,9 +243,45 @@ export async function buildEncryptedDeliveries(
   return deliveries;
 }
 
+/**
+ * Builds the Sent-folder copy: the same protected content the recipients get,
+ * encrypted to the SENDER'S OWN key and wrapped as PGP/MIME.
+ *
+ * This used to be the composer's raw HTML, posted to the server in the clear.
+ * On a client-custody account that quietly gave away everything the deliveries
+ * were protecting — the body and the real subject of every message — to a
+ * server whose stated property is that it cannot read your mail.
+ *
+ * The encryption key is derived from the UNLOCKED PRIVATE KEY in this browser,
+ * not fetched from the server. That matters: if the server supplied "your"
+ * public key, a compromised or hostile one could hand back an attacker's key
+ * and every Sent copy would be encrypted to them, with nothing on screen
+ * looking any different.
+ *
+ * Signing is optional and mirrors the send: a copy of a signed message is
+ * signed. It changes nothing about who can read it.
+ */
+export async function buildEncryptedSentCopy(
+  envelope: MessageEnvelope,
+  contentType: string,
+  body: string,
+  sign: boolean
+): Promise<string> {
+  const pgp = await openpgp();
+  const ownKey = await pgp.readPrivateKey({ armoredKey: requireUnlockedKey() });
+  const signingKeys = sign ? [ownKey] : undefined;
+  const armored = await pgp.encrypt({
+    message: await pgp.createMessage({ text: buildProtectedContent(contentType, body, envelope.subject) }),
+    encryptionKeys: ownKey.toPublic(),
+    signingKeys,
+    format: "armored"
+  });
+  return wrapAsPGPMime(envelope, String(armored));
+}
+
 // Matches pgpmail.OuterPlaceholderSubject so both send paths look identical
 // on the wire.
-const OUTER_PLACEHOLDER_SUBJECT = "[Encrypted] Email Sent by KyPost";
+export const OUTER_PLACEHOLDER_SUBJECT = "[Encrypted] Email Sent by KyPost";
 
 /**
  * Wraps the real content in an RFC 5322 protected-headers part carrying the

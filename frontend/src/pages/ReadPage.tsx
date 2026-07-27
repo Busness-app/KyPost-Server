@@ -253,7 +253,19 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [availableKeywords, setAvailableKeywords] = useState<string[]>([]);
   const emailReaderDialogRef = useRef<HTMLDialogElement | null>(null);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>([]);
-  const [showImages, setShowImages] = useState(false);
+  // run-4 finding M7: this used to be a bare boolean, cleared by
+  // openEmailDetails. That made the opt-in correct only for messages opened
+  // through that one function — and the search-results table called
+  // setSelected directly, so a user who unblocked a newsletter's images and
+  // then opened an attacker's message from search rendered it through the
+  // permissive branch having never opted in for it, firing every tracking
+  // pixel in it.
+  //
+  // Storing the message the grant was made for, rather than a bare "granted",
+  // makes that drift impossible: any future route to a selected message fails
+  // closed, because a grant for some other message simply doesn't match.
+  const [showImagesFor, setShowImagesFor] = useState<string | null>(null);
+  const showImages = selected !== null && showImagesFor === selected.messageId;
   const [showRawEmail, setShowRawEmail] = useState(false);
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
@@ -307,7 +319,11 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     (async () => {
       try {
         const payload = await getPGPMessagePayload(sourceMailbox, message.messageId);
-        const result = await decryptMessage(payload.encryptedPayload, payload.signerPublicKeys ?? []);
+        const result = await decryptMessage(
+          payload.encryptedPayload,
+          payload.signerPublicKeys ?? [],
+          firstAddressFromText(message.sender || "")
+        );
         if (cancelled) return;
         setDecrypted((prev) => ({
           ...prev,
@@ -984,7 +1000,12 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       return;
     }
     setSelected(item);
-    setShowImages(false);
+    // Keying the grant to a message ID already stops it leaking to a different
+    // message. Clearing it here additionally keeps the older, stronger property
+    // that rendering anything unblocked always costs a deliberate click in this
+    // viewing session — reopening a message you unblocked earlier starts blocked
+    // again.
+    setShowImagesFor(null);
     setShowRawEmail(false);
     setActionError("");
     setAttachments([]);
@@ -1228,7 +1249,12 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                         <tr
                           key={item.messageId}
                           className={`inbox-row ${isRead ? "" : "inbox-row-unread"}`.trim()}
-                          onClick={() => setSelected(item)}
+                          // Not setSelected: opening a message is more than
+                          // assigning it. openEmailDetails also clears the
+                          // previous message's attachment list — otherwise a
+                          // link labelled invoice.pdf downloads attachment #N
+                          // of whatever was open before — and marks it read.
+                          onClick={() => void openEmailDetails(item)}
                           style={{ cursor: "pointer" }}
                         >
                           <td className="inbox-cell">
@@ -1236,7 +1262,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setSelected(item);
+                                void openEmailDetails(item);
                               }}
                               style={{
                                 background: "none",
@@ -1543,7 +1569,10 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                   <button type="button" onClick={replyToSelectedEmail} disabled={actionLoading}>Reply</button>
                   <button type="button" onClick={replyAllToSelectedEmail} disabled={actionLoading}>Reply All</button>
                   <button type="button" onClick={forwardSelectedEmail} disabled={actionLoading}>Forward</button>
-                      <button type="button" onClick={() => { setShowImages((v) => !v); }}>
+                      <button
+                        type="button"
+                        onClick={() => setShowImagesFor((current) => (current === selected.messageId ? null : selected.messageId))}
+                      >
                         {showImages ? "Hide Remote Content" : "Show Remote Content"}
                       </button>
                   <button type="button" onClick={() => setSelected(null)}>Close</button>
@@ -1572,9 +1601,21 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
               */}
               {isFlaggedPhishing(selected) ? (
                 <p className="notice notice-error" style={{ margin: "0 0 12px" }}>
-                  <strong>This message impersonates KyPost.</strong> Links to KyPost app addresses have been blocked.
-                  KyPost will never ask you to confirm a pairing request by email — never approve one you did not start
-                  yourself, on this device.
+                  {/*
+                    run-4 M17: this used to assert "Links to KyPost app
+                    addresses have been blocked." That is only true for a
+                    kypost:// deep link, which the scheme allowlist refuses. The
+                    other two rules fire on ordinary https links and on subject
+                    lines, and an allowlisted https link renders live and
+                    untouched — so the sentence was telling the user something
+                    protective had happened when nothing had. A warning that
+                    overstates itself is worse than a quieter accurate one,
+                    because the first time a user checks and finds the link
+                    working, the banner stops meaning anything.
+                  */}
+                  <strong>This message looks like it is impersonating KyPost.</strong> Treat anything it asks you to
+                  open or confirm as untrusted, and check the sender before acting. KyPost will never ask you to confirm
+                  a pairing request by email — never approve one you did not start yourself, on this device.
                 </p>
               ) : null}
               {selected.pgpEncrypted ? (
@@ -1601,7 +1642,12 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                       {!decryptFailed && !decryptingNow && signed ? (
                         <span className={`security-badge ${verified ? "security-badge-on" : "security-badge-off"}`} style={{ marginLeft: 6 }}>
                           <span className="security-dot" aria-hidden="true" />
-                          {verified ? "signature verified" : "signature not verified"}
+                          {verified ? "signature verified" : "signature does not match sender"}
+                        </span>
+                      ) : null}
+                      {signed && !verified && local?.signerFingerprint ? (
+                        <span className="contacts-muted" style={{ marginLeft: 6 }}>
+                          signed by {local.signerFingerprint.slice(-16)}
                         </span>
                       ) : null}
                       {local?.error ? (

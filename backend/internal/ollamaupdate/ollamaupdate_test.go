@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestIsNewer(t *testing.T) {
@@ -33,12 +34,18 @@ func TestIsNewer(t *testing.T) {
 	}
 }
 
-func TestLatestVersionStripsLeadingV(t *testing.T) {
+// run-4 N1 changed the endpoint from /releases/latest (one object) to /releases
+// (a list), so the soak window can be applied — see MinReleaseAge. The response
+// shape here changed with it. The User-Agent assertion is the part worth
+// keeping: GitHub rejects requests without one.
+func TestLatestVersionSendsAUserAgent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ua := r.Header.Get("User-Agent"); ua == "" {
 			t.Errorf("request missing User-Agent header (GitHub API rejects requests without one)")
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.32.1"})
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"tag_name": "v0.32.1", "published_at": time.Now().UTC().Add(-30 * 24 * time.Hour)},
+		})
 	}))
 	defer srv.Close()
 
