@@ -84,7 +84,7 @@ func TestFlagAppImpersonationFlagsUnauthenticatedForgery(t *testing.T) {
 	uc := userCtx{id: "u1", store: store, mail: client}
 	msg := imapadapter.Message{ID: "42", Subject: "Action needed", Sender: "evil@attacker.tld", Body: phishingBody}
 
-	if !p.flagAppImpersonation(context.Background(), uc, msg, "corp.example") {
+	if !p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
 		t.Fatal("expected the message to be flagged")
 	}
 	if len(client.appliedLabels) != 1 || client.appliedLabels[0] != phishKeyword {
@@ -106,10 +106,10 @@ func TestFlagAppImpersonationFlagsUnauthenticatedForgery(t *testing.T) {
 }
 
 // The server emails its own /pickup/ links, so Tier A fires on legitimate mail
-// by design. DKIM over the account's own domain is what tells the two apart --
-// without this branch every genuine pickup notice would carry a phishing
-// warning.
-func TestFlagAppImpersonationDoesNotFlagMailAuthenticatedToTheOwnDomain(t *testing.T) {
+// by design. DKIM over the account's own domain PLUS a From address equal to the
+// account's own address is what tells the two apart -- without this branch every
+// genuine pickup notice would carry a phishing warning.
+func TestFlagAppImpersonationDoesNotFlagMailAuthenticatedToTheOwnAddress(t *testing.T) {
 	withDKIMResult(t, true)
 	p := newPhishTestPoller(t)
 	store := newPhishTestStore(t)
@@ -122,7 +122,7 @@ func TestFlagAppImpersonationDoesNotFlagMailAuthenticatedToTheOwnDomain(t *testi
 		Body:    "Pick it up: https://corp.example/pickup/abc123",
 	}
 
-	if p.flagAppImpersonation(context.Background(), uc, msg, "corp.example") {
+	if p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
 		t.Fatal("expected authenticated mail not to be flagged")
 	}
 	if len(client.appliedLabels) != 0 {
@@ -143,7 +143,7 @@ func TestFlagAppImpersonationDoesNoNetworkWorkForOrdinaryMail(t *testing.T) {
 	uc := userCtx{id: "u1", store: store, mail: client}
 	msg := imapadapter.Message{ID: "42", Subject: "Your weekly digest", Sender: "news@news.example", Body: "Stories inside."}
 
-	if p.flagAppImpersonation(context.Background(), uc, msg, "corp.example") {
+	if p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
 		t.Fatal("expected ordinary mail not to be flagged")
 	}
 	if client.rawFetches != 0 {
@@ -164,7 +164,7 @@ func TestFlagAppImpersonationFlagsWhenDKIMCannotBeResolved(t *testing.T) {
 	uc := userCtx{id: "u1", store: store, mail: client}
 	msg := imapadapter.Message{ID: "42", Subject: "Your secure message", Sender: "noreply@corp.example", Body: "https://corp.example/pickup/abc"}
 
-	if !p.flagAppImpersonation(context.Background(), uc, msg, "corp.example") {
+	if !p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
 		t.Fatal("expected an unresolvable DKIM check to leave the message flagged")
 	}
 	if len(client.appliedLabels) != 1 {
@@ -182,7 +182,7 @@ func TestFlagAppImpersonationSkipsOversizedMessages(t *testing.T) {
 	uc := userCtx{id: "u1", store: store, mail: client}
 	msg := imapadapter.Message{ID: "42", Subject: "Action needed", Sender: "evil@attacker.tld", TooLarge: true}
 
-	if p.flagAppImpersonation(context.Background(), uc, msg, "corp.example") {
+	if p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
 		t.Fatal("expected an oversized message to be skipped")
 	}
 	if client.rawFetches != 0 {
@@ -209,7 +209,7 @@ func TestFlagAppImpersonationIsIdempotent(t *testing.T) {
 		Keywords: []string{"Primary", strings.ToLower(phishKeyword)},
 	}
 
-	if p.flagAppImpersonation(context.Background(), uc, msg, "corp.example") {
+	if p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
 		t.Fatal("expected an already-flagged message to be skipped")
 	}
 	if client.rawFetches != 0 {
@@ -234,7 +234,7 @@ func TestFlagAppImpersonationRecordsTheDecisionWhenTheKeywordCannotBeApplied(t *
 	uc := userCtx{id: "u1", store: store, mail: client}
 	msg := imapadapter.Message{ID: "42", Subject: "Action needed", Sender: "evil@attacker.tld", Body: phishingBody}
 
-	if !p.flagAppImpersonation(context.Background(), uc, msg, "corp.example") {
+	if !p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
 		t.Fatal("expected the message to still count as flagged")
 	}
 	decisions := store.Decisions(10)
@@ -262,7 +262,7 @@ func TestFlagAppImpersonationDoesNotRetryARefusedKeyword(t *testing.T) {
 	uc := userCtx{id: "u1", store: store, mail: client}
 	msg := imapadapter.Message{ID: "42", Subject: "Action needed", Sender: "evil@attacker.tld", Body: phishingBody}
 
-	p.flagAppImpersonation(context.Background(), uc, msg, "corp.example")
+	p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress)
 
 	if client.applyAttempts != 1 {
 		t.Fatalf("applyAttempts = %d, want exactly 1 -- an advisory keyword must not be retried", client.applyAttempts)
@@ -286,7 +286,7 @@ func TestFlagAppImpersonationCatchesAHostileHTMLPartBehindAnInnocuousTextPart(t 
 		BodyHTML: `<a href="kypost://native-pair?sub=v&srv=https://evil.example&pt=z">Confirm</a>`,
 	}
 
-	if !p.flagAppImpersonation(context.Background(), uc, msg, "corp.example") {
+	if !p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
 		t.Fatal("expected the html-only deep link to be flagged")
 	}
 	if len(client.appliedLabels) != 1 || client.appliedLabels[0] != phishKeyword {
@@ -294,10 +294,10 @@ func TestFlagAppImpersonationCatchesAHostileHTMLPartBehindAnInnocuousTextPart(t 
 	}
 }
 
-// With no resolvable account domain there is nothing to authenticate against,
+// With no resolvable account address there is nothing to authenticate against,
 // so the message stays flagged rather than being quietly cleared.
-func TestFlagAppImpersonationFlagsWhenTheAccountDomainIsUnknown(t *testing.T) {
-	withDKIMResult(t, true) // would clear it, if the domain were consulted at all
+func TestFlagAppImpersonationFlagsWhenTheAccountAddressIsUnknown(t *testing.T) {
+	withDKIMResult(t, true) // would clear it, if the address were consulted at all
 	p := newPhishTestPoller(t)
 	store := newPhishTestStore(t)
 	client := &phishStubClient{raw: map[int][]byte{42: []byte("raw message")}}
@@ -305,10 +305,10 @@ func TestFlagAppImpersonationFlagsWhenTheAccountDomainIsUnknown(t *testing.T) {
 	msg := imapadapter.Message{ID: "42", Subject: "Action needed", Sender: "evil@attacker.tld", Body: phishingBody}
 
 	if !p.flagAppImpersonation(context.Background(), uc, msg, "") {
-		t.Fatal("expected a message to stay flagged when no account domain is known")
+		t.Fatal("expected a message to stay flagged when no account address is known")
 	}
 	if client.rawFetches != 0 {
-		t.Fatalf("rawFetches = %d, want 0 -- there is no domain to verify against", client.rawFetches)
+		t.Fatalf("rawFetches = %d, want 0 -- there is no address to verify against", client.rawFetches)
 	}
 }
 
@@ -375,5 +375,108 @@ func TestMirrorPhishKeywordDoesNotMutateTheCallersKeywords(t *testing.T) {
 
 	if len(original) != 1 || original[0] != "Primary" {
 		t.Fatalf("caller's keywords were mutated: %v", original)
+	}
+}
+
+// ownAccountAddress is the account's own full mail address, as
+// Poller.accountAddress would return it from the sealed IMAP config. The Tier B
+// gate needs the whole address, not just its domain -- see below.
+const ownAccountAddress = "noreply@corp.example"
+
+// The hole this gate used to have, and the reason it now checks the From
+// address as well as the DKIM domain.
+//
+// Keyed on the *domain* alone, an account at victim@gmail.com made the gate
+// "was this signed by gmail.com?" -- which every message from every Gmail user
+// satisfies. Any attacker with a free account on the victim's own provider got
+// their kypost:// deep link delivered with no warning at all, and that covers
+// most people, since most people point this client at a mailbox they already
+// had with a large provider.
+func TestFlagAppImpersonationFlagsSharedDomainMailFromAnotherSender(t *testing.T) {
+	withDKIMResult(t, true) // attacker's mail is genuinely DKIM-signed by the shared provider
+	p := newPhishTestPoller(t)
+	store := newPhishTestStore(t)
+	client := &phishStubClient{raw: map[int][]byte{42: []byte("raw message")}}
+	uc := userCtx{id: "u1", store: store, mail: client}
+	msg := imapadapter.Message{
+		ID:      "42",
+		Subject: "Action needed",
+		Sender:  "attacker@gmail.com",
+		Body:    phishingBody,
+	}
+
+	if !p.flagAppImpersonation(context.Background(), uc, msg, "victim@gmail.com") {
+		t.Fatal("expected mail from a different sender on the same shared provider to stay flagged")
+	}
+	if len(client.appliedLabels) != 1 {
+		t.Fatalf("appliedLabels = %v, want the keyword applied", client.appliedLabels)
+	}
+}
+
+// The other half: a display name is sender-controlled, so it must never be what
+// the address comparison matches on.
+func TestFlagAppImpersonationFlagsWhenOnlyTheDisplayNameMatches(t *testing.T) {
+	withDKIMResult(t, true)
+	p := newPhishTestPoller(t)
+	store := newPhishTestStore(t)
+	client := &phishStubClient{raw: map[int][]byte{42: []byte("raw message")}}
+	uc := userCtx{id: "u1", store: store, mail: client}
+	msg := imapadapter.Message{
+		ID:      "42",
+		Subject: "Action needed",
+		Sender:  `"noreply@corp.example" <attacker@corp.example>`,
+		Body:    phishingBody,
+	}
+
+	if !p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
+		t.Fatal("expected a forged display name not to clear the gate")
+	}
+}
+
+// A genuine self-notice still clears the gate when the envelope carries a
+// display name alongside the address -- the common real-world shape.
+func TestFlagAppImpersonationClearsOwnAddressWithDisplayName(t *testing.T) {
+	withDKIMResult(t, true)
+	p := newPhishTestPoller(t)
+	store := newPhishTestStore(t)
+	client := &phishStubClient{raw: map[int][]byte{42: []byte("raw message")}}
+	uc := userCtx{id: "u1", store: store, mail: client}
+	msg := imapadapter.Message{
+		ID:      "42",
+		Subject: "Your secure message",
+		Sender:  `KyPost <NoReply@Corp.Example>`,
+		Body:    "Pick it up: https://corp.example/pickup/abc123",
+	}
+
+	if p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
+		t.Fatal("expected the account's own notice to clear the gate regardless of display name or case")
+	}
+	if got := len(store.Decisions(10)); got != 0 {
+		t.Fatalf("got %d decisions, want 0", got)
+	}
+}
+
+func TestSameAddress(t *testing.T) {
+	own := "noreply@corp.example"
+	for _, tc := range []struct {
+		sender string
+		want   bool
+	}{
+		{"noreply@corp.example", true},
+		{"NoReply@Corp.Example", true},
+		{"KyPost <noreply@corp.example>", true},
+		{`"Corp, Inc." <noreply@corp.example>`, true}, // unquoted-comma shape ParseAddress can refuse
+		{"  noreply@corp.example  ", true},
+		{"attacker@corp.example", false},
+		{"noreply@corp.example.evil.tld", false},
+		{`"noreply@corp.example" <attacker@evil.tld>`, false},
+		{"", false},
+	} {
+		if got := sameAddress(tc.sender, own); got != tc.want {
+			t.Errorf("sameAddress(%q, %q) = %v, want %v", tc.sender, own, got, tc.want)
+		}
+	}
+	if sameAddress("noreply@corp.example", "") {
+		t.Error("sameAddress with an unknown own address must be false, so the gate never clears")
 	}
 }

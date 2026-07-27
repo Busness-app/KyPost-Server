@@ -18,6 +18,7 @@ import (
 	"kypost-server/backend/internal/rules"
 	"kypost-server/backend/internal/sendas"
 	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/users"
 )
 
 // getOrCreateUserStore returns the cached per-user store, constructing and
@@ -401,6 +402,32 @@ func (s *Server) reserveDeviceID(ownerID, deviceID string) bool {
 	}
 	s.deviceIndex[deviceID] = ownerID
 	return true
+}
+
+// revokeAllUserCredentials cuts off every way this account can currently
+// authenticate. There are three, not two:
+//
+//  1. web sessions      (revokeUserSessions)
+//  2. paired devices    (revokeUserDevices)
+//  3. CardDAV Basic Auth (davCredentials)
+//
+// The third one used to be missed by every admin revocation path, because
+// withDAVBasicAuth consults its verified-credential cache *before* it looks the
+// account up and checks u.Active. A deactivated account therefore kept full
+// read/write on its contacts, over CardDAV, for up to davCredentialTTL after an
+// admin cut it off — bounded at 90s, but silently, and the handlers claimed to
+// have revoked everything.
+//
+// Exists as one function rather than three lines repeated in
+// deactivate/reset-password/clear-MFA so that a fourth credential type only has
+// to be added here. The DAV cache has no per-user index (its keys are salted
+// hashes of username+password), so invalidation clears the whole map; that is
+// cheap at this project's scale and costs other users at most one extra scrypt
+// verification on their next sync.
+func (s *Server) revokeAllUserCredentials(u users.User) {
+	s.revokeUserSessions(u.ID, "")
+	s.revokeUserDevices(u.ID)
+	s.davCredentials.invalidateUser(u.Username)
 }
 
 // revokeUserDevices removes every paired native device for userID from both

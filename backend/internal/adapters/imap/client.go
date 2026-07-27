@@ -663,10 +663,8 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 	if err != nil {
 		return nil, err
 	}
-	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
-		if err := d.SelectFolder(mailbox); err != nil {
-			return nil, fmt.Errorf("imap select folder %q: %w", mailbox, err)
-		}
+	if err := c.selectMailboxLocked(d, mailbox); err != nil {
+		return nil, err
 	}
 
 	uids, err := d.GetLastNUIDs(limit)
@@ -755,10 +753,8 @@ func (c *APIClient) ListOverviews(ctx context.Context, mailbox string, limit int
 	if err != nil {
 		return nil, err
 	}
-	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
-		if err := d.SelectFolder(mailbox); err != nil {
-			return nil, fmt.Errorf("imap select folder %q: %w", mailbox, err)
-		}
+	if err := c.selectMailboxLocked(d, mailbox); err != nil {
+		return nil, err
 	}
 
 	uids, err := d.GetLastNUIDs(limit)
@@ -818,10 +814,8 @@ func (c *APIClient) SearchMessages(ctx context.Context, mailbox, field, query st
 	if err != nil {
 		return nil, err
 	}
-	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
-		if err := d.SelectFolder(mailbox); err != nil {
-			return nil, fmt.Errorf("imap select folder %q: %w", mailbox, err)
-		}
+	if err := c.selectMailboxLocked(d, mailbox); err != nil {
+		return nil, err
 	}
 
 	sb := goimap.Search()
@@ -891,10 +885,8 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 	if err != nil {
 		return nil, err
 	}
-	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
-		if err := d.SelectFolder(mailbox); err != nil {
-			return nil, fmt.Errorf("imap select folder %q: %w", mailbox, err)
-		}
+	if err := c.selectMailboxLocked(d, mailbox); err != nil {
+		return nil, err
 	}
 
 	// Ask the server which of the requested UIDs are oversized *before*
@@ -1185,6 +1177,14 @@ func (c *APIClient) CreateFolder(ctx context.Context, parent, name string) (stri
 	if strings.ContainsAny(name, "/.") {
 		return "", errors.New("folder name must be a single level without / or .")
 	}
+	if err := ValidateMailboxName(name); err != nil {
+		return "", err
+	}
+	// The parent is concatenated onto name below and the result goes to
+	// CREATE, so it is just as much a protocol sink as the leaf is.
+	if err := validateOptionalMailboxName(parent); err != nil {
+		return "", err
+	}
 
 	d, err := c.ensureConnectedLocked()
 	if err != nil {
@@ -1236,6 +1236,10 @@ func (c *APIClient) DeleteFolder(ctx context.Context, folder string) error {
 	folder = strings.TrimSpace(folder)
 	if folder == "" {
 		return errors.New("folder is required")
+	}
+	// folder reaches SELECT, UID MOVE, and DELETE below.
+	if err := ValidateMailboxName(folder); err != nil {
+		return err
 	}
 	parent := mailboxParent(folder)
 	if parent == "" {
@@ -1303,6 +1307,14 @@ func (c *APIClient) RenameFolder(ctx context.Context, folder, name string) (stri
 	if strings.ContainsAny(name, "/.") {
 		return "", errors.New("folder name must be a single level without / or .")
 	}
+	// Both halves reach RENAME: folder as the source, name as the leaf of the
+	// destination path built below.
+	if err := ValidateMailboxName(folder); err != nil {
+		return "", err
+	}
+	if err := ValidateMailboxName(name); err != nil {
+		return "", err
+	}
 	parent := mailboxParent(folder)
 	if parent == "" {
 		return "", errors.New("folder must have a parent mailbox")
@@ -1344,8 +1356,8 @@ func (c *APIClient) EnsureLabel(ctx context.Context, label string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(label) == "" {
-		return errors.New("label is required")
+	if err := ValidateKeyword(label); err != nil {
+		return err
 	}
 	// IMAP keywords are typically created implicitly when first applied.
 	return nil
@@ -1363,8 +1375,8 @@ func (c *APIClient) ApplyLabel(ctx context.Context, messageID, label string) err
 		return fmt.Errorf("invalid message id %q", messageID)
 	}
 	label = strings.TrimSpace(label)
-	if label == "" {
-		return errors.New("label is required")
+	if err := ValidateKeyword(label); err != nil {
+		return err
 	}
 
 	d, err := c.ensureConnectedLocked()
@@ -1394,8 +1406,8 @@ func (c *APIClient) RemoveLabel(ctx context.Context, messageID, label string) er
 		return fmt.Errorf("invalid message id %q", messageID)
 	}
 	label = strings.TrimSpace(label)
-	if label == "" {
-		return errors.New("label is required")
+	if err := ValidateKeyword(label); err != nil {
+		return err
 	}
 
 	d, err := c.ensureConnectedLocked()
@@ -1429,10 +1441,14 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action, mai
 		return err
 	}
 	mailbox = strings.TrimSpace(mailbox)
-	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
-		if err := d.SelectFolder(mailbox); err != nil {
-			return fmt.Errorf("imap select folder %q: %w", mailbox, err)
-		}
+	if err := c.selectMailboxLocked(d, mailbox); err != nil {
+		return err
+	}
+	// targetMailbox reaches UID MOVE via moveToFolder/ensureFolderThenRun
+	// (which also CREATEs it), so it is a protocol sink in its own right and
+	// is not covered by the select above.
+	if err := validateOptionalMailboxName(targetMailbox); err != nil {
+		return err
 	}
 
 	moveToFolder := func(folder string) error {
@@ -1581,10 +1597,8 @@ func (c *APIClient) fetchAttachments(ctx context.Context, mailbox string, uid in
 		return nil, err
 	}
 	mailbox = strings.TrimSpace(mailbox)
-	if mailbox != "" && !strings.EqualFold(mailbox, c.mailbox) {
-		if err := d.SelectFolder(mailbox); err != nil {
-			return nil, fmt.Errorf("imap select folder %q: %w", mailbox, err)
-		}
+	if err := c.selectMailboxLocked(d, mailbox); err != nil {
+		return nil, err
 	}
 
 	emails, err := d.GetEmails(uid)

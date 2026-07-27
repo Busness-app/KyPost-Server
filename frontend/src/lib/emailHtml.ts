@@ -50,7 +50,35 @@ const allowedUriSchemes = /^(?:(?:https?|mailto|tel|cid):|[^a-z]|[a-z+.\-]+(?:[^
 // Matches a leading "scheme:" so a refusal can name what it refused.
 const leadingScheme = /^([a-z][a-z0-9+.\-]*):/i;
 
-export function sanitizeEmailHtml(html: string, blockRemoteContent = false): string {
+// DOMPurify strips every character in \x00-\x20 from an attribute value before
+// testing it against ALLOWED_URI_REGEXP. The pre-check in processEmailHtml must
+// do the same, or the two disagree: `href="java&#10;script:alert(1)"` parses to
+// a value containing a raw newline, which satisfies the regex's
+// `[a-z+.\-]+[^a-z+.\-:]` branch and so is judged *allowed* here — but
+// DOMPurify collapses it to "javascript:", refuses it, and strips the href.
+// The result was the exact dead-but-live-looking anchor the [Blocked link]
+// marker exists to prevent. Normalizing first makes one decision, not two.
+function isAllowedUri(href: string): boolean {
+  return allowedUriSchemes.test(href.replace(/[\x00-\x20]/g, ""));
+}
+
+// blockRemoteContent defaults to TRUE, and that default is the security
+// property — not a convenience.
+//
+// It used to default to false. The read view passed `!showImages` explicitly
+// and so behaved correctly, but four sibling call sites (buildReplyBody,
+// buildForwardBody, printEmails, and opening a draft) called
+// `sanitizeEmailHtml(body)` with one argument and silently got the permissive
+// branch. Pressing Reply on a message whose images the user had deliberately
+// NOT unblocked dropped the quoted body into the compose editor via
+// `editor.root.innerHTML`, and every tracking pixel, <style> block,
+// background= attribute, SVG <image href>, <video poster> and <audio src>
+// fired at once — defeating the entire control this function's FORBID list
+// exists to implement.
+//
+// A caller that wants remote content must now say so. Forgetting the argument
+// fails closed (a missing image) instead of open (a fired tracking pixel).
+export function sanitizeEmailHtml(html: string, blockRemoteContent = true): string {
   return DOMPurify.sanitize(
     html,
     blockRemoteContent
@@ -85,8 +113,8 @@ export function processEmailHtml(html: string, showImages: boolean): string {
     // [Image Blocked] gets below, and the same choice the Android client makes
     // when it toasts a blocked scheme rather than swallowing the tap.
     const href = anchor.getAttribute("href") ?? "";
-    if (!allowedUriSchemes.test(href)) {
-      const scheme = href.match(leadingScheme)?.[1]?.toLowerCase();
+    if (!isAllowedUri(href)) {
+      const scheme = href.replace(/[\x00-\x20]/g, "").match(leadingScheme)?.[1]?.toLowerCase();
       anchor.replaceWith(document.createTextNode(`[Blocked link: ${scheme ? `${scheme}:` : "unrecognized address"}]`));
       return;
     }

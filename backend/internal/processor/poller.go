@@ -525,7 +525,7 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	// Resolved once per tick rather than per message: it reads and decrypts the
 	// sealed IMAP config, and every message in this batch belongs to the same
 	// account. Empty is a valid answer — see flagAppImpersonation.
-	ownDomain := p.accountDomain(u.ID)
+	ownAddress := p.accountAddress(u.ID)
 
 	processedCount := 0
 	skippedSeenCount := 0
@@ -547,7 +547,7 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		//     those would silently suppress the flag.
 		// Flagging first also means the keyword travels with the message if a
 		// user rule subsequently moves it.
-		if p.flagAppImpersonation(ctx, uc, msg, ownDomain) {
+		if p.flagAppImpersonation(ctx, uc, msg, ownAddress) {
 			p.mirrorPhishKeyword(mailCache, msg)
 		}
 		if harvestEnabled {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { processEmailHtml, sanitizeEmailHtml } from "../lib/emailHtml";
+import { processEmailHtml } from "../lib/emailHtml";
 import { firstAddressFromText, listAddressesFromText } from "../lib/addressText";
 import { isFlaggedPhishing } from "../lib/phishing";
 import { decryptMessage } from "../lib/pgpClient";
@@ -171,7 +171,12 @@ function buildReplyBody(email: InboxEmail): string {
   const subject = email.subject || "(no subject)";
   const body = email.body || "";
   const isHtml = /<[^>]+>/.test(body);
-  const rendered = isHtml ? sanitizeEmailHtml(body) : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
+  // processEmailHtml, not sanitizeEmailHtml: quoting must go through the same
+  // pipeline the read view uses (link blocking + img -> "[Image Blocked]" +
+  // remote-content-blocking sanitize). sanitizeEmailHtml alone does not strip
+  // <img>, so quoting a message the user chose not to unblock used to fire its
+  // tracking pixels the moment they pressed Reply.
+  const rendered = isHtml ? processEmailHtml(body, false) : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
   return [
     "<p><br /></p>",
     `<p>On ${escapeHtml(time)}, ${escapeHtml(sender)} wrote:</p>`,
@@ -189,7 +194,12 @@ function buildForwardBody(email: InboxEmail): string {
   const subject = email.subject || "(no subject)";
   const body = email.body || "";
   const isHtml = /<[^>]+>/.test(body);
-  const rendered = isHtml ? sanitizeEmailHtml(body) : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
+  // processEmailHtml, not sanitizeEmailHtml: quoting must go through the same
+  // pipeline the read view uses (link blocking + img -> "[Image Blocked]" +
+  // remote-content-blocking sanitize). sanitizeEmailHtml alone does not strip
+  // <img>, so quoting a message the user chose not to unblock used to fire its
+  // tracking pixels the moment they pressed Reply.
+  const rendered = isHtml ? processEmailHtml(body, false) : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
   return [
     "<p><br /></p>",
     "<p>---------- Forwarded message ----------</p>",
@@ -966,8 +976,10 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         // Same sink as buildReplyBody/buildForwardBody (composeHtmlBody ->
         // editor.root.innerHTML): a draft's stored body is HTML and must be
         // sanitized before it can become live markup, same as any other
-        // untrusted HTML entering the compose editor.
-        body: /<[^>]+>/.test(body) ? sanitizeEmailHtml(body) : body
+        // untrusted HTML entering the compose editor. Same pipeline too, so a
+        // draft quoting a hostile message doesn't fetch remote content that the
+        // read view refused to fetch.
+        body: /<[^>]+>/.test(body) ? processEmailHtml(body, false) : body
       });
       return;
     }
@@ -1047,8 +1059,14 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         // every other render path (see sanitizeEmailHtml's invariant): the
         // print document is a same-origin window that inherits the app CSP, so
         // an unsanitized body would be a script-injection sink.
+        //
+        // Remote content is blocked unconditionally rather than following the
+        // reader's per-message "Show Images" opt-in: printing acts on a whole
+        // selection, so honoring that opt-in would mean firing the tracking
+        // pixels of every other message in the batch — messages the user may
+        // never have opened — on the strength of a choice made about one.
         const renderedBody = isHtml
-          ? sanitizeEmailHtml(body)
+          ? processEmailHtml(body, false)
           : `<pre style="white-space: pre-wrap; margin: 0;">${escapeHtml(body)}</pre>`;
         return `
           <article style="page-break-inside: avoid; border: 1px solid #bbb; border-radius: 8px; padding: 12px; margin-bottom: 14px;">

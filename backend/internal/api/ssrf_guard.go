@@ -9,19 +9,15 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"kypost-server/backend/internal/netguard"
 )
 
-// isPrivateOrReservedIP reports whether ip must never be reached via a
-// user-supplied outbound URL: loopback, RFC1918/RFC4193 private, link-local
-// (this also covers the 169.254.169.254 cloud metadata address), multicast,
-// or unspecified.
+// isPrivateOrReservedIP defers to netguard, which is the single definition
+// shared with internal/processor's UnifiedPush endpoint guard. It stays a named
+// function here only so outboundIPGuard below has something to point at.
 func isPrivateOrReservedIP(ip net.IP) bool {
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() ||
-		ip.IsUnspecified()
+	return netguard.IsPrivateOrReserved(ip)
 }
 
 // outboundIPGuard decides whether an IP is forbidden for user-supplied
@@ -115,6 +111,15 @@ func newSSRFSafeHTTPClient(timeout time.Duration) *http.Client {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return errors.New("too many redirects")
+			}
+			// Refuse a downgrade to plaintext. ssrfSafeDialContext checks where
+			// each hop connects, but not how: a server reached over https could
+			// answer 302 to an http:// URL and Go would follow it happily,
+			// putting the user's CardDAV credentials on the wire in the clear
+			// for a passive observer. A redirect that lowers the protection the
+			// caller asked for is refused rather than followed.
+			if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				return fmt.Errorf("refusing redirect from https to %s", req.URL.Scheme)
 			}
 			return nil
 		},

@@ -1,9 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
-	"html"
+	"html/template"
 	"io"
 	"net/http"
 	"strings"
@@ -165,6 +166,14 @@ func (s *Server) handlePickupBlob(w http.ResponseWriter, r *http.Request) {
 // sets script-src 'self' with no 'unsafe-inline'; an inline script would be
 // blocked, and loosening the CSP for this page would weaken the policy that
 // protects the far riskier email-rendering surface.
+//
+// The placeholders are {{.PickupID}}/{{.PickupToken}}, deliberately not %s.
+// This used to be a const full of %s consumed by a hand-rolled
+// strings.Replace helper — which read exactly like a fmt.Sprintf call site
+// somebody had forgotten to write. The obvious "cleanup" (swap it for
+// fmt.Sprintf) would have compiled, produced identical output, and quietly
+// turned attacker-adjacent values into a format string. Named placeholders and
+// a real template make that edit impossible rather than merely unlikely.
 const clientSealedPickupPage = `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -181,19 +190,27 @@ pre{white-space:pre-wrap;font-family:inherit;background:#f6f6f6;padding:12px;bor
 <div id="status" class="muted">Decrypting in your browser…</div>
 <pre id="body" hidden></pre>
 <p id="notice" class="muted" hidden>This message has now been marked as viewed and cannot be retrieved again.</p>
-<script src="/pickup-decrypt.js" data-pickup-id="%s" data-pickup-token="%s"></script>
+<script src="/pickup-decrypt.js" data-pickup-id="{{.PickupID}}" data-pickup-token="{{.PickupToken}}"></script>
 </body></html>`
 
+// clientSealedPickupTemplate is parsed once at startup. html/template (not
+// text/template) does the attribute-context escaping itself, so the values
+// cannot break out of the two data- attributes no matter what they contain —
+// which is stronger than the previous manual html.EscapeString, and does not
+// depend on the caller remembering to apply it.
+var clientSealedPickupTemplate = template.Must(template.New("pickup").Parse(clientSealedPickupPage))
+
 func (s *Server) servePickupDecryptPage(w http.ResponseWriter, id, token string) {
+	// id/token are already validated as a UUID and an HMAC token by the time
+	// this runs, but the template escapes them regardless rather than relying
+	// on that remaining true.
+	var buf bytes.Buffer
+	if err := clientSealedPickupTemplate.Execute(&buf, struct{ PickupID, PickupToken string }{id, token}); err != nil {
+		s.logger.Error("failed to render pickup decrypt page", "error", err.Error())
+		http.Error(w, "failed to render pickup page", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	// id/token are echoed into attributes; both are already validated as a
-	// UUID and an HMAC token, but escape anyway rather than relying on that
-	// remaining true.
-	_, _ = w.Write([]byte(sprintfPickupPage(html.EscapeString(id), html.EscapeString(token))))
-}
-
-func sprintfPickupPage(id, token string) string {
-	out := strings.Replace(clientSealedPickupPage, "%s", id, 1)
-	return strings.Replace(out, "%s", token, 1)
+	_, _ = w.Write(buf.Bytes())
 }

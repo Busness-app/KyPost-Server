@@ -149,3 +149,47 @@ describe("dangerous URI schemes in links", () => {
     expect(out).toContain("cid:logo@example");
   });
 });
+
+// Regression: the four quoting/printing call sites in ReadPage.tsx used to call
+// sanitizeEmailHtml(body) with one argument and get the permissive branch, so a
+// message whose images the user had deliberately NOT unblocked fired every
+// tracking pixel the moment they pressed Reply. The default must fail closed.
+describe("remote-content default", () => {
+  it.each([
+    ["inline style background", '<p style="background-image:url(https://tracker.example/b)">x</p>'],
+    ["style element", "<style>p{background:url(https://tracker.example/a)}</style>"],
+    ["legacy background attribute", '<table background="https://tracker.example/c"><tr><td>x</td></tr></table>'],
+    ["video poster", '<video poster="https://tracker.example/e"></video>']
+  ])("blocks %s when blockRemoteContent is omitted", (_label, input) => {
+    expect(sanitizeEmailHtml(input)).not.toContain("tracker.example");
+  });
+});
+
+// Regression for the pre-check/DOMPurify disagreement: processEmailHtml tested
+// the raw href while DOMPurify strips \x00-\x20 first, so an obfuscated scheme
+// slipped past the "[Blocked link]" replacement and then had its href stripped
+// — leaving a dead anchor that still looked like a live link.
+describe("obfuscated scheme handling", () => {
+  it.each([
+    ["embedded newline", "java\nscript:alert(1)"],
+    ["embedded tab", "java\tscript:alert(1)"],
+    ["leading control chars", "\x01javascript:alert(1)"],
+    ["obfuscated kypost deep link", "kypost\n://native-pair?srv=https://evil.example"]
+  ])("replaces an anchor with %s with a visible marker", (_label, href) => {
+    const out = processEmailHtml(`<a href="${href}">Confirm your account</a>`, true);
+    expect(out).toContain("[Blocked link:");
+    expect(out).not.toContain("<a");
+    expect(out.toLowerCase()).not.toContain("alert(1)");
+  });
+
+  it("names the refused scheme after normalizing it", () => {
+    const out = processEmailHtml('<a href="java\nscript:alert(1)">x</a>', true);
+    expect(out).toContain("[Blocked link: javascript:]");
+  });
+
+  it("still allows ordinary links with surrounding whitespace", () => {
+    const out = processEmailHtml('<a href="  https://ok.example  ">x</a>', true);
+    expect(out).toContain("ok.example");
+    expect(out).toContain("<a");
+  });
+});

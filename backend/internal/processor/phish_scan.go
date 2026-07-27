@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"net/mail"
 	"regexp"
 	"strconv"
 	"strings"
@@ -188,9 +189,9 @@ func hasPhishKeyword(keywords []string) bool {
 // unconditional and needs nothing from here, which is what makes every step
 // below safe to fail.
 //
-// ownDomain is the account's own mail domain, resolved once per tick by the
-// caller rather than re-read per message.
-func (p *Poller) flagAppImpersonation(ctx context.Context, uc userCtx, msg imapadapter.Message, ownDomain string) bool {
+// ownAddress is the account's own full mail address, resolved once per tick by
+// the caller rather than re-read per message.
+func (p *Poller) flagAppImpersonation(ctx context.Context, uc userCtx, msg imapadapter.Message, ownAddress string) bool {
 	// An oversized message's Body was deliberately left empty rather than
 	// pulled into memory, so there is nothing to scan; rejectOversizedMessage
 	// already owns this case.
@@ -213,20 +214,37 @@ func (p *Poller) flagAppImpersonation(ctx context.Context, uc userCtx, msg imapa
 	}
 
 	// Tier B. Only reached by mail that already looks like app impersonation,
-	// so the DNS cost is paid on a vanishing fraction of messages. The server
-	// emails its own /pickup/ links, so this is what keeps a genuine notice
-	// from wearing a phishing warning.
+	// so the DNS cost is paid on a vanishing fraction of messages. This server
+	// emails its own notices (and its own /pickup/ links), so this is what
+	// keeps a genuine notice from wearing a phishing warning.
+	//
+	// The gate requires BOTH a valid DKIM signature over the account's own
+	// domain AND a From address equal to the account's own address. DKIM alone
+	// was not enough, and was in fact no gate at all for most users: it keyed
+	// on the *domain* of the account address, so for an account at
+	// victim@gmail.com the domain is "gmail.com" and every message any Gmail
+	// user sends carries a valid d=gmail.com signature. Any attacker with a
+	// free account on the victim's own provider cleared the gate and got their
+	// kypost:// deep link delivered with no banner. The same held for
+	// outlook.com, yahoo.com, icloud.com — i.e. for most people connecting this
+	// client to a mailbox they already had.
+	//
+	// Pairing the two closes that: a shared-domain provider will only DKIM-sign
+	// a From header it authenticated the sender for, so "signed by the account
+	// domain AND from the account's own address" means the account itself sent
+	// it. Neither half is sufficient alone — a From address is trivially forged
+	// without DKIM, and DKIM without the From check is the hole above.
 	//
 	// A DNS failure makes the real verifier fail closed, which leaves the
 	// message flagged: fail-safe in verdict, fail-soft in consequence -- the
 	// only cost is an advisory banner on legitimate mail, and the https link
 	// still opens. Logged at Info, not Error, because it is not a malfunction.
-	if ownDomain != "" {
+	if ownDomain := domainOf(ownAddress); ownDomain != "" && sameAddress(msg.Sender, ownAddress) {
 		if uid, err := strconv.Atoi(strings.TrimSpace(msg.ID)); err == nil {
 			if raw, err := uc.mail.FetchRawMessage(ctx, uid); err == nil && len(raw) > 0 {
 				if verifyDKIMForDomain(raw, ownDomain) {
 					p.log.Info(
-						"app-impersonation scan: message authenticates to the account's own domain, not flagging",
+						"app-impersonation scan: message is DKIM-authenticated and from the account's own address, not flagging",
 						"user_id", uc.id, "message_id", msg.ID, "domain", ownDomain, "reason", finding.Reason,
 					)
 					return false
@@ -291,18 +309,47 @@ func (p *Poller) mirrorPhishKeyword(cache *mailcache.Store, msg imapadapter.Mess
 	}
 }
 
-// accountDomain resolves the mail domain of the account itself, for the DKIM
-// gate to authenticate against. Empty when it cannot be determined, which
-// leaves a tripped message flagged rather than quietly cleared.
+// sameAddress reports whether a message's From header names exactly the
+// account's own address. sender arrives in whatever shape the IMAP server's
+// envelope produced — bare "a@b.example", or `"Display Name" <a@b.example>` —
+// so the angle-addr is extracted before comparing, and never the display name:
+// a display name is entirely sender-controlled, so matching on it would let
+// `From: "victim@gmail.com" <attacker@gmail.com>` clear the gate.
+func sameAddress(sender, ownAddress string) bool {
+	own := strings.ToLower(strings.TrimSpace(ownAddress))
+	if own == "" {
+		return false
+	}
+	candidate := strings.TrimSpace(sender)
+	if parsed, err := mail.ParseAddress(candidate); err == nil {
+		candidate = parsed.Address
+	} else if i := strings.LastIndex(candidate, "<"); i >= 0 {
+		// ParseAddress rejects some real-world envelope shapes (unquoted
+		// display names containing punctuation, for one). Fall back to the
+		// angle-addr rather than treating the whole string as an address,
+		// which would compare the display name too.
+		if j := strings.Index(candidate[i:], ">"); j > 0 {
+			candidate = candidate[i+1 : i+j]
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(candidate), own)
+}
+
+// accountAddress resolves the full mail address of the account itself, for the
+// DKIM + From gate to authenticate against. Empty when it cannot be determined,
+// which leaves a tripped message flagged rather than quietly cleared.
+//
+// Returns the whole address, not just its domain: the domain alone is not a
+// usable identity on a shared provider — see the gate in flagAppImpersonation.
 //
 // A thin I/O shim on purpose: the account address lives in the sealed IMAP
 // config, which no unit test in this package can construct. Keeping the read
-// here and passing the resulting domain into flagAppImpersonation as a plain
+// here and passing the resulting address into flagAppImpersonation as a plain
 // string is what makes the actual decision logic testable.
-func (p *Poller) accountDomain(userID string) string {
+func (p *Poller) accountAddress(userID string) string {
 	payload, exists, err := mailmsg.ReadIMAPConfigPayload(p.userIMAPConfigPath(userID), p.imapKeyPath)
 	if err != nil || !exists {
 		return ""
 	}
-	return domainOf(strings.TrimSpace(payload.Username))
+	return strings.TrimSpace(payload.Username)
 }

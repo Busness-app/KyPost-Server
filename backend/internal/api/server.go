@@ -52,6 +52,24 @@ import (
 	goimap "github.com/BrianLeishman/go-imap"
 )
 
+// Sessions live in process memory only (Server.sessions) and are never
+// persisted. That is a deliberate trade, and it has a user-visible cost worth
+// stating rather than discovering:
+//
+//   - Every restart logs every user out, mid-compose. Restarts are not rare
+//     here — scheduleContainerRestart exits the process on config changes that
+//     need one, and supervisord brings it back.
+//   - In Docker the `server` and `daemon` processes share no memory, so only
+//     the API process has sessions at all; a future second API replica would
+//     not share them either (no sticky routing, no shared store).
+//
+// What it buys: a stolen session token cannot outlive the process, there is no
+// session file to leak or to keep encrypted at rest, and revocation is a map
+// delete that cannot fail halfway. Persisting sessions would mean writing
+// bearer-equivalent credentials to the same volume this project already works
+// hard to keep free of plaintext secrets. For a self-hosted server with a
+// handful of users, being logged out by a restart is the cheaper problem.
+//
 // Session tracks who a live session token belongs to. Role is deliberately
 // not stored here: currentUser looks the user up live from the users store
 // on every request so a role change or deactivation take effect on the very
@@ -2100,6 +2118,21 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	}
 
 	s.userMu.Lock()
+	// Release the reservation when UpsertNativeDevice merged this registration
+	// into an existing row: the ID the request asked for was reserved above,
+	// but the merge means no NativeDevice record was ever created under it.
+	//
+	// Left behind, that entry is permanent. revokeUserDevices only removes IDs
+	// it finds in the user's device list, so nothing ever cleans it up — the ID
+	// becomes unregisterable by anyone forever (reserveDeviceID sees an owner),
+	// and every auth attempt against it costs deviceAuthFromRequest a lockout
+	// strike, because the owner lookup succeeds and GetNativeDevice then fails.
+	// Re-registering devices would grow the map without bound.
+	if requested := strings.TrimSpace(req.DeviceID); requested != "" && requested != registeredDeviceID {
+		if owner, ok := s.deviceIndex[requested]; ok && owner == ownerID {
+			delete(s.deviceIndex, requested)
+		}
+	}
 	s.deviceIndex[registeredDeviceID] = ownerID
 	s.userMu.Unlock()
 
@@ -3108,6 +3141,19 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 	})
 }
 
+// writeMailboxError distinguishes a folder name this server refused to send
+// (imapadapter.ErrUnsafeMailbox — the caller's input is bad, 400) from one the
+// IMAP server itself rejected (502). Both used to be 502, which told a user who
+// typed a folder name containing a stray control character that their mail
+// provider was at fault.
+func writeMailboxError(w http.ResponseWriter, err error) {
+	if errors.Is(err, imapadapter.ErrUnsafeMailbox) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadGateway)
+}
+
 func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 	mailClient, err := s.mailFor(r)
 	if err != nil {
@@ -3151,7 +3197,7 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 
 		folder, err := mailClient.CreateFolder(r.Context(), parent, name)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeMailboxError(w, err)
 			return
 		}
 
@@ -3187,7 +3233,7 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 
 		renamed, err := mailClient.RenameFolder(r.Context(), folder, name)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeMailboxError(w, err)
 			return
 		}
 
@@ -3212,7 +3258,7 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := mailClient.DeleteFolder(r.Context(), folder); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeMailboxError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -3263,6 +3309,26 @@ func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
 	if (action == "label" || action == "unlabel") && keyword == "" {
 		http.Error(w, "keyword is required for label/unlabel action", http.StatusBadRequest)
 		return
+	}
+	// The adapter refuses an unsafe keyword or mailbox on its own — that is the
+	// boundary that matters (the poller applies keywords too). Checking here as
+	// well is only about the status code: without it every message in the batch
+	// would come back as an individual 502-shaped failure, which reads as "your
+	// mail server is broken" rather than "that keyword isn't valid".
+	if action == "label" || action == "unlabel" {
+		if err := imapadapter.ValidateKeyword(keyword); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	for _, name := range []string{mailbox, targetMailbox} {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		if err := imapadapter.ValidateMailboxName(name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	uniqueIDs := make([]string, 0, len(req.MessageIDs))

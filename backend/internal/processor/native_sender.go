@@ -17,6 +17,7 @@ import (
 
 	"kypost-server/backend/internal/fsutil"
 	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/netguard"
 	"kypost-server/backend/internal/state"
 )
 
@@ -194,12 +195,7 @@ type UnifiedPushSender struct {
 // link-local (this also covers the 169.254.169.254 cloud metadata address),
 // multicast, or unspecified.
 func isPrivateOrReservedIP(ip net.IP) bool {
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() ||
-		ip.IsUnspecified()
+	return netguard.IsPrivateOrReserved(ip)
 }
 
 // ValidateUnifiedPushEndpointURL rejects UnifiedPush endpoint URLs that are

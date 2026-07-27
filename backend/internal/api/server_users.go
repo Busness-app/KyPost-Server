@@ -124,11 +124,10 @@ func (s *Server) handleUsersResetPassword(w http.ResponseWriter, r *http.Request
 	}
 	// The admin's own session isn't among this account's sessions, so there's
 	// no "current session" to keep — every one of the target's live sessions
-	// (e.g. a stolen cookie the reset is meant to shut out) is revoked.
-	s.revokeUserSessions(u.ID, "")
-	// Paired devices carry their own secret independent of the password, so a
-	// reset must revoke them explicitly or the device keeps full access.
-	s.revokeUserDevices(u.ID)
+	// (e.g. a stolen cookie the reset is meant to shut out) is revoked, along
+	// with paired devices (own secret, independent of the password) and cached
+	// CardDAV credentials. See revokeAllUserCredentials.
+	s.revokeAllUserCredentials(u)
 	s.logger.Info("user password reset by admin", "user_id", u.ID)
 	writeJSON(w, http.StatusOK, u.Public())
 }
@@ -147,12 +146,12 @@ func (s *Server) handleUsersDeactivate(w http.ResponseWriter, r *http.Request) {
 		writeUserStoreError(w, err)
 		return
 	}
-	// Cut off both credential types the account holds: web sessions and paired
-	// devices. The device-auth path also rejects inactive accounts live (see
+	// Cut off every credential type the account holds — web sessions, paired
+	// devices, and cached CardDAV Basic Auth (see revokeAllUserCredentials).
+	// The device-auth path also rejects inactive accounts live (see
 	// deviceAuthFromRequest), but purging here makes revocation explicit and
 	// durable across any future reactivation.
-	s.revokeUserSessions(u.ID, "")
-	s.revokeUserDevices(u.ID)
+	s.revokeAllUserCredentials(u)
 	s.logger.Info("user deactivated", "user_id", u.ID)
 	writeJSON(w, http.StatusOK, u.Public())
 }
@@ -178,10 +177,10 @@ func (s *Server) handleUsersClearMFA(w http.ResponseWriter, r *http.Request) {
 		writeUserStoreError(w, err)
 		return
 	}
-	s.revokeUserSessions(u.ID, "")
-	// Clearing MFA is an account-recovery action; revoke paired devices too so
-	// a device paired under the old trust state can't retain access.
-	s.revokeUserDevices(u.ID)
+	// Clearing MFA is an account-recovery action; revoke paired devices and
+	// cached CardDAV credentials too, so nothing issued under the old trust
+	// state retains access.
+	s.revokeAllUserCredentials(u)
 	// Also purge any in-flight push-MFA challenge: DisableTOTP clears the
 	// PushMFAEnabled bit, but a challenge already approved before this call
 	// is otherwise still redeemable via handlePushFinish until it naturally
