@@ -253,8 +253,10 @@ func TestDeviceAuthFromRequest_LockoutClearsAfterExpiry(t *testing.T) {
 
 	// Simulate deviceLockoutFor having elapsed by rewinding the entry's
 	// lockedUntil into the past, exactly as if real time had passed.
+	// The lockout is keyed on (deviceID, clientIP) — see deviceLockoutKey.
+	lockKey := srv.deviceLockoutKey(deviceID, deviceRequest(deviceID, deviceSecret))
 	srv.deviceLockout.mu.Lock()
-	entry, exists := srv.deviceLockout.entries[deviceID]
+	entry, exists := srv.deviceLockout.entries[lockKey]
 	if !exists {
 		srv.deviceLockout.mu.Unlock()
 		t.Fatal("expected a lockout entry for deviceID after failures were recorded")

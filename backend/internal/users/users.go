@@ -168,6 +168,10 @@ func (u User) Public() Public {
 var (
 	ErrNotFound      = errors.New("user not found")
 	ErrUsernameTaken = errors.New("username already in use")
+	// ErrLastActiveAdmin is returned when a write would leave the instance
+	// with no active administrator. Enforced inside the store's write lock
+	// rather than by the caller — see guardNotLastActiveAdmin.
+	ErrLastActiveAdmin = errors.New("cannot remove the last active admin")
 	ErrPasswordWeak  = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 )
 
@@ -534,6 +538,20 @@ func (s *Store) Create(username, password string, role Role) (User, error) {
 // mutate re-reads the store, applies fn to the matching user, and persists
 // the result. fn returns an error to abort without writing.
 func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
+	return s.mutateGuarded(id, nil, fn)
+}
+
+// mutateGuarded is mutate with a whole-file precondition evaluated inside the
+// same lock as the write. guard receives every user as freshly read from disk
+// plus the target; returning an error aborts without writing.
+//
+// This exists because a precondition checked in the handler and enforced by a
+// separate write is not a precondition at all. isLastActiveAdmin used to be
+// evaluated before calling Deactivate/SetRole, so two concurrent requests each
+// saw one other active admin and both proceeded — leaving an instance with
+// zero admins, no delete-user endpoint, and LoadOrMigrate only minting an
+// admin when users.json is absent. Recovery meant hand-editing the volume.
+func (s *Store) mutateGuarded(id string, guard func(all []User, target User) error, fn func(*User) error) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var updated User
@@ -545,6 +563,11 @@ func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
 		for i := range f.Users {
 			if f.Users[i].ID != id {
 				continue
+			}
+			if guard != nil {
+				if err := guard(f.Users, f.Users[i]); err != nil {
+					return err
+				}
 			}
 			if err := fn(&f.Users[i]); err != nil {
 				return err
@@ -566,7 +589,12 @@ func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
 
 // SetRole updates a user's role.
 func (s *Store) SetRole(id string, role Role) (User, error) {
-	return s.mutate(id, func(u *User) error {
+	guard := guardNotLastActiveAdmin
+	if role == RoleAdmin {
+		// Promoting to admin can never remove the last one.
+		guard = nil
+	}
+	return s.mutateGuarded(id, guard, func(u *User) error {
 		u.Role = role
 		return nil
 	})
@@ -602,11 +630,27 @@ func (s *Store) ClearMustChangePassword(id string) (User, error) {
 // Deactivate soft-deletes a user: their sessions stop being accepted and
 // they can no longer log in, but their data is retained.
 func (s *Store) Deactivate(id string) (User, error) {
-	return s.mutate(id, func(u *User) error {
+	return s.mutateGuarded(id, guardNotLastActiveAdmin, func(u *User) error {
 		u.Active = false
 		u.DeactivatedAt = time.Now().UTC().Format(time.RFC3339)
 		return nil
 	})
+}
+
+// guardNotLastActiveAdmin refuses a write that would leave the instance with
+// no active admin. Evaluated inside mutateGuarded's lock against the file as
+// just read, so concurrent callers cannot each observe the other's admin as
+// still active and both proceed.
+func guardNotLastActiveAdmin(all []User, target User) error {
+	if target.Role != RoleAdmin || !target.Active {
+		return nil
+	}
+	for _, u := range all {
+		if u.ID != target.ID && u.Role == RoleAdmin && u.Active {
+			return nil
+		}
+	}
+	return ErrLastActiveAdmin
 }
 
 // Reactivate restores a previously deactivated user.

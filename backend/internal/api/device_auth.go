@@ -24,6 +24,22 @@ func deviceCredentialsFromRequest(r *http.Request) (deviceID, deviceSecret strin
 	return strings.TrimSpace(r.Header.Get(headerDeviceID)), r.Header.Get(headerDeviceSecret)
 }
 
+// deviceLockoutKey scopes the device brute-force lockout to (deviceID,
+// clientIP) rather than deviceID alone.
+//
+// The routes that authenticate this way — /api/notifications/native/pull and
+// /deregister — carry no other credential, so a bare deviceID key let anyone
+// who learned a device id keep that device permanently locked out of mail
+// sync, contacts sync and push-MFA approval by burning its strike budget from
+// anywhere. handleLogin keys on username+clientIP for exactly this reason; the
+// reasoning simply had not been carried over here.
+//
+// One definition, used by the auth path and by the tests that inspect the
+// lockout map, so the two cannot drift.
+func (s *Server) deviceLockoutKey(deviceID string, r *http.Request) string {
+	return deviceID + "\x00" + clientIP(r)
+}
+
 // deviceAuthFromRequest resolves and authenticates the paired device calling
 // r: it extracts deviceId/deviceSecret from headers, finds which user owns
 // deviceId, loads that user's live NativeDevice record by ID, and verifies
@@ -45,26 +61,27 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 	if deviceID == "" || deviceSecret == "" {
 		return "", state.NativeDevice{}, false, 0
 	}
-	if allowed, wait := s.deviceLockout.allowed(deviceID); !allowed {
+	lockoutKey := s.deviceLockoutKey(deviceID, r)
+	if allowed, wait := s.deviceLockout.allowed(lockoutKey); !allowed {
 		return "", state.NativeDevice{}, false, wait
 	}
 	ownerID, okOwner := s.lookupUserByDevice(deviceID)
 	if !okOwner {
-		s.deviceLockout.recordFailure(deviceID)
+		s.deviceLockout.recordFailure(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
 	store, err := s.userStore(ownerID)
 	if err != nil {
-		s.deviceLockout.recordFailure(deviceID)
+		s.deviceLockout.recordFailure(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
 	dev, okDev := store.GetNativeDevice(deviceID)
 	if !okDev {
-		s.deviceLockout.recordFailure(deviceID)
+		s.deviceLockout.recordFailure(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
 	if !users.VerifySecretHash(dev.SecretHash, deviceSecret) {
-		s.deviceLockout.recordFailure(deviceID)
+		s.deviceLockout.recordFailure(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
 	// Honor account deactivation on the device path the same way currentUser
@@ -76,7 +93,7 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 	if err != nil || !u.Active {
 		return "", state.NativeDevice{}, false, 0
 	}
-	s.deviceLockout.recordSuccess(deviceID)
+	s.deviceLockout.recordSuccess(lockoutKey)
 	return ownerID, dev, true, 0
 }
 

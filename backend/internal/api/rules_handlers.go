@@ -250,6 +250,17 @@ func (s *Server) handleRuleSieve(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
+		// The same width bound the two JSON write paths enforce. ParseRuleText
+		// caps nesting depth but not leaf count, and a script well inside the
+		// 1 MiB body limit above parses into hundreds of thousands of
+		// conditions — each of which recompiles its regex on every message,
+		// inside an evaluation the poller cannot interrupt and holds a
+		// single instance-wide semaphore across. Skipping this check here made
+		// the cap the other two paths enforce trivially bypassable.
+		if err := rules.ValidateMatchShape(parsed.Match); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
 		updated, err := store.Upsert(parsed)
 		if err != nil {
 			http.Error(w, "failed to save rule", http.StatusInternalServerError)

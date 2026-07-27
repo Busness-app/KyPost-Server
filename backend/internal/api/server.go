@@ -3612,7 +3612,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password     string `json:"password"`
 		CaptchaToken string `json:"captchaToken,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// Bounded before it is buffered. This is the only unauthenticated decode in
+	// the codebase, and it runs before the lockout and captcha checks below, so
+	// an unbounded body let any anonymous caller choose the server's allocation:
+	// json.Decode buffers the whole value and then allocates the string on top,
+	// measured at ~5.6x the wire size. A login body is a username, a password
+	// and a captcha token.
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -4020,11 +4026,18 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to update password", http.StatusInternalServerError)
 		return
 	}
-	// A password change should cut off any other session on this account —
-	// e.g. a stolen cookie the legitimate user is trying to lock out by
-	// changing their password — while leaving the session making this very
-	// request (presumably the legitimate user) logged in.
-	s.revokeUserSessions(u.ID, currentSessionToken(r))
+	// A password change is the remediation a user reaches for when they think
+	// they have been compromised, so it must cut off *every* credential the
+	// account holds — not just sessions. A device secret minted from a stolen
+	// session is independent of the password and survived this call, keeping
+	// full mailbox access and (since every device registers MFAApprover=true)
+	// a standing second factor. The three admin recovery paths already call
+	// revokeAllUserCredentials for exactly this reason; the self-service path
+	// was the gap.
+	//
+	// The session making this request is preserved so the legitimate user is
+	// not logged out of the tab they are standing in.
+	s.revokeAllUserCredentialsExcept(u, currentSessionToken(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

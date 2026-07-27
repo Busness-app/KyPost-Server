@@ -235,5 +235,12 @@ func writeUserStoreError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// The store now enforces the last-admin invariant inside its own write
+	// lock (the handler's pre-check remains as a fast path with a friendlier
+	// message, but this is the authoritative refusal).
+	if errors.Is(err, users.ErrLastActiveAdmin) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	http.Error(w, "user store error", http.StatusInternalServerError)
 }
