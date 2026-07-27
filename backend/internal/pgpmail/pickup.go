@@ -76,6 +76,65 @@ func (s *PickupStore) recordPath(id string) string {
 	return filepath.Join(s.baseDir, id+".json")
 }
 
+// maxOutstandingPickupsPerUser bounds how many live pickup records one account
+// may hold at once.
+//
+// Each record carries a whole message body — the send path admits roughly
+// 34 MiB of decoded attachments — and sits on the shared state volume for its
+// full TTL. Creating one is an ordinary authenticated send, so without a cap a
+// single account (or a stolen session) can fill the volume that every other
+// user's mail cache, contacts and sealed private keys are written to, at which
+// point fsutil.AtomicWriteFile starts failing for everyone.
+//
+// 100 is set well above any plausible real use: the flow exists for the
+// occasional correspondent who has no PGP key, not for bulk sending.
+const maxOutstandingPickupsPerUser = 100
+
+// ErrPickupQuotaExceeded reports that senderUserID already holds the maximum
+// number of live pickup records. Surfaced to the sender, so the text names the
+// feature and nothing else.
+var ErrPickupQuotaExceeded = errors.New("pgpmail: too many unread pickup messages are already waiting for this account")
+
+// outstandingForLocked counts senderUserID's records that are still live —
+// neither consumed nor past their expiry.
+//
+// Tombstones and expired records are deliberately not counted. The sweeper
+// collects them on its own schedule, and letting them hold a slot would mean
+// someone who legitimately sent a week's worth of pickup links gets refused
+// over messages that have already been read.
+func (s *PickupStore) outstandingForLocked(senderUserID string) int {
+	entries, err := os.ReadDir(s.baseDir)
+	if err != nil {
+		// No directory yet means no records yet. A read failure is reported as
+		// zero rather than as "full": refusing to send because the quota could
+		// not be counted would turn an unrelated disk problem into an outage.
+		return 0
+	}
+	now := time.Now().UTC()
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join(s.baseDir, entry.Name()))
+		if rerr != nil {
+			continue
+		}
+		var record PickupRecord
+		if json.Unmarshal(b, &record) != nil {
+			continue
+		}
+		if record.SenderUserID != senderUserID || record.Viewed {
+			continue
+		}
+		if expiresAt, perr := time.Parse(time.RFC3339, record.ExpiresAt); perr == nil && now.After(expiresAt) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
 // Create seals body and persists a new pickup record, expiring after ttl.
 // Returns the record's ID, used to build the pickup link. mode is the body's
 // format ("html" or "plain"), stored so the pickup page renders what the
@@ -83,6 +142,10 @@ func (s *PickupStore) recordPath(id string) string {
 func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body, mode string, ttl time.Duration) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.outstandingForLocked(senderUserID) >= maxOutstandingPickupsPerUser {
+		return "", ErrPickupQuotaExceeded
+	}
 
 	id, err := fsutil.NewUUIDv4()
 	if err != nil {
@@ -132,6 +195,10 @@ func (s *PickupStore) CreateClientSealed(senderUserID, recipientEmail, sealed st
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.outstandingForLocked(senderUserID) >= maxOutstandingPickupsPerUser {
+		return "", ErrPickupQuotaExceeded
+	}
 
 	id, err := fsutil.NewUUIDv4()
 	if err != nil {

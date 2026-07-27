@@ -657,6 +657,40 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 	}
 }
 
+// StartContactPhotoSweeper reclaims contact-photo files no live contact
+// references, for every user, on the same hourly cadence as the pickup sweep.
+//
+// Photo filenames are content hashes, so two contacts with the same picture
+// share one file and no handler can safely delete on unlink — clearing one
+// contact's photo would blank the other's. That is why DELETE .../photo only
+// clears the reference, and why the bytes need a reference-based sweep to come
+// back at all. Without this they never did.
+//
+// One user's failure is logged and skipped rather than aborting the pass, so a
+// single corrupt contacts file cannot stop every other account being reclaimed.
+func (s *Server) StartContactPhotoSweeper(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			users, err := s.users.List()
+			if err != nil {
+				s.logger.Error("contact photo sweep could not list users", "error", err.Error())
+				continue
+			}
+			for _, u := range users {
+				if err := s.sweepContactPhotos(u.ID); err != nil {
+					s.logger.Error("contact photo sweep failed",
+						"user_id", u.ID, "error", err.Error())
+				}
+			}
+		}
+	}
+}
+
 // StartSessionSweeper reclaims sessions that passed their idle timeout or
 // absolute lifetime without anyone presenting them again, mirroring
 // StartPickupSweeper's ticker/select pattern. Call once after NewServer.

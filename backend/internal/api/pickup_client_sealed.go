@@ -95,6 +95,15 @@ func (s *Server) handlePickupCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, err := s.pickupStore.CreateClientSealed(ac.UserID, recipient, sealed, pickupLinkTTL)
+	if errors.Is(err, pgpmail.ErrPickupQuotaExceeded) {
+		// Not a 500: the caller has hit their own quota, which is a condition
+		// they can clear themselves. Saying so lets the compose UI tell them
+		// what to do instead of reporting a server fault.
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": "too many unread pickup messages are already waiting; they expire on their own, or ask recipients to read them",
+		})
+		return
+	}
 	if err != nil {
 		s.logger.Error("failed to create client-sealed pickup record", "error", err.Error())
 		http.Error(w, "failed to create pickup record", http.StatusInternalServerError)
