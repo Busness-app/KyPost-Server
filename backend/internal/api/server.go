@@ -3770,14 +3770,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			// within the cooldown window reuse the existing push rather than fanning
 			// another one out — see mfaPushCooldown's doc for why.
 			if allowed, _ := s.mfaPushCooldown.tryConsume(u.ID); allowed {
-				go s.dispatchPushChallenge(u.ID, ch.ID)
+				// Snapshot the request context before the goroutine: r is not
+				// safe to touch once this handler returns.
+				go s.dispatchPushChallenge(u.ID, ch.ID, newLoginContext(r), ch.CreatedAt, ch.MatchDigits, ch.DecoyDigits)
 			}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		resp := map[string]any{
 			"mfaRequired": true,
 			"challengeId": ch.ID,
 			"methods":     methods,
-		})
+		}
+		if u.PushMFAEnabled {
+			// The number the approving device must send back. Safe to hand to
+			// this caller: they are the one being asked to read it off this
+			// screen, and knowing it proves nothing on its own — approving
+			// still needs a paired device's credentials.
+			resp["matchDigits"] = ch.MatchDigits
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 

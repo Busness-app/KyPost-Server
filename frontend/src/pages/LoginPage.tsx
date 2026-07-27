@@ -31,6 +31,12 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
   const [useRecoveryCode, setUseRecoveryCode] = useState(false);
   const [mfaMethods, setMfaMethods] = useState<string[]>([]);
   const [mfaMode, setMfaMode] = useState<"totp" | "push">("totp");
+  // The number the approving device must send back. Displaying it is what makes
+  // push approval more than a blind "yes": the phone shows several numbers and
+  // only this screen — the one that actually started the sign-in — says which is
+  // right. Without it the person tapping Approve cannot distinguish their own
+  // login from an attacker's, which is the whole MFA-fatigue attack.
+  const [mfaMatchDigits, setMfaMatchDigits] = useState("");
   const [captchaConfig, setCaptchaConfig] = useState<CaptchaConfig | null>(null);
   const [captchaToken, setCaptchaToken] = useState("");
   const [captchaNonce, setCaptchaNonce] = useState(0);
@@ -94,10 +100,12 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         mfaRequired?: boolean;
         challengeId?: string;
         methods?: string[];
+        matchDigits?: string;
       }>("/api/auth/login", { username, password, captchaToken: captchaToken || undefined });
       if (res.mfaRequired && res.challengeId) {
         const methods = res.methods ?? [];
         setMfaChallengeId(res.challengeId);
+        setMfaMatchDigits(res.matchDigits ?? "");
         setMfaMethods(methods);
         setMfaMode(methods.includes("push") ? "push" : "totp");
         setMfaCode("");
@@ -135,6 +143,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       });
       await onAuthChanged();
       setMfaChallengeId("");
+      setMfaMatchDigits("");
       setMfaCode("");
       finishSignIn(Boolean(res.mustChangePassword));
     } catch {
@@ -171,6 +180,8 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
             return;
           }
           setMfaChallengeId("");
+          setMfaMatchDigits("");
+      setMfaMatchDigits("");
           finishSignIn(Boolean(fin.mustChangePassword));
         } else if (res.status === "denied" || res.status === "expired") {
           clearInterval(interval);
@@ -266,7 +277,28 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         mfaMode === "push" ? (
           <div className="auth-form">
             <h3>Two-Factor Authentication</h3>
-            <p>Approve this sign-in from a paired device. Waiting for approval…</p>
+            {mfaMatchDigits ? (
+              <>
+                <p>Tap this number on your paired device to approve the sign-in:</p>
+                <p
+                  style={{
+                    fontSize: "2.5rem",
+                    fontWeight: 700,
+                    letterSpacing: "0.15em",
+                    textAlign: "center",
+                    margin: "12px 0"
+                  }}
+                  aria-label={`Approval number ${mfaMatchDigits.split("").join(" ")}`}
+                >
+                  {mfaMatchDigits}
+                </p>
+                <p className="config-muted">
+                  If your device is asking you to approve a sign-in you did not start, choose Deny.
+                </p>
+              </>
+            ) : (
+              <p>Approve this sign-in from a paired device. Waiting for approval…</p>
+            )}
             {mfaMethods.includes("totp") ? (
               <button
                 type="button"

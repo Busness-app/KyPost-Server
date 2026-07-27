@@ -130,10 +130,22 @@ func methodsContain(methods []string, want string) bool {
 	return false
 }
 
+// respondPush approves or denies as the paired device would. run-4 M14 made an
+// approval carry the number the browser is displaying, so this reads it off the
+// live challenge — the real client reads it off the human reading the screen.
 func respondPush(srv *Server, challengeID, deviceID, deviceSecret string, approve bool) *httptest.ResponseRecorder {
+	matchDigits := ""
+	if ch, ok := srv.mfaChallenges.Get(challengeID); ok {
+		matchDigits = ch.MatchDigits
+	}
+	return respondPushWithDigits(srv, challengeID, deviceID, deviceSecret, approve, matchDigits)
+}
+
+func respondPushWithDigits(srv *Server, challengeID, deviceID, deviceSecret string, approve bool, matchDigits string) *httptest.ResponseRecorder {
 	body, _ := json.Marshal(map[string]any{
 		"challengeId": challengeID,
 		"approve":     approve,
+		"matchDigits": matchDigits,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/mfa/push/respond", bytes.NewReader(body))
 	setDeviceHeaders(req, deviceID, deviceSecret)

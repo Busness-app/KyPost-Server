@@ -3,7 +3,6 @@ package processor
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -172,8 +171,15 @@ func SendNativePushToDevices(ctx context.Context, dispatcher *NativePushDispatch
 					}
 				}
 			} else {
-				// Prefix the failure reason with the platform for diagnostics.
-				relayFailure[platform] = fmt.Sprintf("[%s] %s", platform, err.Error())
+				// A coarse classification, never err.Error(). This value is
+				// recorded on health.Status.NativePushLastError, which the
+				// UNAUTHENTICATED /api/health publishes — and the error text
+				// carries both the endpoint URL (which for UnifiedPush *is*
+				// the device's push credential) and up to 8 KiB of the remote
+				// server's response body, which a user pointing a device at
+				// their own host controls outright. See
+				// classifyNativePushFailure.
+				relayFailure[platform] = classifyNativePushFailure(platform, err)
 			}
 			if onDeviceError != nil {
 				onDeviceError(device, platform, err)
