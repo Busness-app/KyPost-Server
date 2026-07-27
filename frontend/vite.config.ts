@@ -11,6 +11,7 @@ export default defineConfig({
     // jsdom, not node: the email sanitizer under test uses DOMParser and
     // DOMPurify, both of which need a real DOM.
     environment: "jsdom",
+    setupFiles: ["src/test/setup.ts"],
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"]
   }
 });
