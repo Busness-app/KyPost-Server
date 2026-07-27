@@ -43,9 +43,54 @@ describe("sanitizeEmailHtml", () => {
       expect(sanitizeEmailHtml(input, true)).not.toContain(forbidden);
     });
 
-    it("permits the same remote content when images are allowed", () => {
-      const out = sanitizeEmailHtml('<p style="background-image:url(https://cdn.example/x)">x</p>', false);
+    it("permits remote content when images are allowed", () => {
+      const out = sanitizeEmailHtml('<table background="https://cdn.example/x"><tr><td>y</td></tr></table>', false);
       expect(out).toContain("cdn.example");
+    });
+  });
+
+  // run-4 finding M6: CSS was coupled to the remote-content toggle, but they
+  // are different concerns. Pressing "Show Remote Content" — which a user does
+  // to see a newsletter's pictures — also handed the sender document-wide CSS
+  // on the app's own origin, because the permissive branch dropped both the
+  // style attribute and the <style> element from its FORBID lists and the CSP
+  // allows style-src 'unsafe-inline'.
+  //
+  // Email CSS is not scoped to the message container, so the sender could
+  // hide the "This message impersonates KyPost" banner with
+  // .notice-error{display:none!important}, repaint the PGP badge from red to a
+  // green "verified", or cover the whole viewport with a fixed-position
+  // body::after overlay. None of that requires script, so nothing else in the
+  // pipeline stops it. Roundcube prefixes email CSS selectors for exactly this
+  // reason.
+  //
+  // Unblocking images must therefore never unblock CSS. The remote-content
+  // entries (background attribute, svg/video/audio) stay coupled to the
+  // toggle — those really are about fetching remote URLs.
+  describe("sender CSS is forbidden regardless of the remote-content toggle", () => {
+    it.each([[true], [false]])("strips the style attribute (blockRemoteContent=%s)", (block) => {
+      const out = sanitizeEmailHtml('<p style="display:none">x</p>', block);
+      expect(out).not.toContain("display:none");
+      expect(out).not.toContain("style=");
+    });
+
+    it.each([[true], [false]])("strips <style> elements (blockRemoteContent=%s)", (block) => {
+      // A leading <style> is hoisted into <head> and dropped anyway; the
+      // payload needs a preceding element to survive, which is how it was
+      // reproduced.
+      const out = sanitizeEmailHtml("<p>x</p><style>.notice-error{display:none!important}</style>", block);
+      expect(out).not.toContain("notice-error");
+      expect(out).not.toContain("<style");
+    });
+
+    it("does not let an unblocked message hide the impersonation banner", () => {
+      const out = sanitizeEmailHtml(
+        '<p>hi</p><style>.notice-error,.security-badge-off{display:none!important}</style>' +
+          '<div style="position:fixed;inset:0;background:#fff">overlay</div>',
+        false
+      );
+      expect(out).not.toContain("display:none");
+      expect(out).not.toContain("position:fixed");
     });
   });
 });

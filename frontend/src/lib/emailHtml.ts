@@ -10,25 +10,48 @@ import DOMPurify from "dompurify";
 // It lives in its own module rather than inside ReadPage.tsx so it can be
 // tested directly — see emailHtml.test.ts.
 //
-// blockRemoteContent additionally forbids style/background attributes and
-// <style>, <svg>, <video>, and <audio> elements. Stripping <img> tags alone
-// does not block remote-resource loading: a legacy background="..."
-// attribute, an inline style="background-image:url(...)", a <style> block,
-// an SVG <image href="...">, a <video poster="...">, or an <audio src="...">
-// are all in DOMPurify's default allowlist and fetch a remote URL eagerly on
-// render exactly like <img src> does, so they bypass the "Show Images"
-// control (and its anti-tracking-pixel intent) unless explicitly forbidden
-// here too. svg/video/audio are all in DOMPurify's own DEFAULT_FORBID_CONTENTS
-// set, so forbidding these three tags drops their entire subtree (any
-// <source>/<track> children included) rather than hoisting children to the
-// top level — no separate child-tag entry is needed.
+// blockRemoteContent additionally forbids the background attribute and the
+// <svg>, <video>, and <audio> elements. Stripping <img> tags alone does not
+// block remote-resource loading: a legacy background="..." attribute, an SVG
+// <image href="...">, a <video poster="...">, or an <audio src="..."> are all
+// in DOMPurify's default allowlist and fetch a remote URL eagerly on render
+// exactly like <img src> does, so they bypass the "Show Images" control (and
+// its anti-tracking-pixel intent) unless explicitly forbidden here too.
+// svg/video/audio are all in DOMPurify's own DEFAULT_FORBID_CONTENTS set, so
+// forbidding these three tags drops their entire subtree (any <source>/<track>
+// children included) rather than hoisting children to the top level — no
+// separate child-tag entry is needed.
+//
+// <style> and the style attribute are NOT part of that set: they are forbidden
+// unconditionally, in forbiddenTags/forbiddenAttrs. They can carry a remote
+// url() too, but that is the lesser of the two problems they pose — see the
+// comment there.
 // Interactive form controls are forbidden unconditionally. DOMPurify allows
 // <form>/<input>/<button> by default, and no legitimate email needs them —
 // but a sender-controlled form rendered inside the authenticated app is a
 // credential-phishing surface that looks exactly like part of the client.
 // The CSP's form-action 'self' stops the submission reaching an attacker's
 // origin, which is a mitigation, not a reason to render the form at all.
-const forbiddenTags = ["form", "input", "button", "textarea", "select", "option"];
+//
+// <style> and the style attribute are forbidden unconditionally, and are in
+// this list rather than the remote-content one for that reason. They were
+// coupled to blockRemoteContent, so pressing "Show Remote Content" — which a
+// user does to see a newsletter's pictures — also handed the sender
+// document-wide CSS on the app's own origin, since the CSP allows
+// style-src 'unsafe-inline' and email CSS is not scoped to the message
+// container. That let a message hide the "This message impersonates KyPost"
+// banner with .notice-error{display:none!important}, repaint the PGP badge
+// from red to a green "verified", or cover the viewport with a fixed-position
+// body::after overlay — none of which needs script, so nothing else in this
+// pipeline would have stopped it. Roundcube rewrites and prefixes email CSS
+// selectors to prevent exactly this.
+//
+// Loading a picture and restyling the application are different decisions, and
+// only the first one is what the toggle asks the user about. Blocking CSS
+// costs unblocked mail some visual fidelity, which is the correct trade: the
+// alternative is letting the sender redraw the security UI that describes them.
+const forbiddenTags = ["form", "input", "button", "textarea", "select", "option", "style"];
+const forbiddenAttrs = ["style"];
 
 // The URI schemes an email is allowed to link to.
 //
@@ -87,10 +110,10 @@ export function sanitizeEmailHtml(html: string, blockRemoteContent = true): stri
       ? {
           ADD_ATTR: ["target"],
           ALLOWED_URI_REGEXP: allowedUriSchemes,
-          FORBID_ATTR: ["style", "background"],
-          FORBID_TAGS: [...forbiddenTags, "style", "svg", "video", "audio"]
+          FORBID_ATTR: [...forbiddenAttrs, "background"],
+          FORBID_TAGS: [...forbiddenTags, "svg", "video", "audio"]
         }
-      : { ADD_ATTR: ["target"], ALLOWED_URI_REGEXP: allowedUriSchemes, FORBID_TAGS: forbiddenTags }
+      : { ADD_ATTR: ["target"], ALLOWED_URI_REGEXP: allowedUriSchemes, FORBID_ATTR: forbiddenAttrs, FORBID_TAGS: forbiddenTags }
   );
 }
 
