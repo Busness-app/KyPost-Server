@@ -187,6 +187,17 @@ func newVerificationCode() (string, error) {
 // to lowercase before storing) with the given displayName, generating a
 // random VerificationCode and setting ExpiresAt to 5 minutes from now.
 func (s *Store) Create(userID, email, displayName string) (Alias, error) {
+	return s.create(userID, email, displayName, false)
+}
+
+// CreateAuto is Create for a record the server initiated on the user's behalf
+// (see Alias.Auto). Identical in every respect except the Auto flag, which
+// changes how SweepTerminal treats the record once it fails.
+func (s *Store) CreateAuto(userID, email string) (Alias, error) {
+	return s.create(userID, email, "", true)
+}
+
+func (s *Store) create(userID, email, displayName string, auto bool) (Alias, error) {
 	var created Alias
 	err := s.update(func() error {
 		id, err := fsutil.NewUUIDv4()
@@ -207,6 +218,7 @@ func (s *Store) Create(userID, email, displayName string) (Alias, error) {
 			Status:           "pending",
 			CreatedAt:        now.Format(time.RFC3339),
 			ExpiresAt:        now.Add(pendingExpiry).Format(time.RFC3339),
+			Auto:             auto,
 		}
 		s.aliases = append(s.aliases, created)
 		return s.persistLocked()
@@ -279,14 +291,19 @@ func (s *Store) Delete(id string) error {
 
 // SweepTerminal removes records with Status == "failed" whose FailedAt is
 // older than retention. "verified" and "pending" records are left untouched
-// regardless of age.
+// regardless of age, as are failed Auto records: a user-initiated alias that
+// failed is just clutter (the user knows they tried), but a failed Auto record
+// is the only report that the server could not prove the account's own address
+// and that the key is therefore not being published. Dropping it would make a
+// permanently unpublishable key look like one that was never set up, and would
+// also erase the FailedAt the prober backs off against.
 func (s *Store) SweepTerminal(retention time.Duration) error {
 	return s.update(func() error {
 		cutoff := time.Now().Add(-retention)
 		kept := make([]Alias, 0, len(s.aliases))
 		changed := false
 		for _, a := range s.aliases {
-			if a.Status == "failed" {
+			if a.Status == "failed" && !a.Auto {
 				failedAt, err := time.Parse(time.RFC3339, a.FailedAt)
 				if err == nil && failedAt.Before(cutoff) {
 					changed = true

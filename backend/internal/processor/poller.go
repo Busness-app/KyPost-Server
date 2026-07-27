@@ -576,6 +576,9 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	}
 
 	p.checkPendingSendAsAliases(ctx, u.ID, uc.mail)
+	// Must follow the check above, so it sees the freshest verdict for the
+	// account's own address and doesn't probe an address just proven.
+	p.ensureOwnAddressProven(u.ID)
 	// Must follow the check above, so an alias verified in this very tick
 	// gets its PGP User ID without waiting for the next one.
 	p.reconcilePGPUserIDs(u.ID)

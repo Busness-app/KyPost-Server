@@ -910,6 +910,15 @@ export function ConfigPage() {
                       : alias.status === "failed"
                         ? `verification failed${alias.failedAt ? ` ${formatWhen(alias.failedAt)}` : ""}`
                         : `verifying, expires ${formatWhen(alias.expiresAt)}`}
+                    {alias.auto ? (
+                      <span className="config-muted">
+                        {alias.status === "failed"
+                          ? " — this is your account address, checked automatically so your public key can be published for it." +
+                            " Your key is not being published while this check is failing, which usually means your mail provider" +
+                            " does not DKIM-sign the mail you send. KyPost retries weekly."
+                          : " — your account address, checked automatically so your public key can be published for it."}
+                      </span>
+                    ) : null}
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span className={`contacts-badge ${sendAsStatusClass(alias.status)}`}>
