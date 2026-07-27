@@ -177,7 +177,10 @@ specifically rather than reporting a generic decryption failure.
   bot fetching the HTML does not burn the message.
 - Server-protected accounts keep the original server-sealed path. The server
   can already read their mailbox, so client-sealing there adds machinery
-  without changing what it can see.
+  without changing what it can see. That page renders as text too, for the
+  same reason — it stores the composed body's mode and flattens an HTML body
+  before escaping it, rather than escaping the markup and showing the
+  recipient the tags.
 
 ## Status
 

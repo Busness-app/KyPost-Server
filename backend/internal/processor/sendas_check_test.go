@@ -352,7 +352,14 @@ func stubVerifiedDKIM(t *testing.T) {
 	t.Helper()
 	prev := verifyDKIMForDomain
 	verifyDKIMForDomain = func([]byte, string) bool { return true }
-	t.Cleanup(func() { verifyDKIMForDomain = prev })
+	prevCovers := verifyDKIMCoversHeader
+	// Verification now additionally requires the signature to cover the header
+	// the code was found in — stub that too, for the same reason.
+	verifyDKIMCoversHeader = func([]byte, string, string) bool { return true }
+	t.Cleanup(func() {
+		verifyDKIMForDomain = prev
+		verifyDKIMCoversHeader = prevCovers
+	})
 }
 
 // seedPollerPGPIdentity generates a key for email and stores it on userID,

@@ -25,6 +25,13 @@ type PickupRecord struct {
 	// accounts, for which the server can already read the mailbox anyway.
 	Subject string                     `json:"subject"`
 	BodyEnc cryptutil.EncryptedPayload `json:"bodyEnc"`
+	// Mode is the composed body's format — "html" or "plain" — carried from
+	// the send request so the pickup page can present the body the way it was
+	// written. Without it every body was treated as plain text, which showed
+	// the recipient of an HTML message its tags. Empty on records written
+	// before this field existed; those predate it by at most one TTL and are
+	// read as plain, which is exactly how they were rendered when stored.
+	Mode string `json:"mode,omitempty"`
 	// ClientSealed is the browser-sealed form: an opaque blob encrypted
 	// under a random key that never reaches this server (it travels in the
 	// URL fragment of the pickup link, which browsers do not transmit). The
@@ -56,8 +63,10 @@ func (s *PickupStore) recordPath(id string) string {
 }
 
 // Create seals body and persists a new pickup record, expiring after ttl.
-// Returns the record's ID, used to build the pickup link.
-func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body string, ttl time.Duration) (string, error) {
+// Returns the record's ID, used to build the pickup link. mode is the body's
+// format ("html" or "plain"), stored so the pickup page renders what the
+// sender actually composed.
+func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body, mode string, ttl time.Duration) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -81,6 +90,7 @@ func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body string,
 		RecipientEmail: recipientEmail,
 		Subject:        subject,
 		BodyEnc:        bodyEnc,
+		Mode:           mode,
 		CreatedAt:      now.Format(time.RFC3339),
 		ExpiresAt:      now.Add(ttl).Format(time.RFC3339),
 	}
@@ -167,6 +177,7 @@ func (s *PickupStore) consumeLocked(id string) (PickupRecord, error) {
 		r.BodyEnc = cryptutil.EncryptedPayload{}
 		r.ClientSealed = ""
 		r.Subject = ""
+		r.Mode = ""
 		return r
 	}
 	if expiresAt, perr := time.Parse(time.RFC3339, record.ExpiresAt); perr == nil && time.Now().UTC().After(expiresAt) {
@@ -184,30 +195,31 @@ func (s *PickupStore) consumeLocked(id string) (PickupRecord, error) {
 	return record, nil
 }
 
-// View opens a SERVER-sealed pickup record's body exactly once. Returns
-// ErrPickupClientSealed for a client-sealed record, which this server has no
-// key for — the caller must serve it to the browser instead.
-func (s *PickupStore) View(id string) (subject, body string, err error) {
+// View opens a SERVER-sealed pickup record's body exactly once, returning it
+// with the mode it was composed in. Returns ErrPickupClientSealed for a
+// client-sealed record, which this server has no key for — the caller must
+// serve it to the browser instead.
+func (s *PickupStore) View(id string) (subject, body, mode string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	record, err := s.consumeLocked(id)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if record.ClientSealed != "" {
-		return "", "", ErrPickupClientSealed
+		return "", "", "", ErrPickupClientSealed
 	}
 
 	key, err := cryptutil.LoadKey(s.keyPath)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	plain, err := cryptutil.Open(record.BodyEnc, key)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return record.Subject, string(plain), nil
+	return record.Subject, string(plain), record.Mode, nil
 }
 
 // ViewClientSealed returns a client-sealed blob exactly once, for the browser

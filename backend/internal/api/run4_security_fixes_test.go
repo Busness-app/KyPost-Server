@@ -368,3 +368,35 @@ func TestIMAPTestRefusesPartialCredentialOverride(t *testing.T) {
 			rec.Code, http.StatusBadRequest)
 	}
 }
+
+// run-4 finding H6: the web-push subscription endpoint accepted any endpoint
+// string with only a non-empty check — no scheme check, no netguard screening
+// — while the sibling UnifiedPush path validates all of that. The stored
+// endpoint is then POSTed to by the poller, so an authenticated user could
+// aim the server at internal addresses (with POST /api/notifications/test as
+// a three-state oracle) and, because webpush-go defaults to a zero-timeout
+// client with context.Background(), a tarpit endpoint blocked the poll tick
+// forever — halting mail processing for every user on the instance.
+func TestWebPushSubscriptionEndpointIsScreened(t *testing.T) {
+	srv, u := newTestServerWithUser(t)
+
+	for _, endpoint := range []string{
+		"http://169.254.169.254/latest/meta-data",
+		"http://127.0.0.1:11434/api/pull",
+		"http://10.0.0.5/internal",
+		"ftp://example.com/x",
+	} {
+		body, _ := json.Marshal(map[string]any{
+			"endpoint": endpoint,
+			"keys":     map[string]string{"p256dh": "BParkedPublicKeyValue", "auth": "c2VjcmV0MTIzNDU2Nzg"},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/notifications/subscriptions", bytes.NewReader(body))
+		authRequestAs(srv, req, u.ID)
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("endpoint %q: status = %d, want %d — a push endpoint must be screened the "+
+				"same way the UnifiedPush endpoint already is", endpoint, rec.Code, http.StatusBadRequest)
+		}
+	}
+}

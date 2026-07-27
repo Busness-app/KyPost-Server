@@ -47,6 +47,22 @@ func SendWebPush(store *state.Store, publicKey, privateKeyPath string, ttlSecond
 		VAPIDPublicKey:  publicKey,
 		VAPIDPrivateKey: privateKey,
 		TTL:             ttlSeconds,
+		// webpush-go otherwise builds a bare &http.Client{} and calls
+		// SendNotificationWithContext(context.Background(), ...): no timeout,
+		// redirects followed, nothing cancellable. SendWebPush runs inside the
+		// goroutine that poller.tick's wg.Wait() awaits, and tick holds a
+		// size-1 semaphore across every user — so one endpoint that accepts the
+		// connection and never answers stopped mail polling, classification and
+		// notification for the whole instance until the container restarted.
+		// A hostile endpoint is not required: any push service that hangs
+		// rather than refusing produces the same outcome.
+		HTTPClient: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: &http.Transport{DialContext: safeDialContext},
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 
 	sent := 0

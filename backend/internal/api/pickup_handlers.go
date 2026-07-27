@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inbucket/html2text"
+
 	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/pgpmail"
 )
@@ -46,11 +48,12 @@ func (s *Server) handlePickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subject, body, err := s.pickupStore.View(id)
+	subject, body, mode, err := s.pickupStore.View(id)
 	if err != nil {
 		http.Error(w, "this message has already been viewed or has expired", http.StatusGone)
 		return
 	}
+	body = s.pickupDisplayBody(body, mode)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>%s</title></head>`+
@@ -61,16 +64,43 @@ func (s *Server) handlePickup(w http.ResponseWriter, r *http.Request) {
 		html.EscapeString(subject), html.EscapeString(subject), html.EscapeString(body))
 }
 
+// pickupDisplayBody turns a stored body into what the pickup page shows.
+//
+// An HTML body is flattened to readable text rather than rendered as markup.
+// The same rule as pickup-decrypt.js, for the same reason: this page has no
+// sanitizer and shares an origin with the app, so the sender's markup must
+// never become live HTML here. Escaping it without flattening — what this
+// used to do to every body — is the other wrong answer, and the one the
+// recipient noticed: it showed them the tags instead of the message.
+//
+// A plain body is returned untouched, so a message that merely talks about
+// markup keeps it. The caller escapes either result before it reaches the
+// page.
+func (s *Server) pickupDisplayBody(body, mode string) string {
+	if !strings.EqualFold(strings.TrimSpace(mode), "html") {
+		return body
+	}
+	text, err := html2text.FromString(body)
+	if err != nil {
+		// The link is already burned by View, so there is no retry to offer:
+		// show the raw body escaped, which is at worst what the recipient
+		// would have seen before, rather than nothing at all.
+		s.logger.Error("failed to flatten pickup HTML body to text", "error", err.Error())
+		return body
+	}
+	return text
+}
+
 // sendPickupNotification creates a pickup record for one recipient with no
 // known PGP key and sends them a short, unencrypted email with a link to
 // retrieve the real message once. Consumed by Task 6's send-path
 // integration for every recipient in the "without key" set of an encrypted
 // send.
-func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainBody, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) error {
+func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainBody, mode, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) error {
 	if !s.pairingSecretConfigured() {
 		return fmt.Errorf("PAIRING_SECRET is not set; refusing to send a pickup link signed with a known-empty key")
 	}
-	id, err := s.pickupStore.Create(userID, recipient, subject, plainBody, pickupLinkTTL)
+	id, err := s.pickupStore.Create(userID, recipient, subject, plainBody, mode, pickupLinkTTL)
 	if err != nil {
 		return fmt.Errorf("create pickup record: %w", err)
 	}

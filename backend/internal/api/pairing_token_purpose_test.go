@@ -50,7 +50,7 @@ func TestPairingTokenPurposeMismatchRejected(t *testing.T) {
 func TestPickupHandlerRejectsTokenMintedForOtherPurpose(t *testing.T) {
 	srv := newTestServer(t)
 
-	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "Body", time.Hour)
+	id, err := srv.pickupStore.Create("user-1", "recipient@example.com", "Subject", "Body", "plain", time.Hour)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

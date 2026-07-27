@@ -1,7 +1,9 @@
 package processor
 
 import (
+	"bytes"
 	"context"
+	"net/mail"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,12 @@ import (
 // here can satisfy. Production never reassigns it; the DKIM crypto itself is
 // covered in internal/adapters/imap/dkim_verify_test.go.
 var verifyDKIMForDomain = imapadapter.VerifyDKIMForDomain
+
+// verifyDKIMCoversHeader indirects imapadapter.VerifyDKIMCoversHeader for the
+// same reason, and is the check that actually gates alias verification: a
+// signature must cover the header the code was found in, not merely come from
+// the right domain.
+var verifyDKIMCoversHeader = imapadapter.VerifyDKIMCoversHeader
 
 // userSendAsStore returns the cached send-as alias store for a user,
 // mirroring userMailCacheStore/userRulesStore — the api process
@@ -102,10 +110,27 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 					"user_id", userID, "alias_id", alias.ID, "uid", strconv.Itoa(m.UID), "error", err.Error())
 				continue
 			}
-			if verifyDKIMForDomain(raw, domain) {
-				verified = true
-				break
+			// The verification code lives in the Subject, so the signature must
+			// actually cover the Subject — a d= match alone proved nothing
+			// about it. RFC 6376 hashes only the headers named in h=, takes the
+			// last occurrence of each, and tolerates extras, so an account
+			// holder could take any genuinely signed message from the target
+			// domain, staple "Subject: <code>" on top, IMAP-APPEND it to their
+			// own INBOX, and have the alias verified without ever controlling
+			// the address. Run-3 replaced a forgeable Authentication-Results
+			// header with real crypto here; this binds that crypto to the thing
+			// actually being trusted.
+			if !verifyDKIMCoversHeader(raw, domain, "Subject") {
+				continue
 			}
+			// And the signing domain must align with the From that carries the
+			// alias address, so a signature over some unrelated message from
+			// the same domain is not enough.
+			if !strings.EqualFold(domainOf(rawFromAddress(raw)), domain) {
+				continue
+			}
+			verified = true
+			break
 		}
 		if verified {
 			if err := store.MarkVerified(alias.ID); err != nil {
@@ -253,4 +278,14 @@ func domainOf(email string) string {
 		return strings.ToLower(email[i+1:])
 	}
 	return ""
+}
+
+// rawFromAddress pulls the lowercased addr-spec out of a complete message's
+// From header, or "" when it has none.
+func rawFromAddress(raw []byte) string {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return ""
+	}
+	return parseFromAddress(msg.Header.Get("From"))
 }

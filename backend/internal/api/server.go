@@ -1334,7 +1334,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		// all — answering 200 in that case would silently convert a hard
 		// failure into a lie, which is exactly the failure mode a hard 400 used
 		// to prevent before this opt-in existed.
-		failed := s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password)
+		failed := s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, req.Mode, smtpHost, smtpPort, addr, payload.Username, payload.Password)
 		total := len(plan.withoutKeyEmails)
 		if total > 0 && failed == total {
 			http.Error(w, "failed to deliver a pickup link to any recipient; nothing was sent", http.StatusBadGateway)
@@ -1385,7 +1385,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	// unlike the all-keyless branch above: the keyed recipients above already
 	// received the message, so this loop is topping up delivery to the
 	// keyless subset, not carrying the entire send.
-	s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, smtpHost, smtpPort, addr, payload.Username, payload.Password)
+	s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, req.Mode, smtpHost, smtpPort, addr, payload.Username, payload.Password)
 }
 
 // sendPickupNotifications mails a pickup link to every keyless recipient,
@@ -1395,10 +1395,10 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 // differ only in what they do with the failure count: the all-keyless path
 // has nothing else to fall back on and must check it, the mixed path already
 // delivered to the keyed recipients and treats this as best-effort logging.
-func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients []string, subject, body, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) int {
+func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients []string, subject, body, mode, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) int {
 	failed := 0
 	for _, recipient := range recipients {
-		if err := s.sendPickupNotification(userID, envelopeFrom, recipient, subject, body, smtpHost, smtpPort, addr, smtpUsername, smtpPassword); err != nil {
+		if err := s.sendPickupNotification(userID, envelopeFrom, recipient, subject, body, mode, smtpHost, smtpPort, addr, smtpUsername, smtpPassword); err != nil {
 			s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
 			failed++
 		}
@@ -1810,6 +1810,18 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 		payload.Keys.P256DH = strings.TrimSpace(payload.Keys.P256DH)
 		if payload.Endpoint == "" || payload.Keys.Auth == "" || payload.Keys.P256DH == "" {
 			http.Error(w, "endpoint and keys are required", http.StatusBadRequest)
+			return
+		}
+		// Screened exactly like the UnifiedPush endpoint already is. This is a
+		// user-supplied URL the poller later POSTs to, and it had only a
+		// non-empty check — so it was an authenticated SSRF into the
+		// deployment's private network, with POST /api/notifications/test
+		// returning sent/failed/removedStale as a three-state oracle. The
+		// netguard predicate lives in its own package precisely because a
+		// security check with two homes gets fixed in one of them; this was the
+		// third home.
+		if err := processor.ValidateUnifiedPushEndpointURL(payload.Endpoint); err != nil {
+			http.Error(w, "invalid push endpoint: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
