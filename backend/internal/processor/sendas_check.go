@@ -3,6 +3,7 @@ package processor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/mail"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/sendas"
+	"kypost-server/backend/internal/users"
 )
 
 // verifyDKIMForDomain indirects imapadapter.VerifyDKIMForDomain so tests in
@@ -259,9 +261,27 @@ func (p *Poller) reconcilePGPUserIDs(userID string) {
 		return
 	}
 	// Fingerprint, key ID, source and creation time are all unchanged — the
-	// primary key is the same key, only its User ID set grew.
-	if _, err := p.users.SetPGPIdentity(userID, identity.Fingerprint, identity.KeyID,
-		identity.ArmoredPublicKey, sealed, u.PGPKeySource, u.PGPKeyCreatedAt); err != nil {
+	// primary key is the same key, only its User ID set grew — so this writes
+	// key material only, under the fingerprint it read at the top of the
+	// function.
+	//
+	// That expectation is the point. Everything between the read and here
+	// (opening the private key, re-signing each missing User ID, re-sealing)
+	// takes hundreds of microseconds, and the user may replace or migrate their
+	// key in that window. This used to call SetPGPIdentity, which rewrote the
+	// whole identity unconditionally: a key generated during the window was
+	// reverted to the stale copy, and a migration to client custody had its
+	// browser envelope destroyed and a server-readable key put back.
+	//
+	// A refusal here is not a failure worth retrying differently — the next
+	// tick re-reads whatever key is current and reconciles that one instead.
+	if _, err := p.users.UpdatePGPKeyMaterial(userID, identity.Fingerprint,
+		identity.ArmoredPublicKey, sealed); err != nil {
+		if errors.Is(err, users.ErrPGPFingerprintChanged) || errors.Is(err, users.ErrWouldDowngradeCustody) {
+			p.log.Info("pgp key changed while reconciling user ids; leaving the newer key alone",
+				"user_id", userID, "reason", err.Error())
+			return
+		}
 		p.log.Error("failed to store pgp identity after user id reconcile",
 			"user_id", userID, "error", err.Error())
 		return

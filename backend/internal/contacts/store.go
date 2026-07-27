@@ -218,6 +218,41 @@ func (s *Store) getLocked(uid string) (Contact, bool) {
 // have called refreshFromDiskLocked this call (Upsert and UpsertIfMatch both
 // do so before any precondition check, so the check and the write below see
 // the same, current-as-of-lock-acquisition state).
+// carryPGPProvenance restores the TOFU pin (fingerprint, source, verified) from
+// the stored record when a writer sends back the same key material without it.
+//
+// PGPKeyFingerprint is the first-seen pin that makes the resolver's
+// tierKeyChanged refusal work at all — that check is gated on pinnedFP != "",
+// so a contact whose pin is missing will silently accept and auto-trust the
+// next WKD result for that address, which is the key substitution the pin
+// exists to prevent. Three of five write paths (sync, CardDAV PUT, vCard
+// import) had no field for the provenance and so dropped it on every ordinary
+// write: one routine phone sync left the key in place with an empty pin.
+//
+// Carrying it here rather than at the call sites is the point. A sixth write
+// path cannot forget, in the same way none can drop a PhotoRef.
+//
+// Only when the key material is byte-identical. A different key deserves a
+// different pin, and stamping the old fingerprint onto new key material would
+// be worse than dropping it — the record would claim a pin that describes
+// nothing, and tierKeyChanged would compare against a fingerprint no key has.
+// An emptied key takes its provenance with it, for the same reason.
+//
+// A writer that supplies provenance explicitly is authoritative and is left
+// alone: that is how the resolver re-pins a verified key change and how
+// backfillPGPKeyFingerprint fills in a manually pasted key.
+func carryPGPProvenance(c *Contact, existing Contact) {
+	if c.PGPKey == "" || c.PGPKey != existing.PGPKey {
+		return
+	}
+	if c.PGPKeyFingerprint != "" || c.PGPKeySource != "" || c.PGPKeyVerified {
+		return
+	}
+	c.PGPKeyFingerprint = existing.PGPKeyFingerprint
+	c.PGPKeySource = existing.PGPKeySource
+	c.PGPKeyVerified = existing.PGPKeyVerified
+}
+
 func (s *Store) upsertLocked(c Contact) (Contact, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	s.seq++
@@ -251,6 +286,7 @@ func (s *Store) upsertLocked(c Contact) (Contact, error) {
 			// callers echo it back — means no write path can drop a photo by
 			// omitting the field, and none can point it somewhere else.
 			c.PhotoRef = existing.PhotoRef
+			carryPGPProvenance(&c, existing)
 			s.contacts[i] = c
 			if err := s.persistLocked(); err != nil {
 				return Contact{}, err

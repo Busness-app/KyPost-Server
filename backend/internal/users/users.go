@@ -180,6 +180,11 @@ var (
 	// identity would silently discard a browser-wrapped private key. There is
 	// deliberately no downgrade path (docs/E2E_PGP.md); this enforces it.
 	ErrWouldDowngradeCustody = errors.New("account uses a client-held key: delete the existing identity first")
+	// ErrPGPFingerprintChanged is returned when a caller that read one key
+	// tries to write its result back after a different key has replaced it.
+	// The caller's copy is stale, not wrong; retrying against the current key
+	// is the correct response.
+	ErrPGPFingerprintChanged = errors.New("the account's pgp key changed while this update was in flight")
 	ErrPasswordWeak          = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 )
 
@@ -768,6 +773,43 @@ func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, private
 		u.PGPKeyProtection = PGPProtectionServer
 		u.PGPKeySource = source
 		u.PGPKeyCreatedAt = createdAt
+		return nil
+	})
+}
+
+// UpdatePGPKeyMaterial replaces only the public key and its sealed private half
+// for an identity whose fingerprint is still expectFingerprint, leaving key ID,
+// source, creation time and protection untouched.
+//
+// This is the narrow write the daemon's send-as reconcile needs: it adds User
+// IDs to an existing key, which changes the key's bytes but not its identity.
+// It used to reach for SetPGPIdentity, which rewrites everything — and because
+// it snapshots the user, spends hundreds of microseconds re-signing, and only
+// then writes, a key replaced during that window was silently reverted to the
+// stale copy.
+//
+// Making the expectation a required argument is what closes that window: the
+// caller states which key it read, and the write is refused under the lock if
+// that is no longer the current one. An empty expectation is rejected rather
+// than treated as "any", because a vacuous precondition is worst exactly when
+// the account has no key and a stale write would install one.
+func (s *Store) UpdatePGPKeyMaterial(id, expectFingerprint, armoredPublicKey, privateKeyEnc string) (User, error) {
+	if strings.TrimSpace(expectFingerprint) == "" {
+		return User{}, errors.New("expected fingerprint is required to update key material")
+	}
+	return s.mutate(id, func(u *User) error {
+		// Same refusal as SetPGPIdentity, restated rather than inherited so the
+		// two preconditions cannot drift apart: writing privateKeyEnc onto a
+		// client-held identity would hand the server back a readable copy of a
+		// key it is not supposed to have, and destroy the browser envelope.
+		if u.PGPProtection() == PGPProtectionClient {
+			return ErrWouldDowngradeCustody
+		}
+		if u.PGPFingerprint != expectFingerprint {
+			return ErrPGPFingerprintChanged
+		}
+		u.PGPPublicKey = armoredPublicKey
+		u.PGPPrivateKeyEnc = privateKeyEnc
 		return nil
 	})
 }
