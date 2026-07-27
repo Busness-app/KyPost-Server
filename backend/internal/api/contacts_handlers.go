@@ -57,21 +57,21 @@ type contactPayload struct {
 
 func (p contactPayload) toContact(uid string) contacts.Contact {
 	return contacts.Contact{
-		UID:                uid,
-		FormattedName:      strings.TrimSpace(p.FormattedName),
-		GivenName:          p.GivenName,
-		FamilyName:         p.FamilyName,
-		MiddleName:         p.MiddleName,
-		Prefix:             p.Prefix,
-		Suffix:             p.Suffix,
-		Nickname:           p.Nickname,
-		Org:                p.Org,
-		Title:              p.Title,
-		Emails:             p.Emails,
-		Phones:             p.Phones,
-		Addresses:          p.Addresses,
-		Notes:              p.Notes,
-		Birthday:           p.Birthday,
+		UID:           uid,
+		FormattedName: strings.TrimSpace(p.FormattedName),
+		GivenName:     p.GivenName,
+		FamilyName:    p.FamilyName,
+		MiddleName:    p.MiddleName,
+		Prefix:        p.Prefix,
+		Suffix:        p.Suffix,
+		Nickname:      p.Nickname,
+		Org:           p.Org,
+		Title:         p.Title,
+		Emails:        p.Emails,
+		Phones:        p.Phones,
+		Addresses:     p.Addresses,
+		Notes:         p.Notes,
+		Birthday:      p.Birthday,
 		// PhotoRef is intentionally NOT copied from the payload. It names a
 		// file the server writes and later serves; callers do not get to
 		// choose it. Callers that need to preserve an existing photo across an

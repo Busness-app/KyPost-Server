@@ -180,7 +180,7 @@ var (
 	// identity would silently discard a browser-wrapped private key. There is
 	// deliberately no downgrade path (docs/E2E_PGP.md); this enforces it.
 	ErrWouldDowngradeCustody = errors.New("account uses a client-held key: delete the existing identity first")
-	ErrPasswordWeak  = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
+	ErrPasswordWeak          = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 )
 
 // MinPasswordLen is the minimum length of any password this store will
