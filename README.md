@@ -18,7 +18,7 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 - Contacts address book with groups, dedupe, bulk delete, CSV and vCard import and export, and photo support
 - CardDAV server (`/dav`, `/.well-known/carddav`) to sync contacts to phones and desktop apps. An optional CardDAV client syncs against an external address book.
 - Multi-factor authentication: TOTP authenticator apps, one-time recovery codes, and push-approval sign-in
-- Optional CAPTCHA (Turnstile or Friendly Captcha) on login. It works together with the built-in lockout of 3 strikes and 15 minutes.
+- Optional CAPTCHA on login: self-hosted proof-of-work, Turnstile, or Friendly Captcha. It works together with the built-in lockout of 3 strikes and 15 minutes.
 - Browser push notifications for each user, for all mail or for keyword matches only. KyPost also supports native push pairing for mobile apps.
 - Config page for IMAP, SMTP, model authentication, tuning, logs, health, and decisions
 - A dozen theme presets
@@ -211,8 +211,11 @@ Common variables:
 - `PUSH_RELAY_KEY` (per-server API key from the relay operator. Set it together with `PUSH_RELAY_URL` to enable Android native push.)
 - `APNS_RELAY_URL` (optional. Base URL of the central APNs relay Worker that delivers iOS native push.)
 - `APNS_RELAY_KEY` (per-server API key from the relay operator. Set it together with `APNS_RELAY_URL` to enable iOS native push.)
-- `CAPTCHA_PROVIDER` (optional. Set `turnstile` or `friendly` to require a CAPTCHA solution on login. It works together with the built-in lockout of 3 strikes and 15 minutes.)
-- `CAPTCHA_SITE_KEY` and `CAPTCHA_SECRET_KEY` (required together with `CAPTCHA_PROVIDER`. The site key is public. The server verifies solutions with the secret key.)
+- `CAPTCHA_PROVIDER` (optional. Set `pow`, `turnstile`, or `friendly` to require a CAPTCHA solution on login. It works together with the built-in lockout of 3 strikes and 15 minutes.)
+  - `pow` is self-hosted proof-of-work: the only provider that makes no third-party network call and adds no third-party origin to the CSP. It requires no account with anyone and no keys to obtain — the signing key is generated on first use at `POW_SECRET_FILE`. It raises the cost of scripted login spraying by roughly one to two orders of magnitude; it does **not** replace the three-strikes lockout, which remains the real brute-force defence. Multi-replica deployments must set `POW_SECRET` so every replica agrees on one signing key.
+  - `turnstile` and `friendly` verify a token against a third-party siteverify endpoint and need a site key + secret key.
+- `CAPTCHA_SITE_KEY` and `CAPTCHA_SECRET_KEY` (required together with `CAPTCHA_PROVIDER=turnstile` or `friendly`; not used by `pow`. The site key is public. The server verifies solutions with the secret key.)
+- `POW_MAX_NUMBER`, `POW_SECRET_FILE`, `POW_SECRET` (optional, `CAPTCHA_PROVIDER=pow` only — see `.env.example` for tuning notes)
 
 Notes:
 

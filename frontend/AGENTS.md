@@ -28,7 +28,7 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 
 | Page | Endpoints used |
 |------|---------------|
-| `LoginPage.tsx` | `POST /api/auth/login`, `POST /api/auth/password` (`/login` sign-in plus protected `/password` change-password mode) |
+| `LoginPage.tsx` | `POST /api/auth/login`, `POST /api/auth/password` (`/login` sign-in plus protected `/password` change-password mode), `GET /api/auth/pow-challenge` (`CAPTCHA_PROVIDER=pow` only) |
 | `ReadPage.tsx` | `GET /api/inbox?limit=500&mailbox=<name>`, `POST /api/inbox/actions` (bulk inbox actions + read/unread state updates, includes current mailbox context; move actions are triggered by drag-drop from this page) |
 | `HealthPage.tsx` | `GET /api/health`, `GET /api/status` (includes `emailsProcessedLastHour`), `POST /api/health/repair` |
 | `ConfigPage.tsx` | `GET/PUT /api/config` (admin tabs), `GET/POST/DELETE /api/imap/config` (also carries SMTP host/port for sending), `POST /api/imap/test`, `POST /api/classifier/test` (admin tab), `GET /api/labels` |
