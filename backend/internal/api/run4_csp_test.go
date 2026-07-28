@@ -91,3 +91,27 @@ func TestCSPNeverAllowsInlineOrWildcardScript(t *testing.T) {
 		}
 	}
 }
+
+// The self-hosted proof-of-work provider needs no third-party origin, no
+// WASM, and no blob: worker — it is same-origin fetch plus crypto.subtle.
+// That is the main reason to choose it over Turnstile or Friendly Captcha, so
+// it is worth a test rather than a comment.
+func TestCSPAddsNothingForSelfHostedPoW(t *testing.T) {
+	policy := buildContentSecurityPolicy(captcha.ProviderPoW)
+
+	if policy != buildContentSecurityPolicy(captcha.ProviderNone) {
+		t.Fatalf("pow must not widen the default policy:\n got: %s\nwant: %s",
+			policy, buildContentSecurityPolicy(captcha.ProviderNone))
+	}
+	for _, forbidden := range []string{
+		"cdn.jsdelivr.net", "challenges.cloudflare.com", "wasm-unsafe-eval", "blob:",
+	} {
+		if strings.Contains(policy, forbidden) {
+			t.Errorf("pow policy names %q, which it has no use for:\n%s", forbidden, policy)
+		}
+	}
+	// The worker-src the Friendly widget needs must stay 'self'-only here.
+	if !strings.Contains(policy, "worker-src 'self';") {
+		t.Errorf("pow policy should keep worker-src at 'self':\n%s", policy)
+	}
+}

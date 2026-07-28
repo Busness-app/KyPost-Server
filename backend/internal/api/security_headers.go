@@ -18,6 +18,10 @@ import (
 //   - challenges.cloudflare.com (script + frame): the Turnstile login CAPTCHA
 //   - cdn.jsdelivr.net (script + connect), 'wasm-unsafe-eval' and blob:
 //     workers: the Friendly Captcha widget and its WASM proof-of-work
+//   - the self-hosted 'pow' provider deliberately appears nowhere below: it
+//     is a same-origin fetch plus crypto.subtle, so it needs no third-party
+//     origin, no WASM, and no blob: worker. Pinned by
+//     TestCSPAddsNothingForSelfHostedPoW.
 //   - fonts.googleapis.com / fonts.gstatic.com: the fonts index.html loads
 //   - style-src 'unsafe-inline': inline style attributes in the Quill compose
 //     editor (sanitized email HTML no longer carries any — see emailHtml.ts)
