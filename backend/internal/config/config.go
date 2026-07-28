@@ -256,12 +256,14 @@ func Default() Config {
 
 func LoadOrInit(path string) (Config, error) {
 	configDir := filepath.Dir(path)
+	// Same SECRET_DIR convention processor.relayKeyFilePathWithPrefix uses.
+	secretDir := EnvOrDefault("SECRET_DIR", "/kypost/private")
 	if _, err := os.Stat(path); err == nil {
 		cfg, err := Load(path)
 		if err != nil {
 			return Config{}, err
 		}
-		changed, err := ensureNotificationKeyMaterial(configDir, &cfg)
+		changed, err := ensureNotificationKeyMaterial(configDir, secretDir, &cfg)
 		if err != nil {
 			return Config{}, err
 		}
@@ -276,7 +278,7 @@ func LoadOrInit(path string) (Config, error) {
 		return Config{}, fmt.Errorf("mkdir config dir: %w", err)
 	}
 	cfg := Default()
-	_, err := ensureNotificationKeyMaterial(configDir, &cfg)
+	_, err := ensureNotificationKeyMaterial(configDir, secretDir, &cfg)
 	if err != nil {
 		return Config{}, err
 	}
@@ -315,10 +317,28 @@ func Save(path string, cfg Config) error {
 	return fsutil.AtomicWriteFile(path, b, 0o600)
 }
 
-func ensureNotificationKeyMaterial(configDir string, cfg *Config) (bool, error) {
+// ensureNotificationKeyMaterial fills in the VAPID identity, generating the
+// private key on first use.
+//
+// New installs put the key in secretDir. It used to go to configDir, which made
+// it the one secret in this system outside SECRET_DIR — those are separate
+// volumes with separate lifecycles, and an operator who copies "the config"
+// reasonably does not expect a signing key to come with it.
+//
+// An install that already records a path keeps it, which is why the assignment
+// is guarded rather than unconditional. The VAPID public key is registered with
+// every browser that has ever subscribed to notifications, so relocating an
+// existing key would invalidate every live subscription — a worse outcome than
+// the key sitting in a directory it should not have been in. New installs get
+// the right layout; existing ones keep working.
+func ensureNotificationKeyMaterial(configDir, secretDir string, cfg *Config) (bool, error) {
 	changed := false
 	if strings.TrimSpace(cfg.Notifications.PrivateKeyPath) == "" {
-		cfg.Notifications.PrivateKeyPath = filepath.Join(configDir, "notifications-vapid-private.pem")
+		dir := strings.TrimSpace(secretDir)
+		if dir == "" {
+			dir = configDir
+		}
+		cfg.Notifications.PrivateKeyPath = filepath.Join(dir, "notifications-vapid-private.pem")
 		changed = true
 	}
 	key, err := loadOrCreateNotificationPrivateKey(cfg.Notifications.PrivateKeyPath)

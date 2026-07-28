@@ -17,19 +17,36 @@ type CaptchaWidgetProps = {
   onToken: (token: string) => void;
 };
 
-const PROVIDER_SCRIPT: Record<CaptchaProvider, { src: string; markerAttr: string }> = {
+// Third-party script sources, each pinned and — where the CDN serves immutable
+// versioned artifacts — checked with Subresource Integrity.
+//
+// integrity matters most for jsDelivr: it serves arbitrary npm and GitHub
+// content, so without a hash the login page executes whatever that URL returns
+// on the day. The value below was computed from the pinned artifact
+// (friendly-challenge@0.9.12/widget.module.min.js, 40904 bytes) and verified
+// reproducible across two independent fetches. Bumping the version REQUIRES
+// recomputing it:
+//
+//   curl -fsSL <url> | openssl dgst -sha384 -binary | openssl base64 -A
+//
+// Turnstile has no integrity hash on purpose: Cloudflare serves that URL as a
+// rolling, deliberately-unversioned loader, so pinning a hash would break the
+// widget the next time they ship. Its origin is at least named explicitly in
+// the CSP, and only when Turnstile is the configured provider.
+const PROVIDER_SCRIPT: Record<CaptchaProvider, { src: string; markerAttr: string; integrity?: string }> = {
   turnstile: {
     src: "https://challenges.cloudflare.com/turnstile/v0/api.js",
     markerAttr: "data-kypost-captcha-turnstile"
   },
   friendly: {
     src: "https://cdn.jsdelivr.net/npm/friendly-challenge@0.9.12/widget.module.min.js",
-    markerAttr: "data-kypost-captcha-friendly"
+    markerAttr: "data-kypost-captcha-friendly",
+    integrity: "sha384-dBo7K67Ql3VCbsnnnv4Ooln0dQckF64+vgnSdbIYj/8HAT4XvlIJkmgwmOx1HWgu"
   }
 };
 
 function loadCaptchaScript(provider: CaptchaProvider) {
-  const { src, markerAttr } = PROVIDER_SCRIPT[provider];
+  const { src, markerAttr, integrity } = PROVIDER_SCRIPT[provider];
   if (document.querySelector(`script[${markerAttr}]`)) {
     return;
   }
@@ -37,6 +54,12 @@ function loadCaptchaScript(provider: CaptchaProvider) {
   script.src = src;
   script.async = true;
   script.defer = true;
+  if (integrity) {
+    script.integrity = integrity;
+    // Required for SRI on a cross-origin script: without it the response is
+    // opaque and the browser cannot check the hash, so it refuses to run it.
+    script.crossOrigin = "anonymous";
+  }
   if (provider === "friendly") {
     script.type = "module";
   }

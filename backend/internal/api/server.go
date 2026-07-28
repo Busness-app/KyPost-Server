@@ -335,7 +335,7 @@ func (s *Server) routes() http.Handler {
 	s.routesRules(mux)
 	s.routesFrontend(mux)
 
-	return withSecurityHeaders(mux)
+	return withSecurityHeaders(mux, buildContentSecurityPolicy(s.captchaProvider))
 }
 
 // routesAuth registers sign-in, session, and second-factor endpoints.

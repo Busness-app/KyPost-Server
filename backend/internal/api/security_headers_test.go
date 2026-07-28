@@ -36,18 +36,30 @@ func TestSecurityHeadersOnAllResponses(t *testing.T) {
 			t.Errorf("CSP missing directive %q; got %q", directive, csp)
 		}
 	}
-	// The login CAPTCHA widgets and Google Fonts are the only third-party
-	// origins the SPA legitimately loads from; the email read view needs
-	// remote images once the user opts in.
+	// Google Fonts is loaded unconditionally by index.html; the email read view
+	// needs remote images once the user opts in.
 	for _, allowance := range []string{
-		"https://challenges.cloudflare.com",
 		"https://fonts.googleapis.com",
 		"https://fonts.gstatic.com",
-		"https://cdn.jsdelivr.net",
 		"img-src 'self' data: https: http:",
 	} {
 		if !strings.Contains(csp, allowance) {
 			t.Errorf("CSP missing required allowance %q; got %q", allowance, csp)
+		}
+	}
+	// run-4 hardening note 1 changed this deliberately. Both CAPTCHA origins
+	// used to be asserted here unconditionally, which is what the header
+	// actually did — and jsDelivr serves arbitrary npm and GitHub content, so
+	// naming it as a script source on an install with no CAPTCHA configured
+	// handed script execution on this origin to anything publishable there.
+	// This test server configures no provider, so neither may appear.
+	// buildContentSecurityPolicy's own tests cover the enabled cases.
+	for _, forbidden := range []string{
+		"https://challenges.cloudflare.com",
+		"https://cdn.jsdelivr.net",
+	} {
+		if strings.Contains(csp, forbidden) {
+			t.Errorf("CSP names %q with no CAPTCHA provider configured; got %q", forbidden, csp)
 		}
 	}
 
