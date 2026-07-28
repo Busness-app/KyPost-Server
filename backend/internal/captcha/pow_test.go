@@ -215,3 +215,28 @@ func TestPoWIssuesDistinctSalts(t *testing.T) {
 func errorIsChallengeExpired(err error) bool {
 	return errors.Is(err, ErrChallengeExpired)
 }
+
+func TestNewVerifierBuildsPoWProvider(t *testing.T) {
+	v, err := NewVerifier(Config{Provider: ProviderPoW, HMACKey: []byte("k"), MaxNumber: 100})
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	if _, isPoW := v.(*PoWVerifier); !isPoW {
+		t.Fatalf("NewVerifier(pow) = %T, want *PoWVerifier", v)
+	}
+}
+
+func TestNewVerifierPoWDoesNotWantASiteverifySecret(t *testing.T) {
+	// The pow provider has no upstream to authenticate to, so SecretKey is
+	// meaningless for it — requiring one would make operators invent a
+	// value that is never used.
+	if _, err := NewVerifier(Config{Provider: ProviderPoW, HMACKey: []byte("k")}); err != nil {
+		t.Fatalf("pow must not require SecretKey: %v", err)
+	}
+}
+
+func TestNewVerifierPoWRequiresAnHMACKey(t *testing.T) {
+	if _, err := NewVerifier(Config{Provider: ProviderPoW}); err == nil {
+		t.Fatal("pow with no HMAC key must fail closed")
+	}
+}
