@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"kypost-server/backend/internal/captcha"
 	"kypost-server/backend/internal/mfa"
 	"kypost-server/backend/internal/totp"
 	"kypost-server/backend/internal/users"
@@ -130,7 +131,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// failed/missing solution never pays scrypt's cost.
 	if s.captchaVerifier != nil {
 		ok, err := s.captchaVerifier.Verify(r.Context(), req.CaptchaToken, clientIP(r))
-		if err != nil {
+		switch {
+		case errors.Is(err, captcha.ErrChallengeExpired):
+			// Self-hosted proof-of-work only: the solution was correct and
+			// correctly signed, it just arrived after the challenge's
+			// deadline — a tab left open, not a credential. Refund the
+			// strike (three stale tabs must not lock anyone out) and answer
+			// 401 rather than the 503 below, which means "the provider is
+			// down" and would be a lie here: there is no provider. The
+			// client fetches a fresh challenge and retries. No password is
+			// checked on this path, so the refund cannot buy an attacker
+			// guesses.
+			s.loginLockout.cancelAttempt(lockoutKey)
+			http.Error(w, "security check expired, please try again", http.StatusUnauthorized)
+			return
+		case err != nil:
 			// The operator's CAPTCHA provider is down; the user never got as
 			// far as offering a password. Give the strike back, or an outage
 			// would lock out every user of the instance.
@@ -138,8 +153,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("captcha verification failed", "error", err.Error())
 			http.Error(w, "captcha verification unavailable", http.StatusServiceUnavailable)
 			return
-		}
-		if !ok {
+		case !ok:
 			http.Error(w, "captcha verification failed", http.StatusUnauthorized)
 			return
 		}

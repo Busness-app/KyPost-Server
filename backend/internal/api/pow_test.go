@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -170,5 +172,86 @@ func TestPoWChallengeEndpointRateLimitsPerIP(t *testing.T) {
 	}
 	if last.Header().Get("Retry-After") == "" {
 		t.Error("a 429 should tell the client when to come back")
+	}
+}
+
+// stubVerifier lets these tests drive handleLogin's captcha branch directly,
+// without solving a real challenge.
+type stubVerifier struct {
+	ok  bool
+	err error
+}
+
+func (s stubVerifier) Verify(context.Context, string, string) (bool, error) { return s.ok, s.err }
+
+func TestLoginRefundsTheStrikeForAnExpiredChallenge(t *testing.T) {
+	srv := newTestServer(t)
+	srv.captchaVerifier = stubVerifier{err: captcha.ErrChallengeExpired}
+
+	// Get the bootstrap admin user's actual username
+	all, err := srv.users.List()
+	if err != nil || len(all) != 1 {
+		t.Fatalf("expected exactly one bootstrap user, got %+v err=%v", all, err)
+	}
+	adminUsername := all[0].Username
+
+	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": adminUsername, "password": "irrelevant", "captchaToken": "stale"})
+
+	// A stale tab is a clock, not a credential: 401 so the client knows to
+	// fetch a fresh challenge, but not the 503 that means "the provider is
+	// down" — there is no provider to be down.
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+	// And it must cost nothing: three expired tabs must not lock the user out.
+	lockoutKey := adminUsername + "\x00192.0.2.1"
+	if ok, _ := srv.loginLockout.allowed(lockoutKey); !ok {
+		t.Error("an expired challenge must not spend a lockout strike")
+	}
+}
+
+func TestLoginSpendsTheStrikeForAWrongSolution(t *testing.T) {
+	srv := newTestServer(t)
+	srv.captchaVerifier = stubVerifier{ok: false}
+
+	// Get the bootstrap admin user's actual username
+	all, err := srv.users.List()
+	if err != nil || len(all) != 1 {
+		t.Fatalf("expected exactly one bootstrap user, got %+v err=%v", all, err)
+	}
+	adminUsername := all[0].Username
+
+	for i := 0; i < loginMaxFailures; i++ {
+		rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+			map[string]string{"username": adminUsername, "password": "irrelevant", "captchaToken": "wrong"})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want 401", i+1, rec.Code)
+		}
+	}
+	// A wrong solution is a failed attempt and costs one, exactly as
+	// cancelAttempt's doc comment says.
+	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": adminUsername, "password": "irrelevant", "captchaToken": "wrong"})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status after %d wrong solutions = %d, want 429", loginMaxFailures, rec.Code)
+	}
+}
+
+func TestLoginStillReports503WhenAProviderIsDown(t *testing.T) {
+	srv := newTestServer(t)
+	srv.captchaVerifier = stubVerifier{err: errors.New("siteverify unreachable")}
+
+	// Get the bootstrap admin user's actual username
+	all, err := srv.users.List()
+	if err != nil || len(all) != 1 {
+		t.Fatalf("expected exactly one bootstrap user, got %+v err=%v", all, err)
+	}
+	adminUsername := all[0].Username
+
+	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": adminUsername, "password": "irrelevant", "captchaToken": "x"})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 — the pre-existing outage path must be unchanged", rec.Code)
 	}
 }
