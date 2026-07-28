@@ -61,12 +61,16 @@ func (s *Server) handlePoWChallenge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "proof-of-work is not enabled", http.StatusNotFound)
 		return
 	}
-	if !s.powChallenges.allow(clientIP(r), time.Now()) {
+	ip := clientIP(r)
+	if !s.powChallenges.allow(ip, time.Now()) {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "too many challenge requests, try again shortly", http.StatusTooManyRequests)
 		return
 	}
-	ch, err := s.powVerifier.Issue()
+	// Difficulty rises with this address's recent failed logins, so an
+	// honest first login stays nearly free.
+	maxNumber := s.powDifficulty.maxNumberFor(ip, s.powVerifier.BaseMaxNumber(), time.Now())
+	ch, err := s.powVerifier.IssueAt(maxNumber)
 	if err != nil {
 		s.logger.Error("could not issue a proof-of-work challenge", "error", err.Error())
 		http.Error(w, "could not issue a challenge", http.StatusInternalServerError)
@@ -79,12 +83,12 @@ func (s *Server) handlePoWChallenge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ch)
 }
 
-// StartPoWSweeper reclaims spent salts and stale rate-limit windows on an
-// interval for the process lifetime, mirroring StartSendAsCooldownSweeper's
-// ticker/select pattern. Both maps are fed by unauthenticated callers, so
-// both need a real sweep rather than lazy eviction (backend/AGENTS.md). Call
-// once after NewServer, in both app.go mode blocks. A no-op when pow is not
-// the configured provider.
+// StartPoWSweeper reclaims spent salts, stale rate-limit windows, and decayed
+// per-IP difficulty escalation on an interval for the process lifetime,
+// mirroring StartSendAsCooldownSweeper's ticker/select pattern. All three maps
+// are fed by unauthenticated callers, so all three need a real sweep rather
+// than lazy eviction (backend/AGENTS.md). Call once after NewServer, in both
+// app.go mode blocks. A no-op when pow is not the configured provider.
 func (s *Server) StartPoWSweeper(ctx context.Context) {
 	if s.powVerifier == nil {
 		return
@@ -99,6 +103,7 @@ func (s *Server) StartPoWSweeper(ctx context.Context) {
 			now := time.Now()
 			s.powVerifier.SweepExpired(now)
 			s.powChallenges.sweepExpired(now)
+			s.powDifficulty.sweepExpired(now)
 		}
 	}
 }

@@ -103,6 +103,7 @@ type Server struct {
 	// not on the Verifier interface. nil for every other provider.
 	powVerifier   *captcha.PoWVerifier
 	powChallenges *powChallengeLimiter
+	powDifficulty *powEscalation
 
 	// classifier and globalStore back the Ollama version/update-check block on
 	// the Prompt Tuning page and its admin-notification email. classifier is
@@ -233,6 +234,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		captchaSiteKey:         captchaSiteKey,
 		powVerifier:            powVerifier,
 		powChallenges:          newPowChallengeLimiter(),
+		powDifficulty:          newPowEscalation(),
 		globalStore:            globalStore,
 		wkdStore:               wkdStore,
 	}

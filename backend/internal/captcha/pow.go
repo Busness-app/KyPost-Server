@@ -39,17 +39,13 @@ const (
 	// a password; short enough to bound the spent-salt cache.
 	powChallengeTTL = 5 * time.Minute
 
-	// defaultPoWMaxNumber is the search space when POW_MAX_NUMBER is unset:
-	// ~25k hashes expected, which measures in the low hundreds of
-	// milliseconds via crypto.subtle in a current browser.
-	//
-	// ponytail: one fixed difficulty for every request. Ceiling: it must be
-	// low enough not to punish an honest phone, which is also low enough not
-	// to deter a determined attacker. Upgrade path: Phase 2 of
-	// docs/superpowers/plans/2026-07-28-self-hosted-login-proof-of-work.md
-	// escalates maxNumber per client IP after failed logins, which is where
-	// a proof-of-work actually earns its keep.
-	defaultPoWMaxNumber = 50_000
+	// defaultPoWMaxNumber is the level-0 search space when POW_MAX_NUMBER is
+	// unset: ~2500 hashes expected, which is imperceptible. It is this low
+	// because api's powEscalation raises it per recent failed login from the
+	// same client IP — a fixed difficulty had to be high enough to deter an
+	// attacker and low enough not to punish an honest phone, and no single
+	// value is both.
+	defaultPoWMaxNumber = 5_000
 
 	algorithmSHA256 = "SHA-256"
 )
@@ -123,11 +119,21 @@ func (v *PoWVerifier) sign(salt, challenge string, maxNumber int, expires int64)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// Issue mints a fresh challenge. The secret number is drawn uniformly from
-// [0, maxNumber] so the expected client work really is maxNumber/2 — drawing
-// it from a narrower range, or deriving it from the salt, would let a client
-// that noticed the pattern skip most of the search.
+// Issue mints a challenge at this verifier's configured difficulty.
 func (v *PoWVerifier) Issue() (Challenge, error) {
+	return v.IssueAt(v.maxNumber)
+}
+
+// IssueAt mints a challenge at a caller-chosen difficulty, for api's per-IP
+// escalation. maxNumber <= 0 falls back to the configured default.
+//
+// Verify does not consult v.maxNumber at all — it checks the number against
+// the maxnumber signed into the challenge — so raising the difficulty for one
+// client cannot invalidate another's in-flight challenge.
+func (v *PoWVerifier) IssueAt(maxNumber int) (Challenge, error) {
+	if maxNumber <= 0 {
+		maxNumber = v.maxNumber
+	}
 	saltBytes := make([]byte, 16)
 	// Go 1.24+ crypto/rand.Read never returns an error; it panics internally
 	// if the OS source is unavailable, which is not a condition this process
@@ -135,7 +141,7 @@ func (v *PoWVerifier) Issue() (Challenge, error) {
 	_, _ = rand.Read(saltBytes)
 	salt := hex.EncodeToString(saltBytes)
 
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(v.maxNumber)+1))
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(maxNumber)+1))
 	if err != nil {
 		return Challenge{}, err
 	}
@@ -145,12 +151,16 @@ func (v *PoWVerifier) Issue() (Challenge, error) {
 		Algorithm: algorithmSHA256,
 		Salt:      salt,
 		Challenge: hex.EncodeToString(sum[:]),
-		MaxNumber: v.maxNumber,
+		MaxNumber: maxNumber,
 		Expires:   v.now().Add(powChallengeTTL).Unix(),
 	}
 	ch.Signature = v.sign(ch.Salt, ch.Challenge, ch.MaxNumber, ch.Expires)
 	return ch, nil
 }
+
+// BaseMaxNumber is the configured level-0 difficulty, which api's per-IP
+// escalation multiplies up from.
+func (v *PoWVerifier) BaseMaxNumber() int { return v.maxNumber }
 
 // Verify checks a base64 solution payload. ctx and remoteIP are unused — the
 // Verifier interface carries them for the two providers that make a network

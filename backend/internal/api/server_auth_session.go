@@ -164,15 +164,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// Pay the same scrypt cost a real password check would, so response
 		// timing doesn't reveal whether the username exists (or is inactive).
 		equalizeLoginTiming(req.Password)
-		// No recordFailure: tryAttempt already spent the strike.
+		// Make the next challenge from this address more expensive. Recorded
+		// for the unknown-username case too: spraying a list of guessed
+		// usernames is exactly the pattern this is here to price.
+		s.powDifficulty.recordFailure(clientIP(r), time.Now())
+		// No recordFailure on the lockout: tryAttempt already spent the strike.
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 	if !users.VerifyPassword(u, req.Password) {
+		s.powDifficulty.recordFailure(clientIP(r), time.Now())
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 	s.loginLockout.recordSuccess(lockoutKey)
+	// A correct password proves whoever is at this address holds a real
+	// credential, so stop charging them for earlier failures.
+	s.powDifficulty.clear(clientIP(r))
 
 	// Second-factor users must clear a challenge before a session exists. No
 	// cookie is set here; the client receives a challenge id plus the methods it
