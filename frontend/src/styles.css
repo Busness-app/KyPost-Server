@@ -4313,3 +4313,35 @@ pre {
     opacity: 0.6;
   }
 }
+
+/* Self-hosted proof-of-work security check. Sized to match the fixed slot
+   LoginPage reserves for the third-party widgets (.auth-captcha), so
+   switching CAPTCHA_PROVIDER does not move the Sign in button. */
+.auth-pow {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  justify-content: center;
+  min-height: 65px;
+  font-size: 0.9rem;
+}
+
+.auth-pow-bar {
+  width: 100%;
+  height: 6px;
+}
+
+/* --accent is this app's existing success signal: .notice-success (line
+   ~724) tints its background with it for the same reason. There is no
+   dedicated success token, so reuse that one rather than invent one. */
+.auth-pow-done {
+  color: var(--accent);
+}
+
+/* --danger has no :root definition but is already the established pattern
+   for error text elsewhere (.email-attachments-error, .rule-script-error) —
+   each falls back to the same #c0392b when unset. Reused here rather than
+   inventing a new token. */
+.auth-pow-failed {
+  color: var(--danger, #c0392b);
+}

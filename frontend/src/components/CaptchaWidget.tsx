@@ -1,15 +1,15 @@
 import { useEffect, useId, useRef } from "react";
+import { PowWidget } from "./PowWidget";
 
 // CaptchaWidget renders whichever CAPTCHA provider the backend has
-// configured (see GET /api/auth/captcha-config), loading that provider's
-// script on demand — no third-party script is ever loaded unless an
-// operator has actually turned CAPTCHA on. Both supported providers
-// (Cloudflare Turnstile, Friendly Captcha) auto-render any element with
-// their marker class + data-sitekey once their script loads, and invoke a
-// named global callback with the resulting token — the declarative
-// approach documented by both, rather than each provider's separate
-// imperative render API.
-export type CaptchaProvider = "turnstile" | "friendly";
+// configured (see GET /api/auth/captcha-config). The two third-party
+// providers (Cloudflare Turnstile, Friendly Captcha) load their script on
+// demand — no third-party script is ever loaded unless an operator has
+// actually turned one of them on — and auto-render any element with their
+// marker class + data-sitekey, invoking a named global callback with the
+// resulting token. The third, "pow", is self-hosted and delegates to
+// PowWidget: no script, no site key, no callback.
+export type CaptchaProvider = "turnstile" | "friendly" | "pow";
 
 type CaptchaWidgetProps = {
   provider: CaptchaProvider;
@@ -33,7 +33,7 @@ type CaptchaWidgetProps = {
 // rolling, deliberately-unversioned loader, so pinning a hash would break the
 // widget the next time they ship. Its origin is at least named explicitly in
 // the CSP, and only when Turnstile is the configured provider.
-const PROVIDER_SCRIPT: Record<CaptchaProvider, { src: string; markerAttr: string; integrity?: string }> = {
+const PROVIDER_SCRIPT: Record<"turnstile" | "friendly", { src: string; markerAttr: string; integrity?: string }> = {
   turnstile: {
     src: "https://challenges.cloudflare.com/turnstile/v0/api.js",
     markerAttr: "data-kypost-captcha-turnstile"
@@ -45,7 +45,7 @@ const PROVIDER_SCRIPT: Record<CaptchaProvider, { src: string; markerAttr: string
   }
 };
 
-function loadCaptchaScript(provider: CaptchaProvider) {
+function loadCaptchaScript(provider: "turnstile" | "friendly") {
   const { src, markerAttr, integrity } = PROVIDER_SCRIPT[provider];
   if (document.querySelector(`script[${markerAttr}]`)) {
     return;
@@ -74,6 +74,13 @@ declare global {
 }
 
 export function CaptchaWidget({ provider, siteKey, onToken }: CaptchaWidgetProps) {
+  // pow is self-hosted: no script to load, no site key, no global callback.
+  // Delegating before any of that machinery runs keeps the two concerns from
+  // growing into each other.
+  if (provider === "pow") {
+    return <PowWidget onToken={onToken} />;
+  }
+
   const rawId = useId().replace(/[^a-zA-Z0-9]/g, "");
   const callbackName = `__kypostCaptchaToken_${rawId}` as const;
   const onTokenRef = useRef(onToken);
