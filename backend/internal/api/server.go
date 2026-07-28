@@ -97,6 +97,13 @@ type Server struct {
 	captchaProvider        captcha.Provider
 	captchaSiteKey         string
 
+	// powVerifier is the same object as captchaVerifier when the configured
+	// provider is pow, held additionally under its concrete type because the
+	// challenge endpoint and the sweeper need Issue/SweepExpired, which are
+	// not on the Verifier interface. nil for every other provider.
+	powVerifier   *captcha.PoWVerifier
+	powChallenges *powChallengeLimiter
+
 	// classifier and globalStore back the Ollama version/update-check block on
 	// the Prompt Tuning page and its admin-notification email. classifier is
 	// nil until SetClassifier is called (see app.go); globalStore is the
@@ -153,11 +160,17 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 
 	captchaProvider := captcha.Provider(strings.ToLower(strings.TrimSpace(os.Getenv("CAPTCHA_PROVIDER"))))
 	captchaSiteKey := strings.TrimSpace(os.Getenv("CAPTCHA_SITE_KEY"))
-	captchaVerifier, err := captcha.NewVerifier(captcha.Config{
+	captchaCfg := captcha.Config{
 		Provider:  captchaProvider,
 		SiteKey:   captchaSiteKey,
 		SecretKey: strings.TrimSpace(os.Getenv("CAPTCHA_SECRET_KEY")),
-	})
+	}
+	if captchaProvider == captcha.ProviderPoW {
+		captchaCfg.HMACKey = resolvePoWSecret(
+			config.EnvOrDefault("POW_SECRET_FILE", "/kypost/private/pow.key"), logger)
+		captchaCfg.MaxNumber = config.EnvInt("POW_MAX_NUMBER", 0)
+	}
+	captchaVerifier, err := captcha.NewVerifier(captchaCfg)
 	if err != nil {
 		// Misconfigured CAPTCHA must fail closed on login (see handleLogin)
 		// rather than silently running unprotected, but must not prevent the
@@ -165,6 +178,8 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		logger.Error("captcha misconfigured; login CAPTCHA will reject all attempts until fixed", "error", err.Error())
 		captchaVerifier = misconfiguredCaptchaVerifier{err: err}
 	}
+	// Held under its concrete type too — see the powVerifier field comment.
+	powVerifier, _ := captchaVerifier.(*captcha.PoWVerifier)
 
 	globalStore, err := state.New(stateDir)
 	if err != nil {
@@ -216,6 +231,8 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		captchaVerifier:        captchaVerifier,
 		captchaProvider:        captchaProvider,
 		captchaSiteKey:         captchaSiteKey,
+		powVerifier:            powVerifier,
+		powChallenges:          newPowChallengeLimiter(),
 		globalStore:            globalStore,
 		wkdStore:               wkdStore,
 	}
@@ -281,10 +298,12 @@ func (s *Server) routes() http.Handler {
 
 // routesAuth registers sign-in, session, and second-factor endpoints.
 // The pre-session ones (login, the MFA challenge completions, captcha
-// config) are deliberately unwrapped: they run before a session exists.
+// config, the proof-of-work challenge) are deliberately unwrapped: they run
+// before a session exists.
 func (s *Server) routesAuth(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("GET /api/auth/captcha-config", s.handleCaptchaConfig)
+	mux.HandleFunc("GET /api/auth/pow-challenge", s.handlePoWChallenge)
 	mux.HandleFunc("POST /api/auth/mfa/totp", s.handleMFATOTP)
 	mux.HandleFunc("POST /api/auth/mfa/recovery-code", s.handleMFARecoveryCode)
 	mux.HandleFunc("POST /api/auth/mfa/push/poll", s.handlePushPoll)
