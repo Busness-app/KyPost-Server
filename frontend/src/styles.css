@@ -3908,7 +3908,7 @@ pre {
    ========================================================================== */
 
 .auth-page {
-  --seal-size: 76px;
+  --seal-size: 88px;
   min-height: 100vh;
   min-height: 100dvh;
   display: grid;
@@ -3943,7 +3943,8 @@ pre {
   z-index: 1;
   /* Sits ON the card's top edge. */
   margin-bottom: calc(var(--seal-size) / -2);
-  background: linear-gradient(160deg, color-mix(in srgb, var(--panel) 92%, var(--accent)), var(--panel));
+  overflow: hidden;
+  background: var(--panel);
   /* Double ring: hairline accent, a breath of field, then the card's own line. */
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--accent) 58%, transparent),
@@ -3953,12 +3954,15 @@ pre {
 }
 
 .auth-seal-mark {
-  width: 62%;
-  height: auto;
+  width: 100%;
+  height: 100%;
   display: block;
-  /* The mark is a full-colour PNG; damping it keeps the seal reading as one
-     object rather than a sticker pasted into a ring. */
-  opacity: 0.92;
+  object-fit: cover;
+  border-radius: 50%;
+  /* The mark is a detailed square illustration on its own dark field. Shrinking
+     it inside the plate turned it to mush and, on the light themes, left a dark
+     tile floating in the ring. Filling the disc instead makes that field the
+     seal's own, which is both legible and identical on all sixteen themes. */
 }
 
 /* --- The card ----------------------------------------------------------- */
@@ -3991,6 +3995,11 @@ pre {
 .auth-head {
   display: grid;
   gap: 6px;
+}
+
+/* Centred only on the standalone page; inside the app panel the heading lines
+   up with the fields under it like every other page. */
+.auth-page .auth-head {
   text-align: center;
 }
 
@@ -4025,7 +4034,7 @@ pre {
   color: color-mix(in srgb, var(--ink) 62%, transparent);
 }
 
-.auth-page .auth-input {
+.auth-input {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--line);
@@ -4037,22 +4046,22 @@ pre {
   transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
 }
 
-.auth-page .auth-input::placeholder {
+.auth-input::placeholder {
   color: color-mix(in srgb, var(--ink) 34%, transparent);
 }
 
-.auth-page .auth-input:hover:not(:read-only) {
+.auth-input:hover:not(:read-only) {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
 
-.auth-page .auth-input:focus {
+.auth-input:focus {
   outline: none;
   border-color: var(--accent);
   background: color-mix(in srgb, var(--bg) 42%, var(--panel));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
-.auth-page .auth-input:read-only {
+.auth-input:read-only {
   color: color-mix(in srgb, var(--ink) 72%, transparent);
   background: color-mix(in srgb, var(--bg) 30%, var(--panel));
 }
@@ -4060,12 +4069,12 @@ pre {
 /* Mono for the values that are identifiers or codes — the characters people
    transcribe, where 0/O and 1/l have to stay apart. Not for passwords, which
    are masked, and not for prose. */
-.auth-page .auth-input-code {
+.auth-input-code {
   font-family: var(--mono);
   letter-spacing: 0.04em;
 }
 
-.auth-page .auth-input-otp {
+.auth-input-otp {
   font-size: 1.3rem;
   letter-spacing: 0.42em;
   text-align: center;
@@ -4075,8 +4084,9 @@ pre {
 
 /* --- Submit and alternates ---------------------------------------------- */
 
-.auth-page .auth-submit {
-  width: 100%;
+.auth-submit {
+  width: fit-content;
+  min-width: 11rem;
   padding: 12px 16px;
   font-weight: 500;
   letter-spacing: 0.01em;
@@ -4084,8 +4094,12 @@ pre {
   box-shadow: 0 5px 14px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
-.auth-page .auth-submit:disabled {
+.auth-submit:disabled {
   box-shadow: none;
+}
+
+.auth-page .auth-submit {
+  width: 100%;
 }
 
 .auth-alts {
@@ -4094,7 +4108,7 @@ pre {
   justify-items: center;
 }
 
-.auth-page .auth-alt {
+.auth-alt {
   width: auto;
   justify-self: center;
   padding: 6px 4px;
@@ -4108,7 +4122,7 @@ pre {
   box-shadow: none;
 }
 
-.auth-page .auth-alt:hover:not(:disabled) {
+.auth-alt:hover:not(:disabled) {
   filter: none;
   color: var(--ink-strong);
   text-decoration-color: var(--accent);
@@ -4265,7 +4279,7 @@ pre {
 
 @media (max-width: 480px) {
   .auth-page {
-    --seal-size: 64px;
+    --seal-size: 72px;
     padding: 20px 14px 28px;
     place-items: start center;
   }

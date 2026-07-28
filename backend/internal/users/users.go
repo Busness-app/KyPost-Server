@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -186,6 +187,7 @@ var (
 	// is the correct response.
 	ErrPGPFingerprintChanged = errors.New("the account's pgp key changed while this update was in flight")
 	ErrPasswordWeak          = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
+	ErrUsernameInvalid       = errors.New("username must start with a letter or digit and may otherwise contain only letters, digits, dot, underscore and hyphen (max 64 characters)")
 )
 
 // MinPasswordLen is the minimum length of any password this store will
@@ -206,13 +208,58 @@ func ValidatePassword(password string) error {
 	return nil
 }
 
-// normalizeUsername folds a username to its comparison form. Usernames are
+// usernamePattern is the set of usernames this store will create.
+//
+// A username is not just a label here: the CardDAV surface builds every
+// principal and address-book URL out of it (dav_server.go's
+// CurrentUserPrincipal/AddressBookHomeSetPath) and then guards access by
+// comparing the first path segment back against it. Nothing enforced that it
+// WAS one path segment, so an admin could create "alice/bob" — whose owner is
+// then served a principal URL of "/dav/alice/bob/" and refused it with
+// "address book belongs to a different user" — or ".." , whose principal path
+// ("//") escapes the /dav mount entirely.
+//
+// No cross-user access was reachable either way (the backend resolves the store
+// from the authenticated UserID, never from the path), so this is a validity
+// rule, not a patched hole: it keeps the one place that treats a username as a
+// path segment honest.
+//
+// The leading character must be alphanumeric, which is what rules out "." and
+// ".." — both of which match the body character class (dot is legitimately
+// wanted in "first.last") and both of which are path traversal, not names. It
+// also rules out a leading hyphen, which is an argument-injection hazard
+// anywhere a username reaches a command line.
+var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// ValidateUsername enforces usernamePattern. Called by Create rather than by
+// the handler, for the same reason ValidatePassword is: a future call site
+// cannot forget it.
+//
+// Deliberately NOT applied to existing accounts on read. An install that
+// already has a "first last" username keeps working; only new accounts are
+// held to the rule, exactly as NormalizeUsername's case-collision rule is.
+func ValidateUsername(username string) error {
+	if !usernamePattern.MatchString(strings.TrimSpace(username)) {
+		return ErrUsernameInvalid
+	}
+	return nil
+}
+
+// NormalizeUsername folds a username to its comparison form. Usernames are
 // stored as the user typed them (minus surrounding whitespace) but compared
 // case-insensitively, so "admin", "Admin", and "ADMIN" can never coexist as
 // separate accounts on a system where the admin role can reach every other
 // user's configuration. Comparing rather than rewriting means accounts
 // created before this rule existed keep working without a migration.
-func normalizeUsername(username string) string {
+//
+// Exported because this fold is not an internal detail of the store: anything
+// that keys per-account state off a client-supplied username must key it off
+// the SAME string GetByUsername would resolve, or the two disagree about which
+// account is which. The login lockout learned that the hard way — it keyed on
+// the raw submitted username, so " Admin " and "admin" were one account to the
+// lookup and two independent strike budgets to the lockout, which made the
+// three-strikes limit unbounded. See api.handleLogin.
+func NormalizeUsername(username string) string {
 	return strings.ToLower(strings.TrimSpace(username))
 }
 
@@ -461,7 +508,7 @@ func (s *Store) List() ([]User, error) {
 		return nil, err
 	}
 	sort.Slice(f.Users, func(i, j int) bool {
-		return normalizeUsername(f.Users[i].Username) < normalizeUsername(f.Users[j].Username)
+		return NormalizeUsername(f.Users[i].Username) < NormalizeUsername(f.Users[j].Username)
 	})
 	return f.Users, nil
 }
@@ -483,7 +530,7 @@ func (s *Store) Get(id string) (User, error) {
 }
 
 // GetByUsername returns a user by username, compared case-insensitively —
-// see normalizeUsername.
+// see NormalizeUsername.
 func (s *Store) GetByUsername(username string) (User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -491,9 +538,9 @@ func (s *Store) GetByUsername(username string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
-	want := normalizeUsername(username)
+	want := NormalizeUsername(username)
 	for _, u := range f.Users {
-		if normalizeUsername(u.Username) == want {
+		if NormalizeUsername(u.Username) == want {
 			return u, nil
 		}
 	}
@@ -502,6 +549,9 @@ func (s *Store) GetByUsername(username string) (User, error) {
 
 // Create adds a new user with the given username/password/role.
 func (s *Store) Create(username, password string, role Role) (User, error) {
+	if err := ValidateUsername(username); err != nil {
+		return User{}, err
+	}
 	if err := ValidatePassword(password); err != nil {
 		return User{}, err
 	}
@@ -514,9 +564,9 @@ func (s *Store) Create(username, password string, role Role) (User, error) {
 			return err
 		}
 		username = strings.TrimSpace(username)
-		want := normalizeUsername(username)
+		want := NormalizeUsername(username)
 		for _, u := range f.Users {
-			if normalizeUsername(u.Username) == want {
+			if NormalizeUsername(u.Username) == want {
 				return ErrUsernameTaken
 			}
 		}

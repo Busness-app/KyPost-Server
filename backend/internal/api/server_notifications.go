@@ -1,0 +1,840 @@
+// Web push, native device pairing, the App Pull queue, and the HMAC pairing
+// tokens that gate them (also used by pickup links and PGP QR key exchange —
+// see pickup_handlers.go and pgp_qr_handlers.go).
+//
+// handleNotificationPreferences leads the file rather than sitting with the
+// other per-user preference handlers in server.go, because it is read and
+// written by the same subscription flow as everything below it.
+package api
+
+import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"kypost-server/backend/internal/processor"
+	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/users"
+)
+
+type notificationSubscriptionPayload struct {
+	Endpoint string `json:"endpoint"`
+	Keys     struct {
+		Auth   string `json:"auth"`
+		P256DH string `json:"p256dh"`
+	} `json:"keys"`
+}
+
+type notificationTestPayload struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
+func (s *Server) handleNotificationVAPIDPublicKey(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	publicKey := strings.TrimSpace(s.cfg.Notifications.PublicKey)
+	s.mu.RUnlock()
+	if publicKey == "" {
+		http.Error(w, "notification public key not configured", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"publicKey": publicKey})
+}
+
+func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var payload notificationSubscriptionPayload
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+			http.Error(w, "invalid subscription payload", http.StatusBadRequest)
+			return
+		}
+		payload.Endpoint = strings.TrimSpace(payload.Endpoint)
+		payload.Keys.Auth = strings.TrimSpace(payload.Keys.Auth)
+		payload.Keys.P256DH = strings.TrimSpace(payload.Keys.P256DH)
+		if payload.Endpoint == "" || payload.Keys.Auth == "" || payload.Keys.P256DH == "" {
+			http.Error(w, "endpoint and keys are required", http.StatusBadRequest)
+			return
+		}
+		// Screened exactly like the UnifiedPush endpoint already is. This is a
+		// user-supplied URL the poller later POSTs to, and it had only a
+		// non-empty check — so it was an authenticated SSRF into the
+		// deployment's private network, with POST /api/notifications/test
+		// returning sent/failed/removedStale as a three-state oracle. The
+		// netguard predicate lives in its own package precisely because a
+		// security check with two homes gets fixed in one of them; this was the
+		// third home.
+		if err := processor.ValidateUnifiedPushEndpointURL(payload.Endpoint); err != nil {
+			http.Error(w, "invalid push endpoint: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		sub := state.NotificationSubscription{
+			Endpoint:  payload.Endpoint,
+			Auth:      payload.Keys.Auth,
+			P256DH:    payload.Keys.P256DH,
+			UserAgent: strings.TrimSpace(r.Header.Get("User-Agent")),
+			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := store.UpsertNotificationSubscription(sub); err != nil {
+			http.Error(w, "failed to persist notification subscription", http.StatusInternalServerError)
+			return
+		}
+		count := len(store.ListNotificationSubscriptions())
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "subscriptions": count})
+	case http.MethodDelete:
+		var payload struct {
+			Endpoint string `json:"endpoint"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+			http.Error(w, "invalid unsubscribe payload", http.StatusBadRequest)
+			return
+		}
+		endpoint := strings.TrimSpace(payload.Endpoint)
+		if endpoint == "" {
+			http.Error(w, "endpoint is required", http.StatusBadRequest)
+			return
+		}
+		removed, err := store.RemoveNotificationSubscription(endpoint)
+		if err != nil {
+			http.Error(w, "failed to remove notification subscription", http.StatusInternalServerError)
+			return
+		}
+		count := len(store.ListNotificationSubscriptions())
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "subscriptions": count})
+	}
+}
+
+func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	var payload notificationTestPayload
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload)
+	title := strings.TrimSpace(payload.Title)
+	body := strings.TrimSpace(payload.Body)
+	if title == "" {
+		title = "KyPost Test Notification"
+	}
+	if body == "" {
+		body = "Push delivery is working across all subscribed devices."
+	}
+
+	message := map[string]any{
+		"title": title,
+		"body":  body,
+		"url":   "/notifications",
+		"tag":   "kypost-test",
+	}
+	payloadBytes, err := json.Marshal(message)
+	if err != nil {
+		http.Error(w, "failed to serialize notification payload", http.StatusInternalServerError)
+		return
+	}
+
+	subs := store.ListNotificationSubscriptions()
+	sent := 0
+	failed := 0
+	removed := 0
+	if len(subs) > 0 {
+		outcome, err := processor.SendWebPush(store, s.cfg.Notifications.PublicKey, s.cfg.Notifications.PrivateKeyPath, 3600, payloadBytes)
+		if err != nil {
+			http.Error(w, "failed to load notification private key", http.StatusInternalServerError)
+			return
+		}
+		sent = outcome.Sent
+		failed = outcome.Failed
+		removed = outcome.Removed
+	}
+
+	nativeDevices := store.ListNativeDevices()
+	nativeSent := 0
+	nativeFailed := 0
+	nativeRemoved := 0
+	nativeError := ""
+	if len(nativeDevices) > 0 {
+		nativeMessage := processor.NativePushMessage{
+			Title: title,
+			Body:  body,
+			Data:  map[string]string{"url": "/notifications"},
+		}
+		outcome, err := processor.SendNativePush(r.Context(), s.nativePushDispatcher, s.health, store, nativeMessage, func(device state.NativeDevice, platform string, sendErr error) {
+			s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", platform, "sender", "relay", "error", sendErr.Error())
+		})
+		if outcome.Queued {
+			// App Pull mode: queue the test for the device to fetch over HTTP
+			// instead of dispatching through the relay/Firebase.
+			if err != nil {
+				nativeError = "failed to queue pull notification: " + err.Error()
+				s.logger.Error("test native pull notification failed", "error", err.Error())
+			} else {
+				nativeSent = outcome.Sent
+			}
+		} else {
+			nativeSent = outcome.Sent
+			nativeFailed = outcome.Failed
+			nativeRemoved = outcome.Removed
+		}
+	}
+
+	resp := map[string]any{
+		"ok":                  failed == 0 && nativeFailed == 0 && nativeError == "",
+		"subscriptions":       len(subs),
+		"sent":                sent,
+		"failed":              failed,
+		"removedStale":        removed,
+		"activeSubscriptions": len(store.ListNotificationSubscriptions()),
+		"nativeDevices":       len(nativeDevices),
+		"nativeSent":          nativeSent,
+		"nativeFailed":        nativeFailed,
+		"nativeRemovedStale":  nativeRemoved,
+	}
+	if nativeError != "" {
+		resp["nativeError"] = nativeError
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// nativePairingTokenTTL is the validity window for a native-device pairing
+// token, shared by the token-minting call site (handleNotificationPairing)
+// and the nonce-consumption TTL in handleNotificationNativeRegister — a
+// single constant so the two can't drift out of sync.
+const nativePairingTokenTTL = 90 * time.Second
+
+func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Request) {
+	ac, okAuth := authFromContext(r)
+	if !okAuth {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	store, err := s.userStore(ac.UserID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		http.Error(w, "failed to load subscriber id", http.StatusInternalServerError)
+		return
+	}
+	// Keep the unauthenticated register endpoint's subscriber -> user index
+	// warm so a device pairing right after this call resolves immediately.
+	s.userMu.Lock()
+	s.subIndex[subscriberID] = ac.UserID
+	s.userMu.Unlock()
+	configured := s.pairingSecret != ""
+	configurationError := ""
+	if !configured {
+		configurationError = "pairing is not configured on the server; set PAIRING_SECRET"
+	}
+	serverBaseURL := s.serverBaseURL
+	if serverBaseURL == "" {
+		serverBaseURL = externalBaseURL(r)
+	}
+	registerEndpoint := ""
+	pullEndpoint := ""
+	if serverBaseURL != "" {
+		registerEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/register"
+		pullEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/pull"
+	}
+	pairingTTLSeconds := int64(nativePairingTokenTTL.Seconds())
+	resp := map[string]any{
+		"subscriberId":      subscriberID,
+		"serverBaseUrl":     serverBaseURL,
+		"registerEndpoint":  registerEndpoint,
+		"pullEndpoint":      pullEndpoint,
+		"deliveryMode":      store.NativeDeliveryMode(),
+		"pairingTtlSeconds": pairingTTLSeconds,
+		"configured":        configured,
+	}
+	if configurationError != "" {
+		resp["configurationError"] = configurationError
+	}
+	if configured {
+		token, expiresAt, err := s.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Duration(pairingTTLSeconds)*time.Second)
+		if err != nil {
+			s.logger.Error("failed to create pairing token", "subscriber_id", subscriberID, "error", err.Error())
+			http.Error(w, "failed to prepare mobile pairing", http.StatusInternalServerError)
+			return
+		}
+		resp["pairingToken"] = token
+		resp["pairingExpiresAt"] = expiresAt.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type nativeRegisterRequest struct {
+	SubscriberID string `json:"subscriberId"`
+	PairingToken string `json:"pairingToken"`
+	DeviceToken  string `json:"deviceToken"`
+	DeviceID     string `json:"deviceId,omitempty"`
+	Platform     string `json:"platform,omitempty"`
+	Transport    string `json:"transport,omitempty"`
+	DeviceName   string `json:"deviceName,omitempty"`
+	AppVersion   string `json:"appVersion,omitempty"`
+}
+
+func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http.Request) {
+	if s.pairingSecret == "" {
+		http.Error(w, "pairing is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req nativeRegisterRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	subscriberID := strings.TrimSpace(req.SubscriberID)
+	pairingToken := strings.TrimSpace(req.PairingToken)
+	deviceToken := strings.TrimSpace(req.DeviceToken)
+	if subscriberID == "" || pairingToken == "" || deviceToken == "" {
+		http.Error(w, "subscriberId, pairingToken, and deviceToken are required", http.StatusBadRequest)
+		return
+	}
+
+	platform := normalizeNativePlatform(req.Platform)
+	transport, err := normalizeNativeTransport(req.Transport, req.Platform)
+	if err != nil {
+		http.Error(w, "invalid transport: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// For UnifiedPush, the deviceToken is an HTTPS endpoint URL the client
+	// fully controls, not an opaque token — reject anything that could be used
+	// for SSRF against internal services (private/loopback/link-local hosts).
+	// The sender re-checks at send time too, against DNS rebinding.
+	if transport == "unifiedpush" {
+		if err := processor.ValidateUnifiedPushEndpointURL(deviceToken); err != nil {
+			http.Error(w, "invalid unifiedpush deviceToken: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	claims, err := s.decodeAndVerifyPairingToken(pairingToken, pairingPurposeNativeDevice, time.Now().UTC())
+	if err != nil {
+		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(claims.Sub)), []byte(subscriberID)) != 1 {
+		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
+		return
+	}
+	// Native pairing tokens are meant to be redeemed exactly once — the
+	// QR/deep-link a user scans to pair a new device. Without this, the same
+	// captured token stays valid for its full TTL and could register an
+	// unlimited number of devices.
+	if !s.nativePairingNonces.consume(claims.Nonce, nativePairingTokenTTL) {
+		http.Error(w, "pairing token already used", http.StatusConflict)
+		return
+	}
+
+	// The pairing token proved this device was handed a QR minted by a
+	// signed-in user; resolve which user's device list to write into.
+	ownerID, okOwner := s.lookupUserBySubscriber(subscriberID)
+	if !okOwner {
+		http.Error(w, "unknown subscriber", http.StatusUnauthorized)
+		return
+	}
+	store, err := s.userStore(ownerID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+
+	// A device id is global (the deviceIndex maps it to exactly one owner), but
+	// the id is client-supplied. Reserve it atomically (check-and-set under
+	// one lock, not a separate check followed by a later write) so a caller
+	// can't hijack a victim's device-index entry and deny that device
+	// service, even under concurrent registration requests.
+	if !s.reserveDeviceID(ownerID, strings.TrimSpace(req.DeviceID)) {
+		http.Error(w, "device id already registered", http.StatusConflict)
+		return
+	}
+
+	// Mint this device's own pairing secret. Only its hash is ever persisted
+	// (see state.NativeDevice.SecretHash); the raw value is returned once
+	// below and never retrievable again.
+	rawSecret, err := randomToken(24)
+	if err != nil {
+		http.Error(w, "failed to mint device secret", http.StatusInternalServerError)
+		return
+	}
+	secretHash, err := users.HashPassword(rawSecret)
+	if err != nil {
+		http.Error(w, "failed to mint device secret", http.StatusInternalServerError)
+		return
+	}
+
+	device := state.NativeDevice{
+		DeviceID:    strings.TrimSpace(req.DeviceID),
+		Platform:    platform,
+		Transport:   transport,
+		PushToken:   deviceToken,
+		DeviceName:  strings.TrimSpace(req.DeviceName),
+		AppVersion:  strings.TrimSpace(req.AppVersion),
+		UserAgent:   strings.TrimSpace(r.Header.Get("User-Agent")),
+		UserID:      ownerID,
+		MFAApprover: true,
+		SecretHash:  secretHash,
+	}
+	if err := store.UpsertNativeDevice(device); err != nil {
+		http.Error(w, "failed to persist native device", http.StatusInternalServerError)
+		return
+	}
+
+	// Resolve the canonical device ID by token: the upsert may have merged
+	// this registration into an existing row (same token + platform), whose
+	// ID wins over whatever the request carried.
+	devices := store.ListNativeDevices()
+	registeredDeviceID := device.DeviceID
+	for i := len(devices) - 1; i >= 0; i-- {
+		if strings.TrimSpace(devices[i].PushToken) == deviceToken && devices[i].Platform == device.Platform {
+			registeredDeviceID = devices[i].DeviceID
+			break
+		}
+	}
+
+	s.userMu.Lock()
+	// Release the reservation when UpsertNativeDevice merged this registration
+	// into an existing row: the ID the request asked for was reserved above,
+	// but the merge means no NativeDevice record was ever created under it.
+	//
+	// Left behind, that entry is permanent. revokeUserDevices only removes IDs
+	// it finds in the user's device list, so nothing ever cleans it up — the ID
+	// becomes unregisterable by anyone forever (reserveDeviceID sees an owner),
+	// and every auth attempt against it costs deviceAuthFromRequest a lockout
+	// strike, because the owner lookup succeeds and GetNativeDevice then fails.
+	// Re-registering devices would grow the map without bound.
+	if requested := strings.TrimSpace(req.DeviceID); requested != "" && requested != registeredDeviceID {
+		if owner, ok := s.deviceIndex[requested]; ok && owner == ownerID {
+			delete(s.deviceIndex, requested)
+		}
+	}
+	s.deviceIndex[registeredDeviceID] = ownerID
+	s.userMu.Unlock()
+
+	serverBaseURL := s.serverBaseURL
+	if serverBaseURL == "" {
+		serverBaseURL = externalBaseURL(r)
+	}
+	pullEndpoint := ""
+	if serverBaseURL != "" {
+		pullEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/pull"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"synced":       true,
+		"deviceId":     registeredDeviceID,
+		"deviceSecret": rawSecret,
+		"devices":      len(devices),
+		"deliveryMode": store.NativeDeliveryMode(),
+		"pullEndpoint": pullEndpoint,
+		"transport":    transport,
+	})
+}
+
+func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		devices := store.ListNativeDevices()
+		redacted := make([]state.NativeDevice, len(devices))
+		for i, d := range devices {
+			redacted[i] = d.Redacted()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"devices": redacted})
+	case http.MethodDelete:
+		var payload struct {
+			DeviceID string `json:"deviceId"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		deviceID := strings.TrimSpace(payload.DeviceID)
+		if deviceID == "" {
+			http.Error(w, "deviceId is required", http.StatusBadRequest)
+			return
+		}
+		removed, err := store.RemoveNativeDevice(deviceID)
+		if err != nil {
+			http.Error(w, "failed to remove native device", http.StatusInternalServerError)
+			return
+		}
+		// Only when this user actually owned it. The eviction used to be
+		// unconditional, so a DELETE naming someone else's deviceId reported
+		// removed=false and still dropped their index entry — briefly breaking
+		// their device auth until the next rescan repaired it.
+		if removed {
+			s.userMu.Lock()
+			delete(s.deviceIndex, deviceID)
+			s.userMu.Unlock()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
+	}
+}
+
+func normalizeNativePlatform(platform string) string {
+	clean := strings.ToLower(strings.TrimSpace(platform))
+	if clean == "" {
+		// Legacy clients that omit platform entirely default to android.
+		return "android"
+	}
+	// Pass any other platform name through unchanged so a new client isn't
+	// silently mislabeled as android — it just shows up under its own name.
+	return clean
+}
+
+func normalizeNativeTransport(transport, platform string) (string, error) {
+	clean := strings.ToLower(strings.TrimSpace(transport))
+	switch clean {
+	case "fcm", "apns", "unifiedpush":
+		return clean, nil
+	case "":
+		// Derive from platform if transport not specified (legacy behavior).
+		switch strings.ToLower(strings.TrimSpace(platform)) {
+		case "ios", "macos":
+			return "apns", nil
+		case "linux":
+			return "unifiedpush", nil
+		default:
+			return "fcm", nil
+		}
+	default:
+		return "", fmt.Errorf("unrecognized transport %q", clean)
+	}
+}
+
+func (s *Server) handleNotificationNativeUnpair(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	devices := store.ListNativeDevices()
+	removed := 0
+	for _, device := range devices {
+		if strings.TrimSpace(device.DeviceID) == "" {
+			continue
+		}
+		ok, err := store.RemoveNativeDevice(device.DeviceID)
+		if err != nil {
+			http.Error(w, "failed to revoke paired devices", http.StatusInternalServerError)
+			return
+		}
+		if ok {
+			removed++
+			s.userMu.Lock()
+			delete(s.deviceIndex, device.DeviceID)
+			s.userMu.Unlock()
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
+}
+
+// handleNotificationNativeDeregister lets a paired device remove itself —
+// e.g. on app logout/uninstall — without going through a web session. It
+// authenticates with the device's own X-Kypost-Device-Id/
+// X-Kypost-Device-Secret credentials (deviceAuthFromRequest), so a device can
+// only ever remove itself, never another device on the account.
+func (s *Server) handleNotificationNativeDeregister(w http.ResponseWriter, r *http.Request) {
+	userID, device, ok, retryAfter := s.deviceAuthFromRequest(r)
+	if !ok {
+		writeDeviceAuthFailure(w, retryAfter)
+		return
+	}
+	store, err := s.userStore(userID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	if _, err := store.RemoveNativeDevice(device.DeviceID); err != nil {
+		http.Error(w, "failed to remove device", http.StatusInternalServerError)
+		return
+	}
+	s.userMu.Lock()
+	delete(s.deviceIndex, device.DeviceID)
+	s.userMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleNotificationNativeMode switches native delivery between the relay-backed
+// push mode and App Pull mode for the signed-in user.
+func (s *Server) handleNotificationNativeMode(w http.ResponseWriter, r *http.Request) {
+	store, err := s.storeFor(r)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode != state.DeliveryModePush && mode != state.DeliveryModePull {
+		http.Error(w, "mode must be \"push\" or \"pull\"", http.StatusBadRequest)
+		return
+	}
+	if err := store.SetNativeDeliveryMode(mode); err != nil {
+		http.Error(w, "failed to persist delivery mode", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deliveryMode": store.NativeDeliveryMode()})
+}
+
+// handleNotificationNativePull serves queued notifications to a paired mobile
+// app polling over plain HTTP — the App Pull path that bypasses the Cloudflare
+// relay and Firebase entirely. It is unauthenticated by web session; the
+// device proves it is that specific still-paired device with its own
+// deviceId + deviceSecret (minted at registration), sent via the
+// X-Kypost-Device-Id/X-Kypost-Device-Secret headers (see device_auth.go). The
+// client passes ?after=<cursor> to fetch only notifications newer than its
+// last poll.
+func (s *Server) handleNotificationNativePull(w http.ResponseWriter, r *http.Request) {
+	userID, _, ok, retryAfter := s.deviceAuthFromRequest(r)
+	if !ok {
+		writeDeviceAuthFailure(w, retryAfter)
+		return
+	}
+	store, err := s.userStore(userID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+
+	var after int64
+	if raw := strings.TrimSpace(r.URL.Query().Get("after")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+			after = parsed
+		}
+	}
+	notifications, cursor := store.PullNotificationsAfter(after)
+	if notifications == nil {
+		notifications = []state.PullNotification{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"deliveryMode":  store.NativeDeliveryMode(),
+		"cursor":        cursor,
+		"notifications": notifications,
+	})
+}
+
+func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
+	ac, okAuth := authFromContext(r)
+	if !okAuth {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+
+	store, err := s.userStore(ac.UserID)
+	if err != nil {
+		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+
+	// Check rate limit: max 5 failed attempts per hour
+	allowed, remaining, err := store.CheckDesktopPairingRateLimit()
+	if err != nil {
+		s.logger.Error("rate limit check failed", "user_id", ac.UserID, "error", err.Error())
+		http.Error(w, "failed to check rate limit", http.StatusInternalServerError)
+		return
+	}
+	if !allowed {
+		s.logger.Error("desktop pairing rate limit exceeded", "user_id", ac.UserID)
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error": "rate limit exceeded: too many pairing attempts. Try again later.",
+		})
+		return
+	}
+
+	// Generate 16 bytes (128 bits) of cryptographically secure random data
+	codeBytes := make([]byte, 16)
+	if _, err := rand.Read(codeBytes); err != nil {
+		http.Error(w, "failed to generate pairing code", http.StatusInternalServerError)
+		return
+	}
+
+	// Return as 32-character hex string (no formatting, delivered via API/QR only)
+	pairingCode := strings.ToUpper(hex.EncodeToString(codeBytes))
+
+	// Store pairing code with 5-minute expiration
+	if err := store.SetDesktopPairingCode(pairingCode, 5*time.Minute); err != nil {
+		s.logger.Error("failed to store desktop pairing code", "user_id", ac.UserID, "error", err.Error())
+		http.Error(w, "failed to create pairing code", http.StatusInternalServerError)
+		return
+	}
+
+	// Record successful pairing initiation
+	_ = store.RecordDesktopPairingAttempt(pairingCode, true)
+
+	// No part of the code goes in the log. This used to emit pairingCode[:8]
+	// labelled "code_hash", which it was not — it was the first 32 bits of the
+	// raw credential, in a file that is not treated as secret. The user id and
+	// timestamp are what an operator actually correlates on; the attempt log
+	// keeps a real hash if a redemption ever needs matching to an issuance.
+	s.logger.Info("desktop pairing initiated", "user_id", ac.UserID)
+
+	// Build server URL and register endpoint for desktop app
+	serverBaseURL := s.serverBaseURL
+	if serverBaseURL == "" {
+		serverBaseURL = externalBaseURL(r)
+	}
+	registerEndpoint := ""
+	if serverBaseURL != "" {
+		registerEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/desktop/register"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":               true,
+		"pairingCode":      pairingCode,
+		"ttlSeconds":       300,
+		"rateLimit":        remaining,
+		"serverBaseUrl":    serverBaseURL,
+		"registerEndpoint": registerEndpoint,
+	})
+}
+
+// Pairing tokens are minted for exactly one of these purposes and are only
+// ever valid for that same purpose. Without this separation, a token minted
+// for one flow (e.g. a low-stakes pickup link, mailed in plaintext to a
+// recipient with no account) could be replayed against a different, more
+// sensitive flow (e.g. native device pairing, which grants full mail sync
+// and push-MFA-approval rights) if an attacker obtained it.
+const (
+	pairingPurposeNativeDevice = "native-device"
+	pairingPurposePGPQRKey     = "pgp-qr-key"
+	pairingPurposePickupLink   = "pickup-link"
+)
+
+type pairingTokenClaims struct {
+	Sub     string `json:"sub"`
+	Exp     int64  `json:"exp"`
+	Nonce   string `json:"n"`
+	Purpose string `json:"purpose"`
+}
+
+func (s *Server) createPairingToken(subscriberID, purpose string, ttl time.Duration) (string, time.Time, error) {
+	if ttl <= 0 {
+		ttl = 90 * time.Second
+	}
+	nonceBytes := make([]byte, 8)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return "", time.Time{}, err
+	}
+
+	expiresAt := time.Now().UTC().Add(ttl)
+	claims := pairingTokenClaims{
+		Sub:     strings.TrimSpace(subscriberID),
+		Exp:     expiresAt.Unix(),
+		Nonce:   hex.EncodeToString(nonceBytes),
+		Purpose: purpose,
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	mac := hmac.New(sha256.New, []byte(s.pairingSecret))
+	mac.Write(payload)
+	sig := mac.Sum(nil)
+
+	token := base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(sig)
+	return token, expiresAt, nil
+}
+
+// decodeAndVerifyPairingToken decodes token (in the shape produced by
+// createPairingToken), verifies its HMAC signature, checks expiry, and
+// checks that the token's purpose matches wantPurpose, returning its claims.
+// The purpose check is a plain != — the purpose isn't secret, unlike the
+// HMAC signature and (in validatePairingToken) the subject, which correctly
+// stay constant-time comparisons. Shared by validatePairingToken (which
+// additionally checks the subject against a caller-supplied expectation) and
+// parsePairingTokenUserID (which returns the subject to the caller instead).
+func (s *Server) decodeAndVerifyPairingToken(token, wantPurpose string, now time.Time) (pairingTokenClaims, error) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 2 {
+		return pairingTokenClaims{}, errors.New("invalid token format")
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return pairingTokenClaims{}, errors.New("invalid token payload")
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return pairingTokenClaims{}, errors.New("invalid token signature")
+	}
+
+	mac := hmac.New(sha256.New, []byte(s.pairingSecret))
+	mac.Write(payload)
+	expectedSig := mac.Sum(nil)
+	if subtle.ConstantTimeCompare(sig, expectedSig) != 1 {
+		return pairingTokenClaims{}, errors.New("signature mismatch")
+	}
+
+	var claims pairingTokenClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return pairingTokenClaims{}, errors.New("invalid token claims")
+	}
+	if claims.Exp <= 0 || now.UTC().Unix() > claims.Exp {
+		return pairingTokenClaims{}, errors.New("token expired")
+	}
+	if claims.Purpose != wantPurpose {
+		return pairingTokenClaims{}, errors.New("purpose mismatch")
+	}
+
+	return claims, nil
+}
+
+func (s *Server) validatePairingToken(subscriberID, token, wantPurpose string, now time.Time) error {
+	claims, err := s.decodeAndVerifyPairingToken(token, wantPurpose, now)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(claims.Sub)), []byte(strings.TrimSpace(subscriberID))) != 1 {
+		return errors.New("subscriber mismatch")
+	}
+	return nil
+}
+
+// parsePairingTokenUserID decodes and HMAC-verifies token without requiring
+// the caller to already know the expected subject, returning the subject
+// the token was minted for. Used by the QR key-fetch endpoint, which must
+// learn which user a token belongs to rather than confirm a known one —
+// unlike validatePairingToken (used for pickup links, where the URL path
+// already carries the expected ID to check against).
+func (s *Server) parsePairingTokenUserID(token, wantPurpose string, now time.Time) (string, error) {
+	claims, err := s.decodeAndVerifyPairingToken(token, wantPurpose, now)
+	if err != nil {
+		return "", err
+	}
+	return claims.Sub, nil
+}

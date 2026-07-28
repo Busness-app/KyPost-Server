@@ -172,6 +172,7 @@ func runServer(d runDeps) error {
 	go srv.StartContactPhotoSweeper(sweeperCtx)
 	go srv.StartSendAsCooldownSweeper(sweeperCtx)
 	go srv.StartSessionSweeper(sweeperCtx)
+	go srv.StartMFAChallengeSweeper(sweeperCtx)
 	go srv.StartOllamaVersionMonitor(sweeperCtx)
 
 	stop := make(chan os.Signal, 1)
@@ -238,6 +239,7 @@ func runAll(d runDeps) error {
 	go srv.StartContactPhotoSweeper(sweeperCtx)
 	go srv.StartSendAsCooldownSweeper(sweeperCtx)
 	go srv.StartSessionSweeper(sweeperCtx)
+	go srv.StartMFAChallengeSweeper(sweeperCtx)
 	go srv.StartOllamaVersionMonitor(sweeperCtx)
 	go monitorHealth(d.logger, d.health)
 	go func() {

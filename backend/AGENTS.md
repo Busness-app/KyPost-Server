@@ -20,11 +20,16 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 - Multi-user with roles (`admin`, `user`): accounts in `$CONFIG_DIR/users.json` (`users.Store`); sessions map token → `{userID, issuedAt, expiresAt, csrfToken}`; role is looked up live per request so deactivation/role changes apply immediately.
 - **Sessions are in-memory only and are never persisted**, so every process restart logs every user out — and restarts are routine (`scheduleContainerRestart`). Deliberate: a stolen token cannot outlive the process, and no bearer-equivalent credential is written to the volume. Ruled out by the same reasoning: a second API replica would not share them. See `Session`'s doc comment in `api/server.go`
 - Outbound requests to a user- or client-supplied URL (CardDAV server config in `api/`, UnifiedPush endpoints in `processor/`) must screen the destination IP through `netguard.IsPrivateOrReserved` — one definition, deliberately in a leaf package, because the two call sites previously held separate copies that drifted out of correctness together. Screening happens twice: up front at config time, and again at dial time against DNS rebinding. `api`'s SSRF-safe client additionally refuses an https→http redirect
-- An account can authenticate three ways — web session, paired device secret, CardDAV Basic Auth — and all three are revoked together by `revokeAllUserCredentials`. Any admin action that cuts off access (deactivate, reset-password, clear-MFA) must call it rather than revoking sessions and devices individually; the CardDAV credential cache is checked before the `u.Active` lookup, so missing it leaves a deactivated account working for up to `davCredentialTTL` Legacy `admin.env` is imported into `users.json` on first start (`users.LoadOrMigrate`), and legacy global data files are copied into the first admin's per-user dirs (`app/migrate.go`)
+- An account can authenticate three ways — web session, paired device secret, CardDAV Basic Auth — and all three are revoked together by `revokeAllUserCredentials`. Any admin action that cuts off access (deactivate, reset-password, clear-MFA) must call it rather than revoking sessions and devices individually. The CardDAV credential cache additionally re-checks `u.Active` on every hit, so a deactivated account is refused even if it populated the cache in the window between the deactivation and the invalidation; the cache saves the scrypt verification, never the authorization decision
+- **Any per-account state keyed off a client-supplied username must key it off `users.NormalizeUsername(...)`**, the same fold `GetByUsername` resolves the account with. The login lockout keyed on the raw string, which made `"victim"`, `"Victim"` and `" victim "` one account to the lookup and three independent strike budgets to the lockout — with whitespace padding that key space is unbounded, so three-strikes became unlimited online guessing from one IP
+- Usernames are validated by `users.ValidateUsername` at `Store.Create`: alphanumeric first character, then letters/digits/`.`/`_`/`-`, max 64. The rule exists because the CardDAV surface builds principal and address-book URLs out of the username and then guards access by comparing the first path segment back against it — `alice/bob` served its own owner a principal URL it then refused, and `..` produced paths outside the `/dav` mount. Existing accounts are not re-validated, so a pre-rule username keeps working
+- Legacy `admin.env` is imported into `users.json` on first start (`users.LoadOrMigrate`), and legacy global data files are copied into the first admin's per-user dirs (`app/migrate.go`)
+- Every bounded in-memory map in `api/` has an explicit sweep — sessions, MFA login challenges, the login/DAV/MFA/device lockouts, native-pairing nonces, spent QR tokens, the send-as cooldown, the pickup store. "Swept lazily on access" is not a sweep: an entry nobody comes back for is never accessed. New per-request state that can be created by an unauthenticated (or merely password-holding) caller needs a sweeper wired in **both** `app.go` mode blocks
 - Per-user data: IMAP credentials/tuning/notification prefs/CardDAV app-password hash under `$CONFIG_DIR/users/<userID>/`; mailbox state (checkpoint, processed set, decisions, push subscriptions, native devices, pairing `subscriberId`, contacts, mail cache) under `$STATE_DIR/users/<userID>/`. Global: `config.yaml` (timezone, log level, scan interval, rate limits, redaction, labels, Remote LLM, VAPID keys), root `$STATE_DIR/state.json` (AI-credits flag only)
 - Contacts: per-user address book (`contacts/` package) synced two ways — a session-authenticated JSON CRUD API for the web UI, a real CardDAV surface (`/dav/{username}/contacts/`, HTTP Basic Auth against a separate app-specific password, not the login password) for native OS/CardDAV clients, and a per-device-credential-authenticated two-way JSON sync endpoint (`/api/contacts/sync`) mirroring the native push pull/pairing mechanism, for the companion mobile app. See [internal/contacts/AGENTS.md](internal/contacts/AGENTS.md) and root `Mobile_Contact_Sync.md`
 - Mail cache: per-mailbox metadata cache (`mailcache/` package) backing `GET /api/inbox` — warmed opportunistically by the `processor/` poller's existing ~90s fetch (INBOX only) and by `api/`'s own live-fetch fallback, so the classic (no-`since`) response is usually served with zero IMAP calls, and a `since`-based delta mode avoids re-fetching bodies for already-seen messages. Not a permanent store like contacts — see [internal/mailcache/AGENTS.md](internal/mailcache/AGENTS.md) and root `Mobile_Mail_Relay.md`
 - Anti-phishing: inbound mail that impersonates KyPost itself is flagged **in place** with the IMAP keyword `$Phishing` and recorded as a `flagged_phishing` decision (`processor/phish_scan.go`). Flagging never moves, archives, files to Junk, deletes, bounces, or re-marks a message — the mail stays in INBOX and stays unread. Detection is deterministic (kypost:// URIs, host-agnostic links to this app's own pairing/pickup paths, forged system-notice subjects) and is gated by real DKIM over the account's own domain, run **only** when the content check trips, so ordinary mail costs no DNS. The Ollama classifier is never consulted. `$Phishing` is deliberately **not** in `config.Labels.Allowlist`, so it never becomes an inbox tab. The clients refuse non-allowlisted URI schemes on their own, unconditionally — this server-side flag is advisory, which is why every step of it is best-effort
+- Contact photos (`api/contacts_photo.go`): 5 MiB per photo, 200 MiB per account, content-hashed filenames, reference-counted sweep. **Every content type in `contentTypeExt` must have a decoder registered by a blank import in that file** — the upload path gates on `image.DecodeConfig`, so an advertised type with no decoder behind it is rejected 100% of the time with "file is not a decodable image". `image/webp` was exactly that (Go's stdlib has no webp decoder as of 1.26) and has been removed; restoring it means adding `golang.org/x/image/webp`, not a map entry
 - Secrets (IMAP passwords) are encrypted at rest with the single master key `$SECRET_DIR/imap-config.key`
 - Logs are structured JSON, written to stdout and a rotating file (16 MB max × 8 backups) under `LOG_DIR`
 
@@ -33,16 +38,16 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 | Package | Responsibility |
 |---------|---------------|
 | `app/` | Mode flag parsing; bootstrap logger, config, users store, legacy migration, poller, API server |
-| `api/` | HTTP endpoints; session auth with role enforcement (`withAuth`/`withAdmin`, `AuthContext` via request context); user management; per-user config/IMAP/tuning/notification scoping |
+| `api/` | HTTP endpoints; session auth with role enforcement (`withAuth`/`withAdmin`, `AuthContext` via request context); user management; per-user config/IMAP/tuning/notification scoping. The surface is split by concern: `server.go` (wiring, routes, config, mail send/draft, admin), `server_auth_session.go` (login, MFA completion, sessions, auth middleware), `server_notifications.go` (push, native pairing, pairing tokens), `server_inbox.go` (mailbox read/act/search), `server_request_context.go` (proxy-header trust, client IP, base URL, TLS detection) |
 | `users/` | Multi-user account store (`users.json`): roles, scrypt password hashing, soft-delete lifecycle, legacy `admin.env` migration |
-| `adapters/imap/` | IMAP UID-based email fetching; credential decrypt; one `APIClient` per credential file (per user) |
+| `adapters/imap/` | IMAP UID-based email fetching; credential decrypt; one `APIClient` per credential file (per user). An `APIClient` holds a live authenticated connection for its whole life, so both cache owners (`api`'s `userMailClient`/`invalidateUserMail`, `processor`'s `userMailClient`) must `Close()` the client they evict — see `api.closeMailClient` |
 | `adapters/classifier/` | Ollama `/api/generate` HTTP calls; 3s inter-request pacing; retry backoff; tuning text passed per classify call |
 | `processor/` | Timed polling loop (~90s default); polls every active user's mailbox per tick with bounded concurrency (4); per-user rate budgets; fault isolation (only all-users-failing flips global health) |
 | `config/` | YAML config load/init; global `Config` plus per-user `UserSettings` (notification prefs) |
 | `state/` | Per-user checkpoint, processed-set, decisions, subscriptions, devices; instantiated per user directory |
 | `contacts/` | Per-user address book (`contacts.json`); monotonic `Rev`/tombstoned deletes double as the CardDAV ETag/sync-token and the mobile-sync cursor; instantiated per user directory |
 | `mailcache/` | Per-user, per-mailbox mail metadata cache (`mailcache.json`); not permanent like `contacts/` — represents only the current top-N window, warmed by both `api/` (live-fetch fallback) and `processor/` (opportunistic, INBOX-only); instantiated per user directory in both processes |
-| `fsutil/` | Shared atomic file write + UUIDv4 helpers |
+| `fsutil/` | Shared atomic file write + UUIDv4 helpers. Directories are created `0700` to match the `0600` secrets written into them; an already-existing directory keeps its mode |
 | `health/` | Health status; sticky `aiCreditsExhausted` flag |
 | `logging/` | Structured logger; rotating file writer |
 | `redaction/` | Regex-based PII masking applied to sender, subject, and body before prompting Ollama (shared engine, rebuilt on pattern change) |
@@ -69,10 +74,10 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 | Route | Auth | Notes |
 |-------|------|-------|
 | `POST /api/auth/login` | no | Validates against `users.json`; inactive users rejected |
-| `GET /api/auth/me` | no | Returns `userId`, `username`, `role`, `mustChangePassword`, `subscriberId` when authenticated |
+| `GET /api/auth/me` | no | Returns `userId`, `username`, `role`, `mustChangePassword`, `subscriberId` when authenticated. Read-only: `subscriberId` is empty until `GET /api/notifications/pairing` mints one, because this route is polled on every auth refresh and must not turn a read into a file-locked write |
 | `POST /api/auth/logout` | yes | — |
 | `POST /api/auth/password` | yes | Changes the calling user's own password |
-| `GET\|POST /api/users` | admin | List / create users |
+| `GET\|POST /api/users` | admin | List / create users; `POST` rejects a username outside `users.ValidateUsername` with 400 |
 | `PUT /api/users/{id}` | admin | Change role; demoting the last active admin is rejected |
 | `POST /api/users/{id}/reset-password` | admin | Sets a temp password with forced change on next login |
 | `POST /api/users/{id}/deactivate` | admin | Soft delete; last active admin protected; live sessions die on next request |
@@ -171,7 +176,7 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 ## Work Guidance
 
 - Build: `cd backend && go build -buildvcs=false ./...`
-- Test: `cd backend && go test ./...`
+- Test: `cd backend && go test ./...` (CI runs `-race`; several stores are shared across the api and poller goroutines in `all` mode)
 - Keep adapter packages free of direct state mutation; they communicate via interfaces and channels defined in `processor/`
 - PII redaction must be applied before any text is sent to Ollama
 - Do not add dependencies outside the go.mod without explicit approval
@@ -180,6 +185,8 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 
 - `go build -buildvcs=false ./...` must succeed with zero errors
 - `go vet ./...` must pass
+- `gofmt -l .` must print nothing
+- `go test -race ./...` must pass
 
 ## Child DOX Index
 

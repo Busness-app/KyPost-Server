@@ -83,10 +83,21 @@ type Challenge struct {
 	MatchAttempts int
 }
 
-// Store is a concurrency-safe in-memory challenge map. Entries are swept
-// lazily on access (mirroring the api server's session expiry), which is
-// sufficient given the short TTL and the fact that every challenge is created
-// only to be consumed within seconds.
+// Store is a concurrency-safe in-memory challenge map.
+//
+// Entries are dropped on access when expired, but that alone was never enough:
+// a challenge nobody ever comes back for is never accessed, so it was never
+// swept. Every abandoned second-factor login — the user closes the tab, the
+// push is never answered — pinned an entry for the process lifetime, and an
+// attacker holding a stolen password but not the second factor (precisely the
+// case MFA exists for) could mint them at will, since every correct password
+// clears the login lockout and Create runs before any second factor. scrypt's
+// cost on the login path bounds the rate, so it is a slow leak rather than a
+// fast OOM, but nothing bounded the total.
+//
+// SweepExpired is the missing half. Every other bounded map in this codebase
+// already had one (api's sessions, loginLockout, nativePairingNonces,
+// qrTokenGuard, sendAsCooldown, pickupStore); this was the only holdout.
 type Store struct {
 	mu sync.Mutex
 	m  map[string]Challenge
@@ -94,6 +105,30 @@ type Store struct {
 
 func NewStore() *Store {
 	return &Store{m: map[string]Challenge{}}
+}
+
+// SweepExpired drops every challenge past its TTL and reports how many went.
+// Driven by api.Server.StartMFAChallengeSweeper; separate from the ticker so
+// tests can run one sweep without waiting out an interval.
+func (s *Store) SweepExpired(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for id, ch := range s.m {
+		if now.After(ch.ExpiresAt) {
+			delete(s.m, id)
+			removed++
+		}
+	}
+	return removed
+}
+
+// Len reports how many challenges are currently held. Exists for the sweeper's
+// tests, which otherwise cannot observe the map at all from outside.
+func (s *Store) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.m)
 }
 
 // Create mints a new challenge for userID with a fresh random ID.

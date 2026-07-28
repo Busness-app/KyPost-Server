@@ -423,6 +423,24 @@ func (s *Store) Checkpoint() string {
 	return s.checkpoint
 }
 
+// SubscriberID returns the account's push subscriber ID without minting one,
+// reporting "" if none exists yet.
+//
+// Read-only on purpose. handleMe used GetOrCreateSubscriberID, which made a GET
+// the frontend polls on every auth refresh write (and fsync) a file — so a read
+// of "who am I" could fail, or create durable state, on a full or read-only
+// volume. The ID is only ever needed by a caller that is about to pair a device,
+// and those paths call GetOrCreateSubscriberID themselves.
+// It reads through to disk like NativeDeliveryMode does, so an ID minted by the
+// other process is still seen — and that refresh is still strictly cheaper than
+// the file-locked read-modify-write-fsync this replaced.
+func (s *Store) SubscriberID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshStateFromDiskLocked()
+	return s.subscriberID
+}
+
 func (s *Store) GetOrCreateSubscriberID() (string, error) {
 	var id string
 	err := s.update(func() error {
