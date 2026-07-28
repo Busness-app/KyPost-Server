@@ -28,6 +28,20 @@ func solve(t *testing.T, ch Challenge) string {
 	return ""
 }
 
+// answerFor is solve() without the encoding, for tests that need to build a
+// solution whose only defect is the one they are testing.
+func answerFor(t *testing.T, ch Challenge) int {
+	t.Helper()
+	for n := 0; n <= ch.MaxNumber; n++ {
+		sum := sha256.Sum256([]byte(ch.Salt + strconv.Itoa(n)))
+		if hex.EncodeToString(sum[:]) == ch.Challenge {
+			return n
+		}
+	}
+	t.Fatalf("challenge %+v has no solution in range", ch)
+	return 0
+}
+
 func encodeSolution(t *testing.T, ch Challenge, number int) string {
 	t.Helper()
 	payload := map[string]any{
@@ -117,15 +131,7 @@ func TestPoWRejectsAWrongNumber(t *testing.T) {
 	ch, _ := v.IssueAt(testClientIP, 0)
 	// Find the real answer, then submit a different one under the same
 	// (correctly signed) challenge.
-	var answer int
-	for n := 0; n <= ch.MaxNumber; n++ {
-		sum := sha256.Sum256([]byte(ch.Salt + strconv.Itoa(n)))
-		if hex.EncodeToString(sum[:]) == ch.Challenge {
-			answer = n
-			break
-		}
-	}
-	wrong := (answer + 1) % (ch.MaxNumber + 1)
+	wrong := (answerFor(t, ch) + 1) % (ch.MaxNumber + 1)
 	if ok, _ := v.Verify(context.Background(), encodeSolution(t, ch, wrong), testClientIP); ok {
 		t.Fatal("a number that does not hash to the challenge must be refused")
 	}
@@ -213,9 +219,13 @@ func TestPoWRejectsATamperedClientIP(t *testing.T) {
 	ch, _ := v.IssueAt(testClientIP, 0)
 	token := solve(t, ch)
 
+	// The correct answer, so the signature is the *only* thing that can
+	// reject this. Submitting a deliberately wrong number here would let the
+	// test pass even with clientip left out of the signed preimage — the hash
+	// check would do the rejecting and prove nothing.
 	moved := ch
 	moved.ClientIP = "198.51.100.99"
-	ok, err := v.Verify(context.Background(), encodeSolution(t, moved, 0), moved.ClientIP)
+	ok, err := v.Verify(context.Background(), encodeSolution(t, moved, answerFor(t, ch)), moved.ClientIP)
 	if ok {
 		t.Fatal("a challenge whose clientip was edited must be refused")
 	}
