@@ -13,6 +13,21 @@ type PowWidgetProps = {
 
 type Phase = "working" | "done" | "failed";
 
+// SubtleCrypto is [SecureContext]: over plain http:// to anything but
+// localhost — which is exactly what the shipped docker-compose.yml serves, see
+// the TLS note in README.md — window.crypto.subtle is undefined and the solver
+// throws a TypeError on its first hash. The result is a login page nobody can
+// get past, so say what it is and who can fix it rather than surfacing a raw
+// TypeError through the generic failure branch. Checked before fetching: a
+// challenge this browser cannot solve is not worth minting.
+const SECURE_CONTEXT_REQUIRED =
+  "This security check needs a secure (HTTPS) connection, and this page was not loaded over one. " +
+  "The administrator has to put TLS in front of the server, or choose a different CAPTCHA provider.";
+
+function canRunSecurityCheck(): boolean {
+  return window.isSecureContext && Boolean(globalThis.crypto?.subtle);
+}
+
 export function PowWidget({ onToken }: PowWidgetProps) {
   const [phase, setPhase] = useState<Phase>("working");
   const [progress, setProgress] = useState(0);
@@ -21,6 +36,12 @@ export function PowWidget({ onToken }: PowWidgetProps) {
   onTokenRef.current = onToken;
 
   useEffect(() => {
+    if (!canRunSecurityCheck()) {
+      setPhase("failed");
+      setError(SECURE_CONTEXT_REQUIRED);
+      return;
+    }
+
     // The solver loop is long-lived by design, and LoginPage remounts this
     // component (via its captchaNonce key) after every attempt. Without this
     // flag an in-flight solve from the previous mount would still call
@@ -40,7 +61,7 @@ export function PowWidget({ onToken }: PowWidgetProps) {
       } catch (err) {
         if (cancelled) return;
         setPhase("failed");
-        setError(toErrorMessage(err, "Could not complete the security check."));
+        setError(`${toErrorMessage(err, "Could not complete the security check.")} Reload the page to try again.`);
       }
     })();
 
@@ -49,10 +70,13 @@ export function PowWidget({ onToken }: PowWidgetProps) {
     };
   }, []);
 
+  // The "reload and retry" advice now lives in the message rather than here,
+  // because it is not true of every failure: reloading a page served over
+  // plain HTTP produces the same missing crypto.subtle every time.
   if (phase === "failed") {
     return (
       <div className="auth-pow auth-pow-failed" role="alert">
-        {error} Reload the page to try again.
+        {error}
       </div>
     );
   }

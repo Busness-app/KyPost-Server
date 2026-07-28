@@ -1,5 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PowWidget } from "./PowWidget";
 
 const encoder = new TextEncoder();
@@ -23,8 +23,20 @@ async function challengeFor(number: number, maxnumber = 50) {
   };
 }
 
+beforeEach(() => {
+  // jsdom reports window.isSecureContext === false while still exposing a
+  // working crypto.subtle — the opposite of a browser, where the two travel
+  // together. Every test below except the secure-context ones is about what
+  // happens once the check can actually run, so give them a secure context.
+  vi.stubGlobal("isSecureContext", true);
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  // Testing Library only registers auto-cleanup when vitest runs with globals
+  // enabled, which this project does not. Without it each test inherits the
+  // previous one's mounted tree and every query matches more than once.
+  cleanup();
 });
 
 function stubFetch(body: unknown, ok = true) {
@@ -56,6 +68,41 @@ describe("PowWidget", () => {
     stubFetch(await challengeFor(3));
     render(<PowWidget onToken={vi.fn()} />);
     await waitFor(() => expect(screen.getByText(/verified/i)).toBeTruthy());
+  });
+
+  it("asks for HTTPS instead of throwing when the page is not a secure context", async () => {
+    // crypto.subtle is [SecureContext]: over http://192.168.1.x:5866 — which
+    // the shipped docker-compose serves — it is undefined, sha256Hex throws a
+    // TypeError, no token is ever produced and nobody can sign in. Every layer
+    // of testing hid this: jsdom and Node expose crypto.subtle unconditionally
+    // and http://localhost *is* a secure context, so the condition has to be
+    // stubbed rather than reproduced.
+    vi.stubGlobal("isSecureContext", false);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const onToken = vi.fn();
+
+    render(<PowWidget onToken={onToken} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/HTTPS/i);
+    expect(alert.textContent).toMatch(/administrator/i);
+    expect(onToken).not.toHaveBeenCalled();
+    // Detected before anything is attempted: no point spending a challenge
+    // the browser cannot solve.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("asks for HTTPS when crypto.subtle is missing even if isSecureContext lies", async () => {
+    vi.stubGlobal("crypto", {});
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<PowWidget onToken={vi.fn()} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/HTTPS/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("surfaces a failure instead of silently handing up nothing", async () => {
