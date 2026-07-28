@@ -205,7 +205,11 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	totpSecretKeyPath := config.EnvOrDefault("TOTP_SECRET_KEY_FILE", "/kypost/private/totp-secret.key")
 	pgpPrivateKeyPath := config.EnvOrDefault("PGP_PRIVATE_KEY_FILE", "/kypost/private/pgp-private-key.key")
 	pickupStoreKeyPath := config.EnvOrDefault("PICKUP_STORE_KEY_FILE", "/kypost/private/pickup-store.key")
-	pairingSecret := strings.TrimSpace(os.Getenv("PAIRING_SECRET"))
+	// Generated and persisted like every other key above when PAIRING_SECRET is
+	// unset; the env var still wins so a multi-replica deployment can share one.
+	// See resolvePairingSecret.
+	pairingSecretKeyPath := config.EnvOrDefault("PAIRING_SECRET_FILE", "/kypost/private/pairing.key")
+	pairingSecret := resolvePairingSecret(pairingSecretKeyPath, logger)
 
 	captchaProvider := captcha.Provider(strings.ToLower(strings.TrimSpace(os.Getenv("CAPTCHA_PROVIDER"))))
 	captchaSiteKey := strings.TrimSpace(os.Getenv("CAPTCHA_SITE_KEY"))

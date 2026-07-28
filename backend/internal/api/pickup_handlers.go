@@ -2,17 +2,21 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"html"
 	"html/template"
 	"net/http"
 	"net/smtp"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/inbucket/html2text"
 
+	"kypost-server/backend/internal/cryptutil"
+	"kypost-server/backend/internal/logging"
 	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/pgpmail"
 )
@@ -262,4 +266,48 @@ func (s *Server) pickupBaseURL() string {
 		s.logger.Error("SERVER_BASE_URL is not set; pickup links and PGP QR key-exchange URLs will fall back to http://localhost:5866 and will not work for remote recipients or scanners")
 	})
 	return "http://localhost:5866"
+}
+
+// resolvePairingSecret returns the HMAC secret used to sign pickup links, PGP
+// QR key-exchange tokens and device pairing tokens.
+//
+// The environment variable wins when set. Otherwise the secret is GENERATED and
+// persisted at keyPath, exactly as every other key in this system already is
+// (IMAP_CONFIG_KEY_FILE, TOTP_SECRET_KEY_FILE, PGP_PRIVATE_KEY_FILE,
+// PICKUP_STORE_KEY_FILE all go through cryptutil.LoadOrCreateKey).
+//
+// This used to be environment-only, which made it the one secret an operator
+// had to invent by hand — and .env.example shipped a bare "PAIRING_SECRET="
+// with no length guidance and no generation hint, while Dockerfile and
+// docker-compose both defaulted it to empty. An unset value already failed
+// closed (503 everywhere, logged), so the real gap was a weak one:
+// "PAIRING_SECRET=hunter2" was accepted silently and produced forgeable HMACs
+// for pickup links and pairing tokens. Generating it removes the chance to get
+// it wrong, and removes a setup step.
+//
+// The environment override stays because a multi-replica deployment needs every
+// replica to agree on one secret, and a per-container generated file cannot
+// provide that. An operator-supplied value is used verbatim and writes no file.
+//
+// A generation failure — read-only secrets volume, bad permissions — returns
+// "", which every consumer already reads as "not configured" and answers 503
+// to. Failing closed is the pre-existing behaviour and is the right one: a
+// weak-but-present secret would be worse than a disabled feature.
+func resolvePairingSecret(keyPath string, logger *logging.Logger) string {
+	if fromEnv := strings.TrimSpace(os.Getenv("PAIRING_SECRET")); fromEnv != "" {
+		return fromEnv
+	}
+
+	key, err := cryptutil.LoadOrCreateKey(keyPath)
+	if err != nil {
+		if logger != nil {
+			logger.Error("could not generate or read the pairing secret; pickup links and PGP QR key-exchange stay disabled",
+				"path", keyPath, "error", err.Error())
+		}
+		return ""
+	}
+	// Base64 rather than the raw bytes: the field is a string that reaches
+	// hmac.New either way, and keeping it printable means it looks like an
+	// operator-supplied value everywhere it might surface. Same 256 bits.
+	return base64.StdEncoding.EncodeToString(key)
 }

@@ -126,7 +126,8 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 | `IMAP_CONFIG_FILE` | `$SECRET_DIR/imap-config.json` | Encrypted IMAP credentials |
 | `IMAP_CONFIG_KEY_FILE` | `$SECRET_DIR/imap-config.key` | AES key for IMAP credentials |
 | `SERVER_BASE_URL` | empty | Public backend URL embedded in mobile pairing QR (`srv`) and used to build register endpoint (`reg`) |
-| `PAIRING_SECRET` | empty | HMAC secret used to sign and validate short-lived mobile pairing tokens |
+| `PAIRING_SECRET` | generated | HMAC secret for pickup links, PGP QR exchange and pairing tokens. Generated into `PAIRING_SECRET_FILE` when unset; set it only to share one across replicas |
+| `PAIRING_SECRET_FILE` | `/kypost/private/pairing.key` | Where the generated pairing secret is persisted |
 | `PUSH_RELAY_URL` | empty | Base URL of the central Android push relay (Cloudflare Worker) that delivers native push to FCM. When set with `PUSH_RELAY_KEY`, enables Android native push |
 | `PUSH_RELAY_KEY` | empty | Per-server API key for Android push relay; sent as `Authorization: Bearer` to the relay |
 | `APNS_RELAY_URL` | empty | Base URL of the central iOS push relay (Cloudflare Worker) that delivers native push via APNs. When set with `APNS_RELAY_KEY`, enables iOS native push |

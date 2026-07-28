@@ -195,7 +195,8 @@ Common variables:
 - `IMAP_CONFIG_KEY_FILE` (default `/kypost/private/imap-config.key`)
 - `TOTP_SECRET_KEY_FILE` (default `/kypost/private/totp-secret.key`)
 - `SERVER_BASE_URL` (optional. Recommended for mobile pairing. KyPost embeds this public URL as `srv` in the QR code and uses it to build `reg`.)
-- `PAIRING_SECRET` (required for mobile pairing. KyPost signs and validates pairing tokens with it.)
+- `PAIRING_SECRET` (optional. HMAC secret for pickup links, PGP QR key exchange and mobile pairing tokens. Generated automatically on first start and persisted at `PAIRING_SECRET_FILE` — set it only if several replicas must share one secret, and use `openssl rand -base64 32` if you do.)
+- `PAIRING_SECRET_FILE` (default `/kypost/private/pairing.key`)
 - `PUSH_RELAY_URL` (optional. Base URL of the central push relay Worker that delivers Android native push to FCM.)
 - `PUSH_RELAY_KEY` (per-server API key from the relay operator. Set it together with `PUSH_RELAY_URL` to enable Android native push.)
 - `APNS_RELAY_URL` (optional. Base URL of the central APNs relay Worker that delivers iOS native push.)
@@ -219,7 +220,7 @@ mkdir -p share/ollama/models
 
 The backend handles mobile pairing directly. It does not require Novu.
 
-- Set `PAIRING_SECRET` on the server.
+- Nothing to configure: the pairing secret is generated on first start and kept at `/kypost/private/pairing.key`. Set `PAIRING_SECRET` only if you run multiple replicas that must share one.
 - Optional: set `SERVER_BASE_URL` so that QR code payloads always point to the correct public backend URL.
 - Keep all pairing secrets on the server only.
 
