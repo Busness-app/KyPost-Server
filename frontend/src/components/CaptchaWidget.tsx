@@ -74,19 +74,22 @@ declare global {
 }
 
 export function CaptchaWidget({ provider, siteKey, onToken }: CaptchaWidgetProps) {
-  // pow is self-hosted: no script to load, no site key, no global callback.
-  // Delegating before any of that machinery runs keeps the two concerns from
-  // growing into each other.
-  if (provider === "pow") {
-    return <PowWidget onToken={onToken} />;
-  }
-
+  // Every hook here runs unconditionally, including on the "pow" path that
+  // needs none of them, and the pow branch returns below them rather than
+  // above. Returning early instead is safe only while provider is invariant
+  // per mount — an invariant nothing in the code enforces, in a repo with no
+  // ESLint to catch the day it stops holding. The failure mode is not subtle:
+  // "Rendered fewer hooks than expected", i.e. a crash on the login page.
   const rawId = useId().replace(/[^a-zA-Z0-9]/g, "");
   const callbackName = `__kypostCaptchaToken_${rawId}` as const;
   const onTokenRef = useRef(onToken);
   onTokenRef.current = onToken;
 
   useEffect(() => {
+    // pow is self-hosted: no script to load, no site key, no global callback.
+    if (provider === "pow") {
+      return;
+    }
     window[callbackName] = (token: string) => onTokenRef.current(token);
     loadCaptchaScript(provider);
     return () => {
@@ -94,6 +97,10 @@ export function CaptchaWidget({ provider, siteKey, onToken }: CaptchaWidgetProps
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider, callbackName]);
+
+  if (provider === "pow") {
+    return <PowWidget onToken={onToken} />;
+  }
 
   // data-theme: both providers render a light box by default, which sat on the
   // dark sign-in card as a bright rectangle. Asking each for its dark variant

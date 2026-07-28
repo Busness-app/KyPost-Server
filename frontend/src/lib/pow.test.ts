@@ -52,12 +52,22 @@ describe("solvePowChallenge", () => {
   });
 
   it("reports progress as it searches", async () => {
+    // maxnumber has to clear PROGRESS_EVERY (500) several times over. At
+    // maxnumber=100 this fired exactly once, at number 0 with fraction 0, so
+    // "was called at least once" passed even if reporting were broken for
+    // every iteration after the first.
     const onProgress = vi.fn();
-    await solvePowChallenge(await makeChallenge(100, 100), onProgress);
-    expect(onProgress).toHaveBeenCalled();
-    for (const [fraction] of onProgress.mock.calls) {
+    await solvePowChallenge(await makeChallenge(1500, 1500), onProgress);
+
+    const fractions = onProgress.mock.calls.map(([fraction]) => fraction as number);
+    expect(fractions.length).toBeGreaterThan(1);
+    for (const fraction of fractions) {
       expect(fraction).toBeGreaterThanOrEqual(0);
       expect(fraction).toBeLessThanOrEqual(1);
+    }
+    // It must advance, not just fire.
+    for (let i = 1; i < fractions.length; i++) {
+      expect(fractions[i]).toBeGreaterThan(fractions[i - 1]);
     }
   });
 
