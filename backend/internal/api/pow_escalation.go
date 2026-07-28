@@ -50,15 +50,20 @@ type powEscalationEntry struct {
 // stays nearly free while naive repeated guessing from one address gets
 // expensive fast.
 //
-// Be honest about the reach of that: a challenge is NOT bound to the address
-// that requested it — captcha.PoWVerifier.Verify deliberately ignores its
-// remoteIP argument — so an attacker can fetch base-difficulty challenges from
-// a clean address and submit the solutions from an escalated one, and pay the
-// base price forever. What escalation reliably prices is the honest user who
-// mistyped, and the unsophisticated script that hammers from one address.
-// Binding the challenge to the requesting IP would close that, at the cost of
-// breaking a mobile client whose address changes mid-solve; that tradeoff has
-// not been made, so do not read more into this than it does.
+// This only works because a challenge is bound to the address that requested
+// it: captcha.PoWVerifier.IssueAt signs the client IP into the challenge and
+// Verify compares it against the address presenting the solution. Without that
+// binding an attacker fetched base-difficulty challenges from a clean address
+// and submitted them from their escalated one, paying the base price forever —
+// and escalation then priced nothing but the honest user who mistyped. The
+// mobile client whose address changes mid-solve is handled, not broken: it
+// gets captcha.ErrChallengeWrongClient, which handleLogin refunds the lockout
+// strike for.
+//
+// Be honest about what remains: escalation is counted per address, so an
+// attacker spraying from many addresses still gets the base difficulty at each
+// one. Binding closes the laundering bypass; it does not make a botnet
+// expensive.
 //
 // It deliberately does not reuse loginLockout. That is keyed username+IP, and
 // the challenge is issued before the user has typed a username — there is

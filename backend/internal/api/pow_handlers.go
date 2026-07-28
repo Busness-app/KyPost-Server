@@ -96,9 +96,13 @@ func (s *Server) handlePoWChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Difficulty rises with this address's recent failed logins, so an
-	// honest first login stays nearly free.
+	// honest first login stays nearly free. The challenge is bound to ip as
+	// well as priced for it: otherwise an attacker whose address had been
+	// escalated would just fetch base-difficulty challenges from a clean one
+	// and submit them here, and escalation would price nobody but the honest
+	// user who mistyped.
 	maxNumber := s.powDifficulty.maxNumberFor(ip, s.powVerifier.BaseMaxNumber(), time.Now())
-	ch, err := s.powVerifier.IssueAt(maxNumber)
+	ch, err := s.powVerifier.IssueAt(ip, maxNumber)
 	if err != nil {
 		s.logger.Error("could not issue a proof-of-work challenge", "error", err.Error())
 		http.Error(w, "could not issue a challenge", http.StatusInternalServerError)

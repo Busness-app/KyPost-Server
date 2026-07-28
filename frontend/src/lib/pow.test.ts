@@ -20,6 +20,7 @@ async function makeChallenge(number: number, maxnumber = 100): Promise<PowChalle
     challenge: await sha256Hex(salt + number),
     maxnumber,
     expires: Math.floor(Date.now() / 1000) + 300,
+    clientip: "203.0.113.7",
     signature: "server-signature-the-client-never-inspects"
   };
 }
@@ -37,6 +38,10 @@ describe("solvePowChallenge", () => {
     expect(solution.challenge).toBe(challenge.challenge);
     expect(solution.maxnumber).toBe(challenge.maxnumber);
     expect(solution.expires).toBe(challenge.expires);
+    // clientip binds the challenge to the address it was issued to and is
+    // inside the HMAC, so dropping or rewriting it here would make every
+    // solution look forged to the server.
+    expect(solution.clientip).toBe(challenge.clientip);
     expect(solution.signature).toBe(challenge.signature);
     expect(solution.algorithm).toBe("SHA-256");
   });

@@ -19,6 +19,7 @@ async function challengeFor(number: number, maxnumber = 50) {
     challenge: await sha256Hex(salt + number),
     maxnumber,
     expires: Math.floor(Date.now() / 1000) + 300,
+    clientip: "203.0.113.7",
     signature: "sig"
   };
 }

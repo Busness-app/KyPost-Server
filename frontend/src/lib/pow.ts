@@ -14,6 +14,11 @@ export type PowChallenge = {
   challenge: string;
   maxnumber: number;
   expires: number;
+  // The address the server issued this challenge to. Echoed back untouched
+  // like every other field: the server compares it to the address the login
+  // request arrives from, and it is covered by the signature, so editing it
+  // invalidates the solution rather than moving it to another address.
+  clientip: string;
   signature: string;
 };
 

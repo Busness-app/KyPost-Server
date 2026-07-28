@@ -142,7 +142,9 @@ func TestPoWChallengeEndpointIssuesASignedChallenge(t *testing.T) {
 	srv.powVerifier = v
 
 	rec := httptest.NewRecorder()
-	srv.handlePoWChallenge(rec, httptest.NewRequest(http.MethodGet, "/api/auth/pow-challenge", nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/pow-challenge", nil)
+	req.RemoteAddr = "203.0.113.7:4444"
+	srv.handlePoWChallenge(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -160,6 +162,11 @@ func TestPoWChallengeEndpointIssuesASignedChallenge(t *testing.T) {
 	}
 	if ch.MaxNumber != 100 {
 		t.Errorf("MaxNumber = %d, want 100", ch.MaxNumber)
+	}
+	// The challenge is bound to the address that asked for it, or an
+	// escalated attacker just fetches cheap ones from a clean address.
+	if ch.ClientIP != "203.0.113.7" {
+		t.Errorf("ClientIP = %q, want the requesting address", ch.ClientIP)
 	}
 	if ch.Expires <= time.Now().Unix() {
 		t.Errorf("Expires = %d, want a future timestamp", ch.Expires)
@@ -224,6 +231,30 @@ func TestLoginRefundsTheStrikeForAnExpiredChallenge(t *testing.T) {
 	for i := 0; i <= loginMaxFailures; i++ {
 		rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
 			map[string]string{"username": adminUsername, "password": "irrelevant", "captchaToken": "stale"})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want 401 (body %s)", i+1, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestLoginRefundsTheStrikeForAChallengeIssuedToAnotherAddress(t *testing.T) {
+	srv := newTestServer(t)
+	srv.captchaVerifier = stubVerifier{err: captcha.ErrChallengeWrongClient}
+
+	// Get the bootstrap admin user's actual username
+	all, err := srv.users.List()
+	if err != nil || len(all) != 1 {
+		t.Fatalf("expected exactly one bootstrap user, got %+v err=%v", all, err)
+	}
+	adminUsername := all[0].Username
+
+	// A phone handing off between wifi and cellular can do this repeatedly
+	// through no fault of its own, so a changed address must never lock an
+	// account. Loop loginMaxFailures + 1 times to prove the strikes are
+	// refunded: unrefunded, the final request would return 429.
+	for i := 0; i <= loginMaxFailures; i++ {
+		rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+			map[string]string{"username": adminUsername, "password": "irrelevant", "captchaToken": "foreign"})
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d: status = %d, want 401 (body %s)", i+1, rec.Code, rec.Body.String())
 		}

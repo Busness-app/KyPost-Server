@@ -56,16 +56,31 @@ const (
 // open; that is a clock, not a credential) and spends it for a wrong solution.
 var ErrChallengeExpired = errors.New("captcha: proof-of-work challenge expired")
 
+// ErrChallengeWrongClient reports a correctly signed, unexpired solution that
+// was presented from a different address than the one it was issued to. Like
+// ErrChallengeExpired it is distinct from a plain false, and for the same
+// reason: handleLogin refunds the lockout strike for it. A phone handing off
+// from wifi to cellular mid-solve changes address through no fault of its
+// own, and that is a network event, not a wrong credential.
+var ErrChallengeWrongClient = errors.New("captcha: proof-of-work challenge was issued to a different client address")
+
 // Challenge is what GET /api/auth/pow-challenge returns and what the client
 // echoes back inside its solution. Every field is covered by Signature, so a
 // client can edit none of them — notably not MaxNumber, which is the whole
-// difficulty setting.
+// difficulty setting, nor ClientIP, which binds the challenge to one address.
 type Challenge struct {
 	Algorithm string `json:"algorithm"`
 	Salt      string `json:"salt"`
 	Challenge string `json:"challenge"`
 	MaxNumber int    `json:"maxnumber"`
 	Expires   int64  `json:"expires"`
+	// ClientIP is the address this challenge was issued to. It is echoed to
+	// the client on purpose rather than kept server-side: Verify needs to
+	// tell "this solution belongs to another address" apart from "this
+	// signature is forged", and it can only do that if the issuing address
+	// travels with the challenge. Handing it back leaks nothing — it is that
+	// client's own address, and it is HMAC-covered so they cannot edit it.
+	ClientIP  string `json:"clientip"`
 	Signature string `json:"signature"`
 }
 
@@ -76,6 +91,7 @@ type solution struct {
 	Challenge string `json:"challenge"`
 	MaxNumber int    `json:"maxnumber"`
 	Expires   int64  `json:"expires"`
+	ClientIP  string `json:"clientip"`
 	Signature string `json:"signature"`
 	Number    int    `json:"number"`
 }
@@ -112,25 +128,31 @@ func NewPoWVerifier(hmacKey []byte, maxNumber int) (*PoWVerifier, error) {
 	}, nil
 }
 
-// sign covers every field a client could otherwise choose for itself.
-func (v *PoWVerifier) sign(salt, challenge string, maxNumber int, expires int64) string {
+// sign covers every field a client could otherwise choose for itself,
+// including the address the challenge was issued to — without that, a
+// challenge minted cheaply at a clean address could be spent at an escalated
+// one and api's per-IP difficulty escalation would price nobody but the
+// honest user who mistyped.
+//
+// The fields are joined with "|" and none of them can contain one: salt and
+// challenge are hex, maxnumber and expires are integers, and an IP address
+// can contain ":" (IPv6) or "." but never "|". So the delimiter stays
+// unambiguous and no two distinct field sets share a preimage. Anything added
+// here later must satisfy the same property.
+func (v *PoWVerifier) sign(salt, challenge string, maxNumber int, expires int64, clientIP string) string {
 	mac := hmac.New(sha256.New, v.hmacKey)
-	fmt.Fprintf(mac, "%s|%s|%d|%d", salt, challenge, maxNumber, expires)
+	fmt.Fprintf(mac, "%s|%s|%d|%d|%s", salt, challenge, maxNumber, expires, clientIP)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// Issue mints a challenge at this verifier's configured difficulty.
-func (v *PoWVerifier) Issue() (Challenge, error) {
-	return v.IssueAt(v.maxNumber)
-}
-
-// IssueAt mints a challenge at a caller-chosen difficulty, for api's per-IP
-// escalation. maxNumber <= 0 falls back to the configured default.
+// IssueAt mints a challenge bound to clientIP at a caller-chosen difficulty,
+// for api's per-IP escalation. maxNumber <= 0 falls back to the configured
+// default.
 //
 // Verify does not consult v.maxNumber at all — it checks the number against
 // the maxnumber signed into the challenge — so raising the difficulty for one
 // client cannot invalidate another's in-flight challenge.
-func (v *PoWVerifier) IssueAt(maxNumber int) (Challenge, error) {
+func (v *PoWVerifier) IssueAt(clientIP string, maxNumber int) (Challenge, error) {
 	if maxNumber <= 0 {
 		maxNumber = v.maxNumber
 	}
@@ -153,8 +175,9 @@ func (v *PoWVerifier) IssueAt(maxNumber int) (Challenge, error) {
 		Challenge: hex.EncodeToString(sum[:]),
 		MaxNumber: maxNumber,
 		Expires:   v.now().Add(powChallengeTTL).Unix(),
+		ClientIP:  clientIP,
 	}
-	ch.Signature = v.sign(ch.Salt, ch.Challenge, ch.MaxNumber, ch.Expires)
+	ch.Signature = v.sign(ch.Salt, ch.Challenge, ch.MaxNumber, ch.Expires, ch.ClientIP)
 	return ch, nil
 }
 
@@ -162,15 +185,25 @@ func (v *PoWVerifier) IssueAt(maxNumber int) (Challenge, error) {
 // escalation multiplies up from.
 func (v *PoWVerifier) BaseMaxNumber() int { return v.maxNumber }
 
-// Verify checks a base64 solution payload. ctx and remoteIP are unused — the
-// Verifier interface carries them for the two providers that make a network
+// Verify checks a base64 solution payload against remoteIP. ctx is unused —
+// the Verifier interface carries it for the two providers that make a network
 // call, and this one deliberately makes none.
 //
-// Check order is load-bearing. The signature comes first because every other
-// field is attacker-controlled until it passes, including the salt this would
-// otherwise record as spent. The spent-salt burn comes last so only a fully
-// valid solution consumes an entry, which keeps garbage out of the cache.
-func (v *PoWVerifier) Verify(_ context.Context, token, _ string) (bool, error) {
+// Check order is load-bearing.
+//
+// The signature comes first because every other field is attacker-controlled
+// until it passes, including the salt this would otherwise record as spent
+// and the ClientIP the address check below trusts.
+//
+// The address check sits above the range and hash checks and well above
+// consume, so a foreign solution never burns its salt: a user whose address
+// changed mid-solve gets ErrChallengeWrongClient, fetches a fresh challenge,
+// and is not additionally told their old one was already spent. Moving it
+// below consume would turn one network hiccup into two failures.
+//
+// The spent-salt burn comes last so only a fully valid solution consumes an
+// entry, which keeps garbage out of the cache.
+func (v *PoWVerifier) Verify(_ context.Context, token, remoteIP string) (bool, error) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(token))
 	if err != nil {
 		return false, nil
@@ -183,12 +216,20 @@ func (v *PoWVerifier) Verify(_ context.Context, token, _ string) (bool, error) {
 		return false, nil
 	}
 
-	want := v.sign(sol.Salt, sol.Challenge, sol.MaxNumber, sol.Expires)
+	want := v.sign(sol.Salt, sol.Challenge, sol.MaxNumber, sol.Expires, sol.ClientIP)
 	if subtle.ConstantTimeCompare([]byte(sol.Signature), []byte(want)) != 1 {
 		return false, nil
 	}
 	if v.now().After(time.Unix(sol.Expires, 0)) {
 		return false, ErrChallengeExpired
+	}
+	// sol.ClientIP survived the signature check, so this server put it there:
+	// a client that rewrites it fails above with a plain false (a forgery),
+	// not here. Neither value is a secret, so a plain compare is right —
+	// there is no timing signal in an address the caller already knows. Both
+	// sides come from api.clientIP, so they are the same textual form.
+	if sol.ClientIP != remoteIP {
+		return false, ErrChallengeWrongClient
 	}
 	if sol.Number < 0 || sol.Number > sol.MaxNumber {
 		return false, nil

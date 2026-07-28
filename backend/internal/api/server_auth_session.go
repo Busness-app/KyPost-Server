@@ -145,6 +145,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			s.loginLockout.cancelAttempt(lockoutKey)
 			http.Error(w, "security check expired, please try again", http.StatusUnauthorized)
 			return
+		case errors.Is(err, captcha.ErrChallengeWrongClient):
+			// Self-hosted proof-of-work only: a correctly signed, unexpired
+			// solution presented from a different address than the one it was
+			// issued to. That binding is what stops an attacker fetching cheap
+			// challenges from a clean address and spending them from an
+			// escalated one — but the same thing happens to a phone that hands
+			// off from wifi to cellular while it is solving. Refund the strike
+			// for the same reason an expired challenge refunds one: a changed
+			// address is a network event, not a wrong credential. The client
+			// fetches a fresh challenge and retries, and no password is checked
+			// on this path, so the refund buys an attacker no guesses.
+			s.loginLockout.cancelAttempt(lockoutKey)
+			http.Error(w, "your network address changed during the security check, please try again", http.StatusUnauthorized)
+			return
 		case err != nil:
 			// The operator's CAPTCHA provider is down; the user never got as
 			// far as offering a password. Give the strike back, or an outage
