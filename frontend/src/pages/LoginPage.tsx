@@ -2,9 +2,32 @@ import { FormEvent, useEffect, useState } from "react";
 import { prepareRewrappedPGPKey } from "../lib/pgpSession";
 import { toErrorMessage } from "../api/client";
 import { useNavigate } from "react-router-dom";
-import { getJSON, postJSON } from "../api/client";
+import { getJSON, HttpError, postJSON } from "../api/client";
 import type { AuthState } from "../auth";
 import { CaptchaWidget, type CaptchaProvider } from "../components/CaptchaWidget";
+
+// /api/auth/login's 401 body is always one of: "invalid credentials",
+// "captcha verification failed", "security check expired, please try
+// again", or the pow wrong-address message — never anything that reveals
+// whether a username exists, so surfacing it is safe. It matters for the
+// last two: without this, a stale challenge or a phone's wifi->cellular
+// handoff both rendered as "Check username and password", which is the
+// opposite of the right advice and, worse, told the user their password
+// was wrong on the one path where the lockout strike was refunded because
+// it *wasn't* a credential problem.
+//
+// HttpError's .message is built as `request failed: ${status} - ${detail}`
+// (see requestJSON in api/client.ts); stripping that fixed prefix is how
+// the server's own text comes back out. Returns undefined rather than the
+// generic fallback so a caller can tell "no server message" apart from
+// "server message happened to be empty".
+function loginServerMessage(err: unknown): string | undefined {
+  if (!(err instanceof HttpError) || err.status !== 401) {
+    return undefined;
+  }
+  const prefix = `request failed: ${err.status} - `;
+  return err.message.startsWith(prefix) ? err.message.slice(prefix.length) : undefined;
+}
 
 type LoginPageProps = {
   auth: AuthState;
@@ -120,7 +143,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       setStatus(
         message.includes("429")
           ? "Too many failed attempts. Please wait a few minutes before trying again."
-          : "Login failed. Check username and password."
+          : loginServerMessage(err) ?? "Login failed. Check username and password."
       );
     } finally {
       // CAPTCHA tokens are single-use: always get a fresh challenge for the
