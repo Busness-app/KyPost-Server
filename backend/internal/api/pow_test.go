@@ -47,6 +47,34 @@ func TestPoWChallengeLimiterSweepDropsStaleWindows(t *testing.T) {
 	}
 }
 
+func TestPoWChallengeLimiterSweepsAtThreshold(t *testing.T) {
+	// GET /api/auth/pow-challenge is unauthenticated and costs the caller
+	// nothing, so an attacker presenting many distinct source IPs can mint
+	// one map entry per request. sweepExpired only runs on StartPoWSweeper's
+	// 10-minute ticker, so without a second, size-triggered bound the map
+	// could grow unbounded between ticks. allow() must reclaim expired
+	// windows inline once the map crosses sweepThreshold.
+	l := newPowChallengeLimiter()
+	l.sweepThreshold = 4
+	now := time.Now()
+
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4"} {
+		l.allow(ip, now)
+	}
+	if got := l.windowCount(); got != 4 {
+		t.Fatalf("windowCount() = %d, want 4", got)
+	}
+
+	// All four windows are now stale, and the fifth insertion crosses the
+	// (lowered) threshold, so it must trigger an inline sweep before adding
+	// its own entry.
+	l.allow("5.5.5.5", now.Add(powChallengeWindowLen+time.Second))
+
+	if got := l.windowCount(); got != 1 {
+		t.Fatalf("windowCount() after threshold sweep = %d, want 1 (only the new entry)", got)
+	}
+}
+
 func TestResolvePoWSecretIsStableAcrossCalls(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pow.key")
 	first := resolvePoWSecret(path, nil)
