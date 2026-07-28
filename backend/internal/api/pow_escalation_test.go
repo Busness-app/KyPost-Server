@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -84,6 +85,68 @@ func TestPoWEscalationSweepDropsDecayedEntries(t *testing.T) {
 	if got := e.entryCount(); got != 0 {
 		t.Fatalf("entryCount() after sweep = %d, want 0", got)
 	}
+}
+
+func TestPoWEscalationSweepsAtThreshold(t *testing.T) {
+	// Any failed login from any address inserts an entry, and nothing about
+	// that requires a credential — so an attacker presenting new source
+	// addresses grows this map for free. Entries live 15 minutes against a
+	// 10-minute ticker, so the ticker alone leaves a wide window; recordFailure
+	// must reclaim decayed entries inline once the map crosses sweepThreshold.
+	e := newPowEscalation()
+	e.sweepThreshold = 4
+	now := time.Now()
+
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4"} {
+		e.recordFailure(ip, now)
+	}
+	if got := e.entryCount(); got != 4 {
+		t.Fatalf("entryCount() = %d, want 4", got)
+	}
+
+	// All four have now decayed, and the fifth insertion crosses the (lowered)
+	// threshold, so it must sweep before adding its own entry.
+	e.recordFailure("5.5.5.5", now.Add(powEscalationDecay+time.Minute))
+
+	if got := e.entryCount(); got != 1 {
+		t.Fatalf("entryCount() after the threshold sweep = %d, want 1 (only the new entry)", got)
+	}
+}
+
+func TestPoWSweeperClearsEscalationWhenPoWIsNotTheProvider(t *testing.T) {
+	// Regression tripwire. handleLogin calls powDifficulty.recordFailure on
+	// every failed login whatever CAPTCHA_PROVIDER says, but StartPoWSweeper
+	// used to return immediately when powVerifier was nil. On a default
+	// install — and on every Turnstile/Friendly install — that made this map
+	// grow forever from unauthenticated failed logins: remotely triggerable
+	// memory growth on installs that never opted into proof-of-work.
+	srv := newTestServer(t) // no powVerifier: the default install
+	if srv.powVerifier != nil {
+		t.Fatal("setup: this test needs pow switched off")
+	}
+
+	restore := powSweepInterval
+	powSweepInterval = 5 * time.Millisecond
+	t.Cleanup(func() { powSweepInterval = restore })
+
+	// Already decayed, so the very first tick should reclaim it.
+	srv.powDifficulty.recordFailure("1.2.3.4", time.Now().Add(-powEscalationDecay-time.Minute))
+	if got := srv.powDifficulty.entryCount(); got != 1 {
+		t.Fatalf("setup: entryCount() = %d, want 1", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.StartPoWSweeper(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if srv.powDifficulty.entryCount() == 0 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("the escalation map was never swept with pow disabled; it grows without bound on a default install")
 }
 
 func TestFailedLoginRaisesTheNextChallengeDifficulty(t *testing.T) {

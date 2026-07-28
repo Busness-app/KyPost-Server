@@ -88,11 +88,18 @@ func (s *Server) handlePoWChallenge(w http.ResponseWriter, r *http.Request) {
 // mirroring StartSendAsCooldownSweeper's ticker/select pattern. All three maps
 // are fed by unauthenticated callers, so all three need a real sweep rather
 // than lazy eviction (backend/AGENTS.md). Call once after NewServer, in both
-// app.go mode blocks. A no-op when pow is not the configured provider.
+// app.go mode blocks.
+//
+// Two of the three maps only ever gain entries when pow is the configured
+// provider, so they are skipped otherwise. powDifficulty is swept
+// unconditionally, and that asymmetry is the point: handleLogin calls
+// powDifficulty.recordFailure on every failed login regardless of
+// CAPTCHA_PROVIDER, so a default install (provider unset) and a
+// Turnstile/Friendly install both accumulate one entry per failing client IP.
+// Returning early on powVerifier == nil, as this used to, left exactly those
+// installs — the ones that never opted into proof-of-work — with an
+// unbounded, remotely-triggerable map.
 func (s *Server) StartPoWSweeper(ctx context.Context) {
-	if s.powVerifier == nil {
-		return
-	}
 	ticker := time.NewTicker(powSweepInterval)
 	defer ticker.Stop()
 	for {
@@ -101,9 +108,12 @@ func (s *Server) StartPoWSweeper(ctx context.Context) {
 			return
 		case <-ticker.C:
 			now := time.Now()
+			s.powDifficulty.sweepExpired(now)
+			if s.powVerifier == nil {
+				continue
+			}
 			s.powVerifier.SweepExpired(now)
 			s.powChallenges.sweepExpired(now)
-			s.powDifficulty.sweepExpired(now)
 		}
 	}
 }

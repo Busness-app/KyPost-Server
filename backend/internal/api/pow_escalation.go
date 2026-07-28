@@ -12,9 +12,13 @@ const (
 	// The cap is not decoration: uncapped, a persistent attacker drives the
 	// difficulty to a value nobody can solve, which denies service to
 	// everyone behind that address — turning the defence into the attack.
-	// At the ceiling a browser needs a few seconds, which is a real cost to
-	// automation and a survivable one to a human who has genuinely mistyped
-	// their password several times.
+	//
+	// What the ceiling actually costs, measured rather than guessed: a
+	// maxnumber of 50,000 averages 238 ms under crypto.subtle on a desktop,
+	// so this ceiling is roughly 4.8 s on average and 9.5 s worst case, and
+	// a phone throttled 4x against that desktop is 20-40 s. That is a real
+	// cost to automation and an unpleasant-but-survivable one to a human who
+	// has genuinely mistyped their password several times.
 	powEscalationFactor = 4
 	powMaxNumberCeiling = 1_000_000
 
@@ -23,6 +27,17 @@ const (
 	// stranger's failures must stop costing an innocent neighbour reasonably
 	// soon. It mirrors loginLockoutFor for the same reason.
 	powEscalationDecay = 15 * time.Minute
+
+	// powEscalationSweepThreshold bounds how large the per-IP map may grow
+	// between StartPoWSweeper ticks. Mirrors powChallengeSweepThreshold and
+	// wkdRateSweepThreshold: any failed login from any address inserts an
+	// entry and none of that needs a credential, entries live 15 minutes, and
+	// the ticker fires only every 10 — so an attacker presenting many source
+	// IPs (real rotation, or an attacker-influenced X-Forwarded-For chain when
+	// TRUST_PROXY_HEADERS=true) accumulates freely in between. Crossing this
+	// bound triggers an inline sweep at insertion time as a second, tighter
+	// backstop.
+	powEscalationSweepThreshold = 10_000
 )
 
 type powEscalationEntry struct {
@@ -32,7 +47,18 @@ type powEscalationEntry struct {
 
 // powEscalation raises the proof-of-work difficulty for a client IP that has
 // recently failed logins, so the common case (a correct password, first try)
-// stays nearly free while scripted spraying gets expensive fast.
+// stays nearly free while naive repeated guessing from one address gets
+// expensive fast.
+//
+// Be honest about the reach of that: a challenge is NOT bound to the address
+// that requested it — captcha.PoWVerifier.Verify deliberately ignores its
+// remoteIP argument — so an attacker can fetch base-difficulty challenges from
+// a clean address and submit the solutions from an escalated one, and pay the
+// base price forever. What escalation reliably prices is the honest user who
+// mistyped, and the unsophisticated script that hammers from one address.
+// Binding the challenge to the requesting IP would close that, at the cost of
+// breaking a mobile client whose address changes mid-solve; that tradeoff has
+// not been made, so do not read more into this than it does.
 //
 // It deliberately does not reuse loginLockout. That is keyed username+IP, and
 // the challenge is issued before the user has typed a username — there is
@@ -44,12 +70,16 @@ type powEscalationEntry struct {
 // one budget. Upgrade path: none planned — narrowing it needs an identifier
 // that exists before the login form is filled in, and there isn't one.
 type powEscalation struct {
-	mu      sync.Mutex
-	entries map[string]*powEscalationEntry
+	mu             sync.Mutex
+	entries        map[string]*powEscalationEntry
+	sweepThreshold int
 }
 
 func newPowEscalation() *powEscalation {
-	return &powEscalation{entries: map[string]*powEscalationEntry{}}
+	return &powEscalation{
+		entries:        map[string]*powEscalationEntry{},
+		sweepThreshold: powEscalationSweepThreshold,
+	}
 }
 
 // recordFailure counts one failed login against ip and refreshes its decay
@@ -60,6 +90,12 @@ func (p *powEscalation) recordFailure(ip string, now time.Time) {
 
 	e, exists := p.entries[ip]
 	if !exists || now.After(e.expiresAt) {
+		if !exists && len(p.entries) >= p.sweepThreshold {
+			// Only the !exists branch grows the map, so only it needs the
+			// bound. sweepExpiredLocked, not sweepExpired: p.mu is already
+			// held here and sync.Mutex is not reentrant.
+			p.sweepExpiredLocked(now)
+		}
 		e = &powEscalationEntry{}
 		p.entries[ip] = e
 	}
@@ -103,10 +139,21 @@ func (p *powEscalation) maxNumberFor(ip string, base int, now time.Time) int {
 
 // sweepExpired drops decayed entries. Fed by unauthenticated callers (any
 // failed login from any address makes one), so it needs a real sweep — see
-// backend/AGENTS.md. Driven by StartPoWSweeper.
+// backend/AGENTS.md. Driven by StartPoWSweeper, unconditionally: handleLogin
+// records failures whatever CAPTCHA_PROVIDER is set to. This ticker sweep and
+// recordFailure's threshold-triggered sweep are two independent bounds, not
+// alternatives — the ticker guarantees eventual reclamation even at low
+// traffic, the threshold caps worst-case memory between ticks.
 func (p *powEscalation) sweepExpired(now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.sweepExpiredLocked(now)
+}
+
+// sweepExpiredLocked does the actual reclamation. Callers must hold p.mu.
+// Factored out so recordFailure can trigger it without re-locking a mutex it
+// already holds.
+func (p *powEscalation) sweepExpiredLocked(now time.Time) {
 	for ip, e := range p.entries {
 		if now.After(e.expiresAt) {
 			delete(p.entries, ip)
