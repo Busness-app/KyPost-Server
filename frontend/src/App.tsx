@@ -931,19 +931,32 @@ export function App() {
   }
 
   if (auth === null) {
+    // Same field as the sign-in page, so resolving the session does not flash a
+    // differently-coloured screen on the way to it.
     return (
-      <div className="shell">
-        <main className="content">
-          <section className="panel">
-            <h2>Loading</h2>
-            <p>Checking session...</p>
-          </section>
-        </main>
+      <div className="auth-page">
+        <div className="auth-shell">
+          <p className="auth-footnote">Checking your session…</p>
+        </div>
       </div>
     );
   }
 
   const isAdmin = auth.role === "admin";
+
+  // Sign-in gets its own full-page layout rather than the app shell. Everything
+  // in that shell — New Email, the mailbox list, the folder tree — is mail
+  // chrome a signed-out visitor cannot use, and wrapping the one thing they CAN
+  // do inside it made the front door read as a broken mail client. /password is
+  // deliberately NOT here: that route is reached from inside the app and stays
+  // an ordinary in-app panel.
+  if (location.pathname === "/login") {
+    return (
+      <div className="auth-page">
+        <LoginPage auth={auth} onAuthChanged={refreshAuth} />
+      </div>
+    );
+  }
 
   function protect(element: JSX.Element, adminOnly = false) {
     if (!auth?.authenticated) {

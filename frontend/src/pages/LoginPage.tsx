@@ -88,7 +88,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
   async function submitLogin(e: FormEvent) {
     e.preventDefault();
     if (captchaConfig?.provider && !captchaToken) {
-      setStatus("Please complete the CAPTCHA challenge.");
+      setStatus("Complete the security check to continue.");
       return;
     }
     setBusy(true);
@@ -181,7 +181,6 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
           }
           setMfaChallengeId("");
           setMfaMatchDigits("");
-      setMfaMatchDigits("");
           finishSignIn(Boolean(fin.mustChangePassword));
         } else if (res.status === "denied" || res.status === "expired") {
           clearInterval(interval);
@@ -268,173 +267,245 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
     }
   }
 
-  return (
-    <section className="panel">
-      <h2>{passwordMode ? "Change Password" : "Login and Setup"}</h2>
-      <p>{passwordMode ? "Update your current password." : "Use your local admin credentials to access configuration and daemon controls."}</p>
+  // One of four states, each with its own heading and lede, so the card always
+  // says which gate you are at instead of carrying one generic title.
+  const body = mfaChallengeId ? (
+    mfaMode === "push" ? (
+      <div className="auth-form">
+        <header className="auth-head">
+          <h1 className="auth-title">Approve on your device</h1>
+          <p className="auth-lede">
+            {mfaMatchDigits
+              ? "Tap this number on your paired device."
+              : "Open KyPost on your paired device to approve."}
+          </p>
+        </header>
 
-      {mfaChallengeId ? (
-        mfaMode === "push" ? (
-          <div className="auth-form">
-            <h3>Two-Factor Authentication</h3>
-            {mfaMatchDigits ? (
-              <>
-                <p>Tap this number on your paired device to approve the sign-in:</p>
-                <p
-                  style={{
-                    fontSize: "2.5rem",
-                    fontWeight: 700,
-                    letterSpacing: "0.15em",
-                    textAlign: "center",
-                    margin: "12px 0"
-                  }}
-                  aria-label={`Approval number ${mfaMatchDigits.split("").join(" ")}`}
-                >
-                  {mfaMatchDigits}
-                </p>
-                <p className="config-muted">
-                  If your device is asking you to approve a sign-in you did not start, choose Deny.
-                </p>
-              </>
-            ) : (
-              <p>Approve this sign-in from a paired device. Waiting for approval…</p>
-            )}
-            {mfaMethods.includes("totp") ? (
-              <button
-                type="button"
-                className="nav-link-button"
-                onClick={() => {
-                  setMfaMode("totp");
-                  setStatus("");
-                  setMfaCode("");
-                }}
-              >
-                Use authenticator code instead
-              </button>
-            ) : null}
+        {mfaMatchDigits ? (
+          <div
+            className="auth-match"
+            role="img"
+            aria-label={`Approval number ${mfaMatchDigits.split("").join(" ")}`}
+          >
+            <span className="auth-match-digits">{mfaMatchDigits}</span>
           </div>
-        ) : (
-          <form onSubmit={submitMfa} className="auth-form">
-            <h3>Two-Factor Authentication</h3>
-            {useRecoveryCode ? (
-              <>
-                <p>Enter one of your saved recovery codes.</p>
-                <label>
-                  <div>Recovery Code</div>
-                  <input
-                    value={mfaCode}
-                    onChange={(e) => setMfaCode(e.target.value)}
-                    autoComplete="one-time-code"
-                    placeholder="xxxx-xxxx-xxxx"
-                    autoFocus
-                  />
-                </label>
-              </>
-            ) : (
-              <>
-                <p>Enter the 6-digit code from your authenticator app.</p>
-                <label>
-                  <div>Authentication Code</div>
-                  <input
-                    value={mfaCode}
-                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    placeholder="123456"
-                    autoFocus
-                  />
-                </label>
-              </>
-            )}
-            <button type="submit" disabled={busy || mfaCode.trim() === ""}>
-              {busy ? "Verifying..." : "Verify"}
-            </button>
+        ) : null}
+
+        {/* Shown in both cases: this screen polls, and without a live indicator
+            a pending challenge is indistinguishable from a stalled page. */}
+        <p className="auth-waiting-row">
+          <span className="auth-waiting" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          Waiting for approval…
+        </p>
+
+        {mfaMatchDigits ? (
+          <p className="auth-caution">
+            Did not start this sign-in? Choose <strong>Deny</strong> on your device.
+          </p>
+        ) : null}
+
+        {mfaMethods.includes("totp") ? (
+          <button
+            type="button"
+            className="auth-alt"
+            onClick={() => {
+              setMfaMode("totp");
+              setStatus("");
+              setMfaCode("");
+            }}
+          >
+            Use an authenticator code instead
+          </button>
+        ) : null}
+      </div>
+    ) : (
+      <form onSubmit={submitMfa} className="auth-form">
+        <header className="auth-head">
+          <h1 className="auth-title">{useRecoveryCode ? "Use a recovery code" : "Enter your code"}</h1>
+          <p className="auth-lede">
+            {useRecoveryCode
+              ? "Any one of the codes you saved when you set up two-factor sign-in."
+              : "The 6-digit code from your authenticator app."}
+          </p>
+        </header>
+
+        <label className="auth-field">
+          <span className="auth-label">{useRecoveryCode ? "Recovery code" : "Authentication code"}</span>
+          {useRecoveryCode ? (
+            <input
+              className="auth-input auth-input-code"
+              value={mfaCode}
+              onChange={(e) => setMfaCode(e.target.value)}
+              autoComplete="one-time-code"
+              placeholder="xxxx-xxxx-xxxx"
+              autoFocus
+            />
+          ) : (
+            <input
+              className="auth-input auth-input-code auth-input-otp"
+              value={mfaCode}
+              onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              placeholder="123456"
+              autoFocus
+            />
+          )}
+        </label>
+
+        <button type="submit" className="auth-submit" disabled={busy || mfaCode.trim() === ""}>
+          {busy ? "Verifying…" : "Verify"}
+        </button>
+
+        <div className="auth-alts">
+          <button
+            type="button"
+            className="auth-alt"
+            onClick={() => {
+              setUseRecoveryCode((v) => !v);
+              setMfaCode("");
+              setStatus("");
+            }}
+          >
+            {useRecoveryCode ? "Use an authenticator code instead" : "Use a recovery code instead"}
+          </button>
+          {mfaMethods.includes("push") ? (
             <button
               type="button"
-              className="nav-link-button"
+              className="auth-alt"
               onClick={() => {
-                setUseRecoveryCode((v) => !v);
-                setMfaCode("");
+                setMfaMode("push");
                 setStatus("");
+                setMfaCode("");
               }}
             >
-              {useRecoveryCode ? "Use authenticator code instead" : "Use a recovery code instead"}
+              Approve on a device instead
             </button>
-            {mfaMethods.includes("push") ? (
-              <button
-                type="button"
-                className="nav-link-button"
-                onClick={() => {
-                  setMfaMode("push");
-                  setStatus("");
-                  setMfaCode("");
-                }}
-              >
-                Approve on a device instead
-              </button>
-            ) : null}
-          </form>
-        )
-      ) : !needsPasswordChange ? (
-        <form onSubmit={submitLogin} className="auth-form">
-          <label>
-            <div>Username</div>
-            <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
-          </label>
-          <label>
-            <div>Password</div>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-            />
-          </label>
-          {captchaConfig?.provider ? (
+          ) : null}
+        </div>
+      </form>
+    )
+  ) : !needsPasswordChange ? (
+    <form onSubmit={submitLogin} className="auth-form">
+      <header className="auth-head">
+        <h1 className="auth-title">Sign in</h1>
+        <p className="auth-lede">Your mail, on your own server.</p>
+      </header>
+
+      <label className="auth-field">
+        <span className="auth-label">Username</span>
+        <input
+          className="auth-input auth-input-code"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          autoComplete="username"
+        />
+      </label>
+      <label className="auth-field">
+        <span className="auth-label">Password</span>
+        <input
+          className="auth-input"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="current-password"
+        />
+      </label>
+
+      {captchaConfig?.provider ? (
+        <div className="auth-field">
+          <span className="auth-label">Security check</span>
+          {/* Fixed slot: the widget arrives from a third-party script well after
+              first paint, and an unreserved box made the Sign in button jump
+              out from under the pointer as it loaded. */}
+          <div className="auth-captcha">
             <CaptchaWidget
               key={captchaNonce}
               provider={captchaConfig.provider}
               siteKey={captchaConfig.siteKey}
               onToken={setCaptchaToken}
             />
-          ) : null}
-          <button type="submit" disabled={busy}>
-            {busy ? "Signing in..." : "Sign In"}
-          </button>
-        </form>
-      ) : (
-        <form onSubmit={submitPasswordChange} className="auth-form">
-          <h3>Change Password</h3>
-          <p>Enter your current password and choose a new one.</p>
-          <label>
-            <div>Username</div>
-            <input value={username} autoComplete="username" readOnly />
-          </label>
-          <label>
-            <div>Current Password</div>
-            <input
-              type="password"
-              value={oldPassword}
-              onChange={(e) => setOldPassword(e.target.value)}
-              autoComplete="current-password"
-            />
-          </label>
-          <label>
-            <div>New Password</div>
-            <input
-              type="password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              autoComplete="new-password"
-            />
-          </label>
-          <button type="submit" disabled={busy}>
-            {busy ? "Updating..." : "Update Password"}
-          </button>
-        </form>
-      )}
+          </div>
+        </div>
+      ) : null}
 
-      {status ? <p>{status}</p> : null}
-    </section>
+      <button type="submit" className="auth-submit" disabled={busy}>
+        {busy ? "Signing in…" : "Sign in"}
+      </button>
+    </form>
+  ) : (
+    <form onSubmit={submitPasswordChange} className="auth-form">
+      <header className="auth-head">
+        <h1 className="auth-title">Choose a new password</h1>
+        <p className="auth-lede">
+          {passwordMode
+            ? "Your PGP key is re-encrypted under the new password automatically."
+            : "This account needs a new password before you can go any further."}
+        </p>
+      </header>
+
+      <label className="auth-field">
+        <span className="auth-label">Username</span>
+        <input className="auth-input auth-input-code" value={username} autoComplete="username" readOnly />
+      </label>
+      <label className="auth-field">
+        <span className="auth-label">Current password</span>
+        <input
+          className="auth-input"
+          type="password"
+          value={oldPassword}
+          onChange={(e) => setOldPassword(e.target.value)}
+          autoComplete="current-password"
+        />
+      </label>
+      <label className="auth-field">
+        <span className="auth-label">New password</span>
+        <input
+          className="auth-input"
+          type="password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          autoComplete="new-password"
+        />
+      </label>
+
+      <button type="submit" className="auth-submit" disabled={busy}>
+        {busy ? "Updating…" : "Update password"}
+      </button>
+    </form>
+  );
+
+  const notice = status ? (
+    <p className="auth-status" role="status">
+      {status}
+    </p>
+  ) : null;
+
+  // /password is reached from inside the app, so it stays an ordinary panel in
+  // the app shell. Only the signed-out front door gets the standalone layout.
+  if (passwordMode) {
+    return (
+      <section className="panel">
+        {body}
+        {notice}
+      </section>
+    );
+  }
+
+  return (
+    <div className="auth-shell">
+      <div className="auth-seal">
+        <img className="auth-seal-mark" src="/ky.png" alt="KyPost" />
+      </div>
+      <section className="auth-card">
+        {body}
+        {notice}
+      </section>
+      <p className="auth-footnote">Self-hosted KyPost</p>
+    </div>
   );
 }

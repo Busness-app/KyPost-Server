@@ -69,6 +69,16 @@ Optional for local development (outside Docker):
    ```
 
 4. Open the web UI at http://localhost:5866.
+
+   > **Before exposing this to a network, put TLS in front of it.** KyPost
+   > serves plain HTTP and does not terminate TLS itself. The session cookie is
+   > marked `Secure` only when the request demonstrably arrived over TLS, so on
+   > a bare `http://` deployment the cookie is sent in the clear on every
+   > request. Run a TLS-terminating reverse proxy and set
+   > `TRUST_PROXY_HEADERS=true` so the server sees the real scheme, host and
+   > client IP — without it the cookie stays non-`Secure` and the login and
+   > CardDAV lockouts key off the proxy's IP instead of the caller's. `http://`
+   > on localhost, for one machine, is fine.
 5. Sign in with the bootstrap credentials. The username is `admin`. KyPost
    prints the password once to the container logs on the first start. Look for
    `Generated first-run admin credentials …`. To set your own password instead,
@@ -221,7 +231,7 @@ mkdir -p share/ollama/models
 The backend handles mobile pairing directly. It does not require Novu.
 
 - Nothing to configure: the pairing secret is generated on first start and kept at `/kypost/private/pairing.key`. Set `PAIRING_SECRET` only if you run multiple replicas that must share one.
-- Optional: set `SERVER_BASE_URL` so that QR code payloads always point to the correct public backend URL.
+- Optional: set `SERVER_BASE_URL` so that QR code payloads always point to the correct public backend URL. Use an `https://` URL: pairing tokens, pickup links and QR key-exchange URLs are all built from it, and each carries a bearer credential in the query string. See the TLS note in Quick Start.
 - Keep all pairing secrets on the server only.
 
 Desktop pairing behavior:

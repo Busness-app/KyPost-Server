@@ -428,8 +428,14 @@ func monitorHealth(logger *logging.Logger, healthSvc *health.Service) {
 		if st.UnhealthyFor < int64(threshold) {
 			continue
 		}
-		logger.Error("unhealthy threshold exceeded, requesting container restart", "unhealthy_for_seconds", strconv.FormatInt(st.UnhealthyFor, 10))
-		_ = syscall.Kill(1, syscall.SIGTERM)
+		// No syscall.Kill(1, SIGTERM) here. This used to call it and discard
+		// the error, which was always EPERM: the process runs unprivileged and
+		// PID 1 does not belong to it, so the call had never once worked. The
+		// restart comes entirely from the exit below plus supervisord's
+		// autorestart — api.scheduleContainerRestart already says so at its own
+		// call site, and this was the sibling that kept the dead line.
+		logger.Error("unhealthy threshold exceeded; exiting so supervisord restarts this process",
+			"unhealthy_for_seconds", strconv.FormatInt(st.UnhealthyFor, 10))
 		os.Exit(2)
 	}
 }

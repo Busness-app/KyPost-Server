@@ -122,25 +122,27 @@ type AuthContext struct {
 // shows up under concurrent load in production. Stating the order here is
 // cheaper than discovering it there.
 type Server struct {
-	mu                     sync.RWMutex
-	cfg                    config.Config
-	onConfigUpdated        func(config.Config)
-	logger                 *logging.Logger
-	health                 *health.Service
-	users                  *users.Store
-	configDir              string
-	stateDir               string
-	configPath             string
-	logPath                string
-	imapConfigKeyPath      string
-	totpSecretKeyPath      string
-	pgpPrivateKeyPath      string
-	sessions               map[string]Session
-	mfaChallenges          *mfa.Store
-	pairingSecret          string
-	serverBaseURL          string
-	baseURLFallbackWarn    sync.Once
-	pairingSecretWarn      sync.Once
+	mu                  sync.RWMutex
+	cfg                 config.Config
+	onConfigUpdated     func(config.Config)
+	logger              *logging.Logger
+	health              *health.Service
+	users               *users.Store
+	configDir           string
+	stateDir            string
+	configPath          string
+	logPath             string
+	imapConfigKeyPath   string
+	totpSecretKeyPath   string
+	pgpPrivateKeyPath   string
+	sessions            map[string]Session
+	mfaChallenges       *mfa.Store
+	pairingSecret       string
+	serverBaseURL       string
+	baseURLFallbackWarn sync.Once
+	pairingSecretWarn   sync.Once
+	// qrTokens makes each PGP QR key-exchange token redeemable exactly once.
+	qrTokens               *qrTokenGuard
 	nativePushDispatcher   *processor.NativePushDispatcher
 	pickupStore            *pgpmail.PickupStore
 	poller                 *processor.Poller
@@ -250,6 +252,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		sessions:               map[string]Session{},
 		mfaChallenges:          mfa.NewStore(),
 		pairingSecret:          pairingSecret,
+		qrTokens:               newQRTokenGuard(),
 		serverBaseURL:          strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
 		nativePushDispatcher:   processor.NewNativePushDispatcher(logger),
 		pickupStore:            pgpmail.NewPickupStore(filepath.Join(stateDir, "pickup"), pickupStoreKeyPath),
@@ -2270,9 +2273,15 @@ func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.
 			http.Error(w, "failed to remove native device", http.StatusInternalServerError)
 			return
 		}
-		s.userMu.Lock()
-		delete(s.deviceIndex, deviceID)
-		s.userMu.Unlock()
+		// Only when this user actually owned it. The eviction used to be
+		// unconditional, so a DELETE naming someone else's deviceId reported
+		// removed=false and still dropped their index entry — briefly breaking
+		// their device auth until the next rescan repaired it.
+		if removed {
+			s.userMu.Lock()
+			delete(s.deviceIndex, deviceID)
+			s.userMu.Unlock()
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
 	}
 }
@@ -2473,8 +2482,12 @@ func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
 	// Record successful pairing initiation
 	_ = store.RecordDesktopPairingAttempt(pairingCode, true)
 
-	// Log pairing event without exposing the full code (only hash for correlation)
-	s.logger.Info("desktop pairing initiated", "user_id", ac.UserID, "code_hash", pairingCode[:8])
+	// No part of the code goes in the log. This used to emit pairingCode[:8]
+	// labelled "code_hash", which it was not — it was the first 32 bits of the
+	// raw credential, in a file that is not treated as secret. The user id and
+	// timestamp are what an operator actually correlates on; the attempt log
+	// keeps a real hash if a redemption ever needs matching to an issuance.
+	s.logger.Info("desktop pairing initiated", "user_id", ac.UserID)
 
 	// Build server URL and register endpoint for desktop app
 	serverBaseURL := s.serverBaseURL
@@ -4236,6 +4249,18 @@ func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
+	// An /api/ path that reached the catch-all is one the mux did not
+	// register. Serving index.html for it — 200, a page of HTML — makes a
+	// mistyped endpoint indistinguishable from a working one, and forces every
+	// client to sniff the body to find out which it got.
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		writeJSON(w, http.StatusNotFound, map[string]any{
+			"error": "unknown api endpoint",
+			"path":  r.URL.Path,
+		})
+		return
+	}
+
 	frontendDir := config.EnvOrDefault("FRONTEND_DIR", "/opt/kypost/frontend")
 	indexPath := filepath.Join(frontendDir, "index.html")
 

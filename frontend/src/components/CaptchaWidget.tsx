@@ -88,8 +88,27 @@ export function CaptchaWidget({ provider, siteKey, onToken }: CaptchaWidgetProps
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider, callbackName]);
 
+  // data-theme: both providers render a light box by default, which sat on the
+  // dark sign-in card as a bright rectangle. Asking each for its dark variant
+  // is the only way to restyle Turnstile at all — it renders in an iframe, so
+  // no amount of local CSS reaches inside it. Friendly Captcha renders in the
+  // page and is additionally themed in styles.css.
   if (provider === "turnstile") {
-    return <div className="cf-turnstile" data-sitekey={siteKey} data-callback={callbackName} />;
+    return (
+      <div
+        className="cf-turnstile"
+        data-sitekey={siteKey}
+        data-callback={callbackName}
+        data-theme="dark"
+      />
+    );
   }
-  return <div className="frc-captcha" data-sitekey={siteKey} data-callback={callbackName} />;
+  return (
+    <div
+      className="frc-captcha"
+      data-sitekey={siteKey}
+      data-callback={callbackName}
+      data-theme="dark"
+    />
+  );
 }
