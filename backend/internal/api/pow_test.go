@@ -195,19 +195,16 @@ func TestLoginRefundsTheStrikeForAnExpiredChallenge(t *testing.T) {
 	}
 	adminUsername := all[0].Username
 
-	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
-		map[string]string{"username": adminUsername, "password": "irrelevant", "captchaToken": "stale"})
-
-	// A stale tab is a clock, not a credential: 401 so the client knows to
-	// fetch a fresh challenge, but not the 503 that means "the provider is
-	// down" — there is no provider to be down.
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
-	}
-	// And it must cost nothing: three expired tabs must not lock the user out.
-	lockoutKey := adminUsername + "\x00192.0.2.1"
-	if ok, _ := srv.loginLockout.allowed(lockoutKey); !ok {
-		t.Error("an expired challenge must not spend a lockout strike")
+	// A stale tab is a clock, not a credential: three expired tabs must not
+	// lock the user out. Loop loginMaxFailures + 1 times to prove the strikes
+	// are refunded: if they were not, the final request would lock the account
+	// and return 429; if they are refunded, it still returns 401.
+	for i := 0; i <= loginMaxFailures; i++ {
+		rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+			map[string]string{"username": adminUsername, "password": "irrelevant", "captchaToken": "stale"})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want 401 (body %s)", i+1, rec.Code, rec.Body.String())
+		}
 	}
 }
 
