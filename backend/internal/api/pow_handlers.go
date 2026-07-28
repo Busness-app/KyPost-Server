@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,9 +19,26 @@ import (
 // reclaims an entry within two of its expiry at worst.
 var powSweepInterval = 10 * time.Minute
 
+// powSecretMinLen is the shortest POW_SECRET this will accept. The key is an
+// HMAC key over a challenge whose every field the client already sees, so a
+// guessable one (POW_SECRET=changeme) is recoverable offline from a single
+// issued challenge. Whoever recovers it mints their own challenges —
+// maxnumber 0, number 0, an expiry years out, a signature that verifies — and
+// the proof-of-work becomes a silent no-op that still reports success. 16
+// bytes is the floor; the documented `openssl rand -base64 32` gives 44.
+const powSecretMinLen = 16
+
 // resolvePoWSecret returns the HMAC key that signs proof-of-work challenges,
 // mirroring resolvePairingSecret's precedence: an operator-supplied
 // POW_SECRET wins, otherwise a generated-and-persisted key at keyPath.
+//
+// A POW_SECRET shorter than powSecretMinLen returns nil, which makes
+// captcha.NewVerifier fail and NewServer install misconfiguredCaptchaVerifier:
+// login rejects every attempt with a logged reason, and the server still
+// starts. Falling back to a generated key instead would be worse than it
+// looks — it would silently ignore the operator's configuration, so a
+// multi-replica deployment would end up with a different key per replica and
+// challenges that verify nowhere but where they were issued.
 //
 // Where it deliberately differs from resolvePairingSecret is the failure
 // path. A pairing secret that cannot be written disables an optional feature,
@@ -33,6 +51,16 @@ var powSweepInterval = 10 * time.Minute
 // a weak key, which is the outcome that would actually matter.
 func resolvePoWSecret(keyPath string, logger *logging.Logger) []byte {
 	if fromEnv := strings.TrimSpace(os.Getenv("POW_SECRET")); fromEnv != "" {
+		if len(fromEnv) < powSecretMinLen {
+			if logger != nil {
+				logger.Error("POW_SECRET is too short to be an HMAC key; the login CAPTCHA will "+
+					"reject every attempt until it is fixed. A short key can be recovered offline "+
+					"from one issued challenge, after which the proof-of-work verifies forged "+
+					"challenges and protects nothing. Generate one with: openssl rand -base64 32",
+					"length", strconv.Itoa(len(fromEnv)), "minimum", strconv.Itoa(powSecretMinLen))
+			}
+			return nil
+		}
 		return []byte(fromEnv)
 	}
 	key, err := cryptutil.LoadOrCreateKey(keyPath)

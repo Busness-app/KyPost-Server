@@ -97,6 +97,28 @@ func TestResolvePoWSecretPrefersTheEnvironment(t *testing.T) {
 	}
 }
 
+func TestResolvePoWSecretRefusesAWeakEnvKey(t *testing.T) {
+	// A short POW_SECRET is recoverable offline from a single issued
+	// challenge, and whoever recovers it can mint their own challenge with
+	// maxnumber 0 and a far-future expiry — the proof-of-work becomes a
+	// silent no-op. Fail closed instead: NewVerifier rejects a nil key, so
+	// login answers "captcha misconfigured" until an operator fixes it.
+	t.Setenv("POW_SECRET", "changeme")
+	if got := resolvePoWSecret(filepath.Join(t.TempDir(), "pow.key"), nil); got != nil {
+		t.Fatalf("resolvePoWSecret() = %q, want nil for a %d-byte secret", got, len("changeme"))
+	}
+}
+
+func TestResolvePoWSecretAcceptsAnEnvKeyAtTheMinimum(t *testing.T) {
+	// The boundary is inclusive, so an operator who followed the documented
+	// length is not rejected.
+	key := "0123456789abcdef" // exactly powSecretMinLen bytes
+	t.Setenv("POW_SECRET", key)
+	if got := resolvePoWSecret(filepath.Join(t.TempDir(), "pow.key"), nil); string(got) != key {
+		t.Fatalf("resolvePoWSecret() = %q, want %q", got, key)
+	}
+}
+
 func TestResolvePoWSecretFallsBackToAnEphemeralKey(t *testing.T) {
 	// A read-only secrets volume must not brick login on an install that
 	// opted into pow. Challenges issued before a restart stop verifying,
