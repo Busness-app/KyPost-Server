@@ -114,12 +114,26 @@ func TestPoWRejectsATamperedSignature(t *testing.T) {
 	ch, _ := v.IssueAt(testClientIP, 0)
 	token := solve(t, ch)
 
-	forged := ch
-	forged.MaxNumber = 1 // an attacker lowering the difficulty they were set
-	if ok, _ := v.Verify(context.Background(), encodeSolution(t, forged, 0), testClientIP); ok {
-		t.Fatal("a challenge whose signed fields were edited must be refused")
+	// Forge *forward*, not down. An earlier version of this test lowered
+	// MaxNumber to 1 and submitted number 0 — but 0 is both in range for
+	// MaxNumber=1 and (usually) not the real answer, so the rejection could
+	// have come from the range or hash check rather than the signature, and
+	// the real answer would be out of range under the forged MaxNumber
+	// anyway. Raising each field instead keeps the real answer both in range
+	// and hash-correct, so only the MAC can reject it.
+	forgedMaxNumber := ch
+	forgedMaxNumber.MaxNumber = ch.MaxNumber + 1 // the escalation difficulty, edited down by an attacker
+	if ok, _ := v.Verify(context.Background(), encodeSolution(t, forgedMaxNumber, answerFor(t, ch)), testClientIP); ok {
+		t.Fatal("a challenge whose maxnumber was edited must be refused")
 	}
-	// The untouched original must still be good, proving the rejection above
+
+	forgedExpires := ch
+	forgedExpires.Expires = ch.Expires + 3600 // an attacker buying extra time, or pinning a spent-map entry past every sweep
+	if ok, _ := v.Verify(context.Background(), encodeSolution(t, forgedExpires, answerFor(t, ch)), testClientIP); ok {
+		t.Fatal("a challenge whose expires was edited must be refused")
+	}
+
+	// The untouched original must still be good, proving the rejections above
 	// came from the tamper and not from something incidental.
 	if ok, _ := v.Verify(context.Background(), token, testClientIP); !ok {
 		t.Fatal("the untampered solution should still verify")
