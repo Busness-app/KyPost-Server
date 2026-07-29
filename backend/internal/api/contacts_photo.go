@@ -33,10 +33,22 @@ const maxContactPhotoBytes = 5 << 20 // 5MB
 // number the volume can absorb from every account at once.
 const maxContactPhotoBytesPerUser = 200 << 20 // 200MB
 
+// contentTypeExt is the set of image types a contact photo may be.
+//
+// Every entry must have a decoder registered by the blank imports above:
+// storeContactPhoto gates on image.DecodeConfig, so an entry without one is
+// advertised as supported and then rejected 100% of the time with "file is not
+// a decodable image". "image/webp" was exactly that — Go's standard library
+// has no webp decoder (as of 1.26), so every webp upload, direct or via an
+// inbound CardDAV vCard PHOTO, failed while loadContactPhoto below happily
+// claimed to serve the type back.
+//
+// Restoring webp means a decoder, not a map entry: golang.org/x/image/webp
+// would be a new dependency for a format this map only ever claimed by
+// accident, so it stays out until someone actually asks for it.
 var contentTypeExt = map[string]string{
 	"image/jpeg": "jpg",
 	"image/png":  "png",
-	"image/webp": "webp",
 	"image/gif":  "gif",
 }
 

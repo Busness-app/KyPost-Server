@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -244,12 +245,33 @@ func (s *Server) userMailClient(userID string) (imapadapter.Client, error) {
 	}
 	s.userMu.Lock()
 	defer s.userMu.Unlock()
-	if entry, ok := s.userMail[userID]; ok && entry.updatedAt == payload.UpdatedAt {
-		return entry.client, nil
+	if entry, ok := s.userMail[userID]; ok {
+		if entry.updatedAt == payload.UpdatedAt {
+			return entry.client, nil
+		}
+		closeMailClient(entry.client)
 	}
 	client := imapadapter.NewAPIClientFromStoredConfig(s.userIMAPConfigPath(userID), s.imapConfigKeyPath)
 	s.userMail[userID] = &serverMailEntry{client: client, updatedAt: payload.UpdatedAt}
 	return client, nil
+}
+
+// closeMailClient hangs up a mail client that is being dropped from a cache.
+//
+// An imapadapter.APIClient holds a live authenticated IMAP session for its
+// whole life; nothing reclaims that when the value becomes unreachable, so an
+// evicted client leaks one connection per eviction, in each of the two
+// processes that keep such a cache. IMAP providers cap concurrent sessions per
+// account, so the leak ends as "too many simultaneous connections" and mail
+// simply stops syncing.
+//
+// io.Closer rather than a Close method on imapadapter.Client: the interface has
+// six test fakes with nothing to close, and widening it for their sake buys
+// nothing. A client that isn't a Closer is a no-op here.
+func closeMailClient(client imapadapter.Client) {
+	if c, ok := client.(io.Closer); ok {
+		_ = c.Close()
+	}
 }
 
 func (s *Server) mailFor(r *http.Request) (imapadapter.Client, error) {
@@ -283,6 +305,9 @@ func (s *Server) resolveMailAuthContext(r *http.Request) (AuthContext, error) {
 
 func (s *Server) invalidateUserMail(userID string) {
 	s.userMu.Lock()
+	if entry, ok := s.userMail[userID]; ok {
+		closeMailClient(entry.client)
+	}
 	delete(s.userMail, userID)
 	s.userMu.Unlock()
 }

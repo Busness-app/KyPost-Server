@@ -85,8 +85,17 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 	// must lose device access immediately, not keep it until the device secret
 	// is separately purged. Without this check, deactivation/password-reset
 	// silently fail to revoke a paired device.
+	//
+	// cancelAttempt, not a bare return: the secret was CORRECT, so no guessing
+	// happened and the strike tryAttempt reserved on the way in must go back.
+	// Leaving it counted (which is what a bare return does) meant a deactivated
+	// account's phone burned all deviceMaxFailures within seconds of its normal
+	// retry cadence and then got 429 instead of 401 — so a client reading
+	// writeDeviceAuthFailure's documented contract backs off forever instead of
+	// telling its user to re-pair.
 	u, err := s.users.Get(ownerID)
 	if err != nil || !u.Active {
+		s.deviceLockout.cancelAttempt(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
 	s.deviceLockout.recordSuccess(lockoutKey)

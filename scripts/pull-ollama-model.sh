@@ -2,7 +2,7 @@
 set -eu
 
 base_url="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
-model="${OLLAMA_MODEL:-qwen3:1.7b}"
+model="${OLLAMA_MODEL:-nemotron-3-nano:4b}"
 models_dir="${OLLAMA_MODELS:-/llama_lab/ollama-models}"
 
 hostport="${base_url#http://}"

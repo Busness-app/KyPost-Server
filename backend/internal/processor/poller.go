@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -173,11 +174,21 @@ func (p *Poller) userStore(userID string) (*state.Store, error) {
 
 // userMailClient returns the cached IMAP client for a user, rebuilding it
 // when their encrypted credential file changed on disk.
+// The evicted client is closed rather than dropped: it holds a live,
+// authenticated IMAP session that nothing else reclaims, and the api process
+// keeps its own identical cache — so a credential change leaked one connection
+// per process until the far end timed it out. See api.closeMailClient for why
+// this is an io.Closer assertion and not a Client interface method.
 func (p *Poller) userMailClient(userID string, configModTime time.Time) imapadapter.Client {
 	p.userMu.Lock()
 	defer p.userMu.Unlock()
-	if entry, ok := p.mailClients[userID]; ok && entry.modTime.Equal(configModTime) {
-		return entry.client
+	if entry, ok := p.mailClients[userID]; ok {
+		if entry.modTime.Equal(configModTime) {
+			return entry.client
+		}
+		if c, isCloser := entry.client.(io.Closer); isCloser {
+			_ = c.Close()
+		}
 	}
 	client := imapadapter.NewAPIClientFromStoredConfig(p.userIMAPConfigPath(userID), p.imapKeyPath)
 	p.mailClients[userID] = &mailClientEntry{client: client, modTime: configModTime}

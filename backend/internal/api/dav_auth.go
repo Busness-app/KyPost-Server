@@ -36,8 +36,12 @@ func newDAVCredentialCache() davCredentialCache {
 	return davCredentialCache{entries: map[string]davCredentialCacheEntry{}}
 }
 
+// davCredentialCacheKey folds the username the same way GetByUsername resolves
+// it, so the two spellings of one account share one cache entry rather than
+// silently paying scrypt again per spelling — and so nothing here re-learns the
+// lesson handleLogin's lockout key did (see users.NormalizeUsername).
 func davCredentialCacheKey(username, password string) string {
-	sum := sha256.Sum256([]byte(username + "\x00" + password))
+	sum := sha256.Sum256([]byte(users.NormalizeUsername(username) + "\x00" + password))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -104,6 +108,23 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// polling with correct credentials would spend a strike per
 			// request and lock itself out within seconds.
 			s.davLockout.recordSuccess(ip)
+			// Re-check the account live even on a hit. revokeAllUserCredentials
+			// clears this cache on deactivate/reset, but a request that read
+			// Active==true just before the deactivation can still `put` just
+			// after that clear — so the cache alone left a deactivated account
+			// with full CardDAV read/write for up to davCredentialTTL. This is a
+			// map lookup and a scrypt-free field read; the scrypt verification
+			// the cache exists to skip is still skipped.
+			u, err := s.users.Get(ac.UserID)
+			if err != nil || !u.Active {
+				s.davCredentials.invalidateUser(ac.Username)
+				s.requireDAVAuth(w)
+				return
+			}
+			// Role is re-read for the same reason currentUser does not snapshot
+			// it into the session: an admin demoted mid-sync must not keep the
+			// old role for the rest of the cache TTL.
+			ac.Role = u.Role
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 			return
 		}

@@ -22,7 +22,13 @@ import (
 func AtomicWriteFile(path string, payload []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700, not 0755. Everything routed through here is per-account data —
+	// users.json, encrypted IMAP credentials, sealed PGP keys, contact photos —
+	// written 0600, and creating their parent directories world-readable
+	// contradicted that for no gain: only this process's user ever reads them.
+	// (MkdirAll leaves an existing directory's mode alone, so this changes
+	// nothing for a volume that already has one.)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, base+".tmp.*")

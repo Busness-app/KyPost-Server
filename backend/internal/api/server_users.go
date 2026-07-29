@@ -51,6 +51,12 @@ func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "username required", http.StatusBadRequest)
 		return
 	}
+	// Checked here as well as inside Create so a bad username is reported
+	// alongside a bad password rather than only after the password passes.
+	if err := users.ValidateUsername(req.Username); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := users.ValidatePassword(req.Password); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -230,9 +236,9 @@ func writeUserStoreError(w http.ResponseWriter, err error) {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
-	// A rejected password is caller error, not a store failure — the message
-	// is safe to echo verbatim since it only states the length requirement.
-	if errors.Is(err, users.ErrPasswordWeak) {
+	// A rejected password or username is caller error, not a store failure —
+	// both messages are safe to echo verbatim since they only state the rule.
+	if errors.Is(err, users.ErrPasswordWeak) || errors.Is(err, users.ErrUsernameInvalid) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

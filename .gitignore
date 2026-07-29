@@ -26,6 +26,12 @@ frontend/dist/
 backend/bin/
 backend/.cache/
 backend/main
+backend/modeleval
+
+# Model-evaluation output. The harness writes one JSON per run holding every
+# per-email result; they are large, regenerable, and machine-specific. The
+# corpus and tuning documents next to them ARE tracked — only results are not.
+backend/cmd/modeleval/results/
 
 # Node / Scripts
 scripts/node_modules/

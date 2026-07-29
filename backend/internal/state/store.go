@@ -1,6 +1,8 @@
 package state
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -419,6 +421,24 @@ func (s *Store) Checkpoint() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.checkpoint
+}
+
+// SubscriberID returns the account's push subscriber ID without minting one,
+// reporting "" if none exists yet.
+//
+// Read-only on purpose. handleMe used GetOrCreateSubscriberID, which made a GET
+// the frontend polls on every auth refresh write (and fsync) a file — so a read
+// of "who am I" could fail, or create durable state, on a full or read-only
+// volume. The ID is only ever needed by a caller that is about to pair a device,
+// and those paths call GetOrCreateSubscriberID themselves.
+// It reads through to disk like NativeDeliveryMode does, so an ID minted by the
+// other process is still seen — and that refresh is still strictly cheaper than
+// the file-locked read-modify-write-fsync this replaced.
+func (s *Store) SubscriberID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshStateFromDiskLocked()
+	return s.subscriberID
 }
 
 func (s *Store) GetOrCreateSubscriberID() (string, error) {
@@ -914,6 +934,28 @@ func (s *Store) persistDecisionsLocked() error {
 	return nil
 }
 
+// hashPairingCode returns a hex SHA-256 of a pairing code, for the audit log.
+// Not a password hash and does not need to be: the input is 128 bits of
+// crypto/rand, so there is nothing to brute force.
+func hashPairingCode(code string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(code)))
+	return hex.EncodeToString(sum[:])
+}
+
+// ListDesktopPairingAttempts returns a copy of the attempt audit log.
+func (s *Store) ListDesktopPairingAttempts() []PairingAttempt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshStateFromDiskLocked()
+	out := make([]PairingAttempt, len(s.desktopPairingAttempts))
+	copy(out, s.desktopPairingAttempts)
+	return out
+}
+
+// MaxDesktopPairingCodesPerHour bounds how many desktop pairing codes one
+// account may mint per hour.
+const MaxDesktopPairingCodesPerHour = 5
+
 // SetDesktopPairingCode stores a pairing code with 5-minute expiration
 func (s *Store) SetDesktopPairingCode(code string, ttl time.Duration) error {
 	if ttl <= 0 {
@@ -991,21 +1033,26 @@ func (s *Store) CheckDesktopPairingRateLimit() (bool, int, error) {
 	now := time.Now().UTC()
 	oneHourAgo := now.Add(-1 * time.Hour)
 
-	// Count failed attempts in the last hour
-	failedCount := 0
+	// Count every attempt in the last hour, not just failures.
+	//
+	// This used to count only !Success, and the sole caller records a success
+	// on issuance — so failedCount was always zero and the limit never applied
+	// to anything. Redemption does not exist yet (no route consumes a code), so
+	// issuance is what there is to bound, and bounding it is what stops one
+	// account minting codes without limit.
+	recent := 0
 	for _, attempt := range s.desktopPairingAttempts {
 		attemptAt, err := time.Parse(time.RFC3339, attempt.AttemptAt)
 		if err != nil {
 			continue
 		}
-		if !attempt.Success && attemptAt.After(oneHourAgo) {
-			failedCount++
+		if attemptAt.After(oneHourAgo) {
+			recent++
 		}
 	}
 
-	const maxFailedAttempts = 5
-	allowed := failedCount < maxFailedAttempts
-	remaining := maxFailedAttempts - failedCount
+	allowed := recent < MaxDesktopPairingCodesPerHour
+	remaining := MaxDesktopPairingCodesPerHour - recent
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -1014,10 +1061,17 @@ func (s *Store) CheckDesktopPairingRateLimit() (bool, int, error) {
 }
 
 // RecordDesktopPairingAttempt records a pairing attempt for rate limiting.
+// RecordDesktopPairingAttempt appends one attempt to the audit log.
+//
+// code is HASHED, never stored. It is a credential the moment a redeem handler
+// exists, and this log is persisted to state.json and kept 100 entries deep —
+// so storing it verbatim put a hundred live pairing codes on disk. The hash is
+// enough for the only thing the field is for: correlating an issuance with a
+// later redemption.
 func (s *Store) RecordDesktopPairingAttempt(code string, success bool) error {
 	return s.update(func() error {
 		s.desktopPairingAttempts = append(s.desktopPairingAttempts, PairingAttempt{
-			Code:      strings.TrimSpace(code),
+			Code:      hashPairingCode(code),
 			AttemptAt: time.Now().UTC().Format(time.RFC3339),
 			Success:   success,
 		})

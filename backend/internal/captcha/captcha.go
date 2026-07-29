@@ -22,6 +22,9 @@ const (
 	ProviderNone      Provider = ""
 	ProviderTurnstile Provider = "turnstile"
 	ProviderFriendly  Provider = "friendly"
+	// ProviderPoW is self-hosted: it verifies a proof-of-work this server
+	// issued rather than a token from someone else's service. See pow.go.
+	ProviderPoW Provider = "pow"
 )
 
 // Verifier checks a client-submitted CAPTCHA token server-side. remoteIP is
@@ -30,11 +33,22 @@ type Verifier interface {
 	Verify(ctx context.Context, token, remoteIP string) (bool, error)
 }
 
-// Config is the operator-supplied CAPTCHA configuration.
+// Config is the operator-supplied CAPTCHA configuration. Which fields matter
+// depends on Provider: the two third-party providers use SiteKey/SecretKey,
+// and the self-hosted pow provider uses HMACKey/MaxNumber instead — it has no
+// upstream to hold a secret with, and no public site key to publish.
 type Config struct {
 	Provider  Provider
 	SiteKey   string
 	SecretKey string
+
+	// HMACKey signs pow challenges. Not operator-supplied: api's
+	// resolvePoWSecret generates and persists it, following the same
+	// "generate it rather than ask an operator to invent one" reasoning as
+	// resolvePairingSecret.
+	HMACKey []byte
+	// MaxNumber is the pow search space; <= 0 means defaultPoWMaxNumber.
+	MaxNumber int
 }
 
 // NewVerifier builds a Verifier for cfg.Provider. A nil Verifier (with no
@@ -55,8 +69,11 @@ func NewVerifier(cfg Config) (Verifier, error) {
 			return nil, errors.New("captcha: secret key is required for friendly")
 		}
 		return &friendlyVerifier{secretKey: cfg.SecretKey, verifyURL: friendlyVerifyURL, client: client}, nil
+	case ProviderPoW:
+		return NewPoWVerifier(cfg.HMACKey, cfg.MaxNumber)
 	default:
-		return nil, fmt.Errorf("captcha: unknown provider %q (want %q or %q)", cfg.Provider, ProviderTurnstile, ProviderFriendly)
+		return nil, fmt.Errorf("captcha: unknown provider %q (want %q, %q or %q)",
+			cfg.Provider, ProviderTurnstile, ProviderFriendly, ProviderPoW)
 	}
 }
 

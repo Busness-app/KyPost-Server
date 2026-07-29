@@ -1753,6 +1753,33 @@ func configureGoIMAPDefaults() {
 	})
 }
 
+// Close tears down this client's IMAP connection, if it has opened one.
+//
+// An APIClient holds a live, authenticated *goimap.Dialer for its whole life
+// and Go's GC does not close sockets, so a client that is dropped without this
+// leaves its session open on the far end until the server times it out —
+// minutes to half an hour, and IMAP providers cap concurrent sessions per
+// account (Gmail: 15). Both cache owners rebuild their client when the stored
+// credentials change (api's userMailClient/invalidateUserMail, the poller's
+// userMailClient), so without a close every IMAP settings save burned one
+// session per process and a handful of saves could lock a user out of their
+// own mailbox.
+//
+// Deliberately NOT added to the Client interface: the interface is implemented
+// by six test fakes that have nothing to close, and the two eviction sites
+// type-assert io.Closer instead. Safe to call more than once, and safe on a
+// client that never connected.
+func (c *APIClient) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dialer == nil {
+		return nil
+	}
+	err := c.dialer.Close()
+	c.dialer = nil
+	return err
+}
+
 func (c *APIClient) ensureConnectedLocked() (*goimap.Dialer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

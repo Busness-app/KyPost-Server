@@ -18,7 +18,7 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 - Contacts address book with groups, dedupe, bulk delete, CSV and vCard import and export, and photo support
 - CardDAV server (`/dav`, `/.well-known/carddav`) to sync contacts to phones and desktop apps. An optional CardDAV client syncs against an external address book.
 - Multi-factor authentication: TOTP authenticator apps, one-time recovery codes, and push-approval sign-in
-- Optional CAPTCHA (Turnstile or Friendly Captcha) on login. It works together with the built-in lockout of 3 strikes and 15 minutes.
+- Optional CAPTCHA on login: self-hosted proof-of-work, Turnstile, or Friendly Captcha. It works together with the built-in lockout of 3 strikes and 15 minutes.
 - Browser push notifications for each user, for all mail or for keyword matches only. KyPost also supports native push pairing for mobile apps.
 - Config page for IMAP, SMTP, model authentication, tuning, logs, health, and decisions
 - A dozen theme presets
@@ -69,6 +69,16 @@ Optional for local development (outside Docker):
    ```
 
 4. Open the web UI at http://localhost:5866.
+
+   > **Before exposing this to a network, put TLS in front of it.** KyPost
+   > serves plain HTTP and does not terminate TLS itself. The session cookie is
+   > marked `Secure` only when the request demonstrably arrived over TLS, so on
+   > a bare `http://` deployment the cookie is sent in the clear on every
+   > request. Run a TLS-terminating reverse proxy and set
+   > `TRUST_PROXY_HEADERS=true` so the server sees the real scheme, host and
+   > client IP — without it the cookie stays non-`Secure` and the login and
+   > CardDAV lockouts key off the proxy's IP instead of the caller's. `http://`
+   > on localhost, for one machine, is fine.
 5. Sign in with the bootstrap credentials. The username is `admin`. KyPost
    prints the password once to the container logs on the first start. Look for
    `Generated first-run admin credentials …`. To set your own password instead,
@@ -188,26 +198,61 @@ Common variables:
 - `TZ` (default `America/New_York`)
 - `SECRET_DIR` (default `/kypost/private`)
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-- `OLLAMA_MODEL` (Compose default `gemma4:e4b`)
+- `OLLAMA_MODEL` (default `nemotron-3-nano:4b`; see the model note below)
 - `TUNING_FILE` (default `/kypost/config/TUNING.md`)
 - `OLLAMA_MODELS_HOST_DIR` (default `./share/ollama/models`)
 - `IMAP_CONFIG_FILE` (default `/kypost/private/imap-config.json`)
 - `IMAP_CONFIG_KEY_FILE` (default `/kypost/private/imap-config.key`)
 - `TOTP_SECRET_KEY_FILE` (default `/kypost/private/totp-secret.key`)
 - `SERVER_BASE_URL` (optional. Recommended for mobile pairing. KyPost embeds this public URL as `srv` in the QR code and uses it to build `reg`.)
-- `PAIRING_SECRET` (required for mobile pairing. KyPost signs and validates pairing tokens with it.)
+- `PAIRING_SECRET` (optional. HMAC secret for pickup links, PGP QR key exchange and mobile pairing tokens. Generated automatically on first start and persisted at `PAIRING_SECRET_FILE` — set it only if several replicas must share one secret, and use `openssl rand -base64 32` if you do.)
+- `PAIRING_SECRET_FILE` (default `/kypost/private/pairing.key`)
 - `PUSH_RELAY_URL` (optional. Base URL of the central push relay Worker that delivers Android native push to FCM.)
 - `PUSH_RELAY_KEY` (per-server API key from the relay operator. Set it together with `PUSH_RELAY_URL` to enable Android native push.)
 - `APNS_RELAY_URL` (optional. Base URL of the central APNs relay Worker that delivers iOS native push.)
 - `APNS_RELAY_KEY` (per-server API key from the relay operator. Set it together with `APNS_RELAY_URL` to enable iOS native push.)
-- `CAPTCHA_PROVIDER` (optional. Set `turnstile` or `friendly` to require a CAPTCHA solution on login. It works together with the built-in lockout of 3 strikes and 15 minutes.)
-- `CAPTCHA_SITE_KEY` and `CAPTCHA_SECRET_KEY` (required together with `CAPTCHA_PROVIDER`. The site key is public. The server verifies solutions with the secret key.)
+- `CAPTCHA_PROVIDER` (optional. Set `pow`, `turnstile`, or `friendly` to require a CAPTCHA solution on login. It works together with the built-in lockout of 3 strikes and 15 minutes.)
+  - `pow` is self-hosted proof-of-work: the only provider that makes no third-party network call and adds no third-party origin to the CSP. It requires no account with anyone and no keys to obtain — the signing key is generated on first use at `POW_SECRET_FILE`. **It requires HTTPS**: the browser half uses `crypto.subtle`, which browsers expose only in a secure context, so on a plain-`http://` deployment (anything but `localhost`) the check cannot run and nobody can sign in — put TLS in front of the server, as the note in Quick start says to anyway, or pick another provider. Its difficulty adapts per client IP: an honest first login solves the cheap base challenge in a blink, and each recent failed login from the same address multiplies the next challenge's difficulty, up to a ceiling, decaying after 15 minutes or on a successful login. Each challenge is bound to the address that requested it — the address is signed into the challenge and re-checked when the solution arrives — so the escalation cannot be sidestepped by fetching cheap challenges from a clean address and spending them from an escalated one. (If your own address changes mid-check, say a phone moving from wifi to cellular, the sign-in page tells you to try again and costs you no lockout strike.) Escalation is still counted per address, so an attacker spraying from many addresses gets the base difficulty at each: it prices repetition, not a distributed attacker. An attacker running native code is also one to two orders of magnitude faster than a browser, so this deters casual scripted spraying, not a determined campaign. It does **not** replace the three-strikes lockout, which remains the real brute-force defence. Multi-replica deployments must set `POW_SECRET` so every replica agrees on one signing key — generate it with `openssl rand -base64 32`; anything shorter than 16 characters is refused and the login CAPTCHA then rejects every attempt.
+  - `turnstile` and `friendly` verify a token against a third-party siteverify endpoint and need a site key + secret key.
+- `CAPTCHA_SITE_KEY` and `CAPTCHA_SECRET_KEY` (required together with `CAPTCHA_PROVIDER=turnstile` or `friendly`; not used by `pow`. The site key is public. The server verifies solutions with the secret key.)
+- `POW_MAX_NUMBER`, `POW_SECRET_FILE`, `POW_SECRET` (optional, `CAPTCHA_PROVIDER=pow` only — see `.env.example` for tuning notes)
 
 Notes:
 
-- `Dockerfile` sets a fallback model of `nemotron-3-nano:4b`.
-- `docker-compose.yml` changes the model default to `gemma4:e4b` unless you set `OLLAMA_MODEL`.
+- The classifier model defaults to `nemotron-3-nano:4b` everywhere — `Dockerfile`,
+  `docker-compose.yml`, `.env.example`, and the backend's own fallback.
 - The image sets `OLLAMA_MODELS=/kypost/ollama-models`.
+
+### Choosing a classifier model
+
+The default is picked to run on modest hardware. Measured on a 60-email
+benchmark (`backend/cmd/modeleval`), five repeats each with zero run-to-run
+variance:
+
+| Model | Unambiguous mail | Keyword traps | Prompt injection | RAM resident |
+|---|---|---|---|---|
+| `nemotron-3-nano:4b` (default) | 100% | 75% | 63% | 2.9 GB |
+| `gemma4:e4b` | 100% | 75% | 88% | 8.8 GB |
+
+Both label ordinary mail equally well, and both are perfect on unambiguous
+messages. `gemma4:e4b` resists two more of the eight prompt-injection probes —
+emails written to talk the classifier into filing them somewhere they do not
+belong — but wants three times the memory. Set `OLLAMA_MODEL=gemma4:e4b` if the
+host has 12 GB or more free.
+
+Classification speed is not tabulated because it depends far more on your CPU
+and on what else the host is doing than on the model: the same request measured
+between 13 and 19 seconds on one machine purely as background load varied. The
+two models were within about 20% of each other under identical conditions, with
+`gemma4:e4b` slightly ahead. The poller paces itself at one message every three
+seconds regardless, so throughput is bounded by that unless the host is very
+slow.
+
+Either way the damage from a successful injection is bounded: the label
+allowlist means a hostile email can at most choose which of the four folders it
+lands in, and one probe (an email claiming the label set itself had changed)
+defeated every model and every prompt variant tested. Do not treat the assigned
+label as a security decision.
 
 Create the model cache directory once before the first run:
 
@@ -219,8 +264,8 @@ mkdir -p share/ollama/models
 
 The backend handles mobile pairing directly. It does not require Novu.
 
-- Set `PAIRING_SECRET` on the server.
-- Optional: set `SERVER_BASE_URL` so that QR code payloads always point to the correct public backend URL.
+- Nothing to configure: the pairing secret is generated on first start and kept at `/kypost/private/pairing.key`. Set `PAIRING_SECRET` only if you run multiple replicas that must share one.
+- Optional: set `SERVER_BASE_URL` so that QR code payloads always point to the correct public backend URL. Use an `https://` URL: pairing tokens, pickup links and QR key-exchange URLs are all built from it, and each carries a bearer credential in the query string. See the TLS note in Quick Start.
 - Keep all pairing secrets on the server only.
 
 Desktop pairing behavior:
