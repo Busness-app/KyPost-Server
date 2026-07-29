@@ -1,10 +1,8 @@
-# Pinned so the volume-name prefix ("<project>_<volume>") stays stable no
-# matter what directory this repo is checked out into. Without this, Compose
-# derives the project name from the deploy directory's basename, so checking
-# the repo out into a differently-named folder silently detaches the
-# container from its existing volumes and starts it against brand-new empty
-# ones instead — losing config/state/private keys (PGP, IMAP, TOTP) with no
-# error.
+# Pinned so the volume-name prefix ("<project>_<volume>") does not depend on the
+# checkout directory's name. Without it, Compose derives the project name from
+# that basename, and a rename silently detaches the container from its volumes
+# and starts against empty ones — losing config, state and private keys (PGP,
+# IMAP, TOTP) with no error.
 name: kypost-server
 
 services:
@@ -32,14 +30,11 @@ services:
       APNS_RELAY_URL: ${APNS_RELAY_URL:-}
       APNS_RELAY_KEY: ${APNS_RELAY_KEY:-}
       APNS_RELAY_KEY_FILE: ${APNS_RELAY_KEY_FILE:-}
-    # No `dns:` override. This container previously forced 8.8.8.8/8.8.4.4,
-    # which sent every lookup this server makes — each user's IMAP and SMTP
-    # host, every WKD key-discovery probe, every recipient domain — to
-    # Google, reconstructing the correspondence graph of a product whose
-    # whole premise is self-hosting. It also broke split-horizon and
-    # internal DNS. Docker's default (the host's resolver) is correct; set
-    # `dns:` here yourself only if your host resolver genuinely can't
-    # resolve public names.
+    # Do not add a `dns:` override. Every lookup this server makes — each
+    # user's IMAP and SMTP host, every WKD probe, every recipient domain —
+    # would go to it, reconstructing the correspondence graph of a product
+    # whose premise is self-hosting, and it breaks split-horizon/internal DNS.
+    # Docker's default (the host resolver) is correct.
     volumes:
       - kypost_config:/kypost/config
       - kypost_private:/kypost/private

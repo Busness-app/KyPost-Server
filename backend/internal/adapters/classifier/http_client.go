@@ -10,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"kypost-server/backend/internal/logging"
@@ -52,13 +54,52 @@ const (
 
 const warmupRequestTimeout = 3 * time.Minute
 
-// Classify pacing/serialization. The model handles one generation at a time;
-// firing concurrent or back-to-back requests can increase latency and errors.
 const (
-	classifyPaceInterval = 3 * time.Second
 	classifyFirstBackoff = 2 * time.Second
 	classifyRetryBackoff = 5 * time.Second
 )
+
+// Classify admission control.
+//
+// CLASSIFY_CONCURRENCY bounds how many generations are in flight at once. The
+// default of 1 keeps Ollama's one-generation-at-a-time behaviour; an operator
+// running with OLLAMA_NUM_PARALLEL above 1 should raise this to match, or the
+// extra capacity is unreachable.
+//
+// CLASSIFY_PACE_MS is dead time inserted between the START of consecutive
+// requests. It defaults to 0. It was an unconditional 3 s, which is not
+// backpressure — Ollama queues internally and the retry loop below already
+// backs off on a real error — it was 3 s of idle time added to every message,
+// capping the WHOLE INSTANCE at 20 classifications a minute no matter how many
+// users or how fast the model. A mailbox import could not catch up, and
+// nothing surfaced the backlog. Restore a nonzero value only for a backend
+// that genuinely misbehaves under back-to-back requests.
+const (
+	defaultClassifyConcurrency = 1
+	defaultClassifyPaceMS      = 0
+)
+
+// classifyAdmission reads the two knobs above.
+func classifyAdmission() (concurrency int, pace time.Duration) {
+	concurrency = defaultClassifyConcurrency
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("CLASSIFY_CONCURRENCY"))); err == nil && v > 0 {
+		concurrency = v
+	}
+	ms := defaultClassifyPaceMS
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("CLASSIFY_PACE_MS"))); err == nil && v >= 0 {
+		ms = v
+	}
+	return concurrency, time.Duration(ms) * time.Millisecond
+}
+
+// Stats is a point-in-time view of classifier admission, for GET /api/status.
+// Queued rising while InFlight sits at Concurrency is the signal that the
+// backlog is growing faster than the model drains it.
+type Stats struct {
+	InFlight    int `json:"inFlight"`
+	Queued      int `json:"queued"`
+	Concurrency int `json:"concurrency"`
+}
 
 type warmupState struct {
 	mu       sync.Mutex
@@ -88,7 +129,15 @@ type HTTPClient struct {
 
 	tuningTemplate string
 
-	classifyMu   sync.Mutex
+	// classifySem admits at most len(classifySem) concurrent generations. A
+	// channel rather than a Mutex so a waiter can abandon the queue when its
+	// request context is cancelled instead of blocking a poll tick forever.
+	classifySem chan struct{}
+	inFlight    atomic.Int64
+	queued      atomic.Int64
+
+	paceInterval time.Duration
+	paceMu       sync.Mutex
 	lastClassify time.Time
 
 	outputLog io.WriteCloser
@@ -112,6 +161,7 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 	}
 
 	tuningTemplate := strings.TrimSpace(tuning)
+	concurrency, pace := classifyAdmission()
 
 	logDir := strings.TrimSpace(os.Getenv("LOG_DIR"))
 	if logDir == "" {
@@ -125,6 +175,8 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 		model:          model,
 		client:         &http.Client{Timeout: timeout},
 		tuningTemplate: tuningTemplate,
+		classifySem:    make(chan struct{}, concurrency),
+		paceInterval:   pace,
 		outputLog:      logging.NewRotatingWriter(filepath.Join(logDir, "classifier.log"), diagnosticLogMaxSize, diagnosticLogMaxFiles),
 		serverLog:      logging.NewRotatingWriter(filepath.Join(logDir, "classifier-server.log"), diagnosticLogMaxSize, diagnosticLogMaxFiles),
 		errorLog:       logging.NewRotatingWriter(filepath.Join(logDir, "classifier.err.log"), diagnosticLogMaxSize, diagnosticLogMaxFiles),
@@ -159,13 +211,15 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 		return "", err
 	}
 
-	c.classifyMu.Lock()
-	defer c.classifyMu.Unlock()
+	release, err := c.acquireClassifySlot(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 
 	if err := c.paceClassify(ctx); err != nil {
 		return "", err
 	}
-	defer func() { c.lastClassify = time.Now() }()
 
 	// sender/subject are decoded from attacker-controlled email headers via
 	// mime.WordDecoder (RFC 2047), which does not filter control characters —
@@ -480,15 +534,58 @@ func getWarmupState(key string) *warmupState {
 	return state
 }
 
+// acquireClassifySlot blocks until a generation slot is free, returning the
+// release func. The slot is held for the whole retry sequence, matching the
+// serialization the caller had before — but the WAIT is now abandonable, so a
+// cancelled poll tick no longer sits behind another user's 15-second
+// tools-only backoff.
+func (c *HTTPClient) acquireClassifySlot(ctx context.Context) (release func(), err error) {
+	if c.classifySem == nil {
+		// A zero-value client (test fakes construct these) has no admission
+		// control; there is nothing to serialize against.
+		return func() {}, nil
+	}
+	c.queued.Add(1)
+	select {
+	case c.classifySem <- struct{}{}:
+		c.queued.Add(-1)
+	case <-ctx.Done():
+		c.queued.Add(-1)
+		return nil, ctx.Err()
+	}
+	c.inFlight.Add(1)
+	return func() {
+		c.inFlight.Add(-1)
+		<-c.classifySem
+	}, nil
+}
+
+// Stats reports current admission state. Safe to call concurrently.
+func (c *HTTPClient) Stats() Stats {
+	return Stats{
+		InFlight:    int(c.inFlight.Load()),
+		Queued:      int(c.queued.Load()),
+		Concurrency: cap(c.classifySem),
+	}
+}
+
+// paceClassify enforces CLASSIFY_PACE_MS between the starts of consecutive
+// requests. A no-op at the default of 0.
 func (c *HTTPClient) paceClassify(ctx context.Context) error {
-	if classifyPaceInterval <= 0 || c.lastClassify.IsZero() {
+	if c.paceInterval <= 0 {
 		return nil
 	}
-	wait := classifyPaceInterval - time.Since(c.lastClassify)
-	if wait <= 0 {
-		return nil
+	c.paceMu.Lock()
+	defer c.paceMu.Unlock()
+	if !c.lastClassify.IsZero() {
+		if wait := c.paceInterval - time.Since(c.lastClassify); wait > 0 {
+			if err := sleepWithContext(ctx, wait); err != nil {
+				return err
+			}
+		}
 	}
-	return sleepWithContext(ctx, wait)
+	c.lastClassify = time.Now()
+	return nil
 }
 
 func classifyRetryDelay(attempt int, subsequent time.Duration) time.Duration {
@@ -698,6 +795,13 @@ func LoadTuningText() string {
 }
 
 func (c *HTTPClient) logLine(w io.Writer, prefix, message string) {
+	// NewHTTPClient always sets the three writers, but a client assembled any
+	// other way leaves them nil, and fmt.Fprintf to a nil Writer panics — in
+	// the middle of classifying, on the daemon's poll path. Diagnostic logging
+	// is not worth taking the process down for.
+	if w == nil {
+		return
+	}
 	trimmed := strings.TrimSpace(message)
 	if trimmed == "" {
 		return

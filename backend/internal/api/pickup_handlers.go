@@ -64,20 +64,16 @@ func (s *Server) handlePickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A server-sealed record is NOT read here. This used to render the message
-	// and consume the record in one plain GET, which meant anything that
-	// follows a link in an email read the whole message and left the human a
-	// permanent 410 — and the enterprise URL-detonation scanners that do
-	// exactly that (Safe Links, Proofpoint, Mimecast) sit in the recipient's
-	// own mail path, so this was the common case rather than a corner. HEAD
-	// was worse: Go's ServeMux routes it here, so a scanner could destroy the
+	// A server-sealed record is NOT read or consumed here, and must not be.
+	// Rendering on a plain GET means anything that follows a link in an email
+	// reads the whole message and leaves the human a permanent 410 — and the
+	// URL-detonation scanners that do exactly that (Safe Links, Proofpoint,
+	// Mimecast) sit in the recipient's own mail path, so that is the common
+	// case. Go's ServeMux routes HEAD here too, so a scanner could destroy a
 	// message without even being shown it.
 	//
-	// Consumption moved to POST .../open, which needs a deliberate click. That
-	// is the same shape the client-sealed sibling already had (see
-	// handlePickupBlob, whose comment says it consumes on a second call "so a
-	// link-preview bot that fetches the HTML does not burn the message") — the
-	// defense simply was never carried across to the default path.
+	// Consumption belongs in POST .../open, behind a deliberate click — the
+	// same shape handlePickupBlob already uses for the client-sealed path.
 	//
 	s.serveServerSealedLandingPage(w, id, token)
 }
@@ -167,11 +163,10 @@ func (s *Server) serveServerSealedLandingPage(w http.ResponseWriter, id, token s
 // pickupDisplayBody turns a stored body into what the pickup page shows.
 //
 // An HTML body is flattened to readable text rather than rendered as markup.
-// The same rule as pickup-decrypt.js, for the same reason: this page has no
-// sanitizer and shares an origin with the app, so the sender's markup must
-// never become live HTML here. Escaping it without flattening — what this
-// used to do to every body — is the other wrong answer, and the one the
-// recipient noticed: it showed them the tags instead of the message.
+// Same rule as pickup-decrypt.js: this page has no sanitizer and shares an
+// origin with the app, so the sender's markup must never become live HTML.
+// Escaping without flattening is the other wrong answer — it shows the
+// recipient the tags instead of the message.
 //
 // A plain body is returned untouched, so a message that merely talks about
 // markup keeps it. The caller escapes either result before it reaches the
@@ -276,18 +271,13 @@ func (s *Server) pickupBaseURL() string {
 // (IMAP_CONFIG_KEY_FILE, TOTP_SECRET_KEY_FILE, PGP_PRIVATE_KEY_FILE,
 // PICKUP_STORE_KEY_FILE all go through cryptutil.LoadOrCreateKey).
 //
-// This used to be environment-only, which made it the one secret an operator
-// had to invent by hand — and .env.example shipped a bare "PAIRING_SECRET="
-// with no length guidance and no generation hint, while Dockerfile and
-// docker-compose both defaulted it to empty. An unset value already failed
-// closed (503 everywhere, logged), so the real gap was a weak one:
-// "PAIRING_SECRET=hunter2" was accepted silently and produced forgeable HMACs
-// for pickup links and pairing tokens. Generating it removes the chance to get
-// it wrong, and removes a setup step.
+// Generated rather than operator-invented. An unset value fails closed (503,
+// logged), but a weak one does not: "PAIRING_SECRET=hunter2" is accepted
+// silently and produces forgeable HMACs for pickup links and pairing tokens.
 //
 // The environment override stays because a multi-replica deployment needs every
-// replica to agree on one secret, and a per-container generated file cannot
-// provide that. An operator-supplied value is used verbatim and writes no file.
+// replica to agree on one secret, which a per-container generated file cannot
+// provide. An operator-supplied value is used verbatim and writes no file.
 //
 // A generation failure — read-only secrets volume, bad permissions — returns
 // "", which every consumer already reads as "not configured" and answers 503

@@ -12,12 +12,12 @@ import (
 	"kypost-server/backend/internal/users"
 )
 
-// ollamaVersionPollInterval controls how often the installed Ollama version
-// is compared against the latest upstream GitHub release. The installed
-// version only ever changes when the container image itself is rebuilt, so
-// there is no benefit to polling more often than this — it mainly exists to
-// pick up a freshly-published upstream release in a timely way.
-const ollamaVersionPollInterval = 1 * time.Hour
+// versionPollInterval controls how often the installed Ollama and
+// KyPost-Server versions are compared against the latest upstream GitHub
+// releases. Both installed versions only ever change when the container image
+// itself is rebuilt, so there is no benefit to polling more often than this —
+// it mainly exists to pick up a freshly-published release in a timely way.
+const versionPollInterval = 1 * time.Hour
 
 // ollamaVersionStatus is the last-known result of comparing the installed
 // Ollama version against the latest upstream release, cached in memory so
@@ -34,7 +34,7 @@ type ollamaVersionStatus struct {
 
 // SetClassifier attaches the shared classifier HTTP client so the Ollama
 // version monitor can query the running instance's own /api/version. Must be
-// called before StartOllamaVersionMonitor for the monitor to do anything.
+// called before StartVersionMonitor for the monitor to do anything.
 func (s *Server) SetClassifier(c *classifier.HTTPClient) {
 	s.classifier = c
 }
@@ -51,16 +51,19 @@ func (s *Server) setOllamaStatus(status ollamaVersionStatus) {
 	s.ollamaStatus = status
 }
 
-// StartOllamaVersionMonitor periodically checks the installed Ollama version
-// against the latest upstream release and emails the admin the first time an
-// update becomes available, so a self-hosted operator knows to rebuild and
-// redeploy the container. Safe to call even when SetClassifier was never
-// called — each check is then a no-op. Intended to be run in its own
-// goroutine (mirrors StartPickupSweeper) and returns when ctx is canceled.
-func (s *Server) StartOllamaVersionMonitor(ctx context.Context) {
+// StartVersionMonitor periodically checks the installed Ollama and
+// KyPost-Server versions against the latest releases published upstream, and
+// emails the admin the first time either update becomes available, so a
+// self-hosted operator knows to rebuild and redeploy the container. Safe to
+// call even when SetClassifier was never called — the Ollama half is then a
+// no-op, and the KyPost-Server half does not need it. Intended to be run in
+// its own goroutine (mirrors StartPickupSweeper) and returns when ctx is
+// canceled.
+func (s *Server) StartVersionMonitor(ctx context.Context) {
 	s.refreshOllamaVersionStatus(ctx)
+	s.checkForServerUpdate(ctx)
 
-	ticker := time.NewTicker(ollamaVersionPollInterval)
+	ticker := time.NewTicker(versionPollInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -68,6 +71,7 @@ func (s *Server) StartOllamaVersionMonitor(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.refreshOllamaVersionStatus(ctx)
+			s.checkForServerUpdate(ctx)
 		}
 	}
 }
@@ -150,12 +154,40 @@ func (s *Server) handleOllamaVersion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// notifyAdminOllamaUpdateAvailable emails the install's primary admin
-// (FirstAdminFrom) that a newer Ollama release is available upstream than
-// the one bundled in this container, sent through that admin's own
-// configured IMAP/SMTP credentials and addressed to themselves — the same
-// self-notification pattern sendPickupNotification and handleMailSend use.
+// notifyAdminOllamaUpdateAvailable emails the install's primary admin that a
+// newer Ollama release is available upstream than the one bundled in this
+// container.
+//
+// What this says has to be true, or the operator does it, sees no change, and
+// stops believing the next one. Rebuilding your existing checkout does NOT
+// change the Ollama version: the Dockerfile pins it to a specific tarball and
+// SHA-256 (deliberately — an unpinned install.sh is arbitrary remote code and
+// made builds unreproducible), so a rebuild reinstalls exactly the same
+// release. What moves it is the pin itself moving.
 func (s *Server) notifyAdminOllamaUpdateAvailable(installed, latest string) error {
+	return s.sendAdminNotice(
+		"A newer Ollama version is available for your kypost container",
+		fmt.Sprintf(
+			"Your kypost-server container is currently running Ollama %s. Version %s has been available upstream "+
+				"for at least %d days.\n\n"+
+				"Rebuilding your current checkout will NOT change this: the Dockerfile pins Ollama to a specific "+
+				"release and checksum, so a rebuild reinstalls the same version. To pick up the newer one, either:\n\n"+
+				"  1. Pull a kypost-server image built after the pin was bumped (the pin is advanced by an automated "+
+				"PR that a maintainer merges), or\n"+
+				"  2. Build with the pin overridden yourself:\n"+
+				"     docker build --build-arg OLLAMA_VERSION=%s --build-arg OLLAMA_SHA256=<sha> .\n"+
+				"     The checksum is in that release's published sha256sum.txt; the build verifies it.\n\n"+
+				"This container does not update itself, and nothing here happens automatically.",
+			installed, latest, int(ollamaupdate.MinReleaseAge.Hours()/24), latest,
+		),
+	)
+}
+
+// sendAdminNotice emails the install's primary admin (FirstAdminFrom) through
+// that admin's own configured IMAP/SMTP credentials, addressed to themselves —
+// the same self-notification pattern sendPickupNotification and handleMailSend
+// use. It is how both update checks reach the operator.
+func (s *Server) sendAdminNotice(subject, body string) error {
 	all, err := s.users.List()
 	if err != nil {
 		return fmt.Errorf("list users: %w", err)
@@ -186,28 +218,9 @@ func (s *Server) notifyAdminOllamaUpdateAvailable(installed, latest string) erro
 	msg := mailmsg.Message{
 		From:    from,
 		To:      []string{from},
-		Subject: "A newer Ollama version is available for your kypost container",
-		// What this says has to be true, or the operator does it, sees no
-		// change, and stops believing the next one. Rebuilding your existing
-		// checkout does NOT change the Ollama version: the Dockerfile pins it
-		// to a specific tarball and SHA-256 (deliberately — an unpinned
-		// install.sh is arbitrary remote code and made builds
-		// unreproducible), so a rebuild reinstalls exactly the same release.
-		// What moves it is the pin itself moving.
-		Body: fmt.Sprintf(
-			"Your kypost-server container is currently running Ollama %s. Version %s has been available upstream "+
-				"for at least %d days.\n\n"+
-				"Rebuilding your current checkout will NOT change this: the Dockerfile pins Ollama to a specific "+
-				"release and checksum, so a rebuild reinstalls the same version. To pick up the newer one, either:\n\n"+
-				"  1. Pull a kypost-server image built after the pin was bumped (the pin is advanced by an automated "+
-				"PR that a maintainer merges), or\n"+
-				"  2. Build with the pin overridden yourself:\n"+
-				"     docker build --build-arg OLLAMA_VERSION=%s --build-arg OLLAMA_SHA256=<sha> .\n"+
-				"     The checksum is in that release's published sha256sum.txt; the build verifies it.\n\n"+
-				"This container does not update itself, and nothing here happens automatically.",
-			installed, latest, int(ollamaupdate.MinReleaseAge.Hours()/24), latest,
-		),
-		Mode: "plain",
+		Subject: subject,
+		Body:    body,
+		Mode:    "plain",
 	}.Build()
 
 	return mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, from, []string{from}, msg)

@@ -47,6 +47,27 @@ func TestSetOllamaUpdateNotifiedFiresOncePerVersion(t *testing.T) {
 	}
 }
 
+// TestUpdateNotificationLatchesAreIndependent pins that the Ollama and
+// KyPost-Server update latches use separate keys. They share one helper and
+// coincidentally carry similar version numbers, so a copy-paste of the key
+// would make whichever check ran first swallow the other's email.
+func TestUpdateNotificationLatchesAreIndependent(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if notify, err := store.SetOllamaUpdateNotified("1.2.3"); err != nil || !notify {
+		t.Fatalf("SetOllamaUpdateNotified: notify=%v, err=%v; want notify=true", notify, err)
+	}
+	if notify, err := store.SetServerUpdateNotified("1.2.3"); err != nil || !notify {
+		t.Fatalf("SetServerUpdateNotified: notify=%v, err=%v; want notify=true (separate latch)", notify, err)
+	}
+	if notify, err := store.SetServerUpdateNotified("1.2.3"); err != nil || notify {
+		t.Fatalf("SetServerUpdateNotified (repeat): notify=%v, err=%v; want notify=false", notify, err)
+	}
+}
+
 func TestNotificationSubscriptionsSyncAcrossStoreInstances(t *testing.T) {
 	dir := t.TempDir()
 

@@ -11,7 +11,7 @@ import (
 // cancelable context.Context — the kind runServer/runAll thread into all
 // three background sweepers (Task 20) instead of context.Background() —
 // genuinely stops every one of them: StartPickupSweeper,
-// StartSendAsCooldownSweeper, and StartOllamaVersionMonitor all return
+// StartSendAsCooldownSweeper, and StartVersionMonitor all return
 // promptly once that one shared context is canceled.
 //
 // Before the fix, each sweeper ran on context.Background(), which never
@@ -20,6 +20,10 @@ import (
 // leaked-goroutine failure mode Task 20 closes.
 func TestAllSweepersExitOnSharedContextCancel(t *testing.T) {
 	srv := newTestServer(t)
+	// StartVersionMonitor runs its checks once before entering the select
+	// loop; without this the self-update check would reach the real GitHub API
+	// from a unit test.
+	serveReleases(t, `[]`)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -27,7 +31,7 @@ func TestAllSweepersExitOnSharedContextCancel(t *testing.T) {
 	wg.Add(3)
 	go func() { defer wg.Done(); srv.StartPickupSweeper(ctx) }()
 	go func() { defer wg.Done(); srv.StartSendAsCooldownSweeper(ctx) }()
-	go func() { defer wg.Done(); srv.StartOllamaVersionMonitor(ctx) }()
+	go func() { defer wg.Done(); srv.StartVersionMonitor(ctx) }()
 
 	// Give the goroutines a moment to actually start running (enter their
 	// select loops) before cancellation, so this isn't just testing that an

@@ -1,41 +1,31 @@
 package api
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"mime"
 	"net/http"
-	"net/mail"
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"kypost-server/backend/internal/adapters/classifier"
-	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/captcha"
 	"kypost-server/backend/internal/config"
 	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/cryptutil"
-	"kypost-server/backend/internal/fsutil"
 	"kypost-server/backend/internal/groups"
 	"kypost-server/backend/internal/health"
 	"kypost-server/backend/internal/logging"
 	"kypost-server/backend/internal/mailcache"
 	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/mfa"
-	"kypost-server/backend/internal/pgpdiscovery"
 	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/processor"
 	"kypost-server/backend/internal/rules"
@@ -43,8 +33,6 @@ import (
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
-
-	goimap "github.com/BrianLeishman/go-imap"
 )
 
 // Server holds the HTTP surface and its process-wide state.
@@ -120,13 +108,16 @@ type Server struct {
 	// subscriberID -> userID index used by the unauthenticated native
 	// pairing registration endpoint, and the deviceID -> userID index used
 	// by ongoing per-device auth (deviceAuthFromRequest).
-	userMu         sync.Mutex
-	userStores     map[string]*state.Store
-	userContacts   map[string]*contacts.Store
-	userSendAs     map[string]*sendas.Store
-	userGroups     map[string]*groups.Store
-	userRules      map[string]*rules.Store
-	userMailCache  map[string]*mailcache.Store
+	userMu        sync.Mutex
+	userStores    map[string]*state.Store
+	userContacts  map[string]*contacts.Store
+	userSendAs    map[string]*sendas.Store
+	userGroups    map[string]*groups.Store
+	userRules     map[string]*rules.Store
+	userMailCache map[string]*mailcache.Store
+	// userLastSeen stamps the last request that touched each user's cached
+	// stores above, so sweepIdleUserStores knows what to reclaim.
+	userLastSeen   map[string]time.Time
 	userMail       map[string]*serverMailEntry
 	subIndex       map[string]string
 	deviceIndex    map[string]string
@@ -216,6 +207,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		userGroups:             map[string]*groups.Store{},
 		userRules:              map[string]*rules.Store{},
 		userMailCache:          map[string]*mailcache.Store{},
+		userLastSeen:           map[string]time.Time{},
 		userMail:               map[string]*serverMailEntry{},
 		subIndex:               map[string]string{},
 		deviceIndex:            map[string]string{},
@@ -772,6 +764,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"emailsProcessedLastHour": store.ProcessedSince(processedSince),
 		"serverTimeUtc":           time.Now().UTC().Format(time.RFC3339),
 	}
+	// Classifier admission depth. Without this the only symptom of a backlog
+	// the model cannot drain is mail that quietly classifies late — the poll
+	// tick reports success either way, and the health check only watches IMAP.
+	if s.classifier != nil {
+		resp["classifier"] = s.classifier.Stats()
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -781,168 +779,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // alias here (rather than rewriting every reference in this package) since
 // it's the identical type, just relocated.
 type imapConfigPayload = mailmsg.IMAPConfigPayload
-
-func (s *Server) handleIMAPConfig(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-	imapConfigPath := s.userIMAPConfigPath(ac.UserID)
-	switch r.Method {
-	case http.MethodGet:
-		payload, exists, err := mailmsg.ReadIMAPConfigPayload(imapConfigPath, s.imapConfigKeyPath)
-		if err != nil {
-			http.Error(w, "failed to read imap configuration", http.StatusInternalServerError)
-			return
-		}
-		if !exists {
-			writeJSON(w, http.StatusOK, map[string]any{"configured": false, "path": imapConfigPath, "keyPath": s.imapConfigKeyPath})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"configured":      true,
-			"path":            imapConfigPath,
-			"keyPath":         s.imapConfigKeyPath,
-			"host":            payload.Host,
-			"port":            payload.Port,
-			"username":        payload.Username,
-			"mailbox":         payload.Mailbox,
-			"smtpHost":        payload.SMTPHost,
-			"smtpPort":        payload.SMTPPort,
-			"updatedAt":       payload.UpdatedAt,
-			"encryptedAtRest": true,
-		})
-	case http.MethodPost:
-		var payload imapConfigPayload
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil {
-			http.Error(w, "invalid JSON body", http.StatusBadRequest)
-			return
-		}
-
-		payload = mailmsg.NormalizeIMAPPayload(payload)
-		if payload.Host == "" || payload.Username == "" || payload.Password == "" {
-			http.Error(w, "host, username, and password are required", http.StatusBadRequest)
-			return
-		}
-		payload.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-
-		if err := os.MkdirAll(filepath.Dir(imapConfigPath), 0o700); err != nil {
-			http.Error(w, "failed to create imap configuration directory", http.StatusInternalServerError)
-			return
-		}
-		if err := writeIMAPConfigPayload(imapConfigPath, s.imapConfigKeyPath, payload); err != nil {
-			http.Error(w, "failed to save imap configuration", http.StatusInternalServerError)
-			return
-		}
-		s.invalidateUserMail(ac.UserID)
-
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":              true,
-			"configured":      true,
-			"path":            imapConfigPath,
-			"keyPath":         s.imapConfigKeyPath,
-			"host":            payload.Host,
-			"port":            payload.Port,
-			"username":        payload.Username,
-			"mailbox":         payload.Mailbox,
-			"smtpHost":        payload.SMTPHost,
-			"smtpPort":        payload.SMTPPort,
-			"updatedAt":       payload.UpdatedAt,
-			"encryptedAtRest": true,
-		})
-	case http.MethodDelete:
-		if err := os.Remove(imapConfigPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			http.Error(w, "failed to remove imap configuration", http.StatusInternalServerError)
-			return
-		}
-		s.invalidateUserMail(ac.UserID)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "configured": false})
-	}
-}
-
-func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-	var req imapConfigPayload
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
-
-	// All-or-nothing, deliberately. The fallback used to be applied per field,
-	// so a caller who supplied only a host — leaving username and password
-	// blank — got the *stored* credentials filled in around their chosen
-	// destination, and the server then performed an IMAP LOGIN with the
-	// victim's real mail password against a server the caller controlled.
-	// GET /api/imap/config never returns that password precisely because it is
-	// the account's most durable secret (it is the SMTP password too, and it
-	// survives every KyPost-side revocation), and this was the one path that
-	// handed it out. A caller-chosen destination must never be paired with a
-	// server-held secret.
-	suppliedHost := strings.TrimSpace(req.Host) != ""
-	suppliedUser := strings.TrimSpace(req.Username) != ""
-	suppliedPass := strings.TrimSpace(req.Password) != ""
-	switch {
-	case !suppliedHost && !suppliedUser && !suppliedPass:
-		stored, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
-		if err != nil {
-			http.Error(w, "failed to load imap configuration", http.StatusInternalServerError)
-			return
-		}
-		if !exists {
-			http.Error(w, "host, username, and password are required (or store IMAP config first)", http.StatusBadRequest)
-			return
-		}
-		mailbox := strings.TrimSpace(req.Mailbox)
-		req = stored
-		if mailbox != "" {
-			req.Mailbox = mailbox
-		}
-	case !(suppliedHost && suppliedUser && suppliedPass):
-		http.Error(w, "supply host, username, and password together, or none of them", http.StatusBadRequest)
-		return
-	}
-
-	req = mailmsg.NormalizeIMAPPayload(req)
-
-	client, err := goimap.New(req.Username, req.Password, req.Host, req.Port)
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	defer client.Close()
-
-	if err := client.SelectFolder(req.Mailbox); err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "host": req.Host, "port": req.Port, "mailbox": req.Mailbox})
-}
-
-func parseRecipientList(raw string) ([]string, error) {
-	normalized := strings.TrimSpace(strings.ReplaceAll(raw, ";", ","))
-	if normalized == "" {
-		return []string{}, nil
-	}
-	addresses, err := mail.ParseAddressList(normalized)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(addresses))
-	for _, addr := range addresses {
-		if addr == nil {
-			continue
-		}
-		clean := strings.TrimSpace(addr.Address)
-		if clean == "" {
-			continue
-		}
-		out = append(out, clean)
-	}
-	return out, nil
-}
 
 type mailRequest struct {
 	Subject     string
@@ -969,106 +805,6 @@ const (
 	maxMailRequestBytes    = 40 << 20
 )
 
-// decodeMailRequest decodes and validates the shared to/cc/bcc/subject/body/
-// mode/attachments JSON body used by both the send and draft-save endpoints.
-// On error it returns the client-facing error message alongside the error.
-func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
-	var raw struct {
-		To          string `json:"to"`
-		CC          string `json:"cc"`
-		BCC         string `json:"bcc"`
-		Subject     string `json:"subject"`
-		Body        string `json:"body"`
-		Mode        string `json:"mode"`
-		From        string `json:"from"`
-		Attachments []struct {
-			Name       string `json:"name"`
-			MimeType   string `json:"mimeType"`
-			DataBase64 string `json:"dataBase64"`
-		} `json:"attachments"`
-		Encrypt             bool `json:"encrypt"`
-		Sign                bool `json:"sign"`
-		AllowPickupFallback bool `json:"allowPickupFallback"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxMailRequestBytes)).Decode(&raw); err != nil {
-		return mailRequest{}, "invalid request", err
-	}
-
-	attachments := make([]mailmsg.Attachment, 0, len(raw.Attachments))
-	attachmentTotal := 0
-	for _, a := range raw.Attachments {
-		content, err := base64.StdEncoding.DecodeString(a.DataBase64)
-		if err != nil {
-			return mailRequest{}, "invalid attachment encoding", err
-		}
-		attachmentTotal += len(content)
-		if attachmentTotal > maxMailAttachmentBytes {
-			return mailRequest{}, "attachments too large (max 25 MB total)",
-				errors.New("attachment size limit exceeded")
-		}
-		attachments = append(attachments, mailmsg.Attachment{
-			Name:     a.Name,
-			MimeType: a.MimeType,
-			Content:  content,
-		})
-	}
-
-	toList, err := parseRecipientList(raw.To)
-	if err != nil || len(toList) == 0 {
-		if err == nil {
-			err = errors.New("missing to recipient")
-		}
-		return mailRequest{}, "valid TO recipient is required", err
-	}
-	ccList, err := parseRecipientList(raw.CC)
-	if err != nil {
-		return mailRequest{}, "invalid CC recipients", err
-	}
-	bccList, err := parseRecipientList(raw.BCC)
-	if err != nil {
-		return mailRequest{}, "invalid BCC recipients", err
-	}
-
-	return mailRequest{
-		Subject:             raw.Subject,
-		Body:                raw.Body,
-		Mode:                raw.Mode,
-		To:                  toList,
-		CC:                  ccList,
-		BCC:                 bccList,
-		Attachments:         attachments,
-		Encrypt:             raw.Encrypt,
-		Sign:                raw.Sign,
-		AllowPickupFallback: raw.AllowPickupFallback,
-		From:                raw.From,
-	}, "", nil
-}
-
-func sanitizeHeaderValue(value string) string {
-	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
-}
-
-// findContactPGPKey looks up email among the store's contacts (case-
-// insensitive) and returns its armored PGP public key, if the matching
-// contact has one on file.
-func findContactPGPKey(store *contacts.Store, email string) (string, bool) {
-	target := strings.ToLower(strings.TrimSpace(email))
-	if target == "" {
-		return "", false
-	}
-	for _, c := range store.List() {
-		if c.PGPKey == "" {
-			continue
-		}
-		for _, e := range c.Emails {
-			if strings.ToLower(strings.TrimSpace(e.Value)) == target {
-				return c.PGPKey, true
-			}
-		}
-	}
-	return "", false
-}
-
 // pgpRecipientPlan splits an encrypted send's To/CC/BCC recipients by PGP
 // key availability and status. To/CC recipients with a usable key share one
 // ciphertext, matching how a normal email is visible to every To/CC
@@ -1086,970 +822,11 @@ type pgpRecipientPlan struct {
 	withoutKeyEmails []string
 }
 
-// buildPGPRecipientPlan resolves each recipient's contact PGP key and
-// builds a pgpRecipientPlan. Recipients are deduplicated case-insensitively
-// across To+CC+BCC combined, keeping only the first occurrence — an address
-// listed in both To and BCC is treated as a To recipient.
-func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string, resolver *keyResolver) pgpRecipientPlan {
-	var plan pgpRecipientPlan
-	seen := map[string]bool{}
-
-	resolve := func(recipient string) (armoredKey string, usable bool) {
-		rk := resolver.resolve(ctx, recipient)
-		return rk.Armored, rk.Usable
-	}
-
-	toCC := append(append([]string{}, toList...), ccList...)
-	for _, recipient := range toCC {
-		lower := strings.ToLower(strings.TrimSpace(recipient))
-		if lower == "" || seen[lower] {
-			continue
-		}
-		seen[lower] = true
-		if key, ok := resolve(recipient); ok {
-			plan.toCCEmails = append(plan.toCCEmails, recipient)
-			plan.toCCKeys = append(plan.toCCKeys, key)
-		} else {
-			plan.withoutKeyEmails = append(plan.withoutKeyEmails, recipient)
-		}
-	}
-	for _, recipient := range bccList {
-		lower := strings.ToLower(strings.TrimSpace(recipient))
-		if lower == "" || seen[lower] {
-			continue
-		}
-		seen[lower] = true
-		if key, ok := resolve(recipient); ok {
-			plan.bccEmails = append(plan.bccEmails, recipient)
-			plan.bccKeys = append(plan.bccKeys, key)
-		} else {
-			plan.withoutKeyEmails = append(plan.withoutKeyEmails, recipient)
-		}
-	}
-	return plan
-}
-
 // pgpDelivery is one PGP/MIME ciphertext and the SMTP recipient(s) it
 // should be delivered to in a single transaction.
 type pgpDelivery struct {
 	Recipients []string
 	Ciphertext []byte
-}
-
-// buildPGPDeliveries encrypts msg once for plan's shared To/CC recipients
-// (if any) and once individually for each of plan's BCC recipients, so no
-// BCC recipient's key ID ever appears in a ciphertext another recipient can
-// inspect. signer is passed straight through to EncryptMIME for every
-// delivery (nil if the caller didn't request signing).
-func buildPGPDeliveries(msg []byte, plan pgpRecipientPlan, signer *pgpmail.Identity) ([]pgpDelivery, error) {
-	var deliveries []pgpDelivery
-	if len(plan.toCCEmails) > 0 {
-		ciphertext, err := pgpmail.EncryptMIME(msg, plan.toCCKeys, signer)
-		if err != nil {
-			return nil, fmt.Errorf("encrypt to/cc recipients: %w", err)
-		}
-		deliveries = append(deliveries, pgpDelivery{Recipients: plan.toCCEmails, Ciphertext: ciphertext})
-	}
-	for i, recipient := range plan.bccEmails {
-		ciphertext, err := pgpmail.EncryptMIME(msg, []string{plan.bccKeys[i]}, signer)
-		if err != nil {
-			return nil, fmt.Errorf("encrypt bcc recipient %s: %w", recipient, err)
-		}
-		deliveries = append(deliveries, pgpDelivery{Recipients: []string{recipient}, Ciphertext: ciphertext})
-	}
-	return deliveries, nil
-}
-
-// resolveMailFrom decides the From header value handleMailSend should use,
-// given the account's own IMAP username (accountAddr — already sanitized
-// and confirmed non-empty by the caller) and the client-requested From
-// address (requestedFrom, exactly as decoded from the JSON body — not yet
-// trimmed or validated).
-//
-// If requestedFrom is empty, or names the account's own address
-// (case-insensitively), it resolves to accountAddr and aliasStoreFn is
-// never called — this preserves today's zero-lookup behavior exactly for
-// every existing caller (which never sends `from` at all) and for a caller
-// that explicitly re-submits their own address.
-//
-// Otherwise requestedFrom is parsed as an RFC 5322 address, and
-// aliasStoreFn (typically s.sendAsFor(r), passed lazily so it's only
-// invoked when actually needed) is consulted for a verified alias matching
-// it. A verified alias's stored DisplayName is used to format the
-// resolved From via mail.Address.String(), so a display name with special
-// characters gets properly quoted/encoded.
-//
-// On success it returns the resolved header-From and envelope-From values
-// and status 0. On failure it returns empty values, along with the exact
-// HTTP status code and client-facing message handleMailSend should respond
-// with — malformed address (400), alias store unavailable (500), or
-// address not a verified alias (403).
-//
-// headerFrom and envelopeFrom MUST be kept separate by every caller:
-// headerFrom may carry a display name (RFC 5322 formatted, for the MIME
-// From: header) while envelopeFrom is always a bare addr-spec. net/smtp's
-// Mail()/SendMail() never parses the from string it's given — it only
-// wraps it verbatim as MAIL FROM:<%s> — so passing a display-name-formatted
-// or already-angle-bracketed value as the envelope sender produces a
-// malformed SMTP command that real servers reject.
-func resolveMailFrom(accountAddr, requestedFrom string, aliasStoreFn func() (*sendas.Store, error)) (headerFrom, envelopeFrom string, status int, msg string) {
-	requested := strings.TrimSpace(requestedFrom)
-	if requested == "" {
-		return accountAddr, accountAddr, 0, ""
-	}
-	parsed, perr := mail.ParseAddress(requested)
-	if perr != nil {
-		return "", "", http.StatusBadRequest, "invalid from address"
-	}
-	candidate := strings.ToLower(parsed.Address)
-	if strings.EqualFold(candidate, accountAddr) {
-		return accountAddr, accountAddr, 0, ""
-	}
-	aliasStore, aerr := aliasStoreFn()
-	if aerr != nil {
-		return "", "", http.StatusInternalServerError, "failed to check send-as aliases"
-	}
-	alias, ok := aliasStore.FindVerifiedByEmail(candidate)
-	if !ok {
-		return "", "", http.StatusForbidden, "the from address is not a verified send-as alias for this account"
-	}
-	headerFrom = sanitizeHeaderValue((&mail.Address{Name: alias.DisplayName, Address: alias.Email}).String())
-	envelopeFrom = sanitizeHeaderValue(alias.Email)
-	return headerFrom, envelopeFrom, 0, ""
-}
-
-func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
-	req, errMsg, err := decodeMailRequest(r)
-	if err != nil {
-		http.Error(w, errMsg, http.StatusBadRequest)
-		return
-	}
-	toList, ccList, bccList := req.To, req.CC, req.BCC
-
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)
-	if err != nil {
-		http.Error(w, "failed to read mail credentials", http.StatusInternalServerError)
-		return
-	}
-	if !exists {
-		http.Error(w, "imap configuration is required before sending", http.StatusBadRequest)
-		return
-	}
-
-	smtpHost, smtpPort, addr, err := mailmsg.ResolveSMTPTarget(payload)
-	if err != nil {
-		http.Error(w, "smtp host is not configured", http.StatusBadRequest)
-		return
-	}
-
-	accountAddr := sanitizeHeaderValue(payload.Username)
-	if accountAddr == "" {
-		http.Error(w, "imap username is required for sender", http.StatusBadRequest)
-		return
-	}
-	headerFrom, envelopeFrom, fromStatus, fromMsg := resolveMailFrom(accountAddr, req.From, func() (*sendas.Store, error) {
-		return s.sendAsFor(r)
-	})
-	if fromStatus != 0 {
-		http.Error(w, fromMsg, fromStatus)
-		return
-	}
-
-	autocryptHeader := s.outboundAutocryptHeader(ac.UserID, envelopeFrom)
-
-	msg := mailmsg.Message{
-		From:        headerFrom,
-		To:          toList,
-		CC:          ccList,
-		Subject:     req.Subject,
-		Body:        req.Body,
-		Mode:        req.Mode,
-		Attachments: req.Attachments,
-		Autocrypt:   autocryptHeader,
-	}.Build()
-
-	var signer *pgpmail.Identity
-	if req.Sign || req.Encrypt {
-		u, uerr := s.users.Get(ac.UserID)
-		// An end-to-end key cannot be used here: the server has no way to
-		// open it, by design. Refuse loudly and point at the browser path
-		// rather than falling through to sending the message unsigned and
-		// unencrypted, which is the one outcome a user who ticked those
-		// boxes must never silently get.
-		if uerr == nil && u.PGPProtection() == users.PGPProtectionClient {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":            "this account's PGP key is end-to-end protected, so the server cannot sign or encrypt on your behalf",
-				"clientSideNeeded": true,
-			})
-			return
-		}
-		if uerr == nil && u.HasServerReadableKey() {
-			signer, err = pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, s.pgpPrivateKeyPath)
-			if err != nil {
-				http.Error(w, "failed to load pgp identity", http.StatusInternalServerError)
-				return
-			}
-		} else if req.Sign {
-			http.Error(w, "signing requires a pgp identity — generate or import one first", http.StatusBadRequest)
-			return
-		}
-	}
-	if req.Sign && signer != nil {
-		if status := signer.Status(); !status.Usable() {
-			http.Error(w, "cannot sign — your pgp identity is revoked or expired, generate or import a new one", http.StatusBadRequest)
-			return
-		}
-	}
-
-	if !req.Encrypt {
-		if req.Sign {
-			signed, serr := pgpmail.SignMIME(msg, signer)
-			if serr != nil {
-				http.Error(w, "failed to sign message", http.StatusInternalServerError)
-				return
-			}
-			msg = signed
-		}
-		recipients := append(append(append([]string{}, toList...), ccList...), bccList...)
-		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, recipients, msg, req, "")
-		return
-	}
-
-	contactsStore, cerr := s.userContactsStore(ac.UserID)
-	if cerr != nil {
-		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)
-		return
-	}
-	discoverySettings, derr := pgpdiscovery.Load(s.userStateDir(ac.UserID))
-	if derr != nil {
-		http.Error(w, "failed to load pgp discovery settings", http.StatusInternalServerError)
-		return
-	}
-	suppressed, serr := pgpdiscovery.SuppressedSet(s.userStateDir(ac.UserID))
-	if serr != nil {
-		http.Error(w, "failed to load pgp discovery suppressions", http.StatusInternalServerError)
-		return
-	}
-	resolver := &keyResolver{store: contactsStore, settings: discoverySettings, discover: req.Encrypt, suppressed: suppressed}
-	plan := buildPGPRecipientPlan(r.Context(), toList, ccList, bccList, resolver)
-
-	// Refuse before any delivery when a recipient has no usable key and the
-	// caller did not opt in. The pickup fallback stores this message's
-	// plaintext server-side for seven days and mails the link in the clear,
-	// so it is a downgrade the sender chooses, not one they discover later.
-	//
-	// Ordering matters: nothing has been sent at this point, so a client may
-	// re-send with allowPickupFallback set once the user confirms, with no
-	// risk of a duplicate or half-delivered message.
-	if len(plan.withoutKeyEmails) > 0 && !req.AllowPickupFallback {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":                   "some recipients have no usable PGP key; sending them a one-time link stores this message's plaintext on the server for 7 days",
-			"keylessRecipients":       plan.withoutKeyEmails,
-			"pickupFallbackAvailable": true,
-		})
-		return
-	}
-
-	if len(plan.toCCEmails) == 0 && len(plan.bccEmails) == 0 {
-		if !req.AllowPickupFallback {
-			http.Error(w, "none of the recipients have a known pgp key — disable encryption or add keys to your contacts first", http.StatusBadRequest)
-			return
-		}
-		// Opted in with nothing to encrypt to: the pickup notifications ARE the
-		// entire delivery, so unlike the mixed keyed/keyless path below, their
-		// outcome has to be checked before answering, not logged best-effort
-		// after. If PAIRING_SECRET is unset, sendPickupNotification fails every
-		// recipient immediately (pickup_handlers.go) and nothing goes out at
-		// all — answering 200 in that case would silently convert a hard
-		// failure into a lie, which is exactly the failure mode a hard 400 used
-		// to prevent before this opt-in existed.
-		failed := s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, req.Mode, smtpHost, smtpPort, addr, payload.Username, payload.Password)
-		total := len(plan.withoutKeyEmails)
-		if total > 0 && failed == total {
-			http.Error(w, "failed to deliver a pickup link to any recipient; nothing was sent", http.StatusBadGateway)
-			return
-		}
-		extraWarning := ""
-		if failed > 0 {
-			extraWarning = fmt.Sprintf("failed to deliver a pickup link to %d of %d recipient(s)", failed, total)
-		}
-		// Passing no recipients is safe — finishMailSend skips SMTP on an empty
-		// list and still saves the plaintext Sent copy.
-		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req, extraWarning) {
-			return
-		}
-		return
-	}
-
-	deliveries, eerr := buildPGPDeliveries(msg, plan, encryptSigner(signer, req.Sign))
-	if eerr != nil {
-		http.Error(w, "failed to encrypt message", http.StatusInternalServerError)
-		return
-	}
-
-	// deliveries[0] is always the correct hard-error-gated send: buildPGPDeliveries
-	// guarantees the shared To/CC ciphertext (if any) comes first, otherwise the
-	// first BCC recipient's ciphertext is deliveries[0]. deliveries is guaranteed
-	// non-empty here because the branch above already returned early whenever
-	// both plan.toCCEmails and plan.bccEmails were empty, so at least one of
-	// them is non-empty by the time buildPGPDeliveries runs. Treating index 0
-	// uniformly (rather than special-casing on len(plan.toCCEmails) > 0) avoids
-	// a BCC-only send picking an empty "main" delivery, which previously let
-	// finishMailSend report ok:true via its empty-recipient-list guard before
-	// any of the actual best-effort BCC sends had even been attempted.
-	mainRecipients, mainCiphertext := deliveries[0].Recipients, deliveries[0].Ciphertext
-	bccDeliveries := deliveries[1:]
-
-	if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, mainRecipients, mainCiphertext, req, "") {
-		return
-	}
-
-	for _, delivery := range bccDeliveries {
-		if err := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, delivery.Recipients, delivery.Ciphertext); err != nil {
-			s.logger.Error("bcc pgp send failed", "recipient", delivery.Recipients[0], "error", err.Error())
-		}
-	}
-
-	// Best-effort here (failures only logged, never surfaced) is deliberate and
-	// unlike the all-keyless branch above: the keyed recipients above already
-	// received the message, so this loop is topping up delivery to the
-	// keyless subset, not carrying the entire send.
-	s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, req.Mode, smtpHost, smtpPort, addr, payload.Username, payload.Password)
-}
-
-// sendPickupNotifications mails a pickup link to every keyless recipient,
-// logging each individual failure and returning how many failed. Shared by
-// the all-keyless opt-in path and the mixed keyed/keyless path so the two
-// call sites can't drift apart on the notification loop's behavior — the two
-// differ only in what they do with the failure count: the all-keyless path
-// has nothing else to fall back on and must check it, the mixed path already
-// delivered to the keyed recipients and treats this as best-effort logging.
-func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients []string, subject, body, mode, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) int {
-	failed := 0
-	for _, recipient := range recipients {
-		if err := s.sendPickupNotification(userID, envelopeFrom, recipient, subject, body, mode, smtpHost, smtpPort, addr, smtpUsername, smtpPassword); err != nil {
-			s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
-			failed++
-		}
-	}
-	return failed
-}
-
-// encryptSigner decides which signer identity (if any) should be embedded
-// into an encrypted message. Encrypt and Sign are independent per-email
-// toggles: an identity being loaded (because Encrypt requires checking
-// whether one exists, or because Sign itself was requested) must not imply
-// the message gets signed. Only pass a signer through to EncryptMIME when
-// the caller explicitly asked to sign — otherwise Encrypt=true, Sign=false
-// would silently produce a signed-and-encrypted message whenever the sender
-// happens to have a PGP identity configured, costing them deniability they
-// never asked to give up.
-func encryptSigner(signer *pgpmail.Identity, sign bool) *pgpmail.Identity {
-	if !sign {
-		return nil
-	}
-	return signer
-}
-
-// finishMailSend sends msg over SMTP to recipients and best-effort saves it
-// to the Sent folder (as plaintext — see the plan's Global Constraints on
-// why the Sent copy isn't PGP-wrapped), writing the JSON response. Returns
-// false if the send itself failed (response already written), so callers
-// with follow-up work (e.g. pickup notifications) know not to proceed.
-//
-// extraWarning is folded into the response's warning field alongside any
-// save-to-Sent warning generated here — the all-keyless opt-in path uses it
-// to report partial pickup-notification failures the caller would otherwise
-// never see; every other caller passes "".
-func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest, extraWarning string) bool {
-	s.logger.Info("mail send requested", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "recipientCount", strconv.Itoa(len(recipients)))
-
-	if len(recipients) > 0 {
-		if sendErr := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, smtpUsername, smtpPassword, from, recipients, msg); sendErr != nil {
-			s.logger.Error("mail send failed", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "error", sendErr.Error())
-			http.Error(w, fmt.Sprintf("failed to send email: %s", sendErr.Error()), http.StatusBadGateway)
-			return false
-		}
-	}
-
-	warning := extraWarning
-	sentSaved := true
-	if mailClient, mailErr := s.userMailClient(userID); mailErr == nil {
-		if err := mailClient.SaveSent(r.Context(), imapadapter.DraftMessage{
-			To:          toList,
-			CC:          ccList,
-			BCC:         bccList,
-			Subject:     req.Subject,
-			Body:        req.Body,
-			Mode:        req.Mode,
-			Attachments: req.Attachments,
-		}); err != nil {
-			sentSaved = false
-			if warning != "" {
-				warning += "; "
-			}
-			warning += "email sent but could not be saved to Sent folder"
-			s.logger.Error("mail sent but save-sent failed", "error", err.Error())
-		}
-	}
-	s.logger.Info("mail send completed", "sentSaved", strconv.FormatBool(sentSaved))
-
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sentSaved": sentSaved, "warning": warning})
-	return true
-}
-
-func (s *Server) handleMailDraft(w http.ResponseWriter, r *http.Request) {
-	mailClient, err := s.mailFor(r)
-	if err != nil {
-		if errors.Is(err, errIMAPNotConfigured) {
-			http.Error(w, "imap configuration is required before saving drafts", http.StatusBadRequest)
-			return
-		}
-		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
-		return
-	}
-
-	req, errMsg, err := decodeMailRequest(r)
-	if err != nil {
-		http.Error(w, errMsg, http.StatusBadRequest)
-		return
-	}
-
-	if err := mailClient.SaveDraft(r.Context(), imapadapter.DraftMessage{
-		To:          req.To,
-		CC:          req.CC,
-		BCC:         req.BCC,
-		Subject:     req.Subject,
-		Body:        req.Body,
-		Mode:        req.Mode,
-		Attachments: req.Attachments,
-	}); err != nil {
-		http.Error(w, "failed to save draft", http.StatusBadGateway)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// attachmentRequestParams reads the shared mailbox/messageId query params of
-// the two attachment endpoints. messageId is an IMAP UID, the same id shape
-// /api/inbox and /api/inbox/actions use.
-func attachmentRequestParams(r *http.Request) (mailbox string, uid int, err error) {
-	mailbox = strings.TrimSpace(r.URL.Query().Get("mailbox"))
-	uid, err = strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("messageId")))
-	if err != nil || uid <= 0 {
-		return "", 0, errors.New("valid messageId is required")
-	}
-	return mailbox, uid, nil
-}
-
-// handleMailAttachmentList returns attachment metadata for one message.
-// GET /api/mail/attachments?sub=&hash=&mailbox=&messageId=
-func (s *Server) handleMailAttachmentList(w http.ResponseWriter, r *http.Request) {
-	mailClient, err := s.mailFor(r)
-	if err != nil {
-		if errors.Is(err, errIMAPNotConfigured) {
-			http.Error(w, "imap configuration is required", http.StatusBadRequest)
-			return
-		}
-		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
-		return
-	}
-	s.serveAttachmentList(w, r, mailClient)
-}
-
-func (s *Server) serveAttachmentList(w http.ResponseWriter, r *http.Request, mailClient imapadapter.Client) {
-	mailbox, uid, err := attachmentRequestParams(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	infos, err := mailClient.ListAttachments(r.Context(), mailbox, uid)
-	if err != nil {
-		s.logger.Error("attachment list failed", "mailbox", mailbox, "uid", strconv.Itoa(uid), "error", err.Error())
-		http.Error(w, "failed to list attachments", http.StatusBadGateway)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "attachments": infos})
-}
-
-// handleMailAttachmentDownload streams one attachment's bytes.
-// GET /api/mail/attachment?sub=&hash=&mailbox=&messageId=&index=
-func (s *Server) handleMailAttachmentDownload(w http.ResponseWriter, r *http.Request) {
-	mailClient, err := s.mailFor(r)
-	if err != nil {
-		if errors.Is(err, errIMAPNotConfigured) {
-			http.Error(w, "imap configuration is required", http.StatusBadRequest)
-			return
-		}
-		http.Error(w, "imap client is not configured", http.StatusServiceUnavailable)
-		return
-	}
-	s.serveAttachmentDownload(w, r, mailClient)
-}
-
-func (s *Server) serveAttachmentDownload(w http.ResponseWriter, r *http.Request, mailClient imapadapter.Client) {
-	mailbox, uid, err := attachmentRequestParams(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	index, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("index")))
-	if err != nil || index < 0 {
-		http.Error(w, "valid index is required", http.StatusBadRequest)
-		return
-	}
-	info, content, err := mailClient.GetAttachment(r.Context(), mailbox, uid, index)
-	if errors.Is(err, imapadapter.ErrAttachmentNotFound) {
-		http.Error(w, "attachment not found", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		s.logger.Error("attachment fetch failed", "mailbox", mailbox, "uid", strconv.Itoa(uid), "error", err.Error())
-		http.Error(w, "failed to fetch attachment", http.StatusBadGateway)
-		return
-	}
-
-	contentType := strings.TrimSpace(info.MimeType)
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	name := mailmsg.SanitizeHeaderValue(info.Name)
-	if name == "" {
-		name = "attachment"
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType(
-		"attachment", map[string]string{"filename": name},
-	))
-	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
-}
-
-func writeIMAPConfigPayload(path, keyPath string, payload imapConfigPayload) error {
-	plain, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeEncryptedPayload(path, keyPath, plain)
-}
-
-func writeEncryptedPayload(path, keyPath string, payload []byte) error {
-	key, err := cryptutil.LoadOrCreateKey(keyPath)
-	if err != nil {
-		return err
-	}
-
-	env, err := cryptutil.Seal(payload, key)
-	if err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(env, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return fsutil.AtomicWriteFile(path, b, 0o600)
-}
-
-// decryptEncryptedPayload reverses writeEncryptedPayload. It is a thin
-// alias for cryptutil.OpenBytes, kept so the several call sites in this
-// package read symmetrically with their write side; see OpenBytes for why
-// there is no plaintext fallback.
-func decryptEncryptedPayload(raw []byte, keyPath string) ([]byte, error) {
-	return cryptutil.OpenBytes(raw, keyPath)
-}
-
-func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.mu.RLock()
-		cfg := s.cfg
-		s.mu.RUnlock()
-		// The remote LLM API key is a live secret: never echo it back to
-		// any caller, admin included. Report only whether one is set, on
-		// this response copy — the live s.cfg is never mutated.
-		cfg.Classifier.APIKeySet = cfg.Classifier.APIKey != ""
-		cfg.Classifier.APIKey = ""
-		writeJSON(w, http.StatusOK, cfg)
-	case http.MethodPut:
-		var next config.Config
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&next); err != nil {
-			http.Error(w, "invalid config payload", http.StatusBadRequest)
-			return
-		}
-		s.mu.RLock()
-		// APIKeySet is a response-only computed field (see GET above) and is
-		// never meaningful in a PUT payload. Reset it unconditionally before
-		// the change-detection diff so a naive round-trip of a GET response
-		// (which echoes apiKeySet=true when a key is configured) doesn't
-		// spuriously register as a Classifier change.
-		next.Classifier.APIKeySet = false
-		// GET always zeroes APIKey on the wire, so a naive round-trip PUT
-		// will carry apiKey="". Preserve the live key in that case rather
-		// than wiping it, and do so before the diff so that round-trip
-		// isn't misread as the user clearing the key.
-		if next.Classifier.APIKey == "" {
-			next.Classifier.APIKey = s.cfg.Classifier.APIKey
-		}
-		classifierChanged := next.Classifier != s.cfg.Classifier
-		// VAPID key material is server-owned and json:"-" on the wire;
-		// carry it across the round-trip.
-		next.Notifications = s.cfg.Notifications
-		s.mu.RUnlock()
-		// Remote LLM settings are admin-only. Reject (rather than silently
-		// drop) a non-admin change so a broken save is never masked.
-		if ac, ok := authFromContext(r); classifierChanged && (!ok || ac.Role != users.RoleAdmin) {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "remote llm settings require admin access"})
-			return
-		}
-		if err := config.Save(s.configPath, next); err != nil {
-			http.Error(w, "failed to save config", http.StatusInternalServerError)
-			return
-		}
-		s.mu.Lock()
-		s.cfg = next
-		s.mu.Unlock()
-		if classifierChanged {
-			classifier.ResetWarmupState()
-		}
-		if s.onConfigUpdated != nil {
-			s.onConfigUpdated(next)
-		}
-		s.logger.Info("config updated via api")
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	}
-}
-
-// handleNotificationPreferences reads/writes the calling user's delivery
-// preferences (mode/keywords), which moved out of the global config.
-func (s *Server) handleNotificationPreferences(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-	path := s.userSettingsPath(ac.UserID)
-	switch r.Method {
-	case http.MethodGet:
-		settings, err := config.LoadUserSettings(path)
-		if err != nil {
-			http.Error(w, "failed to read notification preferences", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, settings.Notifications)
-	case http.MethodPut:
-		var prefs config.UserNotificationSettings
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&prefs); err != nil {
-			http.Error(w, "invalid preferences payload", http.StatusBadRequest)
-			return
-		}
-		if prefs.Keywords == nil {
-			prefs.Keywords = []string{}
-		}
-		// One locked read-modify-write, not Load+Save: the label handler below
-		// writes the same file, and interleaving the two lost whichever section
-		// landed first — including the contentPreview privacy opt-out.
-		if err := config.UpdateUserSettings(path, func(settings *config.UserSettings) error {
-			settings.Notifications = prefs
-			return nil
-		}); err != nil {
-			http.Error(w, "failed to save notification preferences", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	}
-}
-
-// handleLabelPreferences reads/writes the calling user's preference for
-// whether the AI classifier automatically applies keyword labels.
-func (s *Server) handleLabelPreferences(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-	path := s.userSettingsPath(ac.UserID)
-	switch r.Method {
-	case http.MethodGet:
-		settings, err := config.LoadUserSettings(path)
-		if err != nil {
-			http.Error(w, "failed to read label preferences", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, settings.Labels)
-	case http.MethodPut:
-		var prefs config.UserLabelSettings
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&prefs); err != nil {
-			http.Error(w, "invalid preferences payload", http.StatusBadRequest)
-			return
-		}
-		if err := config.UpdateUserSettings(path, func(settings *config.UserSettings) error {
-			settings.Labels = prefs
-			return nil
-		}); err != nil {
-			http.Error(w, "failed to save label preferences", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	}
-}
-
-func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
-	store, err := s.storeFor(r)
-	if err != nil {
-		http.Error(w, "failed to open user state", http.StatusInternalServerError)
-		return
-	}
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 1000 {
-			limit = v
-		}
-	}
-	writeJSON(w, http.StatusOK, store.Decisions(limit))
-}
-
-func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	configured := append([]string{}, s.cfg.Labels.Allowlist...)
-	s.mu.RUnlock()
-
-	imapLabels := []string{}
-	if mailClient, err := s.mailFor(r); err == nil {
-		found, err := mailClient.ListLabels(r.Context())
-		if err == nil {
-			imapLabels = found
-		}
-	}
-	sort.Strings(imapLabels)
-	writeJSON(w, http.StatusOK, map[string]any{"configured": configured, "imap": imapLabels})
-}
-
-func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-	tuningPath := s.userTuningPath(ac.UserID)
-	switch r.Method {
-	case http.MethodGet:
-		b, err := os.ReadFile(tuningPath)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				// New users start from the install's default tuning prompt.
-				fallback := strings.TrimSpace(classifier.LoadTuningText())
-				if fallback != "" {
-					writeJSON(w, http.StatusOK, map[string]any{"content": fallback, "path": tuningPath})
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"content": ""})
-				return
-			}
-			http.Error(w, "failed to read tuning file", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"content": string(b), "path": tuningPath})
-	case http.MethodPut:
-		var req struct {
-			Content string `json:"content"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
-			http.Error(w, "invalid request", http.StatusBadRequest)
-			return
-		}
-		if err := os.MkdirAll(filepath.Dir(tuningPath), 0o755); err != nil {
-			http.Error(w, "failed to create tuning directory", http.StatusInternalServerError)
-			return
-		}
-		if err := os.WriteFile(tuningPath, []byte(req.Content), 0o600); err != nil {
-			http.Error(w, "failed to save tuning file", http.StatusInternalServerError)
-			return
-		}
-		// Tuning is now passed to the model per classify call, so no classifier
-		// process restart is needed for edits to take effect.
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": tuningPath, "restartOk": true, "restartError": ""})
-	}
-}
-
-func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
-	lines := 200
-	if raw := r.URL.Query().Get("lines"); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 5000 {
-			lines = v
-		}
-	}
-	logDir := config.EnvOrDefault("LOG_DIR", "/kypost/logs")
-	// Resolve requested file — default to app.log, allow any *.log in logDir
-	filename := filepath.Base(r.URL.Query().Get("file"))
-	if filename == "" || filename == "." {
-		filename = "app.log"
-	}
-	// Security: only allow .log files, no path traversal
-	if filepath.Ext(filename) != ".log" || strings.Contains(filename, "/") || strings.Contains(filename, "..") {
-		http.Error(w, "invalid log file", http.StatusBadRequest)
-		return
-	}
-	target := filepath.Join(logDir, filename)
-	out, err := tailLines(target, lines)
-	if err != nil {
-		http.Error(w, "failed to read logs", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"lines": out, "file": filename})
-}
-
-func (s *Server) handleLogsList(w http.ResponseWriter, r *http.Request) {
-	logDir := config.EnvOrDefault("LOG_DIR", "/kypost/logs")
-	entries, err := os.ReadDir(logDir)
-	if err != nil {
-		http.Error(w, "failed to list logs", http.StatusInternalServerError)
-		return
-	}
-	var files []string
-	for _, e := range entries {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".log" {
-			files = append(files, e.Name())
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"files": files})
-}
-
-// handleSetup is unauthenticated by necessity (the frontend's first-run
-// wizard needs to know whether setup is needed before anyone can log in), so
-// it must never return more than the boolean it exists to answer. It used to
-// also return the real admin username and must-change-password state; the
-// frontend never actually consumed those fields, and returning them let any
-// anonymous caller learn the admin's username indefinitely — defeating the
-// hardening value of an operator choosing a non-default admin username.
-func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	all, err := s.users.List()
-	if err != nil {
-		http.Error(w, "failed to read setup state", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": len(all) > 0})
-}
-
-func (s *Server) handleRepair(w http.ResponseWriter, r *http.Request) {
-	s.logger.Error("manual repair requested")
-	scheduleContainerRestart(s.logger, "manual repair", 250*time.Millisecond)
-	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "message": "restart requested"})
-}
-
-// handlePollNow forces an immediate mail poll tick instead of waiting for
-// the poller's regular interval, for admins who want to check "is new mail
-// here yet" without the usual delay.
-func (s *Server) handlePollNow(w http.ResponseWriter, r *http.Request) {
-	if s.poller == nil {
-		http.Error(w, "poller not available", http.StatusServiceUnavailable)
-		return
-	}
-	s.logger.Info("manual mail poll requested")
-	s.poller.TriggerNow()
-	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
-}
-
-func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-	// This handler deliberately builds its own ad-hoc classifier client (see
-	// below) rather than reusing the server's shared, paced instance, so this
-	// cooldown is the substitute guard against an admin (or a compromised
-	// admin session) firing unpaced concurrent requests at the shared
-	// classifier/Ollama backend.
-	if allowed, retryAfter := s.classifierTestCooldown.tryConsume(ac.UserID); !allowed {
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{
-			"error":             "classifier test already in progress or recently run; try again shortly",
-			"retryAfterSeconds": int(retryAfter.Seconds()) + 1,
-		})
-		return
-	}
-
-	var req struct {
-		Prompt string `json:"prompt"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	s.mu.RLock()
-	cfg := s.cfg
-	s.mu.RUnlock()
-
-	baseURL := strings.TrimSpace(cfg.Classifier.BaseURL)
-	if baseURL == "" {
-		baseURL = strings.TrimSpace(os.Getenv("CLASSIFIER_BASE_URL"))
-	}
-	if baseURL == "" {
-		http.Error(w, "classifier base url is not configured", http.StatusBadRequest)
-		return
-	}
-
-	path := strings.TrimSpace(cfg.Classifier.ClassifyPath)
-	if path == "" {
-		path = "/"
-	}
-	apiKey := strings.TrimSpace(cfg.Classifier.APIKey)
-	if apiKey == "" {
-		apiKey = strings.TrimSpace(os.Getenv("CLASSIFIER_API_KEY"))
-	}
-
-	prompt := strings.TrimSpace(req.Prompt)
-	if prompt == "" {
-		prompt = "Email Address: test@example.com  Subject Line: Classifier connectivity test Return only the label Updates"
-	}
-
-	allowed := cfg.Labels.Allowlist
-	if len(allowed) == 0 {
-		allowed = []string{"Questionable", "Important"}
-	}
-
-	tuning := classifier.LoadTuningText()
-	client := classifier.NewHTTPClient(baseURL, apiKey, path, tuning, 120*time.Second)
-	defer client.Close()
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
-	defer cancel()
-
-	result, err := client.Classify(ctx, allowed, "", "", prompt, tuning)
-	if err != nil {
-		// The model answered but off-allowlist: that is a successful round
-		// trip as far as connectivity goes, which is all this endpoint
-		// tests. Show the operator what it actually said.
-		var noLabel *classifier.NoAllowedLabelError
-		if errors.As(err, &noLabel) {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"ok":             true,
-				"response":       noLabel.Output,
-				"matchedAllowed": false,
-				"baseUrl":        baseURL,
-				"path":           path,
-				"allowedLabels":  allowed,
-			})
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             true,
-		"response":       result,
-		"matchedAllowed": true,
-		"baseUrl":        baseURL,
-		"path":           path,
-	})
 }
 
 func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
@@ -2072,12 +849,22 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	relPath := strings.TrimPrefix(requestPath, "/")
 
 	if relPath != "" {
-		assetPath := filepath.Join(frontendDir, relPath)
-		rootPrefix := filepath.Clean(frontendDir) + string(os.PathSeparator)
-		if strings.HasPrefix(filepath.Clean(assetPath)+string(os.PathSeparator), rootPrefix) {
-			if info, err := os.Stat(assetPath); err == nil && !info.IsDir() {
-				http.ServeFile(w, r, assetPath)
-				return
+		// os.Root, not a lexical prefix check: os.Stat and http.ServeFile
+		// follow symlinks, so a link under frontendDir pointing at
+		// /kypost/private satisfies any string comparison you can write.
+		if root, err := os.OpenRoot(frontendDir); err == nil {
+			defer root.Close()
+			if info, err := root.Stat(relPath); err == nil && !info.IsDir() {
+				if f, err := root.Open(relPath); err == nil {
+					defer f.Close()
+					// Vite content-hashes asset filenames, so anything under
+					// assets/ is immutable by construction.
+					if strings.HasPrefix(relPath, "assets/") {
+						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+					}
+					http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+					return
+				}
 			}
 		}
 	}
@@ -2099,12 +886,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // scheduleContainerRestart exits this process after delay so supervisord's
 // autorestart brings it back with fresh state.
 //
-// It does NOT signal PID 1. The previous version called
-// syscall.Kill(1, SIGTERM) and discarded the error — which was always EPERM,
-// because this process runs unprivileged while PID 1 does not belong to it.
-// The call had never once worked; the restart came entirely from the
-// os.Exit below plus supervisord's autorestart. Naming that honestly beats
-// keeping a line that implies the whole container gets recycled.
+// It restarts THIS PROCESS, not the container. Signalling PID 1 is not an
+// option: this process is unprivileged and PID 1 is not ours, so the kill
+// only ever returns EPERM.
 func scheduleContainerRestart(logger *logging.Logger, reason string, delay time.Duration) {
 	go func() {
 		time.Sleep(delay)
@@ -2113,27 +897,6 @@ func scheduleContainerRestart(logger *logging.Logger, reason string, delay time.
 		}
 		os.Exit(2)
 	}()
-}
-
-func tailLines(path string, limit int) ([]string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	buf := make([]string, 0, limit)
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		buf = append(buf, s.Text())
-		if len(buf) > limit {
-			buf = buf[1:]
-		}
-	}
-	if err := s.Err(); err != nil {
-		return nil, err
-	}
-	return buf, nil
 }
 
 func randomToken(size int) (string, error) {

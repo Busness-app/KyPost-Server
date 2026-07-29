@@ -12,6 +12,7 @@ All code under `backend/internal/adapters/`. Owned by the backend team. Changes 
 
 ### `imap/` — IMAP Client
 
+- Split by concern: `client.go` (connection lifecycle, credentials, message fetch/search), `client_folders.go` (mailbox list/create/delete/rename, keyword apply/remove), `client_attachments.go` (attachment enumeration and fetch), `client_append.go` (draft and Sent APPEND), `protocol_safety.go` (the keyword/mailbox validators below)
 - Wraps `go-imap` to fetch unread emails by UID range from a configured mailbox
 - Reads IMAP credentials from an encrypted file at rest (decrypted at connection time via `SECRET_DIR`)
 - Does not cache or buffer messages; callers receive a slice of messages and are responsible for processing
@@ -23,10 +24,10 @@ All code under `backend/internal/adapters/`. Owned by the backend team. Changes 
 ### `classifier/` — Classifier HTTP Client
 
 - Sends classification requests to Ollama `/api/generate` via HTTP POST
-- Enforces a minimum 3-second gap between consecutive requests (`http_client.go` pacing)
+- Admission control lives in `http_client.go`: `CLASSIFY_CONCURRENCY` (default 1) bounds in-flight generations via a channel semaphore, `CLASSIFY_PACE_MS` (default 0) inserts dead time between request starts. The pace was an unconditional 3 s, which capped the whole instance at 20 classifications/minute regardless of user count — it is not backpressure, since Ollama queues internally and the retry loop already backs off. Raise `CLASSIFY_CONCURRENCY` to match `OLLAMA_NUM_PARALLEL` or the extra capacity is unreachable
 - Implements exponential backoff on transient HTTP errors
 - `client.go` — high-level interface: accepts prompt + email text, returns raw model output string
-- `http_client.go` — low-level transport: handles request construction, pacing timer, retry loop
+- `http_client.go` — low-level transport: request construction, admission control, retry loop, `Stats()` for queue depth
 
 ### Shared Rules
 
@@ -37,8 +38,9 @@ All code under `backend/internal/adapters/`. Owned by the backend team. Changes 
 ## Work Guidance
 
 - Keep each sub-package's external interface minimal: one constructor, one or two methods
-- Pacing and retry logic lives exclusively in `http_client.go`; do not duplicate in `client.go`
-- IMAP credential decryption must use the same key derivation as `api/` encryption — coordinate any changes with `api/server.go`
+- Admission and retry logic lives exclusively in `http_client.go`; do not duplicate in `client.go`
+- The classify slot is held across the whole retry sequence but the WAIT for it is abandonable — keep the semaphore a channel selected against `ctx.Done()`, never a `sync.Mutex`, or a cancelled poll tick blocks behind another user's 15-second backoff
+- IMAP credential decryption must use the same key derivation as `api/` encryption — coordinate any changes with `api/server_imap_config.go`
 
 ## Verification
 

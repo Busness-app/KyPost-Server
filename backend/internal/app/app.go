@@ -30,9 +30,16 @@ import (
 // Run dispatches the process mode and blocks until shutdown for long-running modes.
 func Run(args []string) error {
 	fs := flag.NewFlagSet("kypost-server", flag.ContinueOnError)
-	mode := fs.String("mode", "all", "process mode: daemon, server, all")
+	mode := fs.String("mode", "all", "process mode: daemon, server, all, bootstrap-admin")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// Handled before any of the setup below: bootstrap-admin runs once, as
+	// root, before any service starts, and its whole job is to create the
+	// account store that the setup below expects to already exist.
+	if *mode == "bootstrap-admin" {
+		return BootstrapAdmin()
 	}
 
 	paths := config.Paths{
@@ -122,7 +129,7 @@ func Run(args []string) error {
 	case "all":
 		return runAll(deps)
 	default:
-		return errors.New("invalid mode; expected daemon, server, or all")
+		return errors.New("invalid mode; expected daemon, server, all, or bootstrap-admin")
 	}
 }
 
@@ -174,7 +181,8 @@ func runServer(d runDeps) error {
 	go srv.StartSessionSweeper(sweeperCtx)
 	go srv.StartMFAChallengeSweeper(sweeperCtx)
 	go srv.StartPoWSweeper(sweeperCtx)
-	go srv.StartOllamaVersionMonitor(sweeperCtx)
+	go srv.StartUserStoreSweeper(sweeperCtx)
+	go srv.StartVersionMonitor(sweeperCtx)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -242,7 +250,8 @@ func runAll(d runDeps) error {
 	go srv.StartSessionSweeper(sweeperCtx)
 	go srv.StartMFAChallengeSweeper(sweeperCtx)
 	go srv.StartPoWSweeper(sweeperCtx)
-	go srv.StartOllamaVersionMonitor(sweeperCtx)
+	go srv.StartUserStoreSweeper(sweeperCtx)
+	go srv.StartVersionMonitor(sweeperCtx)
 	go monitorHealth(d.logger, d.health)
 	go func() {
 		if err := srv.Serve(); err != nil {

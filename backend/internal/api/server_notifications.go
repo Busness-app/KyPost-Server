@@ -379,11 +379,7 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		http.Error(w, "failed to mint device secret", http.StatusInternalServerError)
 		return
 	}
-	secretHash, err := users.HashPassword(rawSecret)
-	if err != nil {
-		http.Error(w, "failed to mint device secret", http.StatusInternalServerError)
-		return
-	}
+	secretHash := users.HashDeviceSecret(rawSecret)
 
 	device := state.NativeDevice{
 		DeviceID:    strings.TrimSpace(req.DeviceID),

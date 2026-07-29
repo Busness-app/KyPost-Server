@@ -38,27 +38,17 @@ const (
 	mfaLockoutFor  = 15 * time.Minute
 
 	// deviceMaxFailures/deviceLockoutFor guard per-device secret auth
-	// (deviceAuthFromRequest), the credential every ongoing native-client
-	// request (mail sync, contacts sync, App Pull, push-MFA-approve,
-	// self-deregister) presents. Like dav, every failed attempt pays a full
-	// scrypt verification, so the realistic abuse is CPU exhaustion via
-	// unlimited guesses rather than a credible guessing campaign against a
-	// server-generated secret; the threshold mirrors dav's for the same
-	// reason. Keyed on deviceID rather than clientIP: deviceID is the actual
-	// expensive-scrypt unit being protected, and keying on IP would let one
-	// device's failures (or an attacker's) lock out unrelated devices behind
-	// the same shared-NAT/carrier-grade-NAT client IP.
+	// (deviceAuthFromRequest). Bounds guessing, not CPU; against a 192-bit
+	// random secret the threshold is generous. Keyed on deviceID+clientIP —
+	// see deviceLockoutKey, and do not change one without the other.
 	deviceMaxFailures = 10
 	deviceLockoutFor  = 15 * time.Minute
 
-	// loginLockoutSweepThreshold bounds how large loginLockout.entries can
-	// grow before a housekeeping sweep runs. An attacker submitting a stream
-	// of distinct, nonexistent usernames each gets its own entry that never
-	// reaches the lockout threshold and is otherwise never removed —
-	// unbounded memory growth over a sustained attack. Sweeping out every
-	// not-currently-locked entry once the map gets this large keeps memory
-	// bounded without a background goroutine; legitimate locked-out entries
-	// (the ones actually worth remembering) are untouched.
+	// loginLockoutSweepThreshold bounds loginLockout.entries. A stream of
+	// distinct nonexistent usernames each gets an entry that never reaches the
+	// lockout threshold and is otherwise never removed. Past this size,
+	// not-currently-locked entries are swept inline; locked ones — the only
+	// ones worth remembering — are kept.
 	loginLockoutSweepThreshold = 10_000
 )
 
@@ -95,12 +85,10 @@ func newLoginLockout() *failureLockout {
 // tryAttempt reports whether username may attempt right now and, if so, spends
 // one strike in the same critical section.
 //
-// Reserving at check time is the point. This used to be allowed() at the top of
-// a handler and recordFailure() much later, once the credential check had
-// finished — so a burst of concurrent requests all observed "allowed" before any
-// of them had recorded anything, and sailed past the budget together. The audit
-// measured roughly 7x the login budget and 3.8x the MFA budget that way, which
-// is most of what a three-strike lockout is supposed to prevent.
+// Reserving at check time is the point: checking at the top of a handler and
+// recording after the credential check lets a concurrent burst all observe
+// "allowed" before any has recorded, and sail past the budget together
+// (measured at ~7x the login budget). Do not split these two steps.
 //
 // The caller settles the reservation:
 //
@@ -135,15 +123,11 @@ func (l *failureLockout) tryAttempt(username string) (ok bool, retryAfter time.D
 }
 
 // cancelAttempt returns a strike reserved by tryAttempt, for a path that turned
-// out not to be a credential attempt at all.
+// out not to be a credential attempt at all — e.g. a CAPTCHA provider outage,
+// where the user never got as far as offering a password and counting it would
+// lock out every user of the instance for the duration.
 //
-// The case this exists for is the login handler's "captcha verification
-// unavailable" 503: the operator's CAPTCHA provider is down, the user never got
-// as far as offering a password, and counting it would lock every user of the
-// instance out for the duration of someone else's outage.
-//
-// A failed CAPTCHA is deliberately NOT cancelled — that is a failed attempt and
-// should cost one.
+// A FAILED captcha is deliberately not cancelled; that is an attempt.
 func (l *failureLockout) cancelAttempt(username string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

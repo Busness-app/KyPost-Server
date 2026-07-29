@@ -40,8 +40,13 @@ export interface CommonEnv {
    * (exact atomic counters, no KV write pressure) once on Workers Paid.
    */
   RATE_LIMIT_PER_MINUTE?: string; // display only; default 10
-  /** Public self-registration (`POST /register`). "false" closes it; default open. */
+  /** Public self-registration (`POST /register`). "true" opens it; default closed. */
   REGISTRATION_ENABLED?: string;
+  /**
+   * Opt out of fail-closed rate limiting when the limiter bindings are
+   * unavailable — local dev only. Never set this in a deployed Worker.
+   */
+  RATELIMIT_FAIL_OPEN?: string;
   /** Minute-tier rate limiter (native binding, no KV writes). */
   PUSH_RATE_LIMITER?: RateLimitBinding;
   /**
@@ -285,12 +290,25 @@ export async function checkMinuteLimit(
   key: string,
 ): Promise<boolean> {
   if (!limiter || typeof limiter.limit !== "function") {
-    return true;
+    // Fail CLOSED on a missing binding. "The limiter is misconfigured" and
+    // "there is no limiter" are indistinguishable from outside, and the minute
+    // tier is the ONLY tier still enforced (see the TODO above) — so failing
+    // open here removed rate limiting entirely, silently, from a deployment
+    // whose wrangler.toml had drifted. Local dev without binding support opts
+    // out explicitly via RATELIMIT_FAIL_OPEN.
+    if ((rc.env.RATELIMIT_FAIL_OPEN ?? "").trim().toLowerCase() === "true") {
+      return true;
+    }
+    rc.log({ level: "error", event: "ratelimit.binding_missing", key });
+    return false;
   }
   try {
     const { success } = await limiter.limit({ key });
     return success;
   } catch (err) {
+    // A throwing binding is a real outage rather than a misconfiguration, and
+    // failing closed here would take delivery down with it. Logged loudly so
+    // it cannot be a silent standing state.
     rc.log({ level: "error", event: "ratelimit.binding_error", error: String((err as Error).message ?? err) });
     return true;
   }
@@ -393,9 +411,19 @@ export async function handleAdminCreate(request: Request, rc: RequestContext): P
 
 // ---- /register (public self-service) ---------------------------------------
 
-/** Whether public self-registration is open (default: yes). */
+/**
+ * Whether public self-registration is open. Closed unless explicitly opened.
+ *
+ * This defaulted to OPEN, which meant every deployment of this Worker that had
+ * not read the docs was running an unauthenticated key-minting endpoint on the
+ * public internet. The failure is asymmetric: an operator who wants open
+ * registration flips one var and finds out immediately when they try to
+ * register; an operator who did not want it finds out when someone else is
+ * using their relay. A default that is wrong in the dangerous direction is not
+ * a default, it is a trap.
+ */
 export function registrationEnabled(env: CommonEnv): boolean {
-  return (env.REGISTRATION_ENABLED ?? "").trim().toLowerCase() !== "false";
+  return (env.REGISTRATION_ENABLED ?? "").trim().toLowerCase() === "true";
 }
 
 /**

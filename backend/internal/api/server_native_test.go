@@ -205,7 +205,7 @@ func TestNativeRegisterStoresDevice(t *testing.T) {
 	if devices[0].SecretHash == "" || devices[0].SecretHash == resp.DeviceSecret {
 		t.Fatalf("stored SecretHash = %q, want a non-empty hash distinct from the raw secret", devices[0].SecretHash)
 	}
-	if !users.VerifySecretHash(devices[0].SecretHash, resp.DeviceSecret) {
+	if !users.VerifyDeviceSecret(devices[0].SecretHash, resp.DeviceSecret) {
 		t.Fatalf("stored SecretHash does not verify against the returned deviceSecret")
 	}
 }

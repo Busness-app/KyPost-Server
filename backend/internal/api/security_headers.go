@@ -10,34 +10,27 @@ import (
 // buildContentSecurityPolicy returns the app-wide CSP for the CAPTCHA provider
 // this instance is actually running.
 //
-// The CSP is the second line of defense for the single riskiest thing this app
-// does — rendering sender-controlled HTML email — so a future DOMPurify bypass
-// lands on a page that still cannot run injected script. Every allowance is
-// tied to a concrete feature:
+// This is the second line of defense for the riskiest thing the app does —
+// rendering sender-controlled HTML email — so a DOMPurify bypass still lands
+// on a page that cannot run injected script. Every allowance is tied to a
+// concrete feature, and third-party origins are emitted ONLY for the provider
+// actually configured: jsDelivr serves arbitrary npm and GitHub content, so
+// naming it unconditionally would hand script execution on this origin to
+// anything publishable there, on installs that never enabled the widget.
 //
-//   - challenges.cloudflare.com (script + frame): the Turnstile login CAPTCHA
-//   - cdn.jsdelivr.net (script + connect), 'wasm-unsafe-eval' and blob:
-//     workers: the Friendly Captcha widget and its WASM proof-of-work
-//   - the self-hosted 'pow' provider deliberately appears nowhere below: it
-//     is a same-origin fetch plus crypto.subtle, so it needs no third-party
-//     origin, no WASM, and no blob: worker. Pinned by
-//     TestCSPAddsNothingForSelfHostedPoW.
+//   - challenges.cloudflare.com (script + frame): Turnstile
+//   - cdn.jsdelivr.net (script + connect), 'wasm-unsafe-eval', blob: workers:
+//     the Friendly Captcha widget and its WASM proof-of-work
+//   - the self-hosted 'pow' provider needs nothing: same-origin fetch plus
+//     crypto.subtle. Pinned by TestCSPAddsNothingForSelfHostedPoW.
 //   - fonts.googleapis.com / fonts.gstatic.com: the fonts index.html loads
-//   - style-src 'unsafe-inline': inline style attributes in the Quill compose
-//     editor (sanitized email HTML no longer carries any — see emailHtml.ts)
+//   - style-src 'unsafe-inline': the Quill compose editor's inline style
+//     attributes. Sanitized email HTML carries none — see emailHtml.ts.
 //   - img-src/media-src https: http: data:: remote email content, shown only
 //     after the user opts in per message
 //
-// Those CAPTCHA sources used to be listed unconditionally, for widgets that are
-// OFF by default. jsDelivr in particular serves arbitrary npm and GitHub
-// content, so naming it as a script source on every install handed script
-// execution on this origin to anything that could get a package published
-// there — which is precisely the protection the header exists to provide. They
-// are emitted only for the provider actually configured now, so a default
-// install (no CAPTCHA) carries neither.
-//
-// Notably absent in every case: 'unsafe-inline'/'unsafe-eval' for scripts, and
-// any wildcard script or connect source.
+// Never add 'unsafe-inline'/'unsafe-eval' to script-src, or a wildcard script
+// or connect source.
 func buildContentSecurityPolicy(provider captcha.Provider) string {
 	scriptSrc := []string{"'self'"}
 	connectSrc := []string{"'self'"}

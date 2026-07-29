@@ -46,6 +46,7 @@ share/ollama/models/
 **/*_auth.json
 **/kypost-auth.json
 **/admin.env
+**/first-run-password.txt
 **/google-services.json
 **/GoogleService-Info.plist
 **/firebase-service-account*.json

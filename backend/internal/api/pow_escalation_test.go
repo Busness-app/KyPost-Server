@@ -23,7 +23,7 @@ func TestPoWEscalationQuadruplesPerFailure(t *testing.T) {
 	e := newPowEscalation()
 	now := time.Now()
 	for i, want := range []int{20_000, 80_000, 320_000} {
-		e.recordFailure("1.2.3.4", now)
+		e.recordFailure("1.2.3.4", "victim", now)
 		if got := e.maxNumberFor("1.2.3.4", 5_000, now); got != want {
 			t.Errorf("after %d failures: maxNumberFor() = %d, want %d", i+1, got, want)
 		}
@@ -34,7 +34,7 @@ func TestPoWEscalationIsCapped(t *testing.T) {
 	e := newPowEscalation()
 	now := time.Now()
 	for i := 0; i < 30; i++ {
-		e.recordFailure("1.2.3.4", now)
+		e.recordFailure("1.2.3.4", "victim", now)
 	}
 	// Uncapped, this overflows into a challenge nobody can ever solve —
 	// which is a denial of service against that IP, not a defence.
@@ -46,8 +46,8 @@ func TestPoWEscalationIsCapped(t *testing.T) {
 func TestPoWEscalationIsPerIP(t *testing.T) {
 	e := newPowEscalation()
 	now := time.Now()
-	e.recordFailure("1.2.3.4", now)
-	e.recordFailure("1.2.3.4", now)
+	e.recordFailure("1.2.3.4", "victim", now)
+	e.recordFailure("1.2.3.4", "victim", now)
 	if got := e.maxNumberFor("5.6.7.8", 5_000, now); got != 5_000 {
 		t.Fatalf("an unrelated IP got %d, want the base — one attacker must not slow down everyone", got)
 	}
@@ -56,8 +56,8 @@ func TestPoWEscalationIsPerIP(t *testing.T) {
 func TestPoWEscalationDecays(t *testing.T) {
 	e := newPowEscalation()
 	now := time.Now()
-	e.recordFailure("1.2.3.4", now)
-	e.recordFailure("1.2.3.4", now)
+	e.recordFailure("1.2.3.4", "victim", now)
+	e.recordFailure("1.2.3.4", "victim", now)
 	later := now.Add(powEscalationDecay + time.Minute)
 	if got := e.maxNumberFor("1.2.3.4", 5_000, later); got != 5_000 {
 		t.Fatalf("maxNumberFor() after the decay window = %d, want the base — a shared NAT address must recover", got)
@@ -67,8 +67,8 @@ func TestPoWEscalationDecays(t *testing.T) {
 func TestPoWEscalationClearedOnSuccess(t *testing.T) {
 	e := newPowEscalation()
 	now := time.Now()
-	e.recordFailure("1.2.3.4", now)
-	e.clear("1.2.3.4")
+	e.recordFailure("1.2.3.4", "victim", now)
+	e.clearAccount("1.2.3.4", "victim")
 	if got := e.maxNumberFor("1.2.3.4", 5_000, now); got != 5_000 {
 		t.Fatalf("maxNumberFor() after a successful login = %d, want the base", got)
 	}
@@ -77,7 +77,7 @@ func TestPoWEscalationClearedOnSuccess(t *testing.T) {
 func TestPoWEscalationSweepDropsDecayedEntries(t *testing.T) {
 	e := newPowEscalation()
 	now := time.Now()
-	e.recordFailure("1.2.3.4", now)
+	e.recordFailure("1.2.3.4", "victim", now)
 	if got := e.entryCount(); got != 1 {
 		t.Fatalf("entryCount() = %d, want 1", got)
 	}
@@ -98,7 +98,7 @@ func TestPoWEscalationSweepsAtThreshold(t *testing.T) {
 	now := time.Now()
 
 	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4"} {
-		e.recordFailure(ip, now)
+		e.recordFailure(ip, "victim", now)
 	}
 	if got := e.entryCount(); got != 4 {
 		t.Fatalf("entryCount() = %d, want 4", got)
@@ -106,7 +106,7 @@ func TestPoWEscalationSweepsAtThreshold(t *testing.T) {
 
 	// All four have now decayed, and the fifth insertion crosses the (lowered)
 	// threshold, so it must sweep before adding its own entry.
-	e.recordFailure("5.5.5.5", now.Add(powEscalationDecay+time.Minute))
+	e.recordFailure("5.5.5.5", "victim", now.Add(powEscalationDecay+time.Minute))
 
 	if got := e.entryCount(); got != 1 {
 		t.Fatalf("entryCount() after the threshold sweep = %d, want 1 (only the new entry)", got)
@@ -130,7 +130,7 @@ func TestPoWSweeperClearsEscalationWhenPoWIsNotTheProvider(t *testing.T) {
 	t.Cleanup(func() { powSweepInterval = restore })
 
 	// Already decayed, so the very first tick should reclaim it.
-	srv.powDifficulty.recordFailure("1.2.3.4", time.Now().Add(-powEscalationDecay-time.Minute))
+	srv.powDifficulty.recordFailure("1.2.3.4", "victim", time.Now().Add(-powEscalationDecay-time.Minute))
 	if got := srv.powDifficulty.entryCount(); got != 1 {
 		t.Fatalf("setup: entryCount() = %d, want 1", got)
 	}
@@ -207,4 +207,64 @@ func doLoginFrom(t *testing.T, srv *Server, ip, username, password string) {
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 	req.RemoteAddr = ip + ":1234"
 	srv.handleLogin(httptest.NewRecorder(), req)
+}
+
+func TestPoWEscalationSuccessForgivesOnlyThatAccount(t *testing.T) {
+	// The bug this pins: clear() dropped the whole IP entry, so ANY valid
+	// credential reset the difficulty for the address. An attacker holding one
+	// ordinary account on the instance could spray guesses at another
+	// username, log in as themselves once to reset the price, and repeat — the
+	// escalation control cost them one extra request per burst.
+	e := newPowEscalation()
+	now := time.Now()
+
+	for i := 0; i < 3; i++ {
+		e.recordFailure("1.2.3.4", "victim", now)
+	}
+	escalated := e.maxNumberFor("1.2.3.4", 5_000, now)
+	if escalated <= 5_000 {
+		t.Fatalf("setup: maxNumberFor() = %d, want escalated above the 5000 base", escalated)
+	}
+
+	// The attacker logs in successfully as their own account from the same
+	// address. The victim's failures must survive it.
+	e.clearAccount("1.2.3.4", "attacker")
+
+	if got := e.maxNumberFor("1.2.3.4", 5_000, now); got != escalated {
+		t.Fatalf("maxNumberFor() after an unrelated account succeeded = %d, want %d — "+
+			"one credential must not reprice guesses made against a different account", got, escalated)
+	}
+}
+
+func TestPoWEscalationSuccessForgivesTheAccountThatSucceeded(t *testing.T) {
+	// The other half: an honest user who mistyped their own password several
+	// times and then got it right must go straight back to the base price.
+	e := newPowEscalation()
+	now := time.Now()
+	e.recordFailure("1.2.3.4", "victim", now)
+	e.recordFailure("1.2.3.4", "victim", now)
+	e.clearAccount("1.2.3.4", "victim")
+	if got := e.maxNumberFor("1.2.3.4", 5_000, now); got != 5_000 {
+		t.Fatalf("maxNumberFor() after that account's own successful login = %d, want the base", got)
+	}
+}
+
+func TestPoWEscalationSumsAcrossAccounts(t *testing.T) {
+	// Difficulty must still behave like a flat per-IP counter for the honest
+	// case: splitting the tally by account is bookkeeping for clearAccount, not
+	// a discount for spraying many usernames from one address.
+	e := newPowEscalation()
+	now := time.Now()
+	e.recordFailure("1.2.3.4", "alice", now)
+	e.recordFailure("1.2.3.4", "bob", now)
+	e.recordFailure("1.2.3.4", "carol", now)
+
+	flat := newPowEscalation()
+	for i := 0; i < 3; i++ {
+		flat.recordFailure("5.6.7.8", "alice", now)
+	}
+
+	if got, want := e.maxNumberFor("1.2.3.4", 5_000, now), flat.maxNumberFor("5.6.7.8", 5_000, now); got != want {
+		t.Fatalf("three failures across three accounts priced at %d, three against one at %d — they must match", got, want)
+	}
 }

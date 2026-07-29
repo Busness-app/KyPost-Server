@@ -1,85 +1,62 @@
 import DOMPurify from "dompurify";
 
-// sanitizeEmailHtml is the one and only place untrusted HTML email content
-// (sender-controlled — the single highest-risk XSS input in a mail client)
-// is allowed to become live markup. Every caller that turns an email body
-// into DOM (the read view, and reply/forward quoting into the compose
-// editor) must route through this as the *last* transformation step, so
-// nothing added earlier survives untouched.
+// sanitizeEmailHtml is the ONLY place untrusted email HTML becomes live
+// markup. Every caller that turns an email body into DOM — the read view, and
+// reply/forward quoting into the compose editor — must route through it as the
+// LAST transformation step, so nothing added earlier survives untouched.
 //
-// It lives in its own module rather than inside ReadPage.tsx so it can be
-// tested directly — see emailHtml.test.ts.
+// Separate module so it can be tested directly; see emailHtml.test.ts.
 //
-// blockRemoteContent additionally forbids the background attribute and the
-// <svg>, <video>, and <audio> elements. Stripping <img> tags alone does not
-// block remote-resource loading: a legacy background="..." attribute, an SVG
-// <image href="...">, a <video poster="...">, or an <audio src="..."> are all
-// in DOMPurify's default allowlist and fetch a remote URL eagerly on render
-// exactly like <img src> does, so they bypass the "Show Images" control (and
-// its anti-tracking-pixel intent) unless explicitly forbidden here too.
-// svg/video/audio are all in DOMPurify's own DEFAULT_FORBID_CONTENTS set, so
-// forbidding these three tags drops their entire subtree (any <source>/<track>
-// children included) rather than hoisting children to the top level — no
-// separate child-tag entry is needed.
+// Two groups, forbidden for different reasons:
 //
-// <style> and the style attribute are NOT part of that set: they are forbidden
-// unconditionally, in forbiddenTags/forbiddenAttrs. They can carry a remote
-// url() too, but that is the lesser of the two problems they pose — see the
-// comment there.
-// Interactive form controls are forbidden unconditionally. DOMPurify allows
-// <form>/<input>/<button> by default, and no legitimate email needs them —
-// but a sender-controlled form rendered inside the authenticated app is a
-// credential-phishing surface that looks exactly like part of the client.
-// The CSP's form-action 'self' stops the submission reaching an attacker's
-// origin, which is a mitigation, not a reason to render the form at all.
+// forbiddenTags/forbiddenAttrs — unconditional, regardless of the remote
+// content toggle.
+//   - form/input/button/textarea/select/option: DOMPurify allows these by
+//     default. A sender-controlled form inside the authenticated app is a
+//     credential-phishing surface that looks like part of the client. The
+//     CSP's form-action 'self' is a mitigation, not a reason to render it.
+//   - style (tag and attribute): the CSP allows style-src 'unsafe-inline' and
+//     email CSS is not scoped to the message container, so a sender with CSS
+//     can hide the impersonation banner with
+//     .notice-error{display:none!important}, repaint the PGP badge green, or
+//     cover the viewport with a fixed-position overlay — none of which needs
+//     script. These must NOT be coupled to blockRemoteContent: loading a
+//     picture and restyling the application are different decisions, and only
+//     the first is what the toggle asks about.
 //
-// <style> and the style attribute are forbidden unconditionally, and are in
-// this list rather than the remote-content one for that reason. They were
-// coupled to blockRemoteContent, so pressing "Show Remote Content" — which a
-// user does to see a newsletter's pictures — also handed the sender
-// document-wide CSS on the app's own origin, since the CSP allows
-// style-src 'unsafe-inline' and email CSS is not scoped to the message
-// container. That let a message hide the "This message impersonates KyPost"
-// banner with .notice-error{display:none!important}, repaint the PGP badge
-// from red to a green "verified", or cover the viewport with a fixed-position
-// body::after overlay — none of which needs script, so nothing else in this
-// pipeline would have stopped it. Roundcube rewrites and prefixes email CSS
-// selectors to prevent exactly this.
-//
-// Loading a picture and restyling the application are different decisions, and
-// only the first one is what the toggle asks the user about. Blocking CSS
-// costs unblocked mail some visual fidelity, which is the correct trade: the
-// alternative is letting the sender redraw the security UI that describes them.
+// blockRemoteContent adds background, svg, video, audio. Stripping <img>
+// alone does not stop remote loads: background="...", SVG <image href>,
+// <video poster>, <audio src> are all default-allowed and fetch eagerly, so
+// they bypass "Show Images" and its anti-tracking-pixel intent. All three tags
+// are in DOMPurify's DEFAULT_FORBID_CONTENTS, so forbidding them drops the
+// whole subtree — no separate <source>/<track> entry needed.
 const forbiddenTags = ["form", "input", "button", "textarea", "select", "option", "style"];
 const forbiddenAttrs = ["style"];
 
 // The URI schemes an email is allowed to link to.
 //
-// Pinned here rather than left to DOMPurify's default, even though the current
-// default happens to be equivalent. This app deliberately navigates to its own
-// kypost:// scheme elsewhere (NotificationsPage's "Pair Desktop App"), and every
-// client registers itself as that scheme's system handler — so an
-// <a href="kypost://native-pair?srv=https://evil.example&pt=..."> in a message
-// body is a request to hand the user's device to an attacker's server. Leaving
-// that to a library default means one dependency bump that widened it silently
-// reopens a pairing-phishing hole, with no test to notice. Pinning it makes the
-// allowlist ours, and emailHtml.test.ts holds it in place.
+// Pinned here rather than left to DOMPurify's default, which currently happens
+// to be equivalent. Every client registers as the system handler for this
+// app's own kypost:// scheme, so an
+// <a href="kypost://native-pair?srv=https://evil.example&pt=..."> is a request
+// to hand the user's device to an attacker's server. A dependency bump that
+// widened the library default would silently reopen that with no test to
+// notice; emailHtml.test.ts holds this one in place.
 //
-// The trailing alternations are what keep ordinary mail working: relative paths,
-// bare fragments, and protocol-relative URLs all have no scheme to check. cid:
-// is required for inline image references.
+// The trailing alternations keep ordinary mail working — relative paths, bare
+// fragments and protocol-relative URLs have no scheme to check. cid: is
+// required for inline images.
 const allowedUriSchemes = /^(?:(?:https?|mailto|tel|cid):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
 
 // Matches a leading "scheme:" so a refusal can name what it refused.
 const leadingScheme = /^([a-z][a-z0-9+.\-]*):/i;
 
-// The exact character class DOMPurify strips from an attribute value before
-// testing it against ALLOWED_URI_REGEXP (its ATTR_WHITESPACE). Mirrored rather
-// than approximated: this pre-check used to strip only [\x00-\x20], so a URL
-// split by U+00A0 (or U+2028, U+3000, ...) was judged *allowed* here — no
-// [Blocked link] marker emitted — and then normalized to "javascript:" and
-// refused by DOMPurify. The result was the silent dead-but-clickable-looking
-// anchor this marker exists to prevent. Two normalizations, one decision.
+// DOMPurify's ATTR_WHITESPACE: the exact character class it strips from an
+// attribute value before testing ALLOWED_URI_REGEXP. Mirrored, not
+// approximated — if this pre-check normalizes less than DOMPurify does, a URL
+// split by U+00A0 (or U+2028, U+3000, ...) is judged allowed here, emits no
+// [Blocked link] marker, and is then refused by DOMPurify, leaving the silent
+// dead-but-clickable anchor the marker exists to prevent.
 const attrWhitespace =
   /[\u0000-\u0020\u00A0\u1680\u180E\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/g;
 
@@ -87,22 +64,11 @@ function isAllowedUri(href: string): boolean {
   return allowedUriSchemes.test(href.replace(attrWhitespace, ""));
 }
 
-// blockRemoteContent defaults to TRUE, and that default is the security
-// property — not a convenience.
-//
-// It used to default to false. The read view passed `!showImages` explicitly
-// and so behaved correctly, but four sibling call sites (buildReplyBody,
-// buildForwardBody, printEmails, and opening a draft) called
-// `sanitizeEmailHtml(body)` with one argument and silently got the permissive
-// branch. Pressing Reply on a message whose images the user had deliberately
-// NOT unblocked dropped the quoted body into the compose editor via
-// `editor.root.innerHTML`, and every tracking pixel, <style> block,
-// background= attribute, SVG <image href>, <video poster> and <audio src>
-// fired at once — defeating the entire control this function's FORBID list
-// exists to implement.
-//
-// A caller that wants remote content must now say so. Forgetting the argument
-// fails closed (a missing image) instead of open (a fired tracking pixel).
+// blockRemoteContent defaults to TRUE. That default is the security property,
+// not a convenience: a caller that wants remote content must say so, so
+// forgetting the argument fails closed (a missing image) rather than open (a
+// fired tracking pixel). Five call sites turn email HTML into DOM and only one
+// of them is the read view that owns the toggle.
 export function sanitizeEmailHtml(html: string, blockRemoteContent = true): string {
   return DOMPurify.sanitize(
     html,
@@ -130,13 +96,11 @@ export function processEmailHtml(html: string, showImages: boolean): string {
   }
 
   root.querySelectorAll("a[href]").forEach((anchor) => {
-    // Sanitizing alone would strip the href and leave the anchor behind: styled
-    // like a link, indistinguishable from one, and silently doing nothing when
-    // clicked. A user who just read "Confirm your account" learns nothing from
-    // a dead link, and may well go looking for another way to comply. Replace
-    // the whole anchor with a visible refusal instead — the same treatment
-    // [Image Blocked] gets below, and the same choice the Android client makes
-    // when it toasts a blocked scheme rather than swallowing the tap.
+    // Sanitizing alone strips the href and leaves the anchor: styled like a
+    // link, indistinguishable from one, silently doing nothing when clicked. A
+    // user who just read "Confirm your account" learns nothing from that and
+    // goes looking for another way to comply. Replace it with a visible
+    // refusal, as [Image Blocked] does below.
     const href = anchor.getAttribute("href") ?? "";
     if (!isAllowedUri(href)) {
       const scheme = href.replace(attrWhitespace, "").match(leadingScheme)?.[1]?.toLowerCase();

@@ -1,7 +1,7 @@
 package api
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -23,12 +23,14 @@ import (
 )
 
 // getOrCreateUserStore returns the cached per-user store, constructing and
-// caching it on first access. Shared by the userStore/userContactsStore/
-// userGroupsStore/userRulesStore/userMailCacheStore getters below, which
-// otherwise differ only in which map and constructor they use.
-func getOrCreateUserStore[T any](mu *sync.Mutex, cache map[string]T, userID string, construct func() (T, error)) (T, error) {
+// caching it on first access, and stamps the user as recently seen so
+// sweepIdleUserStores can reclaim them. Shared by the userStore/
+// userContactsStore/userGroupsStore/userRulesStore/userMailCacheStore getters
+// below, which otherwise differ only in which map and constructor they use.
+func getOrCreateUserStore[T any](mu *sync.Mutex, cache map[string]T, lastSeen map[string]time.Time, userID string, construct func() (T, error)) (T, error) {
 	mu.Lock()
 	defer mu.Unlock()
+	lastSeen[userID] = time.Now()
 	if st, ok := cache[userID]; ok {
 		return st, nil
 	}
@@ -39,6 +41,68 @@ func getOrCreateUserStore[T any](mu *sync.Mutex, cache map[string]T, userID stri
 	}
 	cache[userID] = st
 	return st, nil
+}
+
+// userStoreIdleTTL is how long a user's cached stores survive with no requests
+// before sweepIdleUserStores reclaims them. Without a bound, every user who
+// ever authenticates pins their full processed-message set and decision history
+// in RAM for the process lifetime.
+//
+// Eviction is safe because these stores hold no state a reopen cannot rebuild:
+// state.Store owns a SQLite handle (closed below), the rest are file-backed
+// JSON. A dropped store costs one reopen. Anything added here that holds a
+// live resource MUST be released in sweepIdleUserStores.
+const userStoreIdleTTL = 2 * time.Hour
+
+// userStoreSweepInterval is how often idle per-user stores are reclaimed. A
+// var so tests can drive it.
+var userStoreSweepInterval = 30 * time.Minute
+
+// StartUserStoreSweeper reclaims per-user stores idle past userStoreIdleTTL.
+// Follows StartSessionSweeper's ticker/select pattern; call once after
+// NewServer.
+func (s *Server) StartUserStoreSweeper(ctx context.Context) {
+	ticker := time.NewTicker(userStoreSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.sweepIdleUserStores(time.Now())
+		}
+	}
+}
+
+// sweepIdleUserStores drops every cached store for users not seen since
+// userStoreIdleTTL ago, returning how many users were reclaimed. Split out so
+// tests can drive it without the ticker. All six caches are keyed by user id
+// and swept together, since a request acquires them together.
+func (s *Server) sweepIdleUserStores(now time.Time) int {
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
+	removed := 0
+	for userID, seen := range s.userLastSeen {
+		if now.Sub(seen) < userStoreIdleTTL {
+			continue
+		}
+		// state.Store owns a SQLite handle and its WAL; dropping the map entry
+		// without closing leaks both for the process lifetime.
+		if st, ok := s.userStores[userID]; ok {
+			if err := st.Close(); err != nil {
+				s.logger.Error("closing evicted user state store", "user_id", userID, "error", err.Error())
+			}
+		}
+		delete(s.userStores, userID)
+		delete(s.userContacts, userID)
+		delete(s.userSendAs, userID)
+		delete(s.userGroups, userID)
+		delete(s.userRules, userID)
+		delete(s.userMailCache, userID)
+		delete(s.userLastSeen, userID)
+		removed++
+	}
+	return removed
 }
 
 // errIMAPNotConfigured is returned when a caller has not stored IMAP
@@ -97,7 +161,7 @@ func (s *Server) userCardDAVClientConfigPath(userID string) string {
 }
 
 func (s *Server) userStore(userID string) (*state.Store, error) {
-	return getOrCreateUserStore(&s.userMu, s.userStores, userID, func() (*state.Store, error) {
+	return getOrCreateUserStore(&s.userMu, s.userStores, s.userLastSeen, userID, func() (*state.Store, error) {
 		return state.New(s.userStateDir(userID))
 	})
 }
@@ -113,7 +177,7 @@ func (s *Server) storeFor(r *http.Request) (*state.Store, error) {
 }
 
 func (s *Server) userContactsStore(userID string) (*contacts.Store, error) {
-	return getOrCreateUserStore(&s.userMu, s.userContacts, userID, func() (*contacts.Store, error) {
+	return getOrCreateUserStore(&s.userMu, s.userContacts, s.userLastSeen, userID, func() (*contacts.Store, error) {
 		return contacts.New(s.userStateDir(userID))
 	})
 }
@@ -130,7 +194,7 @@ func (s *Server) contactsFor(r *http.Request) (*contacts.Store, error) {
 }
 
 func (s *Server) userSendAsStore(userID string) (*sendas.Store, error) {
-	return getOrCreateUserStore(&s.userMu, s.userSendAs, userID, func() (*sendas.Store, error) {
+	return getOrCreateUserStore(&s.userMu, s.userSendAs, s.userLastSeen, userID, func() (*sendas.Store, error) {
 		return sendas.New(s.userStateDir(userID))
 	})
 }
@@ -146,7 +210,7 @@ func (s *Server) sendAsFor(r *http.Request) (*sendas.Store, error) {
 }
 
 func (s *Server) userGroupsStore(userID string) (*groups.Store, error) {
-	return getOrCreateUserStore(&s.userMu, s.userGroups, userID, func() (*groups.Store, error) {
+	return getOrCreateUserStore(&s.userMu, s.userGroups, s.userLastSeen, userID, func() (*groups.Store, error) {
 		return groups.New(s.userStateDir(userID))
 	})
 }
@@ -162,7 +226,7 @@ func (s *Server) groupsFor(r *http.Request) (*groups.Store, error) {
 }
 
 func (s *Server) userRulesStore(userID string) (*rules.Store, error) {
-	return getOrCreateUserStore(&s.userMu, s.userRules, userID, func() (*rules.Store, error) {
+	return getOrCreateUserStore(&s.userMu, s.userRules, s.userLastSeen, userID, func() (*rules.Store, error) {
 		return rules.New(s.userStateDir(userID))
 	})
 }
@@ -211,7 +275,7 @@ func (s *Server) userContactPhotoPath(userID, ref string) string {
 }
 
 func (s *Server) userMailCacheStore(userID string) (*mailcache.Store, error) {
-	return getOrCreateUserStore(&s.userMu, s.userMailCache, userID, func() (*mailcache.Store, error) {
+	return getOrCreateUserStore(&s.userMu, s.userMailCache, s.userLastSeen, userID, func() (*mailcache.Store, error) {
 		return mailcache.New(s.userStateDir(userID))
 	})
 }
@@ -336,31 +400,40 @@ func (s *Server) lookupUserBySubscriber(subscriberID string) (string, bool) {
 	return userID, ok
 }
 
-// rescanSubscriberIndex rebuilds subscriberID -> userID by reading every
-// per-user state.json. Cheap at this scale (a handful of small files).
-func (s *Server) rescanSubscriberIndex() {
-	usersDir := filepath.Join(s.stateDir, "users")
-	entries, err := os.ReadDir(usersDir)
+// knownUserIDs lists every account with a per-user state directory. The
+// directory layout is the index; there is no separate registry.
+func (s *Server) knownUserIDs() []string {
+	entries, err := os.ReadDir(filepath.Join(s.stateDir, "users"))
 	if err != nil {
-		return
+		return nil
 	}
-	next := map[string]string{}
+	out := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+		if e.IsDir() {
+			out = append(out, e.Name())
 		}
-		b, err := os.ReadFile(filepath.Join(usersDir, e.Name(), "state.json"))
+	}
+	return out
+}
+
+// rescanSubscriberIndex rebuilds subscriberID -> userID across every per-user
+// store. Cheap at this scale (a handful of accounts).
+//
+// It goes through state.Store rather than reading the underlying file. Parsing
+// storage directly from here is how this broke once already: it hard-coded
+// state.json, so the move to SQLite left it silently finding nothing and every
+// device registration answering "unknown subscriber". The store is the only
+// thing that knows how state is stored.
+func (s *Server) rescanSubscriberIndex() {
+	next := map[string]string{}
+	// userStore takes s.userMu, so resolve every store BEFORE taking it below.
+	for _, userID := range s.knownUserIDs() {
+		store, err := s.userStore(userID)
 		if err != nil {
 			continue
 		}
-		var doc struct {
-			SubscriberID string `json:"subscriberId"`
-		}
-		if err := json.Unmarshal(b, &doc); err != nil {
-			continue
-		}
-		if id := strings.TrimSpace(doc.SubscriberID); id != "" {
-			next[id] = e.Name()
+		if id := strings.TrimSpace(store.SubscriberID()); id != "" {
+			next[id] = userID
 		}
 	}
 	s.userMu.Lock()
@@ -487,34 +560,19 @@ func (s *Server) revokeUserDevices(userID string) {
 	}
 }
 
-// rescanDeviceIndex rebuilds deviceID -> userID by reading every per-user
-// state.json's nativeDevices array. Mirrors rescanSubscriberIndex.
+// rescanDeviceIndex rebuilds deviceID -> userID across every per-user store.
+// Mirrors rescanSubscriberIndex, including going through state.Store rather
+// than parsing storage directly.
 func (s *Server) rescanDeviceIndex() {
-	usersDir := filepath.Join(s.stateDir, "users")
-	entries, err := os.ReadDir(usersDir)
-	if err != nil {
-		return
-	}
 	next := map[string]string{}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(usersDir, e.Name(), "state.json"))
+	for _, userID := range s.knownUserIDs() {
+		store, err := s.userStore(userID)
 		if err != nil {
 			continue
 		}
-		var doc struct {
-			NativeDevices []struct {
-				DeviceID string `json:"deviceId"`
-			} `json:"nativeDevices"`
-		}
-		if err := json.Unmarshal(b, &doc); err != nil {
-			continue
-		}
-		for _, d := range doc.NativeDevices {
+		for _, d := range store.ListNativeDevices() {
 			if id := strings.TrimSpace(d.DeviceID); id != "" {
-				next[id] = e.Name()
+				next[id] = userID
 			}
 		}
 	}

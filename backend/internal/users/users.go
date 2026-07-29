@@ -4,8 +4,10 @@ package users
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -608,12 +610,12 @@ func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
 // same lock as the write. guard receives every user as freshly read from disk
 // plus the target; returning an error aborts without writing.
 //
-// This exists because a precondition checked in the handler and enforced by a
-// separate write is not a precondition at all. isLastActiveAdmin used to be
-// evaluated before calling Deactivate/SetRole, so two concurrent requests each
-// saw one other active admin and both proceeded — leaving an instance with
-// zero admins, no delete-user endpoint, and LoadOrMigrate only minting an
-// admin when users.json is absent. Recovery meant hand-editing the volume.
+// A precondition checked in the handler and enforced by a separate write is
+// not a precondition. Evaluating isLastActiveAdmin outside this lock lets two
+// concurrent requests each see one other active admin and both proceed,
+// leaving an instance with zero admins — unrecoverable short of hand-editing
+// the volume, since there is no delete-user endpoint and LoadOrMigrate only
+// mints an admin when users.json is absent.
 func (s *Store) mutateGuarded(id string, guard func(all []User, target User) error, fn func(*User) error) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -809,9 +811,9 @@ func (s *Store) SetLastUsedTOTPStep(id string, step int64) (User, error) {
 func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, privateKeyEnc, source, createdAt string) (User, error) {
 	return s.mutate(id, func(u *User) error {
 		// Refuse to overwrite a client-held identity with a server-readable
-		// one. This used to clear PGPPrivateKeyWrapped unconditionally, so
-		// generate/import silently downgraded custody and destroyed the
-		// browser envelope — the opposite of what docs/E2E_PGP.md promises.
+		// one: clearing PGPPrivateKeyWrapped here would silently downgrade
+		// custody and destroy the browser envelope, the opposite of what
+		// docs/E2E_PGP.md promises.
 		if u.PGPProtection() == PGPProtectionClient {
 			return ErrWouldDowngradeCustody
 		}
@@ -833,16 +835,15 @@ func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, private
 //
 // This is the narrow write the daemon's send-as reconcile needs: it adds User
 // IDs to an existing key, which changes the key's bytes but not its identity.
-// It used to reach for SetPGPIdentity, which rewrites everything — and because
-// it snapshots the user, spends hundreds of microseconds re-signing, and only
-// then writes, a key replaced during that window was silently reverted to the
-// stale copy.
+// Do not substitute SetPGPIdentity: it rewrites everything, and since the
+// caller snapshots the user, spends hundreds of microseconds re-signing, and
+// only then writes, a key replaced during that window is silently reverted.
 //
-// Making the expectation a required argument is what closes that window: the
-// caller states which key it read, and the write is refused under the lock if
-// that is no longer the current one. An empty expectation is rejected rather
-// than treated as "any", because a vacuous precondition is worst exactly when
-// the account has no key and a stale write would install one.
+// expectFingerprint closes that window — the caller states which key it read,
+// and the write is refused under the lock if that is no longer current. An
+// empty expectation is rejected rather than treated as "any": a vacuous
+// precondition is worst exactly when the account has no key and a stale write
+// would install one.
 func (s *Store) UpdatePGPKeyMaterial(id, expectFingerprint, armoredPublicKey, privateKeyEnc string) (User, error) {
 	if strings.TrimSpace(expectFingerprint) == "" {
 		return User{}, errors.New("expected fingerprint is required to update key material")
@@ -978,6 +979,46 @@ func VerifySecretHash(encoded, candidate string) bool {
 	return verifyScryptHash(encoded, candidate)
 }
 
+// deviceSecretPrefix tags the SHA-256 device-secret format so
+// VerifyDeviceSecret can tell it apart from the scrypt hashes minted before
+// this format existed.
+const deviceSecretPrefix = "sha256:"
+
+// HashDeviceSecret hashes a native device's pairing secret.
+//
+// Plain SHA-256 where the rest of this file uses scrypt. A password KDF exists
+// to price guesses at a low-entropy human-chosen secret; a device secret is 24
+// bytes from crypto/rand (api.randomToken), unguessable by construction. So
+// scrypt bought nothing here and cost ~16 MB and ~50 ms on every request a
+// paired device makes — App Pull polls, mail sync, contacts sync, push-MFA.
+//
+// Do NOT use this for anything a human types or chooses. Not full-entropy
+// random means HashPassword.
+func HashDeviceSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return deviceSecretPrefix + hex.EncodeToString(sum[:])
+}
+
+// VerifyDeviceSecret checks a candidate device secret against a stored hash in
+// constant time.
+//
+// Untagged values fall through to scrypt: devices paired before
+// HashDeviceSecret existed hold one, and rejecting them would silently unpair
+// every phone on every existing install. New registrations write the tagged
+// form, so that branch drains as devices re-pair.
+func VerifyDeviceSecret(stored, candidate string) bool {
+	encoded, ok := strings.CutPrefix(stored, deviceSecretPrefix)
+	if !ok {
+		return verifyScryptHash(stored, candidate)
+	}
+	want, err := hex.DecodeString(encoded)
+	if err != nil || len(want) != sha256.Size {
+		return false
+	}
+	got := sha256.Sum256([]byte(candidate))
+	return subtle.ConstantTimeCompare(got[:], want) == 1
+}
+
 // HashPassword produces a scrypt-encoded hash string in the same format
 // used historically by admin.env's ADMIN_PASS_HASH field.
 func HashPassword(password string) (string, error) {
@@ -1018,6 +1059,18 @@ func verifyScryptHash(encoded, candidate string) bool {
 	}
 	p, err := strconv.Atoi(parts[3])
 	if err != nil {
+		return false
+	}
+	// Bound the cost parameters: scrypt.Key allocates 128*r*N bytes of
+	// whatever it is told, and these three come out of a file (users.json,
+	// per-user state.json, an operator's ADMIN_PASS_HASH). One bad value asks
+	// the allocator for terabytes on the next login, OOM-kills the process,
+	// and supervisord restarts it straight back into the same crash.
+	// x/crypto's own check only rejects values far above this.
+	//
+	// Floor is HashPassword's current cost — never accept a hash weaker than
+	// we mint. Ceiling is ~1 GB, above any plausible tuning.
+	if n < 1<<14 || n > 1<<20 || n&(n-1) != 0 || r < 1 || r > 32 || p < 1 || p > 16 {
 		return false
 	}
 	salt, err := base64.StdEncoding.DecodeString(parts[4])

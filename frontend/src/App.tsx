@@ -29,127 +29,31 @@ import { TuningPage } from "./pages/TuningPage";
 import { UsersPage } from "./pages/UsersPage";
 import agplLicenseText from "./agpl-3.0.txt?raw";
 
-// Bump this when releasing a new build. Shown in the license overlay.
-const APP_VERSION = 1;
-
-const settingsNavItems: ReadonlyArray<{ to: string; label: string; adminOnly?: boolean }> = [
-  { to: "/login", label: "Login" },
-  { to: "/health", label: "System Health" },
-  { to: "/config", label: "Configuration" },
-  { to: "/notifications", label: "Pairing" },
-  { to: "/security", label: "Security" },
-  { to: "/rules", label: "Filters" },
-  { to: "/tuning", label: "Prompt Tuning" },
-  { to: "/users", label: "Manage Users", adminOnly: true },
-  { to: "/logs", label: "System Logs", adminOnly: true }
-];
-
-type BeforeInstallPromptEvent = Event & {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
-};
-
-type InboxFolder = {
-  path: string;
-  deletable: boolean;
-};
-
-type InboxFoldersResponse = {
-  parent: string;
-  folders: InboxFolder[];
-};
-
-type CreateFolderResponse = {
-  ok: boolean;
-  parent: string;
-  name: string;
-  folder: string;
-};
-
-type DeleteFolderResponse = {
-  ok: boolean;
-  parent: string;
-  folder: string;
-};
-
-type RenameFolderResponse = {
-  ok: boolean;
-  folder: string;
-  renamed: string;
-  parent: string;
-};
-
-type MoveInboxActionResponse = {
-  ok: boolean;
-  action: "move";
-  processed: number;
-  failed: Array<{ messageId: string; error: string }>;
-  targetMailbox: string;
-};
-
-type DragMessagePayload = {
-  messageIds: string[];
-  mailbox: string;
-};
-
-type DraftComposePayload = {
-  sentTo?: string;
-  cc?: string;
-  bcc?: string;
-  subject?: string;
-  body?: string;
-};
-
-// ComposeAttachment mirrors the backend's attachment wire shape
-// ({name, mimeType, dataBase64}) accepted by /api/mail/send and /api/mail/draft.
-// size is kept client-side only, for the chip label and the 25 MB total cap.
-type ComposeAttachment = {
-  name: string;
-  mimeType: string;
-  dataBase64: string;
-  size: number;
-};
-
-// Mirror of the backend maxMailAttachmentBytes (25 MB total decoded).
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
-
-// readFileAsAttachment reads a File and strips the "data:...;base64," prefix
-// that FileReader.readAsDataURL prepends, yielding the raw base64 the API wants.
-function readFileAsAttachment(file: File): Promise<ComposeAttachment> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error(`failed to read ${file.name}`));
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      const comma = result.indexOf(",");
-      resolve({
-        name: file.name,
-        mimeType: file.type || "application/octet-stream",
-        dataBase64: comma >= 0 ? result.slice(comma + 1) : result,
-        size: file.size
-      });
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-// Pulls the keyless-recipient list out of /api/mail/send's 409 body, if
-// that's what this error is. Returns null for anything else (a different
-// error shape, a non-JSON body, or a keyless list that came back empty) so
-// the caller can fall back to the generic message.
-function keylessRecipientsFrom409(error: unknown): string[] | null {
-  if (!(error instanceof HttpError) || error.status !== 409) return null;
-  const body = error.body as { keylessRecipients?: unknown } | undefined;
-  const list = body?.keylessRecipients;
-  if (!Array.isArray(list) || list.length === 0) return null;
-  return list.filter((item): item is string => typeof item === "string");
-}
+import { APP_VERSION, settingsNavItems } from "./app/navigation";
+import type {
+  BeforeInstallPromptEvent,
+  InboxFolder,
+  InboxFoldersResponse,
+  CreateFolderResponse,
+  DeleteFolderResponse,
+  RenameFolderResponse,
+  MoveInboxActionResponse,
+  DragMessagePayload,
+  DraftComposePayload,
+  ComposeAttachment
+} from "./app/types";
+import {
+  MAX_ATTACHMENT_BYTES,
+  readFileAsAttachment,
+  formatBytes,
+  keylessRecipientsFrom409
+} from "./app/compose";
+import {
+  clearDraftSnapshot,
+  loadDraftSnapshot,
+  restoreNotice,
+  saveDraftSnapshot
+} from "./app/draftAutosave";
 
 export function App() {
   const location = useLocation();
@@ -267,6 +171,11 @@ export function App() {
       // Drop the unwrapped private key with the session. Leaving it in memory
       // after logout would let the next person at this browser read mail.
       clearPGPSession();
+      // Drop the autosaved compose buffer with the session, for the same
+      // reason: the next person at this browser must not read it.
+      if (auth?.userId) {
+        clearDraftSnapshot(auth.userId);
+      }
       setAuth({ authenticated: false });
     }
   }
@@ -548,10 +457,59 @@ export function App() {
       .catch(() => setSendAsOptions([]));
   }
 
+  // Debounced autosave of the open compose window. 1s after typing stops is
+  // short enough that almost nothing is lost and long enough that a keystroke
+  // is not a localStorage write.
+  //
+  // The Quill editor's live HTML is read here rather than relying on
+  // composeHtmlBody: the editor writes through onChange, so on a hard crash
+  // the last keystrokes may not have reached React state yet — which is
+  // precisely the moment this exists for.
+  useEffect(() => {
+    if (!composeOpen || !auth?.userId) {
+      return;
+    }
+    const userId = auth.userId;
+    const timer = setTimeout(() => {
+      saveDraftSnapshot(userId, {
+        to: serializeRecipientField(composeTo),
+        cc: serializeRecipientField(composeCc),
+        bcc: serializeRecipientField(composeBcc),
+        subject: composeSubject,
+        body: quillInstanceRef.current?.root.innerHTML ?? composeHtmlBody,
+        attachments: composeAttachments
+      });
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [composeOpen, auth?.userId, composeTo, composeCc, composeBcc, composeSubject, composeHtmlBody, composeAttachments]);
+
+  // discardComposeDraft clears both the form and the autosaved snapshot. Used
+  // wherever the work is finished or deliberately abandoned; closing the
+  // window is NOT one of those, so it does not call this.
+  function discardComposeDraft() {
+    if (auth?.userId) {
+      clearDraftSnapshot(auth.userId);
+    }
+    resetComposeForm();
+  }
+
   function openComposeWindow() {
     resetComposeForm();
     setComposeError("");
     setComposeSuccess("");
+    setComposeNotice("");
+    // Recover anything the last session left behind. Only on a blank compose:
+    // openDraftInCompose has explicit content and must never be overwritten by
+    // a stale snapshot.
+    const snapshot = auth?.userId ? loadDraftSnapshot(auth.userId) : null;
+    if (snapshot) {
+      setComposeTo(parseRecipientField(snapshot.to));
+      setComposeCc(parseRecipientField(snapshot.cc));
+      setComposeBcc(parseRecipientField(snapshot.bcc));
+      setComposeSubject(snapshot.subject);
+      setComposeHtmlBody(snapshot.body);
+      setComposeNotice(restoreNotice(snapshot));
+    }
     setComposeOpen(true);
     loadSendAsOptions();
   }
@@ -570,7 +528,7 @@ export function App() {
   }
 
   function trashComposeDraft() {
-    resetComposeForm();
+    discardComposeDraft();
     setComposeOpen(false);
   }
 
@@ -859,7 +817,7 @@ export function App() {
       // on that is how it used to reach nobody. Empty the form first (so the
       // window cannot be used to send the same message twice) and keep it
       // open carrying the warning; a clean send still closes as before.
-      resetComposeForm();
+      discardComposeDraft();
       if (warning) {
         setComposeNotice(`Sent — ${warning}`);
       } else {
@@ -898,6 +856,12 @@ export function App() {
         mode: "html",
         attachments: composeAttachments.map(({ name, mimeType, dataBase64 }) => ({ name, mimeType, dataBase64 }))
       });
+      // The work is now a real IMAP draft, so the local safety net has
+      // nothing left to protect. Clear it rather than leave a stale copy to
+      // resurrect over the saved one on next open.
+      if (auth?.userId) {
+        clearDraftSnapshot(auth.userId);
+      }
       setComposeSuccess("Draft saved.");
     } catch (e) {
       const message = toErrorMessage(e, "failed to save draft");

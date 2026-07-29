@@ -17,18 +17,17 @@ import (
 // Anti-phishing Tier A: a pure, deterministic check for mail that impersonates
 // this app itself.
 //
-// The threat is specific rather than general. Every client registers itself as
-// the system handler for the kypost:// scheme (the Flatpak's
-// x-scheme-handler/kypost, Android's native-pair intent filter), so an
+// The threat is specific. Every client registers as the system handler for the
+// kypost:// scheme (the Flatpak's x-scheme-handler/kypost, Android's
+// native-pair intent filter), so an
 // <a href="kypost://native-pair?srv=https://evil.example&pt=..."> in a message
-// body used to route one click back into the app's own PairingController and
-// raise the real pairing-confirm dialog naming an attacker's server -- phishing
-// wearing the trusted UI.
+// body is one click from the app's own pairing-confirm dialog naming an
+// attacker's server: phishing wearing the trusted UI.
 //
-// The clients now refuse non-allowlisted schemes on their own, unconditionally
-// and with no server input. This scan exists to *tell the user why* a message
-// is hostile, not to be the thing that stops it. That is why every rule here
-// can afford to be conservative: a miss costs a banner, never the block.
+// The clients refuse non-allowlisted schemes themselves, with no server input.
+// This scan exists to tell the user WHY a message is hostile, not to be what
+// stops it — which is why every rule here can afford to be conservative. A miss
+// costs a banner, never the block.
 //
 // Deliberately not here: lookalike/homograph domains, anchor-text-vs-href
 // mismatch scoring, urgency-language heuristics, reputation lists. Those are
@@ -58,32 +57,24 @@ type phishFinding struct {
 // working URL -- raw colon, decimal entity (zero-padded or not), named entity,
 // and percent-encoded colon -- plus a percent-encoded first slash.
 //
-// ponytail: this is not full HTML-entity/percent normalisation, so a
-// sufficiently creative encoding will slip past. That is an accepted ceiling,
-// not an oversight: the client-side scheme allowlist blocks the navigation
-// regardless of what this regex thinks, so a bypass costs the user a missing
-// banner and never the refusal itself. Normalising properly would mean
-// reimplementing a browser's URL parser here, against untrusted input, to
-// improve a message string.
+// ponytail: not full HTML-entity/percent normalisation, so a creative encoding
+// slips past. Accepted ceiling: the client-side scheme allowlist blocks the
+// navigation regardless, so a bypass costs a missing banner, never the refusal.
+// Upgrade path: none — doing it properly means reimplementing a browser's URL
+// parser against untrusted input to improve a message string.
 var appDeepLinkPattern = regexp.MustCompile(`(?i)kypost\s*(?::|&#0*58;|&colon;|%3a)\s*(?:/|%2f)`)
 
-// R2. Host-agnostic on purpose: the attacker's own host serving a lookalike
-// page at this app's pairing or pickup path is the whole attack, so matching
-// the path alone is the point.
+// R2. Host-agnostic on purpose: an attacker's own host serving a lookalike
+// page at this app's pairing or pickup path IS the attack, so the path alone is
+// what matters.
 //
-// But it has to be a path, in a URL a client would actually resolve. This was
-// a case-insensitive substring test over subject + text body + HTML body,
-// needing no link, no scheme and no host — so a grocery store's
-// "https://grocer.example/pickup/slot?d=today", a restaurant's
-// ".../reservations/pickup/details", and the bare words "/pickup/" in a
-// sentence all flagged.
-//
-// That mattered more than a cosmetic false positive. The Tier-B clear requires
-// sameAddress(msg.Sender, ownAddress), which cannot hold for inbound
-// third-party mail, so an R2 hit on inbound mail could never be cleared; the
-// verdict then rides a durable $Phishing IMAP keyword that every other client
-// the user owns displays too. The banner is this subsystem's whole user-facing
-// product, and firing it on grocery mail teaches people to dismiss it.
+// It must be a path in a URL a client would resolve, never a substring match.
+// A false positive here is not cosmetic: the Tier-B clear requires
+// sameAddress(msg.Sender, ownAddress), which inbound third-party mail can never
+// satisfy, so a wrong hit can never be cleared and rides a durable $Phishing
+// IMAP keyword into every other client the user owns. The banner is this
+// subsystem's whole product; firing it on a grocer's collection-slot page
+// teaches people to dismiss it.
 var sensitiveEndpointPaths = []string{
 	"/api/notifications/native/register",
 	"/api/notifications/desktop/pair",

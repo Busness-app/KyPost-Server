@@ -25,17 +25,16 @@ func deviceCredentialsFromRequest(r *http.Request) (deviceID, deviceSecret strin
 }
 
 // deviceLockoutKey scopes the device brute-force lockout to (deviceID,
-// clientIP) rather than deviceID alone.
+// clientIP), so anyone who learns a device id cannot lock that device out of
+// mail sync, contacts sync and push-MFA approval by burning its strike budget
+// from an unrelated address. handleLogin keys on username+clientIP likewise.
 //
-// The routes that authenticate this way — /api/notifications/native/pull and
-// /deregister — carry no other credential, so a bare deviceID key let anyone
-// who learned a device id keep that device permanently locked out of mail
-// sync, contacts sync and push-MFA approval by burning its strike budget from
-// anywhere. handleLogin keys on username+clientIP for exactly this reason; the
-// reasoning simply had not been carried over here.
+// Per-IP scoping bounds guessing, not CPU: an attacker with many addresses
+// gets a fresh budget at each. That is only acceptable because verification is
+// a SHA-256 compare (users.VerifyDeviceSecret). Never make it expensive again
+// without re-keying this.
 //
-// One definition, used by the auth path and by the tests that inspect the
-// lockout map, so the two cannot drift.
+// One definition, shared with the tests that inspect the lockout map.
 func (s *Server) deviceLockoutKey(deviceID string, r *http.Request) string {
 	return deviceID + "\x00" + clientIP(r)
 }
@@ -77,21 +76,17 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 	if !okDev {
 		return "", state.NativeDevice{}, false, 0
 	}
-	if !users.VerifySecretHash(dev.SecretHash, deviceSecret) {
+	if !users.VerifyDeviceSecret(dev.SecretHash, deviceSecret) {
 		return "", state.NativeDevice{}, false, 0
 	}
-	// Honor account deactivation on the device path the same way currentUser
-	// does on the session path: a deactivated (offboarded/compromised) account
-	// must lose device access immediately, not keep it until the device secret
-	// is separately purged. Without this check, deactivation/password-reset
-	// silently fail to revoke a paired device.
+	// Deactivation must revoke device access immediately, exactly as
+	// currentUser enforces it on the session path — not only once the device
+	// secret is separately purged.
 	//
-	// cancelAttempt, not a bare return: the secret was CORRECT, so no guessing
-	// happened and the strike tryAttempt reserved on the way in must go back.
-	// Leaving it counted (which is what a bare return does) meant a deactivated
-	// account's phone burned all deviceMaxFailures within seconds of its normal
-	// retry cadence and then got 429 instead of 401 — so a client reading
-	// writeDeviceAuthFailure's documented contract backs off forever instead of
+	// cancelAttempt, not a bare return: the secret was CORRECT, so the strike
+	// goes back. Counting it would burn a deactivated account's phone through
+	// deviceMaxFailures at its normal retry cadence and answer 429, so a client
+	// following writeDeviceAuthFailure's contract backs off forever instead of
 	// telling its user to re-pair.
 	u, err := s.users.Get(ownerID)
 	if err != nil || !u.Active {

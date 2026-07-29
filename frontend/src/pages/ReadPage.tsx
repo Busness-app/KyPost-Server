@@ -12,224 +12,36 @@ import { usePagination } from "../hooks/usePagination";
 import { useDialogOpen } from "../hooks/useDialogOpen";
 import { PageTabs } from "../components/PageTabs";
 
-type InboxEmail = {
-  messageId: string;
-  sender: string;
-  sentTo?: string;
-  cc?: string;
-  bcc?: string;
-  subject: string;
-  body?: string;
-  label?: string;
-  keywords?: string[];
-  status: string;
-  detail?: string;
-  atUtc: string;
-  hasAttachments?: boolean;
-  pgpEncrypted?: boolean;
-  pgpSigned?: boolean;
-  pgpVerified?: boolean;
-  pgpSignerFingerprint?: string;
-  pgpDecryptError?: string;
-};
-
-// DecryptedView is one locally-decrypted message: the plaintext body plus
-// what the signature check found. Held in component state only, so it is
-// gone on reload along with the key that produced it.
-type DecryptedView = {
-  body: string;
-  signed: boolean;
-  verified: boolean;
-  signerFingerprint: string;
-  error: string;
-};
-
-// AttachmentInfo mirrors the /api/mail/attachments wire shape.
-type AttachmentInfo = {
-  index: number;
-  name: string;
-  mimeType: string;
-  size: number;
-};
-
-type ReadPageProps = {
-  onOpenDraft?: (payload: { sentTo?: string; cc?: string; bcc?: string; subject?: string; body?: string }) => void;
-};
-
-type InboxResponse = {
-  tabs: string[];
-  byTab: Record<string, InboxEmail[]>;
-};
-
-type InboxAction = "delete" | "archive" | "spam" | "read";
-
-type InboxActionResponse = {
-  ok: boolean;
-  action: InboxAction;
-  processed: number;
-  failed: Array<{ messageId: string; error: string }>;
-};
-
-// KeywordActionResponse is the same /api/inbox/actions response shape used
-// for the "label"/"unlabel" actions — a subset of InboxActionResponse since
-// those aren't part of the InboxAction union. handleInboxActions always
-// returns HTTP 200 and signals per-message failure via `failed`, so callers
-// must check it explicitly rather than treating a 200 as success.
-type KeywordActionResponse = {
-  failed: Array<{ messageId: string; error: string }>;
-};
-
-type SortKey = "time" | "subject" | "sender";
-type SortDirection = "asc" | "desc";
-const EMAILS_PER_PAGE = 20;
-const SWIPE_HINT_THRESHOLD = 0.15;
-const SWIPE_ACTIVATE_THRESHOLD = 0.5;
-const SWIPE_DISMISS_RATIO = 1.08;
-const SWIPE_MAX_OFFSET_RATIO = 0.92;
-const SWIPE_HAPTICS_STORAGE_KEY = "kypost-read-swipe-haptics-enabled";
-
-type SwipeTone = "archive" | "delete";
-type SwipeRowState = {
-  offset: number;
-  phase: "dragging" | "snapback" | "dismiss";
-  tone: SwipeTone;
-  showHint: boolean;
-  armed: boolean;
-};
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatTimestamp(value: string): string {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-}
-
-function formatInboxListTime(value: string): string {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const emailStart = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const diffDays = Math.floor((todayStart.getTime() - emailStart.getTime()) / 86_400_000);
-
-  if (diffDays === 0) {
-    return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  }
-  if (diffDays === 1) {
-    return "Yesterday";
-  }
-  if (diffDays > 1 && diffDays <= 6) {
-    return date.toLocaleDateString([], { weekday: "long" });
-  }
-  return date.toLocaleDateString();
-}
-
-function formatUpdatedLabel(lastLoadedAt: Date | null, now: number): string {
-  if (!lastLoadedAt) return "Updated Never";
-  const elapsedMs = now - lastLoadedAt.getTime();
-  if (elapsedMs < 3 * 60 * 1000) {
-    return "Updated Just Now";
-  }
-  return `Updated ${lastLoadedAt.toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit"
-  })}`;
-}
-
-function ensureSubjectPrefix(subject: string | undefined, prefix: "Re:" | "Fwd:"): string {
-  const base = (subject ?? "").trim();
-  if (base === "") {
-    return prefix;
-  }
-  const lowerPrefix = prefix.toLowerCase();
-  if (base.toLowerCase().startsWith(lowerPrefix)) {
-    return base;
-  }
-  return `${prefix} ${base}`;
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function buildReplyBody(email: InboxEmail): string {
-  const time = formatTimestamp(email.atUtc);
-  const sender = email.sender || "-";
-  const subject = email.subject || "(no subject)";
-  const body = email.body || "";
-  const isHtml = /<[^>]+>/.test(body);
-  // processEmailHtml, not sanitizeEmailHtml: quoting must go through the same
-  // pipeline the read view uses (link blocking + img -> "[Image Blocked]" +
-  // remote-content-blocking sanitize). sanitizeEmailHtml alone does not strip
-  // <img>, so quoting a message the user chose not to unblock used to fire its
-  // tracking pixels the moment they pressed Reply.
-  const rendered = isHtml ? processEmailHtml(body, false) : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
-  return [
-    "<p><br /></p>",
-    `<p>On ${escapeHtml(time)}, ${escapeHtml(sender)} wrote:</p>`,
-    "<blockquote style=\"margin: 0 0 0 0.8rem; padding-left: 0.8rem; border-left: 3px solid var(--line, #c2c7d0);\">",
-    `<p><strong>Subject:</strong> ${escapeHtml(subject)}</p>`,
-    rendered,
-    "</blockquote>"
-  ].join("");
-}
-
-function buildForwardBody(email: InboxEmail): string {
-  const time = formatTimestamp(email.atUtc);
-  const sender = email.sender || "-";
-  const sentTo = email.sentTo || "-";
-  const subject = email.subject || "(no subject)";
-  const body = email.body || "";
-  const isHtml = /<[^>]+>/.test(body);
-  // processEmailHtml, not sanitizeEmailHtml: quoting must go through the same
-  // pipeline the read view uses (link blocking + img -> "[Image Blocked]" +
-  // remote-content-blocking sanitize). sanitizeEmailHtml alone does not strip
-  // <img>, so quoting a message the user chose not to unblock used to fire its
-  // tracking pixels the moment they pressed Reply.
-  const rendered = isHtml ? processEmailHtml(body, false) : `<pre style=\"white-space: pre-wrap; margin: 0;\">${escapeHtml(body)}</pre>`;
-  return [
-    "<p><br /></p>",
-    "<p>---------- Forwarded message ----------</p>",
-    `<p><strong>From:</strong> ${escapeHtml(sender)}</p>`,
-    `<p><strong>Date:</strong> ${escapeHtml(time)}</p>`,
-    `<p><strong>Subject:</strong> ${escapeHtml(subject)}</p>`,
-    `<p><strong>To:</strong> ${escapeHtml(sentTo)}</p>`,
-    rendered
-  ].join("");
-}
-
-function buildReplyAllRecipients(email: InboxEmail): { to: string; cc: string } {
-  const sender = firstAddressFromText(email.sender || "");
-  const senderKey = sender.toLowerCase();
-  const recipients = [
-    ...listAddressesFromText(email.sentTo || ""),
-    ...listAddressesFromText(email.cc || "")
-  ];
-  const cc: string[] = [];
-  const seen = new Set<string>();
-  for (const recipient of recipients) {
-    const key = recipient.toLowerCase();
-    if (!recipient || key === senderKey || seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    cc.push(recipient);
-  }
-  return { to: sender, cc: cc.join(", ") };
-}
+import type {
+  InboxEmail,
+  DecryptedView,
+  AttachmentInfo,
+  ReadPageProps,
+  InboxResponse,
+  InboxAction,
+  InboxActionResponse,
+  KeywordActionResponse,
+  SortKey,
+  SortDirection,
+  SwipeTone,
+  SwipeRowState
+} from "./read/types";
+import {
+  EMAILS_PER_PAGE,
+  SWIPE_HINT_THRESHOLD,
+  SWIPE_ACTIVATE_THRESHOLD,
+  SWIPE_DISMISS_RATIO,
+  SWIPE_MAX_OFFSET_RATIO,
+  SWIPE_HAPTICS_STORAGE_KEY
+} from "./read/types";
+import { formatBytes, formatTimestamp, formatInboxListTime, formatUpdatedLabel } from "./read/format";
+import {
+  ensureSubjectPrefix,
+  escapeHtml,
+  buildReplyBody,
+  buildForwardBody,
+  buildReplyAllRecipients
+} from "./read/compose";
 
 export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [searchParams, setSearchParams] = useSearchParams();

@@ -79,11 +79,22 @@ Optional for local development (outside Docker):
    > client IP — without it the cookie stays non-`Secure` and the login and
    > CardDAV lockouts key off the proxy's IP instead of the caller's. `http://`
    > on localhost, for one machine, is fine.
-5. Sign in with the bootstrap credentials. The username is `admin`. KyPost
-   prints the password once to the container logs on the first start. Look for
-   `Generated first-run admin credentials …`. To set your own password instead,
-   pass `BOOTSTRAP_ADMIN_PASS` on the first run. You can also pass
-   `BOOTSTRAP_ADMIN_USER`.
+5. Sign in with the bootstrap credentials. The username is `admin`. On the
+   first start KyPost writes the generated password to
+   `first-run-password.txt` in the config volume, mode `600`. Read it, then
+   delete the file:
+
+   ```bash
+   docker compose exec kypost-server cat /kypost/config/first-run-password.txt
+   docker compose exec kypost-server rm /kypost/config/first-run-password.txt
+   ```
+
+   The password is deliberately not printed to the container logs: those are
+   unrotated by default, kept for the life of the container, readable by
+   anything with access to the Docker socket, and forwarded to whatever log
+   aggregator you have configured. To set your own password instead, pass
+   `BOOTSTRAP_ADMIN_PASS` on the first run (no file is written in that case,
+   since you already have it). You can also pass `BOOTSTRAP_ADMIN_USER`.
 6. Change the password when KyPost prompts you. Until you change it, the
    account can reach only the password-change screen.
 7. In Config, save the IMAP and SMTP settings. Then run IMAP Test.

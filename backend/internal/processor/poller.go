@@ -282,6 +282,13 @@ func (p *Poller) Run() {
 	// below from starting.
 	go p.recheckWKDDomains()
 
+	// Retention housekeeping, not per-tick work. Eager first run for the same
+	// reason recheckWKDDomains has one: a host restarting more often than the
+	// interval would otherwise never run it.
+	cleanupTicker := time.NewTicker(stateCleanupInterval)
+	defer cleanupTicker.Stop()
+	go p.cleanupAllUsers()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -291,6 +298,48 @@ func (p *Poller) Run() {
 			p.tick()
 		case <-wkdTicker.C:
 			p.recheckWKDDomains()
+		case <-cleanupTicker.C:
+			p.cleanupAllUsers()
+		}
+	}
+}
+
+const (
+	// stateCleanupInterval is how often processed-message IDs and decisions are
+	// trimmed. Against a 30-day window, a longer gap only means state.json
+	// carries a few extra hours of entries past the cutoff.
+	stateCleanupInterval = 6 * time.Hour
+	// stateRetentionDays bounds both the audit view's history and the size of
+	// the two files every mutation rewrites.
+	stateRetentionDays = 30
+)
+
+// cleanupAllUsers trims expired state for every active user. Errors are logged
+// per user and never abort the sweep — one unreadable state directory must not
+// stop the others being trimmed.
+func (p *Poller) cleanupAllUsers() {
+	if p.users == nil {
+		// Defensive only, as in recheckWKDDomains: guards Poller values built
+		// without New(). Needed here and not in tick() because this also runs
+		// eagerly at Run(), before any ticker has fired.
+		return
+	}
+	all, err := p.users.List()
+	if err != nil {
+		p.log.Error("failed to list users for state cleanup", "error", err.Error())
+		return
+	}
+	for _, u := range all {
+		if !u.Active {
+			continue
+		}
+		store, err := p.userStore(u.ID)
+		if err != nil {
+			p.log.Error("failed to open user state store for cleanup", "user_id", u.ID, "error", err.Error())
+			continue
+		}
+		if err := store.Cleanup(stateRetentionDays); err != nil {
+			p.log.Error("state cleanup failed", "user_id", u.ID, "error", err.Error())
 		}
 	}
 }
@@ -416,7 +465,18 @@ func (p *Poller) tick() {
 	}
 	wg.Wait()
 
-	p.log.Info("poll tick completed", "users_polled", strconv.Itoa(usersPolled), "users_failed", strconv.Itoa(usersFailed))
+	tickFields := []string{"users_polled", strconv.Itoa(usersPolled), "users_failed", strconv.Itoa(usersFailed)}
+	// Carry classifier admission depth onto the tick line. A tick that
+	// "completed" while messages are still queued behind the model looks
+	// identical to a healthy one otherwise, which is how a backlog that never
+	// drains stays invisible.
+	if p.classifier != nil {
+		st := p.classifier.Stats()
+		tickFields = append(tickFields,
+			"classify_inflight", strconv.Itoa(st.InFlight),
+			"classify_queued", strconv.Itoa(st.Queued))
+	}
+	p.log.Info("poll tick completed", tickFields...)
 
 	// Fault isolation: one broken mailbox must not restart the container.
 	// Only flip global health when every polled mailbox failed.
@@ -465,9 +525,9 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		p.log.Error("failed to open user state store", "user_id", u.ID, "error", err.Error())
 		return err
 	}
-	if err := store.Cleanup(30); err != nil {
-		p.log.Error("state cleanup failed", "user_id", u.ID, "error", err.Error())
-	}
+	// Cleanup runs on its own ticker (cleanupAllUsers), NOT here: it takes both
+	// file locks and rewrites and fsyncs both state.json and decisions.json in
+	// full, against a 30-day retention window.
 
 	settings, err := config.LoadUserSettings(p.userSettingsPath(u.ID))
 	if err != nil {

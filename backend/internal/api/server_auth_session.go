@@ -3,12 +3,9 @@
 // every authenticated route goes through (withAuth, withMailAuth, csrfCheckOK,
 // currentUser).
 //
-// Split out of server.go, which had grown to 4,499 lines holding this alongside
-// mailbox reads, notifications, pairing and SPA file serving. That size is not a
-// style complaint: the login lockout keyed itself on the raw submitted username
-// forty lines from the case-folding lookup that resolved the account, and in a
-// file where nothing is forty lines from anything, the two never got read
-// together.
+// Keep the lockout key, the case-folding account lookup, and the credential
+// check within reading distance of each other. They have to agree on what "the
+// same account" means, and that agreement is invisible from any one of them.
 package api
 
 import (
@@ -28,31 +25,27 @@ import (
 	"kypost-server/backend/internal/users"
 )
 
-// Sessions live in process memory only (Server.sessions) and are never
-// persisted. That is a deliberate trade, and it has a user-visible cost worth
-// stating rather than discovering:
+// Session tracks who a live session token belongs to.
 //
-//   - Every restart logs every user out, mid-compose. Restarts are not rare
-//     here — scheduleContainerRestart exits the process on config changes that
-//     need one, and supervisord brings it back.
-//   - In Docker the `server` and `daemon` processes share no memory, so only
-//     the API process has sessions at all; a future second API replica would
-//     not share them either (no sticky routing, no shared store).
+// Sessions are in-memory only (Server.sessions), never persisted, and that is
+// settled: persisting them would write bearer-equivalent credentials to the
+// same volume this project works to keep free of plaintext secrets, to buy
+// back an annoyance. A stolen token cannot outlive the process and revocation
+// is a map delete that cannot fail halfway.
 //
-// What it buys: a stolen session token cannot outlive the process, there is no
-// session file to leak or to keep encrypted at rest, and revocation is a map
-// delete that cannot fail halfway. Persisting sessions would mean writing
-// bearer-equivalent credentials to the same volume this project already works
-// hard to keep free of plaintext secrets. For a self-hosted server with a
-// handful of users, being logged out by a restart is the cheaper problem.
+// The cost is that a restart logs everyone out. Restarts are NOT routine: the
+// only in-process trigger is scheduleContainerRestart, called from exactly one
+// place — handleRepair, behind an explicit admin action on
+// POST /api/health/repair. Saving config does not restart anything. Do not
+// re-argue this without checking that caller list first.
 //
-// Session tracks who a live session token belongs to. Role is deliberately
-// not stored here: currentUser looks the user up live from the users store
-// on every request so a role change or deactivation take effect on the very
-// next request rather than only at next login. CSRFToken backs the
-// double-submit CSRF check (see csrfCheckOK) — minted alongside the session
-// and mirrored into the non-HttpOnly csrf_token cookie so the frontend can
-// read and echo it back as a header.
+// Only the API process has sessions at all; a second API replica would not
+// share them.
+//
+// Role is deliberately not stored here: currentUser looks the user up live on
+// every request, so a role change or deactivation takes effect on the next
+// request rather than at next login. CSRFToken backs the double-submit check
+// (see csrfCheckOK), mirrored into the non-HttpOnly csrf_token cookie.
 type Session struct {
 	UserID string
 	// IssuedAt is when this session was minted. ExpiresAt slides forward on
@@ -102,19 +95,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Three-strikes/15-minute lockout, keyed by the submitted username
-	// regardless of whether it belongs to a real account (so lockout behavior
-	// can't be used to enumerate valid usernames) plus the client IP (so an
-	// attacker hammering a known username can't lock the real owner out from
-	// their own machine).
+	// Three-strikes/15-minute lockout, keyed on username+client IP: on the
+	// username whether or not it exists (so lockout behavior cannot enumerate
+	// accounts), and on the IP (so hammering a known username cannot lock its
+	// real owner out from their own machine).
 	//
-	// The username is folded through users.NormalizeUsername — the exact fold
-	// GetByUsername below resolves the account with. Keying on the raw string
-	// instead made the lockout worthless: "victim", "Victim" and " victim "
-	// are one account to the lookup but three independent strike budgets here,
-	// and whitespace padding makes that key space unbounded, so a single IP
-	// could guess passwords forever with the lockout permanently "engaged" on
-	// the canonical spelling.
+	// The username MUST be folded through users.NormalizeUsername — the same
+	// fold GetByUsername resolves the account with. On the raw string,
+	// "victim", "Victim" and " victim " are one account to the lookup but
+	// three strike budgets here, and padding makes that key space unbounded.
 	lockoutKey := users.NormalizeUsername(req.Username) + "\x00" + clientIP(r)
 	if allowed, retryAfter := s.loginLockout.tryAttempt(lockoutKey); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
@@ -133,29 +122,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ok, err := s.captchaVerifier.Verify(r.Context(), req.CaptchaToken, clientIP(r))
 		switch {
 		case errors.Is(err, captcha.ErrChallengeExpired):
-			// Self-hosted proof-of-work only: the solution was correct and
-			// correctly signed, it just arrived after the challenge's
-			// deadline — a tab left open, not a credential. Refund the
-			// strike (three stale tabs must not lock anyone out) and answer
-			// 401 rather than the 503 below, which means "the provider is
-			// down" and would be a lie here: there is no provider. The
-			// client fetches a fresh challenge and retries. No password is
-			// checked on this path, so the refund cannot buy an attacker
-			// guesses.
+			// Self-hosted proof-of-work only: a correctly signed solution that
+			// arrived after its deadline — a tab left open, not a credential.
+			// Refund the strike so three stale tabs cannot lock anyone out.
+			// 401, not the 503 below, which means "the provider is down" and
+			// there is no provider here. No password is checked on this path,
+			// so the refund buys an attacker no guesses.
 			s.loginLockout.cancelAttempt(lockoutKey)
 			http.Error(w, "security check expired, please try again", http.StatusUnauthorized)
 			return
 		case errors.Is(err, captcha.ErrChallengeWrongClient):
-			// Self-hosted proof-of-work only: a correctly signed, unexpired
-			// solution presented from a different address than the one it was
-			// issued to. That binding is what stops an attacker fetching cheap
-			// challenges from a clean address and spending them from an
-			// escalated one — but the same thing happens to a phone that hands
-			// off from wifi to cellular while it is solving. Refund the strike
-			// for the same reason an expired challenge refunds one: a changed
-			// address is a network event, not a wrong credential. The client
-			// fetches a fresh challenge and retries, and no password is checked
-			// on this path, so the refund buys an attacker no guesses.
+			// Self-hosted proof-of-work only: a valid solution presented from a
+			// different address than it was issued to. The binding is what
+			// stops an attacker fetching cheap challenges from a clean address
+			// and spending them from an escalated one — but a phone handing off
+			// wifi to cellular mid-solve looks identical. A changed address is
+			// a network event, not a wrong credential, so refund the strike.
 			s.loginLockout.cancelAttempt(lockoutKey)
 			http.Error(w, "your network address changed during the security check, please try again", http.StatusUnauthorized)
 			return
@@ -173,6 +155,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The account this attempt targeted, folded the same way GetByUsername
+	// resolves it and the lockout key above is built — so escalation, lockout
+	// and lookup all agree on what "the same account" means.
+	powAccount := users.NormalizeUsername(req.Username)
+
 	u, err := s.users.GetByUsername(req.Username)
 	if err != nil || !u.Active {
 		// Pay the same scrypt cost a real password check would, so response
@@ -181,20 +168,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// Make the next challenge from this address more expensive. Recorded
 		// for the unknown-username case too: spraying a list of guessed
 		// usernames is exactly the pattern this is here to price.
-		s.powDifficulty.recordFailure(clientIP(r), time.Now())
+		s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
 		// No recordFailure on the lockout: tryAttempt already spent the strike.
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 	if !users.VerifyPassword(u, req.Password) {
-		s.powDifficulty.recordFailure(clientIP(r), time.Now())
+		s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 	s.loginLockout.recordSuccess(lockoutKey)
-	// A correct password proves whoever is at this address holds a real
-	// credential, so stop charging them for earlier failures.
-	s.powDifficulty.clear(clientIP(r))
+	// A correct password proves whoever is at this address holds THIS
+	// account's credential — and nothing about any other account they have
+	// been guessing at from the same address. Forgive only this one; see
+	// powEscalation.clearAccount.
+	s.powDifficulty.clearAccount(clientIP(r), powAccount)
 
 	// Second-factor users must clear a challenge before a session exists. No
 	// cookie is set here; the client receives a challenge id plus the methods it
@@ -380,24 +369,18 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Per-account replay guard: a password-holding attacker can mint any
-	// number of challenges, so single-use protection on the challenge alone
-	// (above) is not enough — it would let one captured valid code be
-	// replayed once per freshly minted challenge. SetLastUsedTOTPStep
-	// atomically rejects any step that is not strictly newer than the last
-	// one accepted for this account, persisted across challenges. It runs
-	// only after every other check has passed (a wrong/rejected code never
-	// reaches here, so it never advances the recorded step), and a rejection
-	// here gets the exact same generic response as a wrong code so it cannot
-	// be distinguished from one over the wire.
+	// Per-account replay guard. Single-use protection on the challenge alone
+	// is not enough: a password-holding attacker can mint unlimited
+	// challenges, so a captured valid code would be replayable once per fresh
+	// one. SetLastUsedTOTPStep atomically rejects any step not strictly newer
+	// than the last accepted for this account, across challenges.
 	//
-	// recordSuccess (which clears the account's brute-force lockout throttle)
-	// is deliberately deferred until after this guard passes: a replayed code
-	// is a rejected attempt, exactly like a wrong code, and must count against
-	// the lockout rather than clearing it — otherwise a captured valid code let
-	// an attacker keep the lockout counter at zero indefinitely while brute
-	// forcing the real, still-unknown current code. tryAttempt spent the strike
-	// on the way in, so simply not clearing it is what counts it.
+	// Ordering is load-bearing. This runs after every other check, so a
+	// rejected code never advances the recorded step; a rejection here answers
+	// exactly like a wrong code, so the two are indistinguishable on the wire;
+	// and recordSuccess stays below it, so a replay counts against the lockout
+	// instead of clearing it — otherwise one captured code holds the counter at
+	// zero while the attacker brute-forces the current one.
 	if _, err := s.users.SetLastUsedTOTPStep(u.ID, step); err != nil {
 		s.mfaChallenges.Delete(ch.ID)
 		http.Error(w, "invalid code", http.StatusUnauthorized)
@@ -570,17 +553,13 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to update password", http.StatusInternalServerError)
 		return
 	}
-	// A password change is the remediation a user reaches for when they think
-	// they have been compromised, so it must cut off *every* credential the
-	// account holds — not just sessions. A device secret minted from a stolen
-	// session is independent of the password and survived this call, keeping
-	// full mailbox access and (since every device registers MFAApprover=true)
-	// a standing second factor. The three admin recovery paths already call
-	// revokeAllUserCredentials for exactly this reason; the self-service path
-	// was the gap.
-	//
-	// The session making this request is preserved so the legitimate user is
-	// not logged out of the tab they are standing in.
+	// A password change is what a user reaches for when they think they have
+	// been compromised, so it must cut off EVERY credential, not just
+	// sessions: a device secret minted from a stolen session is independent of
+	// the password and would otherwise keep full mailbox access and — since
+	// every device registers MFAApprover=true — a standing second factor.
+	// The caller's own session is preserved so they are not logged out of the
+	// tab they are standing in.
 	s.revokeAllUserCredentialsExcept(u, currentSessionToken(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

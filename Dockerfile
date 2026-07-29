@@ -7,32 +7,26 @@ RUN cd backend && go build -o /app/bin/kypost-server ./cmd/main.go
 
 FROM node:26.5.0-slim AS frontend-builder
 WORKDIR /frontend
-# `npm ci` (not `npm install`) and a required, non-globbed lockfile: the
-# lockfile is the point. `npm install` re-resolves every caret range at build
-# time, so two builds of the same commit could ship different code — and one
-# of those ranges is dompurify, which is the only thing standing between a
-# hostile email and the session cookie.
+# `npm ci` and a required, non-globbed lockfile. `npm install` re-resolves
+# every caret range at build time, so two builds of the same commit can ship
+# different code — and one of those ranges is dompurify, the only thing between
+# a hostile email and the session cookie.
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend .
 RUN npm run build
 
-FROM node:26.5.0-slim
-# liblzma5 and tar are explicitly upgraded (not just pulled from the base
-# image as-is) to pick up any Debian security fixes published after this
-# base image tag was built — apt-get install re-resolves already-installed
-# packages to the latest version available from the configured repos.
+# Nothing in the runtime path is JavaScript: the frontend is static files from
+# the stage above, and the admin-password hashing that once needed `node` is now
+# `kypost-server --mode bootstrap-admin`. Keep it that way — a Node runtime here
+# is a CVE stream to track for no runtime benefit. See scripts/AGENTS.md.
+FROM debian:stable-slim
+# liblzma5 and tar are named explicitly so apt re-resolves them to the latest
+# available, picking up Debian security fixes published after this base tag.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends supervisor tzdata curl ca-certificates zstd liblzma5 tar util-linux \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& useradd -m -s /bin/bash kypost
-
-# npm itself is never invoked at runtime here (only the `node` interpreter
-# is, via scripts/bootstrap.sh), but the base image ships npm with its own
-# bundled, independently-versioned undici copy that lags well behind
-# Node's own runtime undici — upgrade it explicitly rather than leave an
-# unused CLI tool sitting in the image with a vulnerable dependency.
-RUN npm install -g npm@12.0.1
 
 WORKDIR /opt/kypost
 COPY --from=backend-builder /app/bin/kypost-server /usr/local/bin/kypost-server
@@ -43,16 +37,13 @@ COPY scripts /opt/kypost/scripts
 
 RUN chmod +x /opt/kypost/scripts/*.sh
 
-# Ollama is installed from a pinned release tarball verified against its
-# published SHA-256, not by piping a remote install script into a shell.
-# `curl https://ollama.com/install.sh | sh` is arbitrary remote code
-# execution at build time from a URL this project does not control, with no
-# version pin: every rebuild installed a different Ollama, so builds were
-# not reproducible and a compromise of that host was a compromise of this
-# image.
+# Pinned release tarball verified against its published SHA-256. Never replace
+# this with `curl https://ollama.com/install.sh | sh`: that is unpinned remote
+# code execution at build time from a host this project does not control, and it
+# makes builds non-reproducible.
 #
-# OLLAMA_VERSION/OLLAMA_SHA256 are bumped by .github/workflows/ollama-bump.yml,
-# which only advances to a release that has been public for at least 3 days.
+# Bumped by .github/workflows/ollama-bump.yml, which only advances to a release
+# that has been public for at least 3 days.
 ARG OLLAMA_VERSION=0.32.3
 ARG OLLAMA_SHA256=2597d74fbe654ef6a37db56f771cf37d4a85c6bde4018127874e3927d3113800
 RUN curl -fsSL -o /tmp/ollama.tar.zst \
@@ -80,8 +71,7 @@ RUN mkdir -p /kypost/config /kypost/private /kypost/logs /kypost/state \
 VOLUME ["/kypost/config", "/kypost/private", "/kypost/logs", "/kypost/state"]
 EXPOSE 5866
 
-# There is deliberately no `USER kypost` here. entrypoint.sh must start as
-# root to chown the mounted volumes (which arrive owned by whoever created
-# them on the host); it drops to kypost via setpriv before exec'ing
-# supervisord, so PID 1 and every service run unprivileged.
+# No `USER kypost` on purpose: entrypoint.sh must start as root to chown the
+# mounted volumes, then drops to kypost via setpriv before exec'ing supervisord,
+# so PID 1 and every service still run unprivileged.
 CMD ["/opt/kypost/scripts/entrypoint.sh"]
