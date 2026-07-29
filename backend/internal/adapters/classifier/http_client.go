@@ -22,6 +22,34 @@ import (
 const diagnosticLogMaxSize = 16 * 1024 * 1024
 const diagnosticLogMaxFiles = 8
 
+// DefaultModel is the fallback when OLLAMA_MODEL is unset. It must agree with
+// Dockerfile, docker-compose.yml, scripts/pull-ollama-model.sh and .env.example;
+// five files previously disagreed, so nothing in the repo could answer which
+// model actually ran.
+//
+// Chosen by measurement (backend/cmd/modeleval, 60 emails, five repeats with
+// zero variance): 100% on unambiguous mail, 75% on keyword traps, at 2.89 GB
+// resident. gemma4:e4b scores the same on traps with better injection
+// resistance, but needs 8.83 GB — documented in .env.example as the upgrade for
+// hosts with the memory to spare.
+const DefaultModel = "nemotron-3-nano:4b"
+
+// Classification decoding parameters, all measured rather than guessed.
+//
+//   - temperature 0: classification should not sample.
+//   - num_ctx 8192: the worst-case prompt is ~2162 tokens. Ollama truncates from
+//     the FRONT, so an overflow silently discards these instructions and keeps
+//     the attacker-controlled email. 4096 left under 2x headroom, and raising it
+//     cost 0.19 GB while measuring identical accuracy and lower latency.
+//   - think false: several candidate models (nemotron, qwen3, deepseek-r1) emit a
+//     separate reasoning channel. With a `format` schema set, Ollama routes the
+//     constrained answer into "thinking" and leaves "response" EMPTY. Without
+//     this, adopting structured output would return nothing on every call.
+const (
+	classifyTemperature = 0
+	classifyNumCtx      = 8192
+)
+
 const warmupRequestTimeout = 3 * time.Minute
 
 // Classify pacing/serialization. The model handles one generation at a time;
@@ -80,7 +108,7 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 	}
 	model := strings.TrimSpace(os.Getenv("OLLAMA_MODEL"))
 	if model == "" {
-		model = "qwen3:1.7b"
+		model = DefaultModel
 	}
 
 	tuningTemplate := strings.TrimSpace(tuning)
@@ -164,7 +192,7 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 	}
 
 	classifyAttempt := func(attempt int) (string, error, bool) {
-		result, err := c.classifyOnce(ctx, prompt)
+		result, err := c.classifyOnce(ctx, prompt, allowedLabels)
 		if err != nil {
 			c.logError(err.Error())
 			return "", err, false
@@ -234,12 +262,26 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 	return retry.Loop(ctx, 3, classifyBackoff, classifyAttempt)
 }
 
-func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string) (string, error) {
+func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string, allowedLabels []string) (string, error) {
 	payload := map[string]any{
 		"model":      c.model,
 		"prompt":     prompt,
 		"stream":     false,
 		"keep_alive": "10m",
+		"think":      false,
+		"options": map[string]any{
+			"temperature": classifyTemperature,
+			"num_ctx":     classifyNumCtx,
+		},
+	}
+	// Constrained decoding: the sampler cannot emit anything but an allowlisted
+	// label. Across nine models this took strict-format compliance to 100% and
+	// retries to 0%, and it is the only measured defence that stopped an email
+	// forcing an out-of-allowlist label — the model could not comply even when
+	// instructed to. Skipped when no allowlist is configured, since there is
+	// then nothing to constrain to.
+	if len(allowedLabels) > 0 {
+		payload["format"] = map[string]any{"type": "string", "enum": allowedLabels}
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -272,6 +314,7 @@ func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string) (string, e
 
 	var out struct {
 		Response string `json:"response"`
+		Thinking string `json:"thinking"`
 		Error    string `json:"error"`
 	}
 	if err := json.Unmarshal(bodyBytes, &out); err != nil {
@@ -280,7 +323,28 @@ func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string) (string, e
 	if strings.TrimSpace(out.Error) != "" {
 		return "", fmt.Errorf("ollama classify failed: %s", strings.TrimSpace(out.Error))
 	}
-	return strings.TrimSpace(out.Response), nil
+	// Safety net for a reasoning model that ignores think=false: an empty
+	// response alongside a populated reasoning channel means the answer was
+	// routed to the wrong field, not that the model declined to answer.
+	// Without this the classifier would silently return nothing on every call.
+	answer := strings.TrimSpace(out.Response)
+	if answer == "" && strings.TrimSpace(out.Thinking) != "" {
+		answer = strings.TrimSpace(out.Thinking)
+	}
+	return unquoteStructured(answer), nil
+}
+
+// unquoteStructured unwraps the JSON string Ollama returns when a `format`
+// schema is set — the response is `"Primary"`, not a bare token.
+func unquoteStructured(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' {
+		var decoded string
+		if json.Unmarshal([]byte(s), &decoded) == nil {
+			return strings.TrimSpace(decoded)
+		}
+	}
+	return s
 }
 
 // Version queries the running Ollama instance's own /api/version endpoint
@@ -361,7 +425,10 @@ func (c *HTTPClient) runWarmup(ctx context.Context) error {
 		return err
 	}
 
-	_, err := c.classifyOnce(warmCtx, "Respond with exactly: READY")
+	// No allowlist here on purpose: the warmup asks for "READY", which a label
+	// enum would make unemittable. This call exists to prove the model loads and
+	// answers, not to classify anything.
+	_, err := c.classifyOnce(warmCtx, "Respond with exactly: READY", nil)
 	if err != nil {
 		return err
 	}

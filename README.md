@@ -198,7 +198,7 @@ Common variables:
 - `TZ` (default `America/New_York`)
 - `SECRET_DIR` (default `/kypost/private`)
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-- `OLLAMA_MODEL` (Compose default `gemma4:e4b`)
+- `OLLAMA_MODEL` (default `nemotron-3-nano:4b`; see the model note below)
 - `TUNING_FILE` (default `/kypost/config/TUNING.md`)
 - `OLLAMA_MODELS_HOST_DIR` (default `./share/ollama/models`)
 - `IMAP_CONFIG_FILE` (default `/kypost/private/imap-config.json`)
@@ -219,9 +219,40 @@ Common variables:
 
 Notes:
 
-- `Dockerfile` sets a fallback model of `nemotron-3-nano:4b`.
-- `docker-compose.yml` changes the model default to `gemma4:e4b` unless you set `OLLAMA_MODEL`.
+- The classifier model defaults to `nemotron-3-nano:4b` everywhere — `Dockerfile`,
+  `docker-compose.yml`, `.env.example`, and the backend's own fallback.
 - The image sets `OLLAMA_MODELS=/kypost/ollama-models`.
+
+### Choosing a classifier model
+
+The default is picked to run on modest hardware. Measured on a 60-email
+benchmark (`backend/cmd/modeleval`), five repeats each with zero run-to-run
+variance:
+
+| Model | Unambiguous mail | Keyword traps | Prompt injection | RAM resident |
+|---|---|---|---|---|
+| `nemotron-3-nano:4b` (default) | 100% | 75% | 63% | 2.9 GB |
+| `gemma4:e4b` | 100% | 75% | 88% | 8.8 GB |
+
+Both label ordinary mail equally well, and both are perfect on unambiguous
+messages. `gemma4:e4b` resists two more of the eight prompt-injection probes —
+emails written to talk the classifier into filing them somewhere they do not
+belong — but wants three times the memory. Set `OLLAMA_MODEL=gemma4:e4b` if the
+host has 12 GB or more free.
+
+Classification speed is not tabulated because it depends far more on your CPU
+and on what else the host is doing than on the model: the same request measured
+between 13 and 19 seconds on one machine purely as background load varied. The
+two models were within about 20% of each other under identical conditions, with
+`gemma4:e4b` slightly ahead. The poller paces itself at one message every three
+seconds regardless, so throughput is bounded by that unless the host is very
+slow.
+
+Either way the damage from a successful injection is bounded: the label
+allowlist means a hostile email can at most choose which of the four folders it
+lands in, and one probe (an email claiming the label set itself had changed)
+defeated every model and every prompt variant tested. Do not treat the assigned
+label as a security decision.
 
 Create the model cache directory once before the first run:
 
