@@ -8,12 +8,28 @@ version: 2
 # Note that these PRs need the same repository setting the ollama-bump workflow
 # needs — Settings > Actions > General > "Allow GitHub Actions to create and
 # approve pull requests" — or they are silently never opened.
+#
+# Every ecosystem is grouped into a single PR. The first run of this file
+# without grouping opened ten at once (the whole accumulated backlog of a repo
+# that had never run Dependabot), each triggering a full matrix including a
+# `docker build`. Grouping caps that at three PRs per interval no matter how
+# far behind the tree has drifted.
+#
+# Majors are deliberately grouped in alongside minors rather than ignored.
+# Every update in that first batch was a major — vite 5->8, react-router 6->7,
+# @vitejs/plugin-react 4->6, jsdom 29->30, checkout 4->7 — so a config that
+# skipped majors would have filtered out all of the actual work while still
+# claiming coverage. They arrive together and get reviewed on purpose.
 updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore(deps)"
 
@@ -21,7 +37,11 @@ updates:
     directory: "/backend"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    groups:
+      go-modules:
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore(deps)"
 
@@ -29,6 +49,20 @@ updates:
     directory: "/frontend"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
+    groups:
+      # Split by what a break would mean. A runtime bump (dompurify, openpgp,
+      # quill, react) can ship a vulnerability to a browser parsing hostile
+      # mail; a build-tooling bump can only break the build, which CI catches
+      # before anyone sees it. Separating them means the urgent one is never
+      # stuck behind a vite major that needs a migration.
+      frontend-runtime:
+        dependency-type: production
+        patterns:
+          - "*"
+      frontend-tooling:
+        dependency-type: development
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore(deps)"
