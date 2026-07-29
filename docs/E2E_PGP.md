@@ -422,6 +422,12 @@ request the browser makes, not a degraded one.
    an in-app WebView, which shares no session and would put an account-password
    field inside the app.
 
+This section specifies *when* to hand off. **`WEBMAIL_HANDOFF.md` covers
+*how*** — the launch mechanism per client, the first-party origin guard, why
+Android's move to Custom Tabs must not be ported to desktop, and why an
+embedded web view stays ruled out everywhere. Read it before touching either
+handoff site in any client.
+
 Encrypting needs only the recipients' public keys, not the sender's private
 one. `POST /api/pgp/recipients/resolve` and `POST /api/mail/send-pgp` are both
 `withMailAuth`, so an encrypt-only (unsigned) send built on device is possible
