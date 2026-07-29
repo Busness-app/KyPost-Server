@@ -97,9 +97,9 @@ func enrollTOTP(t *testing.T, srv *Server, userID string) (secret string, recove
 func doJSONAuth(srv *Server, handler http.HandlerFunc, method, path string, payload any, userID string) *httptest.ResponseRecorder {
 	token := "session-token-" + userID
 	csrfToken := "csrf-token-" + userID
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	srv.sessions[token] = Session{UserID: userID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 	// Model an onboarded session; the must-change gate (withAuth) is exercised
 	// by its own dedicated test.
 	_, _ = srv.users.ClearMustChangePassword(userID)

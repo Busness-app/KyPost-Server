@@ -99,9 +99,9 @@ func TestMustChangePasswordBlocksOtherEndpoints(t *testing.T) {
 	// authRequestAs, which intentionally clears the flag for onboarded tests).
 	token := "mcp-session"
 	csrf := "mcp-csrf"
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	srv.sessions[token] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrf}
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 
 	// A normal authenticated endpoint must be refused.
 	rec := httptest.NewRecorder()
@@ -137,5 +137,59 @@ func TestMFALockoutIsPerAccountAcrossChallenges(t *testing.T) {
 	}
 	if ok, _ := srv.mfaLockout.allowed(userID); ok {
 		t.Fatal("second-factor attempts must be locked out for the account after the cap, regardless of new challenges")
+	}
+}
+
+// TestMailUploadLimitsAreInternallyConsistent pins the relationship between the
+// request-body cap and the attachment budget.
+//
+// These were two independently hand-picked numbers: a 25 MiB decoded attachment
+// budget under a 40 MiB request cap. Attachments travel base64-encoded inside
+// the JSON body (4/3 expansion), so 25 MiB of attachment needs ~33.3 MiB of
+// body before any JSON scaffolding — meaning a send near the advertised
+// attachment limit failed on the request cap instead, reporting the wrong limit
+// at the wrong layer.
+func TestMailUploadLimitsAreInternallyConsistent(t *testing.T) {
+	// The user-facing upload cap.
+	if maxMailRequestBytes != 25<<20 {
+		t.Errorf("maxMailRequestBytes = %d, want %d (25 MiB)", maxMailRequestBytes, 25<<20)
+	}
+
+	// The attachment budget must be reachable: base64 of a maximum-size
+	// attachment set, plus the reserved overhead, must fit inside the body cap.
+	encoded := int64(maxMailAttachmentBytes) * 4 / 3
+	if encoded+mailRequestOverheadBytes > maxMailRequestBytes {
+		t.Errorf("a full %d-byte attachment set base64-encodes to %d bytes, which with %d bytes of "+
+			"overhead exceeds the %d-byte request cap — the attachment limit is unreachable",
+			maxMailAttachmentBytes, encoded, mailRequestOverheadBytes, maxMailRequestBytes)
+	}
+
+	// And it must not be pointlessly small either: within a MiB of the most that
+	// could fit, or we are refusing uploads the cap would allow.
+	if maxMailRequestBytes-(encoded+mailRequestOverheadBytes) > 1<<20 {
+		t.Errorf("attachment budget %d wastes %d bytes of the request cap",
+			maxMailAttachmentBytes, maxMailRequestBytes-(encoded+mailRequestOverheadBytes))
+	}
+}
+
+// TestUploadRoutesGetAnExtendedReadDeadline guards the pairing of the 25 MiB
+// body cap with a read deadline that can actually accommodate it.
+//
+// http.Server's ReadTimeout covers the body, so at 60 s a 25 MiB upload
+// requires a sustained 3.5 Mbit/s — which mobile and DSL uplinks do not
+// provide. The routes that accept an upload must therefore extend it.
+func TestUploadRoutesGetAnExtendedReadDeadline(t *testing.T) {
+	if uploadReadDeadline < 5*time.Minute {
+		t.Errorf("uploadReadDeadline = %v, too short for a %d-byte upload on a slow uplink",
+			uploadReadDeadline, maxMailRequestBytes)
+	}
+
+	// A 25 MiB body must be transferable inside the deadline at a rate a phone
+	// on cellular can actually sustain (~1 Mbit/s).
+	const slowUplinkBytesPerSec = 1_000_000 / 8
+	needed := time.Duration(maxMailRequestBytes/slowUplinkBytesPerSec) * time.Second
+	if uploadReadDeadline < needed {
+		t.Errorf("uploadReadDeadline = %v but a %d-byte upload at 1 Mbit/s needs %v",
+			uploadReadDeadline, maxMailRequestBytes, needed)
 	}
 }

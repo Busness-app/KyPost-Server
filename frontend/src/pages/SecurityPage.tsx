@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router";
 import QRCode from "qrcode";
 import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
+import { deriveCredential } from "../api/auth";
 import {
   getPGPIdentity,
   generatePGPIdentity,
@@ -18,7 +19,14 @@ import {
 } from "../api/pgp";
 import { generateIdentity, importIdentity } from "../lib/pgpClient";
 import { wrapPrivateKey } from "../lib/keyVault";
-import { lockPGPSession, loadPGPSession, subscribePGPSession, type PGPSessionState } from "../lib/pgpSession";
+import {
+  lockPGPSession,
+  loadPGPSession,
+  rewrapUnlockedKeyUnder,
+  subscribePGPSession,
+  unlockPGPSession,
+  type PGPSessionState
+} from "../lib/pgpSession";
 import { unlockWithArmoredKey } from "../lib/keyVault";
 import { PgpUnlockDialog } from "../components/PgpUnlockDialog";
 import { listContacts, type Contact } from "../api/contacts";
@@ -87,6 +95,14 @@ export function SecurityPage() {
   const [unlockOpen, setUnlockOpen] = useState(false);
   const [migratePassword, setMigratePassword] = useState("");
   const [migrateOpen, setMigrateOpen] = useState(false);
+
+  // Stale-envelope recovery: the stored PGP envelope is sealed under an OLDER
+  // password than the account's, so nothing can open it with the current one.
+  // Two passwords are needed to fix it — the old one to unlock, the current one
+  // to re-seal.
+  const [recoverOpen, setRecoverOpen] = useState(false);
+  const [recoverOldPassword, setRecoverOldPassword] = useState("");
+  const [recoverCurrentPassword, setRecoverCurrentPassword] = useState("");
   const [selfContact, setSelfContact] = useState<Contact | null>(null);
 
   // PGP key-discovery settings.
@@ -292,6 +308,43 @@ export function SecurityPage() {
     }
   }
 
+  /**
+   * Recovers a PGP envelope that is out of step with the account password.
+   *
+   * This is reachable when a password change committed but the matching rewrap
+   * did not — which used to be a permanent loss. The rewrap was a second HTTP
+   * request fired after the password write, so a dropped connection between them
+   * left the envelope sealed under a password the user no longer had, and every
+   * rewrap path re-derived from the CURRENT password and therefore could never
+   * open it. The only escape was deleting the identity, losing every message ever
+   * encrypted to it.
+   *
+   * The two writes are atomic now (one request — see LoginPage), so this should
+   * never be needed again. It exists for accounts already stranded by the old
+   * flow, and because "should never happen" is not a recovery plan.
+   */
+  async function handleRecoverStaleEnvelope(e: FormEvent) {
+    e.preventDefault();
+    setPgpBusy(true);
+    setPgpStatus("");
+    try {
+      // Unlock with the OLD password — this only touches memory.
+      await unlockPGPSession(recoverOldPassword);
+      // Then re-seal under the current one and upload.
+      await rewrapUnlockedKeyUnder(recoverCurrentPassword);
+      setRecoverOpen(false);
+      setRecoverOldPassword("");
+      setRecoverCurrentPassword("");
+      setPgpStatus("Your PGP key is re-encrypted under your current password.");
+    } catch (err) {
+      setPgpStatus(
+        `Recovery failed: ${toErrorMessage(err, "unknown error")}. Check that the first password is the one your key was last encrypted under.`
+      );
+    } finally {
+      setPgpBusy(false);
+    }
+  }
+
   async function handleImportPGPIdentity(e: FormEvent) {
     e.preventDefault();
     setPgpBusy(true);
@@ -416,7 +469,13 @@ export function SecurityPage() {
     setBusy(true);
     setMessage("");
     try {
-      await postJSON<{ ok: boolean }>("/api/mfa/totp/disable", { password: disablePassword });
+      // Both forms: the server checks whichever the account stores. Derived
+      // against the caller's own session parameters — see api/auth.ts.
+      const { authSecret } = await deriveCredential("", disablePassword);
+      await postJSON<{ ok: boolean }>("/api/mfa/totp/disable", {
+        password: disablePassword,
+        authSecret
+      });
       setShowDisable(false);
       setDisablePassword("");
       setRecoveryCodes([]);
@@ -745,7 +804,48 @@ export function SecurityPage() {
                         Unlock key
                       </button>
                     )}
+                    <button type="button" className="contacts-action" onClick={() => setRecoverOpen((v) => !v)}>
+                      Key won&apos;t unlock?
+                    </button>
                   </div>
+                  {recoverOpen ? (
+                    <form onSubmit={(e) => void handleRecoverStaleEnvelope(e)}>
+                      <p className="contacts-muted">
+                        If your key stopped opening with your current password, a past password change saved only
+                        half-way. Enter the password your key was last encrypted under, plus your current one, and it
+                        will be re-encrypted to match.
+                      </p>
+                      <label>
+                        <div>Password your key was last encrypted under</div>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={recoverOldPassword}
+                          onChange={(e) => setRecoverOldPassword(e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <div>Your current account password</div>
+                        <input
+                          type="password"
+                          autoComplete="current-password"
+                          value={recoverCurrentPassword}
+                          onChange={(e) => setRecoverCurrentPassword(e.target.value)}
+                        />
+                      </label>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button
+                          type="submit"
+                          disabled={pgpBusy || recoverOldPassword === "" || recoverCurrentPassword === ""}
+                        >
+                          Re-encrypt key
+                        </button>
+                        <button type="button" className="contacts-action" onClick={() => setRecoverOpen(false)}>
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  ) : null}
                 </div>
               ) : pgpSession?.bootstrap?.migrationAvailable ? (
                 <div className="security-section">

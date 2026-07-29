@@ -18,13 +18,19 @@ import (
 
 // allowLoopbackOutboundForTest relaxes the SSRF guard (see ssrf_guard.go)
 // for the duration of a test so syncCardDAVClient can reach an
-// httptest.Server, which always listens on a loopback address. Production
-// code must never touch outboundIPGuard.
+// httptest.Server, which always listens on a loopback address AND speaks
+// plain http. Production code must never touch outboundIPGuard or
+// outboundCardDAVSchemes.
 func allowLoopbackOutboundForTest(t *testing.T) {
 	t.Helper()
-	old := outboundIPGuard
+	oldGuard := outboundIPGuard
 	outboundIPGuard = func(net.IP) bool { return false }
-	t.Cleanup(func() { outboundIPGuard = old })
+	oldSchemes := outboundCardDAVSchemes
+	outboundCardDAVSchemes = []string{"http", "https"}
+	t.Cleanup(func() {
+		outboundIPGuard = oldGuard
+		outboundCardDAVSchemes = oldSchemes
+	})
 }
 
 // fakeMultiBookBackend serves two address books for a single fixed user: an
@@ -271,5 +277,30 @@ func TestResolveCardDAVPathPinsHost(t *testing.T) {
 				t.Errorf("resolveCardDAVPath(%q, %q) = %q, want %q", c.hostRoot, c.path, got, c.want)
 			}
 		})
+	}
+}
+
+// TestCardDAVClientRefusesPlaintextURL pins the https-only rule on the
+// outbound CardDAV URL.
+//
+// Every request to that URL carries the user's address-book password in an
+// HTTP Basic header, and outboundIPGuard already refuses loopback and private
+// space — so an http:// target is by construction a public internet host
+// reached in the clear. This asserts the default value of the production
+// variable, NOT behaviour under allowLoopbackOutboundForTest's relaxation,
+// which is exactly the widening that would otherwise go unnoticed.
+func TestCardDAVClientRefusesPlaintextURL(t *testing.T) {
+	if len(outboundCardDAVSchemes) != 1 || outboundCardDAVSchemes[0] != "https" {
+		t.Fatalf("outboundCardDAVSchemes = %v, want exactly [https]; widening this puts "+
+			"the user's CardDAV password on the wire in the clear", outboundCardDAVSchemes)
+	}
+
+	if err := validateOutboundURL("http://carddav.example.com/dav/", outboundCardDAVSchemes...); err == nil {
+		t.Error("validateOutboundURL accepted an http:// CardDAV URL, want refusal")
+	}
+	// A bad scheme must be refused before any DNS resolution decides the
+	// outcome, so the check holds for a host that does not resolve either way.
+	if err := validateOutboundURL("http://nonexistent.invalid/dav/", outboundCardDAVSchemes...); err == nil {
+		t.Error("validateOutboundURL accepted http:// for an unresolvable host, want refusal on scheme alone")
 	}
 }

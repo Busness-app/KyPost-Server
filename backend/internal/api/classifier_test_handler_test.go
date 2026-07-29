@@ -18,9 +18,9 @@ func TestHandleClassifierTestCooldownBlocksRapidRequests(t *testing.T) {
 	srv := newTestServer(t)
 	admin, _ := newTestUsers(t, srv)
 
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	srv.cfg.Classifier.BaseURL = "http://127.0.0.1:1" // nothing listens here; connection refused fast
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 
 	body := []byte(`{"prompt":"test"}`)
 
@@ -51,9 +51,9 @@ func TestHandleClassifierTestCooldownIsPerAdmin(t *testing.T) {
 		t.Fatalf("Create second admin: %v", err)
 	}
 
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	srv.cfg.Classifier.BaseURL = "http://127.0.0.1:1"
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 
 	body := []byte(`{"prompt":"test"}`)
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -44,17 +45,42 @@ const (
 	deviceMaxFailures = 10
 	deviceLockoutFor  = 15 * time.Minute
 
-	// loginLockoutSweepThreshold bounds loginLockout.entries. A stream of
-	// distinct nonexistent usernames each gets an entry that never reaches the
-	// lockout threshold and is otherwise never removed. Past this size,
-	// not-currently-locked entries are swept inline; locked ones — the only
-	// ones worth remembering — are kept.
+	// loginLockoutSweepThreshold is the size at which sweepIfCrowdedLocked runs
+	// inline. A stream of distinct nonexistent usernames each gets an entry that
+	// never reaches the lockout threshold and is otherwise never removed. Past
+	// this size, not-currently-locked entries are swept.
 	loginLockoutSweepThreshold = 10_000
+	// loginLockoutHardCap is the size past which even currently-locked entries
+	// are evicted, oldest-expiry first.
+	//
+	// The sweep above keeps locked entries, which are precisely the ones an
+	// attacker creates on purpose — maxFailures requests buys one that survives
+	// every subsequent sweep for lockoutFor. So the threshold alone bounded only
+	// the unlocked portion, and the real limit on the table was the scrypt cost
+	// per login attempt in an entirely different file.
+	//
+	// Sized above the threshold so a normal instance never reaches it: crossing
+	// this means tens of thousands of distinct keys are simultaneously locked
+	// out, which is an attack, not a busy Monday morning.
+	loginLockoutHardCap = 50_000
+	// loginLockoutLowWater is how far stage 2 trims below the hard cap, so a
+	// table parked at the cap does not re-scan on every subsequent attempt.
+	loginLockoutLowWater = loginLockoutHardCap * 3 / 4
 )
 
 type loginLockoutEntry struct {
 	failures    int
 	lockedUntil time.Time
+	// lastSeen is when this key last attempted, so the sweep can tell an entry
+	// whose strikes have gone stale from one mid-accumulation.
+	//
+	// Without it the sweep had only "is it locked right now?" to go on, and so
+	// deleted every PARTIAL strike record whenever the table was crowded. That
+	// is a lockout bypass, not a memory optimization: flood the table past the
+	// threshold and every subsequent attempt wipes the 1-of-3 and 2-of-3
+	// progress of every real key, so no key ever reaches the third strike and
+	// the lockout never engages for anyone.
+	lastSeen time.Time
 }
 
 // failureLockout is small in-memory, keyed strike/cooldown state: after
@@ -68,7 +94,20 @@ type failureLockout struct {
 	maxFailures int
 	lockoutFor  time.Duration
 	entries     map[string]*loginLockoutEntry
+	// lastSweep throttles sweepIfCrowdedLocked. Both of its stages are O(n) (the
+	// second O(n log n)), and it is called from tryAttempt — so once the table
+	// sat above the threshold, every single attempt paid a full scan. Under the
+	// flood that makes the table big, that is the attacker choosing how much
+	// work each of their requests costs the server.
+	lastSweep time.Time
 }
+
+// sweepMinInterval is the shortest gap between two crowded-table sweeps.
+//
+// Hysteresis, so a table parked above the threshold does not scan itself on
+// every attempt. The hard cap is still enforced immediately regardless (see
+// sweepIfCrowdedLocked) — that one is a memory bound and cannot wait.
+const sweepMinInterval = time.Second
 
 func newFailureLockout(maxFailures int, lockoutFor time.Duration) *failureLockout {
 	return &failureLockout{
@@ -100,24 +139,32 @@ func (l *failureLockout) tryAttempt(username string) (ok bool, retryAfter time.D
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.sweepIfCrowdedLocked()
+	now := time.Now()
+	l.sweepIfCrowdedLocked(now)
 
 	e, exists := l.entries[username]
 	if !exists {
 		e = &loginLockoutEntry{}
 		l.entries[username] = e
-	} else if remaining := time.Until(e.lockedUntil); remaining > 0 {
+	} else if remaining := e.lockedUntil.Sub(now); remaining > 0 {
+		e.lastSeen = now
 		return false, remaining
 	} else if !e.lockedUntil.IsZero() {
 		// The lockout ran its course; start a fresh set of strikes rather than
 		// leaving the old ones to trip the very next attempt.
 		e.failures = 0
 		e.lockedUntil = time.Time{}
+	} else if now.Sub(e.lastSeen) >= l.lockoutFor {
+		// Partial strikes gone stale. Forgiving them here rather than only in
+		// the sweep means the budget behaves the same whether or not the table
+		// happened to be crowded enough to sweep.
+		e.failures = 0
 	}
 
+	e.lastSeen = now
 	e.failures++
 	if e.failures >= l.maxFailures {
-		e.lockedUntil = time.Now().Add(l.lockoutFor)
+		e.lockedUntil = now.Add(l.lockoutFor)
 	}
 	return true, 0
 }
@@ -164,18 +211,65 @@ func (l *failureLockout) allowed(username string) (ok bool, retryAfter time.Dura
 	return true, 0
 }
 
-// sweepIfCrowdedLocked drops entries that are not currently locked out once the
-// map grows past the threshold, bounding it without a background goroutine.
-// Callers must hold l.mu.
-func (l *failureLockout) sweepIfCrowdedLocked() {
+// sweepIfCrowdedLocked bounds the map without a background goroutine. Callers
+// must hold l.mu.
+//
+// Two stages, because the original single stage was neither a bound nor safe.
+//
+// Stage 1 reclaims entries that are neither locked nor mid-accumulation. It
+// keys off lastSeen, NOT off "is this locked right now" — the latter deleted
+// partial strike records, so flooding the table past the threshold erased every
+// real key's 1-of-3 and 2-of-3 progress and the lockout stopped engaging at all.
+// An entry idle for longer than lockoutFor is safe to drop because its strikes
+// would be reset on the next attempt anyway (see tryAttempt).
+//
+// Stage 2 evicts currently-locked entries, soonest-expiry first, once even they
+// exceed the hard cap. The old sweep exempted locked entries — which are exactly
+// what an attacker manufactures, maxFailures requests each — so the threshold
+// bounded only the unlocked portion while its comment claimed it bounded the
+// map. What actually limited the table was the scrypt cost per attempt in
+// handleLogin: a load-bearing dependency on a different file that nothing wrote
+// down. Evicting a locked entry forgives that key's cooldown early, which is the
+// right thing to trade for a real memory bound.
+func (l *failureLockout) sweepIfCrowdedLocked(now time.Time) {
+	overHardCap := len(l.entries) > loginLockoutHardCap
 	if len(l.entries) < loginLockoutSweepThreshold {
 		return
 	}
-	now := time.Now()
+	// Throttled unless we are over the hard cap, in which case the scan is not
+	// optional.
+	if !overHardCap && now.Sub(l.lastSweep) < sweepMinInterval {
+		return
+	}
+	l.lastSweep = now
+
 	for k, e := range l.entries {
-		if e.lockedUntil.IsZero() || !now.Before(e.lockedUntil) {
+		locked := !e.lockedUntil.IsZero() && now.Before(e.lockedUntil)
+		if locked {
+			continue
+		}
+		if now.Sub(e.lastSeen) >= l.lockoutFor {
 			delete(l.entries, k)
 		}
+	}
+
+	if len(l.entries) <= loginLockoutHardCap {
+		return
+	}
+	// Everything left is either locked or recently active. Evict down to a
+	// low-water mark rather than exactly to the cap, so the next attempt does
+	// not immediately trigger another full scan.
+	type keyed struct {
+		key   string
+		until time.Time
+	}
+	remaining := make([]keyed, 0, len(l.entries))
+	for k, e := range l.entries {
+		remaining = append(remaining, keyed{key: k, until: e.lockedUntil})
+	}
+	sort.Slice(remaining, func(i, j int) bool { return remaining[i].until.Before(remaining[j].until) })
+	for i := 0; i < len(remaining)-loginLockoutLowWater; i++ {
+		delete(l.entries, remaining[i].key)
 	}
 }
 
@@ -187,19 +281,75 @@ func (l *failureLockout) recordSuccess(username string) {
 	delete(l.entries, username)
 }
 
-const (
-	// timingDummyHash is a precomputed scrypt hash used to equalize login
-	// timing regardless of whether the account exists. It's a valid
-	// scrypt(n=16384,r=8,p=1) hash of "kypost-timing-equalization-dummy"
-	// with a fixed salt, hardcoded to avoid any runtime cost/variance in
-	// computing the dummy hash.
-	timingDummyHash = "scrypt$16384$8$1$WKzJYfE9CiMdmMrc+JFGzA==$xF16zj/zU2Y8NeGHTbs/wNF8iRSncahxdDCzZw0q34U="
-)
+// timingDummyHash is a scrypt hash used only to equalize login timing,
+// regardless of whether the account exists. Its plaintext is irrelevant: the
+// verification is only ever expected to fail, and only its COST matters.
+//
+// Derived at init from the CURRENT cost parameters rather than hardcoded. It was
+// a hardcoded scrypt$16384$... literal, and the instant HashPassword's N was
+// raised to 2^17 that literal became a cheaper hash than a real account's — so
+// the unknown-username path returned in ~22 ms against ~224 ms for a real user,
+// reopening the exact account-enumeration oracle this function exists to close.
+// A constant that has to be kept in step with another constant by hand will not
+// be. Pinned by TestLoginTimingDoesNotRevealUnknownUsernames.
+//
+// The one-off derivation cost is paid once at process start, not per request.
+var timingDummyHash = func() string {
+	h, err := users.HashPassword("kypost-timing-equalization-dummy")
+	if err != nil {
+		// HashPassword only fails on a crypto/rand failure or invalid cost
+		// parameters, neither of which is recoverable or reachable in practice.
+		// An empty string would make VerifySecretHash return immediately and
+		// silently restore the timing oracle, so refuse to start instead.
+		panic("users.HashPassword failed while deriving the login timing hash: " + err.Error())
+	}
+	return h
+}()
 
 // equalizeLoginTiming verifies candidate against a throwaway scrypt hash so
 // the unknown-username (and inactive-account) login path costs the same as a
-// real wrong-password check. The dummy hash is precomputed; its plaintext is
-// irrelevant because the verification is only ever expected to fail.
+// real wrong-password check.
 func equalizeLoginTiming(candidate string) {
 	users.VerifySecretHash(timingDummyHash, candidate)
 }
+
+// Instance-wide login throttle and the per-IP lockout, both added because the
+// username+IP lockout above bounds the wrong thing.
+//
+// loginMaxFailures is a budget per (username, IP) pair, and the username comes
+// from the request body — so a caller who never repeats a username never trips
+// it. Meanwhile every attempt against an unknown account runs scrypt on purpose
+// (equalizeLoginTiming, so timing does not reveal whether the account exists):
+// 16 MB and tens of milliseconds for a 200-byte request, on a host whose other
+// job is running an LLM.
+const (
+	// loginRateBurst/loginRateRefillPerSec bound TOTAL login attempts for the
+	// whole instance.
+	//
+	// Sized against the actual cost rather than picked round: one attempt is one
+	// scrypt at HashPassword's parameters, measured at roughly 200 ms of a core
+	// at N=2^17. At 1/sec sustained that is about a fifth of one core, on a box
+	// whose other job is running an LLM. 60 attempts a minute is still far above
+	// any real self-hosted instance — even fifty users all signing in at 9am
+	// peak below 1/sec — while a burst of 15 absorbs a genuine morning cluster
+	// without a legitimate user ever seeing a 429.
+	//
+	// Instance-wide rather than per-IP because the resource being protected is
+	// this server's CPU, which is shared, and because a per-IP limit is defeated
+	// by using more IPs.
+	loginRateBurst        = 15
+	loginRateRefillPerSec = 1.0
+
+	// loginIPMaxFailures/loginIPLockoutFor cut off one address that is cycling
+	// through usernames. Deliberately much looser than the 3-strike per-account
+	// budget: a shared NAT egress, a family, or an office all legitimately
+	// produce several failures from one address, and this must not become an
+	// easier way to lock out a building than to lock out an account.
+	loginIPMaxFailures = 50
+	loginIPLockoutFor  = 15 * time.Minute
+)
+
+// loginRateLimitKey is the single bucket key for the instance-wide login
+// throttle. ipRateLimiter is keyed, so a constant key gives one shared bucket
+// rather than one per caller — which is the whole point here.
+const loginRateLimitKey = "instance"

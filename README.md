@@ -18,7 +18,7 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 - Contacts address book with groups, dedupe, bulk delete, CSV and vCard import and export, and photo support
 - CardDAV server (`/dav`, `/.well-known/carddav`) to sync contacts to phones and desktop apps. An optional CardDAV client syncs against an external address book.
 - Multi-factor authentication: TOTP authenticator apps, one-time recovery codes, and push-approval sign-in
-- Optional CAPTCHA on login: self-hosted proof-of-work, Turnstile, or Friendly Captcha. It works together with the built-in lockout of 3 strikes and 15 minutes.
+- CAPTCHA on login, **self-hosted proof-of-work by default** (also Turnstile or Friendly Captcha; `CAPTCHA_PROVIDER=none` turns it off). It works alongside a 3-strikes/15-minute account lockout, a looser per-IP lockout, and an instance-wide login rate limit. Note that proof-of-work needs a secure context in the browser — read the CAPTCHA notes in `.env.example` if you serve over plain HTTP on a LAN.
 - Browser push notifications for each user, for all mail or for keyword matches only. KyPost also supports native push pairing for mobile apps.
 - Config page for IMAP, SMTP, model authentication, tuning, logs, health, and decisions
 - A dozen theme presets
@@ -70,15 +70,62 @@ Optional for local development (outside Docker):
 
 4. Open the web UI at http://localhost:5866.
 
-   > **Before exposing this to a network, put TLS in front of it.** KyPost
-   > serves plain HTTP and does not terminate TLS itself. The session cookie is
-   > marked `Secure` only when the request demonstrably arrived over TLS, so on
-   > a bare `http://` deployment the cookie is sent in the clear on every
-   > request. Run a TLS-terminating reverse proxy and set
-   > `TRUST_PROXY_HEADERS=true` so the server sees the real scheme, host and
-   > client IP — without it the cookie stays non-`Secure` and the login and
-   > CardDAV lockouts key off the proxy's IP instead of the caller's. `http://`
-   > on localhost, for one machine, is fine.
+   > **Before exposing this to a network, get TLS in front of it.** By default
+   > KyPost serves plain HTTP. The session cookie is marked `Secure` only when the
+   > request demonstrably arrived over TLS, so on a bare `http://` deployment the
+   > cookie is sent in the clear on every request. `http://` on localhost, for one
+   > machine, is fine.
+   >
+   > The shipped compose file publishes port 5866 on `127.0.0.1` only. Behind a
+   > proxy, **leave it that way** — the proxy reaches it over loopback, and
+   > anything else leaves an unproxied plain-HTTP port listening beside your TLS
+   > one.
+   >
+   > Three ways to get TLS, and they are not equivalent:
+   >
+   > **1. Terminate TLS in KyPost.** Set `TLS_CERT_FILE` and `TLS_KEY_FILE` to
+   > mounted certificate paths (see `.env.example` and the commented volume in
+   > `docker-compose.yml`). This is the only option where "did this arrive over
+   > TLS?" is answered by the connection itself rather than by a header, so
+   > `TRUSTED_PROXY_CIDRS` does not apply at all. Renewals are picked up without a
+   > restart, which matters because a restart logs everyone out. Setting only one
+   > of the two paths is a startup error, not a fallback to cleartext.
+   > Certificates are deliberately never baked into the image.
+   >
+   > **2. Cloudflare Tunnel.** cloudflared gives the browser a real HTTPS origin,
+   > which is all the login proof-of-work needs, with no TLS configuration of your
+   > own.
+   >
+   > **3. A reverse proxy you run** (nginx, Caddy).
+   >
+   > Options 2 and 3 need `TRUSTED_PROXY_CIDRS` set to the proxy's address — e.g.
+   > `127.0.0.1/32` for a proxy on the same host, or the bridge address of a proxy
+   > container. Only then does the server believe
+   > `X-Forwarded-Proto`/`-Host`/`-For`, which is what marks the cookie `Secure`
+   > and keys the login and CardDAV lockouts off the real caller rather than the
+   > proxy. **Name the proxy's address specifically, not a wide range:** any peer
+   > inside the range you name can forge its own client IP and bypass every rate
+   > limit and lockout keyed on it. This replaces the old
+   > `TRUST_PROXY_HEADERS=true`, which is no longer read — it trusted forwarded
+   > headers on *every* connection from any peer, so it was only ever safe when
+   > nothing but the proxy could reach the port.
+   >
+   > Behind Cloudflare specifically, the client address is read from
+   > `CF-Connecting-IP` in preference to `X-Forwarded-For`: the edge appends the
+   > visitor IP to XFF, but cloudflared can append its own hop after it, which
+   > would make every visitor look like `127.0.0.1` and collapse the per-IP lockout
+   > into one shared bucket.
+   >
+   > If the proxy runs on a **different host**, combine option 1 with 2 or 3 — that
+   > hop carries session cookies across a real network. A self-signed certificate
+   > is enough there; tell the proxy to skip verification (cloudflared
+   > `noTLSVerify: true`, nginx `proxy_ssl_verify off`).
+   >
+   > **Verify rather than assume.** Sign in and fetch `GET /api/status`: `clientIp`
+   > must be your own public address and `proxyHeadersTrusted` must be `true`
+   > (option 1 reports `false`, correctly — it trusts no headers). If `clientIp` is
+   > a loopback or bridge address, every user is sharing one lockout key and the
+   > session cookie is not being marked `Secure`.
 5. Sign in with the bootstrap credentials. The username is `admin`. On the
    first start KyPost writes the generated password to
    `first-run-password.txt` in the config volume, mode `600`. Read it, then
@@ -112,10 +159,34 @@ The browser then wraps the key under a key derived from your account password.
 It uses PBKDF2-HMAC-SHA256 with 600,000 iterations and AES-256-GCM. The browser
 uploads only the wrapped blob and the public half.
 
-The server stores that blob and cannot open it. The server holds a scrypt hash
-of your password, not the password, so it cannot derive the wrapping key. Your
-browser decrypts and signs. A person who takes the disk, a backup, or the memory
-of this process gets ciphertext.
+The server stores that blob and cannot open it, and two things have to be true
+for that to hold:
+
+1. **Your password never reaches the server.** The browser stretches it with a
+   per-account login salt (fetched from `GET /api/auth/login-params`) and splits
+   the result: an authentication half, which is what gets sent, and a
+   key-wrapping half, which never leaves the page.
+2. **The two halves are derived under different salts.** The wrapping key uses a
+   random salt stored inside the envelope; authentication uses the account's
+   login salt. Neither value can be computed from the other without the password.
+
+Point 1 was not true before. Earlier versions POSTed the plaintext password to
+`/api/auth/login` on every sign-in, so the server was handed the wrapping key's
+source material repeatedly and merely chose not to keep it — a few lines in the
+login handler would have opened every client-protected key on the instance. That
+made the claim in this section, and in the code, false. Existing accounts convert
+automatically on their next sign-in; nothing needs to be re-imported.
+
+Your browser decrypts and signs. A person who takes the disk, a backup, or the
+memory of this process gets ciphertext.
+
+**What this does not defend against.** This server ships the JavaScript that does
+the derivation. A server that wants your password can serve a modified bundle
+that sends it, and no amount of client-side cryptography prevents that. What you
+get is protection against a server that keeps too much, against your password
+reaching logs, heap dumps and backups, and against someone who obtains the data
+at rest. That is the same trust boundary as every other end-to-end product
+delivered through a browser.
 
 The costs are real. Know them before you choose this mode:
 
@@ -345,6 +416,9 @@ Important files:
 Auth:
 
 - `POST /api/auth/login`
+- `GET /api/auth/login-params` — the per-account salt and work factor a client
+  needs to derive its auth secret, so the password is never transmitted. Public,
+  and deliberately answers identically for a username that does not exist.
 - `GET /api/auth/captcha-config`
 - `GET /api/auth/me`
 - `POST /api/auth/logout`

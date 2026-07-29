@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,20 +38,37 @@ import (
 
 // Server holds the HTTP surface and its process-wide state.
 //
-// LOCK ORDER: mu before userMu. Never the reverse.
+// LOCK ORDER: cfgMu before sessMu before userMu. Never the reverse.
 //
-// These are two independent mutexes guarding two independent groups of
-// fields — mu covers cfg/sessions/httpServer, userMu covers the per-user
-// store caches and the subscriber/device indexes. Nothing currently takes
-// both, which is the only reason there is no deadlock to find today. The
-// moment one handler reads s.cfg (mu) inside a userMu critical section
-// while another does the reverse, that becomes an ABBA deadlock that only
-// shows up under concurrent load in production. Stating the order here is
-// cheaper than discovering it there.
+// These are independent mutexes guarding independent groups of fields.
+// Nothing currently takes more than one, which is the only reason there is no
+// deadlock to find today. The moment one handler reads s.cfg inside a userMu
+// critical section while another does the reverse, that becomes an ABBA
+// deadlock that only shows up under concurrent load in production. Stating the
+// order here is cheaper than discovering it there.
+//
+// cfgMu and sessMu were one mutex named mu, and that was a real bottleneck
+// rather than a tidiness problem: currentUser slides a session's idle expiry,
+// which is a WRITE, so every authenticated request took the single lock
+// exclusively and every s.cfg reader in the process queued behind it. The
+// RWMutex degenerated into a plain Mutex across the whole request path. They
+// guard unrelated state with opposite access patterns — cfg is written once
+// per admin action and read constantly; sessions are written on every request
+// — so one lock could not serve both.
+//
+// The old comment also claimed mu covered httpServer. It did not: Prepare,
+// Serve, Run and Shutdown all touch s.httpServer with no lock held. That is
+// safe only because Prepare is called synchronously before any goroutine can
+// reach the others — see Prepare's doc comment — and it is documented here as
+// unguarded rather than left looking protected.
 type Server struct {
-	mu                  sync.RWMutex
-	cfg                 config.Config
-	onConfigUpdated     func(config.Config)
+	cfgMu           sync.RWMutex
+	cfg             config.Config
+	onConfigUpdated func(config.Config)
+
+	// sessMu guards sessions only.
+	sessMu sync.RWMutex
+
 	logger              *logging.Logger
 	health              *health.Service
 	users               *users.Store
@@ -93,6 +111,26 @@ type Server struct {
 	powChallenges *powChallengeLimiter
 	powDifficulty *powEscalation
 
+	// loginRateLimiter is an INSTANCE-WIDE token bucket on POST /api/auth/login,
+	// not a per-IP one.
+	//
+	// loginLockout below is keyed on username+IP, and the username is
+	// attacker-chosen with unbounded cardinality — so it bounds guessing at any
+	// one account and bounds nothing about total work. Every attempt with an
+	// unknown username deliberately runs scrypt (equalizeLoginTiming, to keep
+	// response timing from revealing whether an account exists), which is 16 MB
+	// and tens of milliseconds of CPU for a 200-byte request. That made login an
+	// unauthenticated amplifier on a box that also runs an LLM on the same
+	// cores: a rotating username never trips the lockout, so a handful of
+	// connections could peg every CPU and starve mail classification.
+	//
+	// Instance-wide is the point: a per-IP limit is defeated by more IPs, and
+	// the resource being protected (this server's CPU) is shared.
+	loginRateLimiter *ipRateLimiter
+	// loginIPLockout is a second, coarser lockout keyed on the client IP ALONE,
+	// so a caller cycling through usernames from one address runs out of budget.
+	loginIPLockout *failureLockout
+
 	// classifier and globalStore back the Ollama version/update-check block on
 	// the Prompt Tuning page and its admin-notification email. classifier is
 	// nil until SetClassifier is called (see app.go); globalStore is the
@@ -129,6 +167,15 @@ type Server struct {
 	// comment for why sharing one instance matters.
 	wkdStore *wkdpublish.Store
 
+	// TLS state, resolved by Prepare from TLS_CERT_FILE/TLS_KEY_FILE. tlsConfig
+	// is nil for a plain-HTTP listener; tlsErr is non-nil when the configuration
+	// is broken, and Serve refuses to start rather than falling back to
+	// cleartext. See tls.go.
+	tlsConfig   *tls.Config
+	tlsErr      error
+	tlsCertFile string
+	tlsKeyFile  string
+
 	// httpServer is the live *http.Server backing Run/Serve, constructed by
 	// Prepare so that a Shutdown call arriving before Serve's goroutine has
 	// even been scheduled still has a real server to act on instead of racing
@@ -150,7 +197,10 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	pairingSecretKeyPath := config.SecretFile("PAIRING_SECRET_FILE", "pairing.key")
 	pairingSecret := resolvePairingSecret(pairingSecretKeyPath, logger)
 
-	captchaProvider := captcha.Provider(strings.ToLower(strings.TrimSpace(os.Getenv("CAPTCHA_PROVIDER"))))
+	warnOnRetiredProxyEnv(logger)
+
+	captchaProvider := resolveCaptchaProvider(os.Getenv("CAPTCHA_PROVIDER"))
+	warnIfPoWDefaultMayLockOutPlainHTTP(logger, captchaProvider, os.Getenv("CAPTCHA_PROVIDER"))
 	captchaSiteKey := strings.TrimSpace(os.Getenv("CAPTCHA_SITE_KEY"))
 	captchaCfg := captcha.Config{
 		Provider:  captchaProvider,
@@ -227,6 +277,8 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		powVerifier:            powVerifier,
 		powChallenges:          newPowChallengeLimiter(),
 		powDifficulty:          newPowEscalation(),
+		loginRateLimiter:       newIPRateLimiter(loginRateBurst, loginRateRefillPerSec),
+		loginIPLockout:         newFailureLockout(loginIPMaxFailures, loginIPLockoutFor),
 		globalStore:            globalStore,
 		wkdStore:               wkdStore,
 	}
@@ -297,6 +349,10 @@ func (s *Server) routes() http.Handler {
 func (s *Server) routesAuth(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	mux.HandleFunc("GET /api/auth/captcha-config", s.handleCaptchaConfig)
+	// Pre-login, unauthenticated: tells the browser how to derive its auth
+	// secret so the password never has to be transmitted. See login_params.go
+	// for why the response cannot reveal whether the account exists.
+	mux.HandleFunc("GET /api/auth/login-params", s.handleLoginParams)
 	mux.HandleFunc("GET /api/auth/pow-challenge", s.handlePoWChallenge)
 	mux.HandleFunc("POST /api/auth/mfa/totp", s.handleMFATOTP)
 	mux.HandleFunc("POST /api/auth/mfa/recovery-code", s.handleMFARecoveryCode)
@@ -361,11 +417,11 @@ func (s *Server) routesMail(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("DELETE /api/imap/config", s.withAuth(s.handleIMAPConfig))
 	mux.HandleFunc("POST /api/imap/test", s.withAuth(s.handleIMAPTest))
-	mux.HandleFunc("POST /api/mail/draft", s.withMailAuth(s.handleMailDraft))
-	mux.HandleFunc("POST /api/mail/send", s.withMailAuth(s.handleMailSend))
+	mux.HandleFunc("POST /api/mail/draft", withUploadDeadline(s.withMailAuth(s.handleMailDraft)))
+	mux.HandleFunc("POST /api/mail/send", withUploadDeadline(s.withMailAuth(s.handleMailSend)))
 	// Send path for end-to-end keys: the browser has already encrypted and
 	// signed, the server only relays over SMTP. See pgp_send_client.go.
-	mux.HandleFunc("POST /api/mail/send-pgp", s.withMailAuth(s.handleMailSendPGP))
+	mux.HandleFunc("POST /api/mail/send-pgp", withUploadDeadline(s.withMailAuth(s.handleMailSendPGP)))
 	// Read path for end-to-end keys: lazy per-message ciphertext fetch, since
 	// the inbox DTO cannot carry it. See pgp_client_read.go.
 	mux.HandleFunc("GET /api/mail/pgp-payload", s.withMailAuth(s.handlePGPPayload))
@@ -385,7 +441,7 @@ func (s *Server) routesContacts(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/contacts/search", s.withAuth(s.handleContactsSearch))
 	mux.HandleFunc("POST /api/contacts/bulk-delete", s.withAuth(s.handleContactsBulkDelete))
 	mux.HandleFunc("GET /api/contacts/export", s.withAuth(s.handleContactsExport))
-	mux.HandleFunc("POST /api/contacts/import", s.withAuth(s.handleContactsImport))
+	mux.HandleFunc("POST /api/contacts/import", withUploadDeadline(s.withAuth(s.handleContactsImport)))
 	mux.HandleFunc("GET /api/contacts/dav-password", s.withAuth(s.handleContactsDAVPassword))
 	mux.HandleFunc("POST /api/contacts/dav-password", s.withAuth(s.handleContactsDAVPassword))
 	mux.HandleFunc("DELETE /api/contacts/dav-password", s.withAuth(s.handleContactsDAVPassword))
@@ -398,7 +454,7 @@ func (s *Server) routesContacts(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/contacts/{id}", s.withAuth(s.handleContactByID))
 	mux.HandleFunc("GET /api/contacts/sync", s.handleContactsSync)
 	mux.HandleFunc("POST /api/contacts/sync", s.handleContactsSync)
-	mux.HandleFunc("POST /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
+	mux.HandleFunc("POST /api/contacts/{id}/photo", withUploadDeadline(s.withAuth(s.handleContactPhoto)))
 	mux.HandleFunc("GET /api/contacts/{id}/photo", s.withMailAuth(s.handleContactPhoto))
 	mux.HandleFunc("DELETE /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
 	mux.HandleFunc("POST /api/contacts/{id}/self", s.withAuth(s.handleContactSelf))
@@ -474,7 +530,7 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// See pickup_client_sealed.go.
 	mux.HandleFunc("POST /pickup/{id}/open", s.handlePickupOpen)
 	mux.HandleFunc("GET /pickup/{id}/blob", s.handlePickupBlob)
-	mux.HandleFunc("POST /api/pgp/pickup", s.withMailAuth(s.handlePickupCreate))
+	mux.HandleFunc("POST /api/pgp/pickup", withUploadDeadline(s.withMailAuth(s.handlePickupCreate)))
 }
 
 // routesNotifications registers web push, native device pairing, and the
@@ -539,6 +595,12 @@ func (s *Server) Prepare() {
 	// publishes this port directly with no reverse proxy in front to absorb
 	// it. WriteTimeout is deliberately generous rather than absent — large
 	// attachment downloads stream through this same server.
+	//
+	// ReadTimeout stays tight because it covers the whole request INCLUDING the
+	// body, and almost every route here reads at most a few KB. The handful
+	// that accept a multi-megabyte upload extend it per-request via
+	// withUploadDeadline — see its doc comment for why the global value cannot
+	// simply be raised to suit them.
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
 		Handler:           s.routes(),
@@ -546,6 +608,24 @@ func (s *Server) Prepare() {
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      10 * time.Minute,
 		IdleTimeout:       120 * time.Second,
+	}
+
+	// Optional inbound TLS — see tls.go. The error is stashed rather than
+	// returned because Prepare has no error return and several callers rely on
+	// that; Serve surfaces it and refuses to start. It must NOT degrade to plain
+	// HTTP: an operator who configured a certificate believes this port is
+	// encrypted, and quietly serving cleartext on it is worse than not starting.
+	certFile, keyFile, err := tlsFilesFromEnv()
+	if err == nil {
+		s.tlsConfig, err = newTLSConfig(certFile, keyFile)
+	}
+	if err != nil {
+		s.tlsErr = err
+		return
+	}
+	if s.tlsConfig != nil {
+		s.httpServer.TLSConfig = s.tlsConfig
+		s.tlsCertFile, s.tlsKeyFile = certFile, keyFile
 	}
 }
 
@@ -560,8 +640,21 @@ func (s *Server) Serve() error {
 	if s.httpServer == nil {
 		s.Prepare()
 	}
-	s.logger.Info("api server starting", "addr", s.httpServer.Addr)
-	err := s.httpServer.ListenAndServe()
+	// A TLS misconfiguration is fatal here rather than a fallback to cleartext.
+	if s.tlsErr != nil {
+		return fmt.Errorf("tls configuration: %w", s.tlsErr)
+	}
+
+	var err error
+	if s.tlsConfig != nil {
+		s.logger.Info("api server starting", "addr", s.httpServer.Addr, "scheme", "https")
+		// Paths are already in TLSConfig.GetCertificate; passing empty strings
+		// tells net/http to use it, which is what makes renewal reload work.
+		err = s.httpServer.ListenAndServeTLS("", "")
+	} else {
+		s.logger.Info("api server starting", "addr", s.httpServer.Addr, "scheme", "http")
+		err = s.httpServer.ListenAndServe()
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
@@ -675,8 +768,8 @@ func (s *Server) StartSessionSweeper(ctx context.Context) {
 // sweepSessions drops every session dead as of now. Split out so tests can
 // drive it directly instead of waiting on the ticker.
 func (s *Server) sweepSessions(now time.Time) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
 	removed := 0
 	for token, sess := range s.sessions {
 		if now.After(sess.ExpiresAt) || now.Sub(sess.IssuedAt) >= sessionMaxLifetime {
@@ -748,19 +841,27 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg := s.cfg
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	store, err := s.storeFor(r)
 	if err != nil {
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
 		return
 	}
 	processedSince := time.Now().UTC().Add(-1 * time.Hour)
+	// A failed checkpoint read is reported as such rather than rendered as an
+	// empty string, which on this page is indistinguishable from "never polled".
+	checkpoint, err := store.Checkpoint()
+	if err != nil {
+		s.logger.Error("status: checkpoint read failed", "error", err.Error())
+		checkpoint = ""
+	}
 	resp := map[string]any{
 		"scanIntervalSeconds":     cfg.Scan.IntervalSeconds,
 		"rateLimits":              cfg.RateLimits,
-		"checkpoint":              store.Checkpoint(),
+		"checkpoint":              checkpoint,
+		"checkpointReadFailed":    err != nil,
 		"emailsProcessedLastHour": store.ProcessedSince(processedSince),
 		"serverTimeUtc":           time.Now().UTC().Format(time.RFC3339),
 	}
@@ -770,6 +871,26 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.classifier != nil {
 		resp["classifier"] = s.classifier.Stats()
 	}
+
+	// How this server resolved the caller's address, and whether it believed the
+	// forwarded headers to do it.
+	//
+	// This is here because there was no way to check it. Nothing logs the client
+	// IP (deliberately — see log_privacy_test.go), so an operator standing up a
+	// reverse proxy had no way to confirm the lockouts were keying off real
+	// callers rather than off the proxy. Getting that wrong is silent and it cuts
+	// both ways: a forgeable value defeats every rate limit, and a CONSTANT value
+	// makes the per-IP lockout one shared bucket, where 50 failures from anyone
+	// locks out sign-in for everyone.
+	//
+	// Safe to return: it is the caller's own address, which they already know, and
+	// the trust flag is a property of the deployment rather than a secret. Behind
+	// a correctly configured proxy, clientIp should be YOUR public address and
+	// proxyHeadersTrusted should be true. If clientIp is a loopback or bridge
+	// address, every user is sharing one lockout key.
+	resp["clientIp"] = clientIP(r)
+	resp["proxyHeadersTrusted"] = proxyHeadersTrusted(r)
+
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -798,11 +919,42 @@ type mailRequest struct {
 	From                string
 }
 
-// Attachment budget for one outgoing message (decoded bytes); the request
-// body limit leaves headroom for the ~4/3 base64 overhead plus the JSON.
+// Size limits for one outgoing message.
+//
+// maxMailRequestBytes is the hard cap on the request body — the number a user
+// experiences as "how big an upload is allowed" — and it is the one fixed by
+// hand. maxMailAttachmentBytes is DERIVED from it rather than picked
+// separately, because the two are not independent: attachments travel
+// base64-encoded inside the JSON body, so a decoded budget larger than
+// (request cap × 3/4) is a limit that can never be reached and only exists to
+// produce a confusing error at the wrong layer. That is what a hand-picked
+// 25 MiB attachment budget under a 40 MiB request cap was.
+//
+// mailRequestOverheadBytes reserves room for everything in the body that is
+// not attachment payload: the JSON scaffolding, recipient lists, subject, and
+// message body. 1 MiB is far more than those need.
+//
+// The client-side-encrypted paths (maxClientCiphertextBytes,
+// maxSealedPickupBytes) deliberately track the INBOUND message cap instead of
+// this one: they carry an already-armored ciphertext whose size is set by what
+// the browser produced, and they are bounded so a send cannot exceed what a
+// receive can handle. See their own doc comments.
 const (
-	maxMailAttachmentBytes = 25 << 20
-	maxMailRequestBytes    = 40 << 20
+	maxMailRequestBytes      = 25 << 20
+	mailRequestOverheadBytes = 1 << 20
+	// 3/4 undoes base64's 4/3 expansion.
+	maxMailAttachmentBytes = (maxMailRequestBytes - mailRequestOverheadBytes) / 4 * 3
+)
+
+// The two size-refusal messages, derived from the constants above rather than
+// written out. The attachment message previously read "max 25 MB total" as a
+// hardcoded string while the constant it described was a separate literal —
+// so changing one silently made the other a lie to the user's face.
+var (
+	mailTooLargeMessage = fmt.Sprintf(
+		"message too large (max %d MB including attachments)", maxMailRequestBytes>>20)
+	attachmentsTooLargeMessage = fmt.Sprintf(
+		"attachments too large (max %d MB total)", maxMailAttachmentBytes>>20)
 )
 
 // pgpRecipientPlan splits an encrypted send's To/CC/BCC recipients by PGP

@@ -8,7 +8,16 @@
 // each deciding for themselves and disagreeing.
 
 import { getPGPBootstrap, rewrapPGPPrivateKey, type PGPBootstrap } from "../api/pgp";
-import { isUnlocked, lock, onVaultChange, parseEnvelope, unlock, unwrapPrivateKey, wrapPrivateKey } from "./keyVault";
+import {
+  isUnlocked,
+  lock,
+  onVaultChange,
+  parseEnvelope,
+  requireUnlockedKey,
+  unlock,
+  unwrapPrivateKey,
+  wrapPrivateKey
+} from "./keyVault";
 
 export type PGPSessionState = {
   loaded: boolean;
@@ -112,22 +121,26 @@ export function knownSignerKeys(): string[] {
 }
 
 /**
- * Prepares the PGP key rewrap that a password change requires.
+ * Returns the PGP private-key envelope re-sealed under newPassword, or null when
+ * there is nothing to re-seal (no key, or a legacy server-held one).
  *
  * The wrapping key is derived from the account password, so changing the
- * password without rewrapping strands the key: the stored envelope still
- * only opens with the old password, and nothing in the UI tells the user
- * that. Returns null when there is nothing to rewrap (no key, or a legacy
- * server-held one).
+ * password without re-sealing strands the key: the stored envelope still only
+ * opens with the old password, and nothing in the UI would say so.
  *
- * The unwrap happens eagerly — while the old password is known to be
- * correct — and the upload is deferred to the returned function, so the
- * caller can order it against the password write itself.
+ * This used to return an uploader the caller invoked AFTER the password write,
+ * as a second HTTP request. A dropped connection in between left the password
+ * changed and the envelope sealed under a password the user no longer had —
+ * permanently, because the only rewrap path re-derives from the CURRENT password
+ * and so could never open it again. The advertised recovery ("unlock with your
+ * PREVIOUS password, then change your password again") could not work. The
+ * envelope is now returned as data and written in the SAME request as the
+ * credential, so the pair commits together or not at all.
  */
-export async function prepareRewrappedPGPKey(
+export async function rewrappedEnvelopeFor(
   oldPassword: string,
   newPassword: string
-): Promise<null | (() => Promise<void>)> {
+): Promise<string | null> {
   const bootstrap = state.bootstrap ?? (await loadPGPSession()).bootstrap;
   if (!bootstrap || bootstrap.protection !== "client" || !bootstrap.wrappedPrivateKey) {
     return null;
@@ -136,10 +149,22 @@ export async function prepareRewrappedPGPKey(
   if (!envelope) {
     return null;
   }
+  // Unwrapped eagerly, while the old password is known to be correct.
   const armored = await unwrapPrivateKey(envelope, oldPassword);
-  const rewrapped = await wrapPrivateKey(armored, newPassword);
-  return async () => {
-    await rewrapPGPPrivateKey(JSON.stringify(rewrapped));
-    await loadPGPSession();
-  };
+  return JSON.stringify(await wrapPrivateKey(armored, newPassword));
+}
+
+/**
+ * Re-seals the ALREADY-UNLOCKED key under password and uploads it.
+ *
+ * The recovery path for an envelope that is out of step with the account
+ * password — which had no way out at all before: every rewrap derived from the
+ * current password, and a stale envelope by definition does not open with it.
+ * Unlocking with the older password (PgpUnlockDialog) puts the key in memory,
+ * and this writes it back under the current one.
+ */
+export async function rewrapUnlockedKeyUnder(password: string): Promise<void> {
+  const armored = requireUnlockedKey();
+  await rewrapPGPPrivateKey(JSON.stringify(await wrapPrivateKey(armored, password)));
+  await loadPGPSession();
 }

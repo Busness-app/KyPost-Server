@@ -1,10 +1,20 @@
 import { FormEvent, useEffect, useState } from "react";
-import { prepareRewrappedPGPKey } from "../lib/pgpSession";
+import { loadPGPSession, rewrappedEnvelopeFor } from "../lib/pgpSession";
+import { deriveCredential, deriveNewCredential } from "../api/auth";
+import { defaultIterations, newLoginSalt } from "../lib/authSecret";
 import { toErrorMessage } from "../api/client";
 import { useNavigate } from "react-router";
 import { getJSON, HttpError, postJSON } from "../api/client";
 import type { AuthState } from "../auth";
 import { CaptchaWidget, type CaptchaProvider } from "../components/CaptchaWidget";
+
+// Mirror of users.MinPasswordLen on the server.
+//
+// Duplicated rather than fetched because the server can no longer measure it: a
+// converted account sends a derived auth secret, not the password. The floor has
+// to be enforced where the password still exists, which is here. The server
+// keeps enforcing it on the legacy plaintext path and on admin-set passwords.
+const MIN_PASSWORD_LEN = 14;
 
 // /api/auth/login's 401 body is always one of: "invalid credentials",
 // "captcha verification failed", "security check expired, please try
@@ -124,7 +134,11 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         challengeId?: string;
         methods?: string[];
         matchDigits?: string;
-      }>("/api/auth/login", { username, password, captchaToken: captchaToken || undefined });
+      }>("/api/auth/login", {
+        username,
+        ...(await deriveCredential(username, password)),
+        captchaToken: captchaToken || undefined
+      });
       if (res.mfaRequired && res.challengeId) {
         const methods = res.methods ?? [];
         setMfaChallengeId(res.challengeId);
@@ -243,34 +257,43 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       return;
     }
     try {
-      // The PGP key is wrapped under the account password, so it must be
-      // rewrapped as part of this change. Do it BEFORE the password write:
-      // if the rewrap fails, the password is untouched and the user retries,
-      // which is recoverable. The other order leaves the password changed and
-      // the key still wrapped under the old one — recoverable only by knowing
-      // to enter a password that is no longer their password.
-      const rewrap = await prepareRewrappedPGPKey(currentPassword, newPassword);
+      // MIN_PASSWORD_LEN is enforced here, in the client, because the server
+      // cannot see the new password any more — that is the point of deriving the
+      // credential locally. The server still checks length on the legacy
+      // plaintext path and on admin-set passwords, which is where an operator
+      // policy actually needs to bite.
+      if ([...newPassword].length < MIN_PASSWORD_LEN) {
+        setStatus(`New password must be at least ${MIN_PASSWORD_LEN} characters.`);
+        setBusy(false);
+        return;
+      }
+
+      // Build everything BEFORE writing anything, then send one request.
+      //
+      // The PGP key is sealed under the account password, so the credential and
+      // the re-sealed envelope have to land together. They used to be two
+      // sequential requests, and a dropped connection between them stranded the
+      // key permanently — the only rewrap path re-derives from the current
+      // password and so could never open the stale envelope again.
+      const iterations = defaultIterations();
+      const salt = newLoginSalt();
+      const newAuthSecret = await deriveNewCredential(newPassword, salt, iterations);
+      const oldCredential = await deriveCredential(username, currentPassword);
+      const rewrappedPgpKey = await rewrappedEnvelopeFor(currentPassword, newPassword);
 
       await postJSON<{ ok: boolean }>("/api/auth/password", {
-        username,
         oldPassword: currentPassword,
-        newPassword
+        oldAuthSecret: oldCredential.authSecret,
+        newAuthSecret,
+        newLoginSalt: salt,
+        newIterations: iterations,
+        ...(rewrappedPgpKey ? { rewrappedPgpKey } : {})
       });
 
-      if (rewrap) {
-        try {
-          await rewrap();
-        } catch (rewrapErr) {
-          // The password did change, so say exactly that and name the remedy
-          // rather than reporting a generic failure for a half-applied change.
-          setStatus(
-            "Password updated, but re-encrypting your PGP key failed. Go to Security and unlock your key with your PREVIOUS password, then change your password again. " +
-              toErrorMessage(rewrapErr, "")
-          );
-          setBusy(false);
-          return;
-        }
-      }
+      // The envelope, if there was one, is already committed alongside the
+      // credential; refresh the cached snapshot so the UI reflects it.
+      await loadPGPSession();
+
       await onAuthChanged();
       setNeedsPasswordChange(false);
       setPassword("");

@@ -42,9 +42,9 @@ type notificationTestPayload struct {
 }
 
 func (s *Server) handleNotificationVAPIDPublicKey(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	publicKey := strings.TrimSpace(s.cfg.Notifications.PublicKey)
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	if publicKey == "" {
 		http.Error(w, "notification public key not configured", http.StatusInternalServerError)
 		return
@@ -155,7 +155,15 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	failed := 0
 	removed := 0
 	if len(subs) > 0 {
-		outcome, err := processor.SendWebPush(store, s.cfg.Notifications.PublicKey, s.cfg.Notifications.PrivateKeyPath, 3600, payloadBytes)
+		// Read under cfgMu like every other s.cfg access. These two were bare
+		// field reads racing PUT /api/config's write — benign-looking because
+		// they are strings, but a torn read of a key path is a push that fails
+		// for no discoverable reason.
+		s.cfgMu.RLock()
+		vapidPublic := s.cfg.Notifications.PublicKey
+		vapidKeyPath := s.cfg.Notifications.PrivateKeyPath
+		s.cfgMu.RUnlock()
+		outcome, err := processor.SendWebPush(store, vapidPublic, vapidKeyPath, 3600, payloadBytes)
 		if err != nil {
 			http.Error(w, "failed to load notification private key", http.StatusInternalServerError)
 			return
@@ -177,7 +185,9 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 			Data:  map[string]string{"url": "/notifications"},
 		}
 		outcome, err := processor.SendNativePush(r.Context(), s.nativePushDispatcher, s.health, store, nativeMessage, func(device state.NativeDevice, platform string, sendErr error) {
-			s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", platform, "sender", "relay", "error", sendErr.Error())
+			// "sent_via", not "sender" — this names the delivery path, not an
+			// email's From address. See the matching note in processor/poller.go.
+			s.logger.Error("test native notification failed", "device_id", strings.TrimSpace(device.DeviceID), "platform", platform, "sent_via", "relay", "error", sendErr.Error())
 		})
 		if outcome.Queued {
 			// App Pull mode: queue the test for the device to fetch over HTTP

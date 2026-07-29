@@ -254,6 +254,21 @@ func carryPGPProvenance(c *Contact, existing Contact) {
 }
 
 func (s *Store) upsertLocked(c Contact) (Contact, error) {
+	out, err := s.applyUpsertLocked(c)
+	if err != nil {
+		return Contact{}, err
+	}
+	if err := s.persistLocked(); err != nil {
+		return Contact{}, err
+	}
+	return out, nil
+}
+
+// applyUpsertLocked is upsertLocked without the write.
+//
+// Split out so ApplyBatch can apply many changes and persist once. The single-
+// change path is unchanged: upsertLocked above is this plus a persist.
+func (s *Store) applyUpsertLocked(c Contact) (Contact, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	s.seq++
 	c.Rev = s.seq
@@ -268,9 +283,6 @@ func (s *Store) upsertLocked(c Contact) (Contact, error) {
 		c.UID = uid
 		c.CreatedAt = now
 		s.contacts = append(s.contacts, c)
-		if err := s.persistLocked(); err != nil {
-			return Contact{}, err
-		}
 		return c, nil
 	}
 
@@ -288,9 +300,6 @@ func (s *Store) upsertLocked(c Contact) (Contact, error) {
 			c.PhotoRef = existing.PhotoRef
 			carryPGPProvenance(&c, existing)
 			s.contacts[i] = c
-			if err := s.persistLocked(); err != nil {
-				return Contact{}, err
-			}
 			return c, nil
 		}
 	}
@@ -299,10 +308,24 @@ func (s *Store) upsertLocked(c Contact) (Contact, error) {
 	// contact and assigned its own UID) — treat as a create under that UID.
 	c.CreatedAt = now
 	s.contacts = append(s.contacts, c)
-	if err := s.persistLocked(); err != nil {
-		return Contact{}, err
-	}
 	return c, nil
+}
+
+// applyDeleteLocked is Delete's tombstoning without the write. Returns false if
+// no contact with that UID exists.
+func (s *Store) applyDeleteLocked(uid string) bool {
+	for i, c := range s.contacts {
+		if c.UID != uid {
+			continue
+		}
+		s.seq++
+		c.tombstone()
+		c.Rev = s.seq
+		c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		s.contacts[i] = c
+		return true
+	}
+	return false
 }
 
 // Delete tombstones a contact (clearing its PII fields, keeping only
@@ -319,21 +342,13 @@ func (s *Store) Delete(uid string) (bool, error) {
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return false, err
 	}
-	for i, c := range s.contacts {
-		if c.UID != uid {
-			continue
-		}
-		s.seq++
-		c.tombstone()
-		c.Rev = s.seq
-		c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-		s.contacts[i] = c
-		if err := s.persistLocked(); err != nil {
-			return false, err
-		}
-		return true, nil
+	if !s.applyDeleteLocked(uid) {
+		return false, nil
 	}
-	return false, nil
+	if err := s.persistLocked(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetSelf marks (self=true) or unmarks (self=false) the contact at uid as
@@ -666,4 +681,73 @@ func (s *Store) Search(query string, limit int) []Contact {
 		out[i] = cs.contact
 	}
 	return out
+}
+
+// BatchOp is one change in an ApplyBatch call. Delete tombstones UID;
+// otherwise Contact is upserted (creating it when its UID is empty or unknown).
+type BatchOp struct {
+	Delete  bool
+	UID     string
+	Contact Contact
+}
+
+// ApplyBatch applies every op under a single lock and a single write, or
+// applies none of them.
+//
+// The mobile sync handler used to call Upsert/Delete once per change. Each of
+// those takes the mutex, takes the inter-process file lock, re-reads
+// contacts.json from disk, and rewrites the whole file with an fsync — so a
+// 4,000-change push from a phone that had been offline was 4,000 full-file
+// rewrites, holding the lock for the duration and blocking every other reader.
+//
+// Atomicity is the more important half. On a failure partway through, the loop
+// left the earlier changes committed and returned an error, so the client's sync
+// cursor no longer described the server's state: it would resync from its old
+// base cursor and re-apply everything it had already applied. Either the whole
+// batch lands and the returned cursor is meaningful, or nothing does.
+//
+// The in-memory state is restored on failure, not left ahead of the file.
+func (s *Store) ApplyBatch(ops []BatchOp) error {
+	if len(ops) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	release, err := fsutil.LockFile(s.path())
+	if err != nil {
+		return err
+	}
+	defer release()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return err
+	}
+
+	// Snapshot for rollback. The slice must be copied, not aliased: the apply
+	// helpers assign into s.contacts[i] in place.
+	prevContacts := append([]Contact{}, s.contacts...)
+	prevSeq := s.seq
+	rollback := func() {
+		s.contacts = prevContacts
+		s.seq = prevSeq
+	}
+
+	for _, op := range ops {
+		if op.Delete {
+			// A delete of an unknown UID is not an error: the client is telling
+			// us about a contact that is already gone, which is the desired
+			// end state.
+			s.applyDeleteLocked(op.UID)
+			continue
+		}
+		if _, err := s.applyUpsertLocked(op.Contact); err != nil {
+			rollback()
+			return err
+		}
+	}
+
+	if err := s.persistLocked(); err != nil {
+		rollback()
+		return err
+	}
+	return nil
 }

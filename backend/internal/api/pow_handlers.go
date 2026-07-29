@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"kypost-server/backend/internal/captcha"
 	"kypost-server/backend/internal/cryptutil"
 	"kypost-server/backend/internal/logging"
 )
@@ -148,4 +149,70 @@ func (s *Server) StartPoWSweeper(ctx context.Context) {
 			s.powChallenges.sweepExpired(now)
 		}
 	}
+}
+
+// resolveCaptchaProvider maps the CAPTCHA_PROVIDER environment variable onto a
+// provider, defaulting to the self-hosted proof-of-work.
+//
+// UNSET NOW MEANS pow, NOT off. The login endpoint is unauthenticated and runs
+// scrypt on every attempt by design (equalizeLoginTiming), so leaving it
+// entirely ungated by default made the default deployment an unauthenticated
+// CPU amplifier. Proof-of-work is the only provider that can be on by default:
+// it is self-hosted, needs no account with anyone, no site key, no secret key,
+// and no third-party origin in the CSP (pinned by
+// TestCSPAddsNothingForSelfHostedPoW). Its HMAC key is generated and persisted
+// like every other key here — see resolvePoWSecret.
+//
+// An operator who genuinely wants no CAPTCHA writes CAPTCHA_PROVIDER=none. That
+// spelling exists precisely so "off" is something you can say out loud, rather
+// than being what you get by saying nothing.
+func resolveCaptchaProvider(raw string) captcha.Provider {
+	switch p := captcha.Provider(strings.ToLower(strings.TrimSpace(raw))); p {
+	case captcha.ProviderNone:
+		return captcha.ProviderPoW
+	case captcha.ProviderDisabled:
+		return captcha.ProviderNone
+	default:
+		// Including unrecognized values: NewVerifier rejects those, and
+		// handleLogin then fails closed via misconfiguredCaptchaVerifier rather
+		// than silently running with no check.
+		return p
+	}
+}
+
+// warnIfPoWDefaultMayLockOutPlainHTTP flags the one way the proof-of-work
+// default can go wrong.
+//
+// The browser half of the PoW check uses crypto.subtle, which browsers expose
+// only in a secure context. localhost counts as one; a LAN address over plain
+// http does not. So on an install reached at http://192.168.1.10:5866 the check
+// cannot run, and since the server requires a solution, NOBODY CAN SIGN IN.
+//
+// The login form reports this rather than failing silently, but a self-hoster
+// upgrading into a default they never chose deserves to find out from the log at
+// boot, not from a locked-out user. Both escapes are named explicitly.
+//
+// Heuristic on purpose: there is no reliable way to know at startup how users
+// reach this server. It warns when nothing in the configuration suggests TLS is
+// in front, and stays quiet when something does.
+func warnIfPoWDefaultMayLockOutPlainHTTP(logger *logging.Logger, provider captcha.Provider, explicit string) {
+	if logger == nil || provider != captcha.ProviderPoW {
+		return
+	}
+	// An operator who asked for pow by name already knows.
+	if strings.TrimSpace(explicit) != "" {
+		return
+	}
+	// Signals that TLS terminates somewhere in front of this process.
+	if len(trustedProxyNets) > 0 {
+		return
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(os.Getenv("SERVER_BASE_URL"))), "https://") {
+		return
+	}
+	logger.Error("login proof-of-work is ON by default but no TLS was detected in front of this server. " +
+		"The browser half needs crypto.subtle, which requires a secure context: http://localhost works, " +
+		"but reaching this server at a plain http:// LAN address means NOBODY CAN SIGN IN. " +
+		"Fix it either way: put a TLS-terminating reverse proxy in front and set TRUSTED_PROXY_CIDRS " +
+		"(see README), or set CAPTCHA_PROVIDER=none to turn the check off.")
 }

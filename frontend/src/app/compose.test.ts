@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatBytes, keylessRecipientsFrom409, readFileAsAttachment } from "./compose";
+import { MAX_ATTACHMENT_BYTES, formatBytes, keylessRecipientsFrom409, readFileAsAttachment } from "./compose";
 import { HttpError } from "../api/client";
 
 describe("readFileAsAttachment", () => {
@@ -48,5 +48,21 @@ describe("formatBytes", () => {
     expect(formatBytes(512)).toBe("512 B");
     expect(formatBytes(2048)).toBe("2 KB");
     expect(formatBytes(5 * 1024 * 1024)).toBe("5.0 MB");
+  });
+});
+
+describe("attachment budget", () => {
+  // The backend derives maxMailAttachmentBytes from its 25 MiB request cap:
+  // (25 MiB - 1 MiB overhead) * 3/4, because attachments travel base64-encoded
+  // inside the JSON body. If this drifts, the UI accepts a set of attachments
+  // the server refuses, and the error names a limit the user did not exceed.
+  it("matches the backend's derived cap exactly", () => {
+    expect(MAX_ATTACHMENT_BYTES).toBe(18874368);
+  });
+
+  // And the encoded form must fit the request cap it was derived from.
+  it("base64-expands to within the 25 MiB request cap", () => {
+    const encoded = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3);
+    expect(encoded + 1024 * 1024).toBeLessThanOrEqual(25 * 1024 * 1024);
   });
 });

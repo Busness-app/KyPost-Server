@@ -22,9 +22,9 @@ import (
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		cfg := s.cfg
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 		// The remote LLM API key is a live secret: never echo it back to
 		// any caller, admin included. Report only whether one is set, on
 		// this response copy — the live s.cfg is never mutated.
@@ -37,7 +37,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid config payload", http.StatusBadRequest)
 			return
 		}
-		s.mu.RLock()
+		s.cfgMu.RLock()
 		// APIKeySet is a response-only computed field (see GET above) and is
 		// never meaningful in a PUT payload. Reset it unconditionally before
 		// the change-detection diff so a naive round-trip of a GET response
@@ -55,7 +55,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// VAPID key material is server-owned and json:"-" on the wire;
 		// carry it across the round-trip.
 		next.Notifications = s.cfg.Notifications
-		s.mu.RUnlock()
+		s.cfgMu.RUnlock()
 		// Remote LLM settings are admin-only. Reject (rather than silently
 		// drop) a non-admin change so a broken save is never masked.
 		if ac, ok := authFromContext(r); classifierChanged && (!ok || ac.Role != users.RoleAdmin) {
@@ -66,9 +66,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to save config", http.StatusInternalServerError)
 			return
 		}
-		s.mu.Lock()
+		s.cfgMu.Lock()
 		s.cfg = next
-		s.mu.Unlock()
+		s.cfgMu.Unlock()
 		if classifierChanged {
 			classifier.ResetWarmupState()
 		}
@@ -170,9 +170,9 @@ func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	configured := append([]string{}, s.cfg.Labels.Allowlist...)
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	imapLabels := []string{}
 	if mailClient, err := s.mailFor(r); err == nil {

@@ -363,9 +363,9 @@ func TestMFAChallengeSweeperLeavesLiveChallengesAlone(t *testing.T) {
 func TestHandleMeDoesNotWriteState(t *testing.T) {
 	srv, u := newTestServerWithUser(t)
 	token := "me-session"
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	srv.sessions[token] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), CSRFToken: "c"}
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 
 	// Open the store first so this measures handleMe rather than the
 	// constructor.

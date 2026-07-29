@@ -673,9 +673,9 @@ func TestHandleMailSearch_PopulatesKeywords(t *testing.T) {
 	}
 	userID := all[0].ID
 
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	srv.cfg.Labels.Allowlist = []string{"Work"}
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 
 	if err := writeIMAPConfigPayload(srv.userIMAPConfigPath(userID), srv.imapConfigKeyPath, imapConfigPayload{
 		Host: "imap.example.com", Port: 993, Username: "alice@example.com", Password: "pw",

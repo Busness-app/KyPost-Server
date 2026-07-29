@@ -24,8 +24,15 @@ var ErrMessageTooLarge = errors.New("mailmsg: message exceeds maximum allowed si
 // MaxInboundMessageBytes bounds how much of a single inbound message (raw
 // bytes, attachment content, decrypted PGP payload) this server will hold in
 // memory at once. A large attachment or a PGP decompression bomb must not be
-// able to OOM the process. Matches the existing outbound
-// maxMailAttachmentBytes cap in internal/api/server.go (25 MiB).
+// able to OOM the process.
+//
+// This is deliberately NOT the same number as the outbound
+// maxMailAttachmentBytes cap in internal/api/server.go, and it used to claim it
+// was. The two answer different questions: this one is "how much can we hold in
+// memory for a message someone else composed", while the outbound cap is
+// derived from the 25 MiB request-body limit and so lands lower once base64
+// expansion is accounted for. A server should be able to receive a message
+// slightly larger than the largest one it will let you send.
 //
 // This is a package-level var, not a const, so tests can substitute a much
 // smaller limit and exercise the overflow/boundary behavior cheaply instead

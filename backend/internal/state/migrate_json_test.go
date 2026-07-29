@@ -50,10 +50,10 @@ func TestMigrationImportsEveryFieldFromJSON(t *testing.T) {
 	}
 	defer s.Close()
 
-	if got := s.Checkpoint(); got != "42" {
+	if got := checkpointForTest(t, s); got != "42" {
 		t.Errorf("Checkpoint = %q, want 42", got)
 	}
-	if !s.Seen("m1") || !s.Seen("m2") {
+	if !seenForTest(t, s, "m1") || !seenForTest(t, s, "m2") {
 		t.Error("processed message ids did not survive migration")
 	}
 	if got := s.SubscriberID(); got != "sub-123" {

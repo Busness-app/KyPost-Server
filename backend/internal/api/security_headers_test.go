@@ -69,7 +69,10 @@ func TestSecurityHeadersOnAllResponses(t *testing.T) {
 }
 
 func TestHSTSOnSecureRequestsOnly(t *testing.T) {
-	t.Setenv("TRUST_PROXY_HEADERS", "true")
+	// httptest.NewRequest's default peer is 192.0.2.1, so trust that as the
+	// TLS-terminating proxy: X-Forwarded-Proto is only believed from a
+	// configured trusted peer now, not on any connection.
+	trustProxyCIDRsForTest(t, "192.0.2.0/24")
 	srv := newTestServer(t)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)

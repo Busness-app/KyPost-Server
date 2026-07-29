@@ -22,9 +22,9 @@ func TestConfigPutRequiresAdmin(t *testing.T) {
 	admin, regular := newTestUsers(t, srv)
 	srv.configPath = t.TempDir() + "/config.yaml"
 
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	originalPatternCount := len(srv.cfg.Redaction.Patterns)
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 	if originalPatternCount == 0 {
 		t.Fatal("expected the default config to seed at least one redaction pattern")
 	}
@@ -42,9 +42,9 @@ func TestConfigPutRequiresAdmin(t *testing.T) {
 		t.Fatalf("non-admin PUT /api/config: status = %d, want 403, body=%s", rec.Code, rec.Body.String())
 	}
 
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	stillIntact := len(srv.cfg.Redaction.Patterns)
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 	if stillIntact != originalPatternCount {
 		t.Fatalf("redaction patterns were modified by a rejected non-admin PUT: got %d, want %d", stillIntact, originalPatternCount)
 	}
@@ -67,9 +67,9 @@ func TestConfigGetMasksLLMAPIKeyForNonAdmin(t *testing.T) {
 	srv := newTestServer(t)
 	admin, regular := newTestUsers(t, srv)
 
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	srv.cfg.Classifier.APIKey = "sk-super-secret-key"
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
 	authRequestAs(srv, req, regular.ID)
@@ -109,9 +109,9 @@ func TestConfigGetNeverEchoesAPIKeyButReportsAPIKeySet(t *testing.T) {
 	srv := newTestServer(t)
 	admin, _ := newTestUsers(t, srv)
 
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	srv.cfg.Classifier.APIKey = "sk-super-secret-key"
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
 	authRequestAs(srv, req, admin.ID)
@@ -137,17 +137,17 @@ func TestConfigGetNeverEchoesAPIKeyButReportsAPIKeySet(t *testing.T) {
 	}
 
 	// The live in-memory config must never be mutated by serving a GET.
-	srv.mu.RLock()
+	srv.cfgMu.RLock()
 	liveKey := srv.cfg.Classifier.APIKey
-	srv.mu.RUnlock()
+	srv.cfgMu.RUnlock()
 	if liveKey != "sk-super-secret-key" {
 		t.Fatalf("GET /api/config mutated the live config's APIKey: got %q", liveKey)
 	}
 
 	// With no key configured, apiKeySet must report false.
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	srv.cfg.Classifier.APIKey = ""
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 	req = httptest.NewRequest(http.MethodGet, "/api/config", nil)
 	authRequestAs(srv, req, admin.ID)
 	rec = httptest.NewRecorder()
@@ -171,9 +171,9 @@ func TestConfigPutEmptyAPIKeyPreservesExisting(t *testing.T) {
 	srv.configPath = t.TempDir() + "/config.yaml"
 	admin, _ := newTestUsers(t, srv)
 
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	srv.cfg.Classifier.APIKey = "sk-existing-key"
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 
 	next := config.Default()
 	next.Classifier.APIKey = "" // as a naive round-trip PUT would send
@@ -188,10 +188,10 @@ func TestConfigPutEmptyAPIKeyPreservesExisting(t *testing.T) {
 		t.Fatalf("PUT /api/config: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
 
-	srv.mu.RLock()
+	srv.cfgMu.RLock()
 	gotKey := srv.cfg.Classifier.APIKey
 	gotBaseURL := srv.cfg.Classifier.BaseURL
-	srv.mu.RUnlock()
+	srv.cfgMu.RUnlock()
 	if gotKey != "sk-existing-key" {
 		t.Fatalf("PUT with empty apiKey wiped the existing key: got %q, want %q", gotKey, "sk-existing-key")
 	}
@@ -213,9 +213,9 @@ func TestConfigRoundTripDoesNotCorruptChangeDetection(t *testing.T) {
 	srv.configPath = t.TempDir() + "/config.yaml"
 	admin, regular := newTestUsers(t, srv)
 
-	srv.mu.Lock()
+	srv.cfgMu.Lock()
 	srv.cfg.Classifier.APIKey = "sk-existing-key"
-	srv.mu.Unlock()
+	srv.cfgMu.Unlock()
 
 	// Fetch the config the way the frontend would.
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
@@ -245,9 +245,9 @@ func TestConfigRoundTripDoesNotCorruptChangeDetection(t *testing.T) {
 		t.Fatalf("non-admin round-trip PUT: status = %d, want 200 (change-detection falsely triggered), body=%s", rec.Code, rec.Body.String())
 	}
 
-	srv.mu.RLock()
+	srv.cfgMu.RLock()
 	gotKey := srv.cfg.Classifier.APIKey
-	srv.mu.RUnlock()
+	srv.cfgMu.RUnlock()
 	if gotKey != "sk-existing-key" {
 		t.Fatalf("round-trip PUT altered the existing key: got %q", gotKey)
 	}
@@ -266,10 +266,10 @@ func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 
 	changingToken := "changing-session-token"
 	otherToken := "other-stolen-session-token"
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	srv.sessions[changingToken] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-a"}
 	srv.sessions[otherToken] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-b"}
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 
 	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password-testpassword", "newPassword": "new-password-testpassword"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
@@ -281,10 +281,10 @@ func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 		t.Fatalf("change password: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
 
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	_, changingStillLive := srv.sessions[changingToken]
 	_, otherStillLive := srv.sessions[otherToken]
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 	if !changingStillLive {
 		t.Error("the session that performed the password change was itself revoked; it should stay logged in")
 	}
@@ -302,9 +302,9 @@ func TestAdminResetPasswordRevokesTargetSessions(t *testing.T) {
 	admin, target := newTestUsers(t, srv)
 
 	targetToken := "target-session-token"
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	srv.sessions[targetToken] = Session{UserID: target.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "csrf-target"}
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 
 	body, _ := json.Marshal(map[string]string{"password": "brand-new-password"})
 	req := httptest.NewRequest(http.MethodPost, "/api/users/"+target.ID+"/reset-password", bytes.NewReader(body))
@@ -316,9 +316,9 @@ func TestAdminResetPasswordRevokesTargetSessions(t *testing.T) {
 		t.Fatalf("admin reset password: status = %d, want 200, body=%s", rec.Code, rec.Body.String())
 	}
 
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	_, targetStillLive := srv.sessions[targetToken]
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 	if targetStillLive {
 		t.Error("target's session survived an admin password reset; it should have been revoked")
 	}

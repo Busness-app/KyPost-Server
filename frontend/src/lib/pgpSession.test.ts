@@ -100,33 +100,31 @@ describe("cold start", () => {
 
 describe("password change rewrap", () => {
   it(
-    "produces an envelope that opens with the new password and not the old",
+    "returns an envelope that opens with the new password and not the old",
     async () => {
       const envelope = await wrapPrivateKey(SECRET, OLD_PASSWORD);
       getPGPBootstrap.mockResolvedValue(bootstrapFixture({ wrappedPrivateKey: JSON.stringify(envelope) }));
       await session.loadPGPSession();
 
-      const commit = await session.prepareRewrappedPGPKey(OLD_PASSWORD, NEW_PASSWORD);
-      expect(commit).not.toBeNull();
+      const rewrapped = await session.rewrappedEnvelopeFor(OLD_PASSWORD, NEW_PASSWORD);
+      expect(rewrapped).not.toBeNull();
 
-      // Nothing is uploaded until the caller commits: the caller orders this
-      // against the password write itself.
+      // Nothing is uploaded here at all any more. The envelope is returned as
+      // DATA so the caller can send it in the same request as the credential —
+      // the two used to be separate requests, and a dropped connection between
+      // them stranded the key permanently.
       expect(rewrapPGPPrivateKey).not.toHaveBeenCalled();
 
-      rewrapPGPPrivateKey.mockResolvedValue({ ok: true });
-      await commit!();
-      expect(rewrapPGPPrivateKey).toHaveBeenCalledTimes(1);
-
-      const uploaded = JSON.parse(rewrapPGPPrivateKey.mock.calls[0][0] as string);
+      const parsed = JSON.parse(rewrapped!);
       const { unwrapPrivateKey } = await import("./keyVault");
-      await expect(unwrapPrivateKey(uploaded, NEW_PASSWORD)).resolves.toBe(SECRET);
-      await expect(unwrapPrivateKey(uploaded, OLD_PASSWORD)).rejects.toBeTruthy();
+      await expect(unwrapPrivateKey(parsed, NEW_PASSWORD)).resolves.toBe(SECRET);
+      await expect(unwrapPrivateKey(parsed, OLD_PASSWORD)).rejects.toBeTruthy();
     },
     TIMEOUT
   );
 
-  // Preparing with the wrong current password must fail BEFORE the password
-  // is changed, so the caller can abort with nothing half-applied.
+  // Rewrapping with the wrong current password must fail BEFORE anything is
+  // sent, so the caller aborts with nothing half-applied.
   it(
     "fails on a wrong current password without uploading anything",
     async () => {
@@ -134,7 +132,7 @@ describe("password change rewrap", () => {
       getPGPBootstrap.mockResolvedValue(bootstrapFixture({ wrappedPrivateKey: JSON.stringify(envelope) }));
       await session.loadPGPSession();
 
-      await expect(session.prepareRewrappedPGPKey("not-the-old-password", NEW_PASSWORD)).rejects.toBeTruthy();
+      await expect(session.rewrappedEnvelopeFor("not-the-old-password", NEW_PASSWORD)).rejects.toBeTruthy();
       expect(rewrapPGPPrivateKey).not.toHaveBeenCalled();
     },
     TIMEOUT
@@ -143,7 +141,44 @@ describe("password change rewrap", () => {
   it("is a no-op for an account with no client-protected key", async () => {
     getPGPBootstrap.mockResolvedValue(bootstrapFixture({ protection: "server", wrappedPrivateKey: "" }));
     await session.loadPGPSession();
-    await expect(session.prepareRewrappedPGPKey(OLD_PASSWORD, NEW_PASSWORD)).resolves.toBeNull();
+    await expect(session.rewrappedEnvelopeFor(OLD_PASSWORD, NEW_PASSWORD)).resolves.toBeNull();
+    expect(rewrapPGPPrivateKey).not.toHaveBeenCalled();
+  });
+});
+
+// The recovery path for an envelope that is out of step with the account
+// password. Before this existed there was none: every rewrap derived from the
+// CURRENT password, and a stale envelope by definition does not open with it, so
+// the only escape was deleting the identity and losing every message ever
+// encrypted to it.
+describe("stale-envelope recovery", () => {
+  it(
+    "re-seals the already-unlocked key under the current password",
+    async () => {
+      // The stored envelope is sealed under an OLDER password than the account's.
+      const stale = await wrapPrivateKey(SECRET, OLD_PASSWORD);
+      getPGPBootstrap.mockResolvedValue(bootstrapFixture({ wrappedPrivateKey: JSON.stringify(stale) }));
+      await session.loadPGPSession();
+
+      // The user unlocks with the older password, as the UI instructs.
+      await session.unlockPGPSession(OLD_PASSWORD);
+
+      rewrapPGPPrivateKey.mockResolvedValue({ ok: true });
+      await session.rewrapUnlockedKeyUnder(NEW_PASSWORD);
+
+      expect(rewrapPGPPrivateKey).toHaveBeenCalledTimes(1);
+      const uploaded = JSON.parse(rewrapPGPPrivateKey.mock.calls[0][0] as string);
+      const { unwrapPrivateKey } = await import("./keyVault");
+      await expect(unwrapPrivateKey(uploaded, NEW_PASSWORD)).resolves.toBe(SECRET);
+    },
+    TIMEOUT
+  );
+
+  it("refuses when the vault is locked, rather than uploading garbage", async () => {
+    getPGPBootstrap.mockResolvedValue(bootstrapFixture({ wrappedPrivateKey: "" }));
+    await session.loadPGPSession();
+    session.lockPGPSession();
+    await expect(session.rewrapUnlockedKeyUnder(NEW_PASSWORD)).rejects.toBeTruthy();
     expect(rewrapPGPPrivateKey).not.toHaveBeenCalled();
   });
 });

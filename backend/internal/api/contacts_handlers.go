@@ -423,6 +423,16 @@ type contactsSyncPushRequest struct {
 // minted during registration (POST /api/notifications/native/register), sent
 // via the X-Kypost-Device-Id/X-Kypost-Device-Secret headers (see
 // device_auth.go).
+// maxContactsSyncChanges bounds one mobile-sync push.
+//
+// The 1 MiB body limit alone was not a bound on work: a compact change is on the
+// order of 200 bytes, so a full body could carry several thousand of them, and
+// each one used to be an independent full-file rewrite under the store's lock.
+// Batching (see contacts.Store.ApplyBatch) removed the per-change cost, and this
+// bounds the size of the single transaction that replaced it. A client with more
+// than this to push pages it.
+const maxContactsSyncChanges = 500
+
 func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
 	userID, _, ok, retryAfter := s.deviceAuthFromRequest(r)
 	if !ok {
@@ -444,26 +454,43 @@ func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
+		if len(req.Changes) > maxContactsSyncChanges {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+				"error":      "too many changes in one request",
+				"maxChanges": maxContactsSyncChanges,
+			})
+			return
+		}
+
+		// Translate first, write once. This was a loop calling store.Upsert /
+		// store.Delete per change, and each of those takes the file lock,
+		// re-reads contacts.json and rewrites the whole file with an fsync —
+		// so a large push from a phone that had been offline was one full-file
+		// rewrite per contact.
+		//
+		// It was also non-atomic: a failure at change 500 left 499 committed and
+		// returned 500, after which the client resynced from its old base cursor
+		// and re-applied everything. ApplyBatch commits all or none, which is
+		// what makes the cursor returned below mean anything.
+		ops := make([]contacts.BatchOp, 0, len(req.Changes))
 		for _, change := range req.Changes {
 			uid := strings.TrimSpace(change.UID)
 			if change.Deleted {
 				if uid == "" {
 					continue
 				}
-				if _, err := store.Delete(uid); err != nil {
-					http.Error(w, "failed to apply change", http.StatusInternalServerError)
-					return
-				}
+				ops = append(ops, contacts.BatchOp{Delete: true, UID: uid})
 				continue
 			}
 			if strings.TrimSpace(change.FormattedName) == "" {
 				continue
 			}
 			change.GroupIDs = s.sanitizeGroupIDsForUser(userID, change.GroupIDs)
-			if _, err := store.Upsert(change.toContact(uid)); err != nil {
-				http.Error(w, "failed to apply change", http.StatusInternalServerError)
-				return
-			}
+			ops = append(ops, contacts.BatchOp{Contact: change.toContact(uid)})
+		}
+		if err := store.ApplyBatch(ops); err != nil {
+			http.Error(w, "failed to apply changes", http.StatusInternalServerError)
+			return
 		}
 		s.writeContactsSyncResponse(w, store, req.BaseCursor)
 	default:

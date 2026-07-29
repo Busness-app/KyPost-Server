@@ -27,6 +27,16 @@ func isPrivateOrReservedIP(ip net.IP) bool {
 // — production code must never reassign it.
 var outboundIPGuard = isPrivateOrReservedIP
 
+// outboundCardDAVSchemes are the schemes a user-supplied CardDAV server URL
+// may use.
+//
+// https only, and a var for the same single reason outboundIPGuard is one:
+// httptest listeners speak plain http. Production must never widen it. Every
+// request to a CardDAV URL carries the user's password in an HTTP Basic
+// header, and outboundIPGuard already refuses loopback and private space, so
+// an http:// target is necessarily a public host reached in the clear.
+var outboundCardDAVSchemes = []string{"https"}
+
 // validateOutboundURL rejects URLs that are not safe for this server to make
 // requests to on a user's behalf: schemes outside allowedSchemes, and hosts
 // that (as an IP literal or via DNS) resolve to a private/loopback/link-local

@@ -162,6 +162,9 @@ func (s *Server) handlePGPExportLegacyKey(w http.ResponseWriter, r *http.Request
 	}
 	var req struct {
 		Password string `json:"password"`
+		// AuthSecret is the client-derived credential, for an account whose
+		// password never reaches this server. See login_params.go.
+		AuthSecret string `json:"authSecret,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -178,7 +181,7 @@ func (s *Server) handlePGPExportLegacyKey(w http.ResponseWriter, r *http.Request
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
-	if !users.VerifyPassword(u, req.Password) {
+	if !verifyAccountCredential(u, req.Password, req.AuthSecret) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}

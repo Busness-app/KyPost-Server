@@ -21,6 +21,16 @@ import (
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 
+	// CAPTCHA off for the shared helper. Proof-of-work is now the DEFAULT
+	// provider (see resolveCaptchaProvider), so without this every one of the
+	// hundred-odd tests that logs in would have to solve one — testing the PoW
+	// implementation over and over instead of the thing it is actually about.
+	//
+	// The default itself is covered deliberately, in
+	// TestCaptchaDefaultsToSelfHostedProofOfWork and
+	// TestLoginRequiresProofOfWorkByDefault, which build servers without this.
+	t.Setenv("CAPTCHA_PROVIDER", "none")
+
 	logDir := t.TempDir()
 	stateDir := t.TempDir()
 
@@ -92,9 +102,9 @@ func authRequest(s *Server, req *http.Request) {
 	}
 	token := "session-token"
 	csrfToken := "csrf-token"
-	s.mu.Lock()
+	s.sessMu.Lock()
 	s.sessions[token] = Session{UserID: all[0].ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
-	s.mu.Unlock()
+	s.sessMu.Unlock()
 	// Model an onboarded session; the must-change gate (withAuth) has its own
 	// dedicated test.
 	_, _ = s.users.ClearMustChangePassword(all[0].ID)

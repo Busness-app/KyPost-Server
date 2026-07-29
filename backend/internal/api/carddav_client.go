@@ -122,7 +122,15 @@ func (s *Server) handleContactsCardDAVClientConfig(w http.ResponseWriter, r *htt
 			http.Error(w, "serverUrl, username, and password are required", http.StatusBadRequest)
 			return
 		}
-		if err := validateOutboundURL(payload.ServerURL, "http", "https"); err != nil {
+		// https only. Every request to this URL carries the user's address-book
+		// password in an HTTP Basic header, and validateOutboundURL refuses
+		// private and loopback addresses — so an http:// target here is, by
+		// construction, a PUBLIC internet host reached in the clear. There is no
+		// deployment in which that combination is what the user wanted.
+		// (newSSRFSafeHTTPClient already refuses an https->http redirect
+		// downgrade for the same reason; allowing the caller to simply start at
+		// http made that guard decorative.)
+		if err := validateOutboundURL(payload.ServerURL, outboundCardDAVSchemes...); err != nil {
 			http.Error(w, "serverUrl is not reachable: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -482,7 +490,11 @@ func discoverAddressBooksFrom(ctx context.Context, httpClient webdav.HTTPClient,
 // see what was found and pin a specific path if the auto-pick is still
 // wrong.
 func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, store *contacts.Store, groupsStore *groups.Store, storePhoto func([]byte) (string, error)) (imported, updated int, addressBookPath string, discovered []discoveredAddressBook, err error) {
-	if verr := validateOutboundURL(cfg.ServerURL, "http", "https"); verr != nil {
+	// https only — see the matching check in the POST handler. This one also
+	// catches a config written before that check existed, so an install that
+	// already stored an http:// URL stops syncing credentials in the clear
+	// rather than being grandfathered into it.
+	if verr := validateOutboundURL(cfg.ServerURL, outboundCardDAVSchemes...); verr != nil {
 		return 0, 0, "", nil, fmt.Errorf("refusing to sync: %w", verr)
 	}
 	httpClient := newSSRFSafeHTTPClient(30 * time.Second)

@@ -259,9 +259,9 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	useDelta := strings.TrimSpace(r.URL.Query().Get("since")) != ""
 	since := parseNonNegativeInt64Query(r, "since")
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg := s.cfg
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	ac, ok := authFromContext(r)
 	if !ok {
@@ -823,9 +823,9 @@ func (s *Server) handleMailSearch(w http.ResponseWriter, r *http.Request) {
 		limit = 200
 	}
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg := s.cfg
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 	allowedKeywords := collectAllowedKeywords(cfg)
 
 	results, err := mailClient.SearchMessages(r.Context(), mailbox, field, q, limit)
