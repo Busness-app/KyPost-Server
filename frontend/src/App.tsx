@@ -1,5 +1,5 @@
 import { type DragEvent, useEffect, useRef, useState } from "react";
-import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import Quill from "quill";
 import "quill/dist/quill.snow.css";
 import { deleteJSON, getJSON, HttpError, postJSON, putJSON, toErrorMessage } from "./api/client";

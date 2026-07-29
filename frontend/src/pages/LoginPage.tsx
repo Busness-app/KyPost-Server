@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { prepareRewrappedPGPKey } from "../lib/pgpSession";
 import { toErrorMessage } from "../api/client";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { getJSON, HttpError, postJSON } from "../api/client";
 import type { AuthState } from "../auth";
 import { CaptchaWidget, type CaptchaProvider } from "../components/CaptchaWidget";
