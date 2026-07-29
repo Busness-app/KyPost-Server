@@ -463,6 +463,15 @@ func stripFenceMarkers(s string) string {
 	return fenceMarkerPattern.ReplaceAllString(s, "[fence marker removed]")
 }
 
+// BuildRuntimePrompt exposes the exact prompt assembly Classify uses, so the
+// offline model-evaluation harness (backend/cmd/modeleval) measures the prompt
+// that actually ships. A hand-copied duplicate in the harness would silently
+// drift from this one, and every accuracy number it produced would then be
+// describing a prompt no user ever sends.
+func BuildRuntimePrompt(tuningTemplate string, allowedLabels []string, sender, subject, body string) string {
+	return buildRuntimePrompt(tuningTemplate, allowedLabels, sender, subject, body)
+}
+
 func buildRuntimePrompt(tuningTemplate string, allowedLabels []string, sender, subject, body string) string {
 	body = stripFenceMarkers(strings.TrimSpace(body))
 	sender = stripFenceMarkers(strings.TrimSpace(sender))
