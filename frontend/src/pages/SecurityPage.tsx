@@ -28,6 +28,10 @@ type ApproverDevice = {
   deviceName?: string;
   platform?: string;
   approver: boolean;
+  // Absent on older servers, which had no notion of an ineligible transport.
+  // Treat undefined as eligible so this page keeps working against one.
+  canApprove?: boolean;
+  cannotApproveReason?: string;
 };
 
 type MfaStatus = {
@@ -666,20 +670,31 @@ export function SecurityPage() {
               </label>
               {status && status.approverDevices.length > 0 ? (
                 <ul className="security-devices">
-                  {status.approverDevices.map((device) => (
-                    <li key={device.deviceId}>
-                      <label className="security-check">
-                        <input
-                          type="checkbox"
-                          checked={device.approver}
-                          disabled={busy}
-                          onChange={(e) => void toggleApprover(device.deviceId, e.target.checked)}
-                        />
-                        {device.deviceName?.trim() || device.platform || device.deviceId} — may approve
-                        sign-ins
-                      </label>
-                    </li>
-                  ))}
+                  {status.approverDevices.map((device) => {
+                    // Older servers omit canApprove entirely; undefined means
+                    // eligible, so this page degrades cleanly against one.
+                    const eligible = device.canApprove !== false;
+                    const name = device.deviceName?.trim() || device.platform || device.deviceId;
+                    return (
+                      <li key={device.deviceId}>
+                        <label className="security-check">
+                          <input
+                            type="checkbox"
+                            checked={eligible && device.approver}
+                            disabled={busy || !eligible}
+                            onChange={(e) => void toggleApprover(device.deviceId, e.target.checked)}
+                          />
+                          {name} — {eligible ? "may approve sign-ins" : "cannot approve sign-ins"}
+                        </label>
+                        {!eligible && (
+                          <p className="security-muted">
+                            {device.cannotApproveReason ||
+                              "This device's push delivery cannot carry sign-in approvals. Mail notifications still work."}
+                          </p>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               ) : (
                 <p className="security-muted">

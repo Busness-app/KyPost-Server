@@ -39,12 +39,20 @@ func (s *Server) handleMFAStatus(w http.ResponseWriter, r *http.Request) {
 	deviceStatuses := []map[string]any{}
 	if store, err := s.userStore(ac.UserID); err == nil {
 		for _, d := range store.ListNativeDevices() {
-			deviceStatuses = append(deviceStatuses, map[string]any{
+			// canApprove tells the UI whether this device's transport may carry
+			// a challenge at all, so it can explain the exclusion rather than
+			// offer a toggle that silently does nothing.
+			entry := map[string]any{
 				"deviceId":   d.DeviceID,
 				"deviceName": d.DeviceName,
 				"platform":   d.Platform,
 				"approver":   d.MFAApprover,
-			})
+				"canApprove": MFATransportEligible(d),
+			}
+			if !MFATransportEligible(d) {
+				entry["cannotApproveReason"] = "UnifiedPush delivery cannot carry sign-in approvals: the request includes sign-in details and would cross an unencrypted public broker. Mail notifications still work."
+			}
+			deviceStatuses = append(deviceStatuses, entry)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

@@ -34,6 +34,40 @@ func approverDevices(store *state.Store) []state.NativeDevice {
 	return all
 }
 
+// MFATransportEligible reports whether a device's push transport may carry an
+// MFA challenge.
+//
+// UnifiedPush is excluded: a challenge carries sign-in metadata (IP address,
+// user agent, and the match digits themselves), and that must not traverse an
+// unencrypted public broker such as ntfy.sh until end-to-end encryption exists.
+// The devices stay fully usable for mail notifications.
+//
+// This catches more than it looks like: normalizeNativeTransport maps platform
+// "linux" to the unifiedpush transport, so a Linux client that does not name a
+// transport explicitly is excluded here too.
+func MFATransportEligible(d state.NativeDevice) bool {
+	return strings.ToLower(strings.TrimSpace(d.Transport)) != "unifiedpush"
+}
+
+// mfaApproverDevices returns the devices that can actually be sent a challenge —
+// approver-eligible AND on a transport allowed to carry one.
+//
+// Every caller deciding "can push approval work for this user" must use this
+// rather than approverDevices. The enable gate and the dispatcher used to apply
+// the two rules separately and drifted apart, so a user whose only paired device
+// was UnifiedPush could turn push approval on, receive {"ok":true}, and then
+// never be sent a challenge.
+func mfaApproverDevices(store *state.Store) []state.NativeDevice {
+	candidates := approverDevices(store)
+	eligible := make([]state.NativeDevice, 0, len(candidates))
+	for _, d := range candidates {
+		if MFATransportEligible(d) {
+			eligible = append(eligible, d)
+		}
+	}
+	return eligible
+}
+
 // handleMFAPushEnabled toggles push 2FA for the calling user. Enabling requires
 // TOTP already enabled (so a fallback always exists) and at least one paired
 // approver-eligible device. Disabling has no preconditions.
@@ -65,8 +99,16 @@ func (s *Server) handleMFAPushEnabled(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to open user state", http.StatusInternalServerError)
 			return
 		}
-		if len(approverDevices(store)) == 0 {
-			http.Error(w, "pair a device on the Notifications page before enabling push approval", http.StatusBadRequest)
+		// Must match dispatchPushChallenge exactly, or we accept the setting and
+		// then silently never deliver a challenge.
+		if len(mfaApproverDevices(store)) == 0 {
+			msg := "pair a device on the Notifications page before enabling push approval"
+			if len(approverDevices(store)) > 0 {
+				// They have devices; every one is on an excluded transport.
+				// Saying so beats "pair a device" when they already did.
+				msg = "your paired devices cannot receive sign-in approvals: UnifiedPush delivery (used by the Linux client by default) is excluded because approval requests carry sign-in details and would cross an unencrypted public broker. Pair an Android or iOS device to use push approval."
+			}
+			http.Error(w, msg, http.StatusBadRequest)
 			return
 		}
 	}
@@ -163,21 +205,20 @@ func (s *Server) dispatchPushChallenge(userID, challengeID string, ctx loginCont
 		s.logger.Error("push mfa: open user state failed", "error", err.Error())
 		return
 	}
-	devices := approverDevices(store)
-	if len(devices) == 0 {
-		return
-	}
-
-	// Filter out unifiedpush devices: MFA challenges contain sensitive metadata
-	// and should not traverse unencrypted public brokers until encryption is added.
-	filteredDevices := make([]state.NativeDevice, 0, len(devices))
-	for _, d := range devices {
-		if strings.ToLower(strings.TrimSpace(d.Transport)) == "unifiedpush" {
-			continue
-		}
-		filteredDevices = append(filteredDevices, d)
-	}
+	// mfaApproverDevices applies the transport rule too — the same call the
+	// enable gate makes, so the two cannot disagree about whether this user can
+	// receive a challenge.
+	filteredDevices := mfaApproverDevices(store)
 	if len(filteredDevices) == 0 {
+		// Log it. A user reporting "the approval never arrives" previously left
+		// no trace at all, which made this indistinguishable from a relay
+		// outage or a dropped notification.
+		paired := len(approverDevices(store))
+		s.logger.Info("push mfa: no eligible approver device, challenge not sent",
+			"user_id", userID,
+			"challenge_id", challengeID,
+			"paired_approver_devices", strconv.Itoa(paired),
+			"reason", "all paired devices are on transports excluded from MFA challenges (UnifiedPush)")
 		return
 	}
 
