@@ -95,12 +95,78 @@ describe("robustness", () => {
   });
 
   it("does not throw when storage is full", () => {
-    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    // Swap the whole storage object rather than spying on a method. Neither
+    // spy target works in both environments: jsdom hands out a proxied
+    // Storage that an instance-level spy does not intercept, while the Node 26
+    // polyfill in src/test/setup.ts does not inherit from Storage.prototype,
+    // so a prototype spy misses it there. A spy that silently fails to
+    // intercept turns this into an assertion that nothing throws when nothing
+    // was asked to throw — green, and worthless.
+    const original = Object.getOwnPropertyDescriptor(window, "localStorage");
+    const setItem = vi.fn(() => {
       throw new DOMException("QuotaExceededError");
     });
-    // A failed autosave must never surface as an exception mid-typing.
-    expect(() => saveDraftSnapshot(USER, draft({ subject: "x" }))).not.toThrow();
-    spy.mockRestore();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: { ...window.localStorage, setItem }
+    });
+
+    try {
+      // A failed autosave must never surface as an exception mid-typing.
+      expect(() => saveDraftSnapshot(USER, draft({ subject: "x" }))).not.toThrow();
+      expect(setItem).toHaveBeenCalled();
+    } finally {
+      if (original) {
+        Object.defineProperty(window, "localStorage", original);
+      }
+    }
+  });
+});
+
+describe("expiry", () => {
+  // The stored body is the plaintext of a message that may be about to be
+  // PGP-encrypted. Logout clears it, but closing the tab or never logging out
+  // does not — so it has to expire on its own.
+  function storeWithAge(ageMs: number): void {
+    window.localStorage.setItem(
+      `kypost-compose-draft:${USER}`,
+      JSON.stringify({
+        version: 1,
+        to: "",
+        cc: "",
+        bcc: "",
+        subject: "secret",
+        body: "<p>plaintext</p>",
+        attachmentNames: [],
+        savedAt: new Date(Date.now() - ageMs).toISOString()
+      })
+    );
+  }
+
+  it("still restores a snapshot from within the window", () => {
+    storeWithAge(23 * 60 * 60 * 1000);
+    expect(loadDraftSnapshot(USER)?.subject).toBe("secret");
+  });
+
+  it("discards a snapshot older than the window", () => {
+    storeWithAge(25 * 60 * 60 * 1000);
+    expect(loadDraftSnapshot(USER)).toBeNull();
+  });
+
+  it("removes the expired plaintext rather than merely refusing to return it", () => {
+    storeWithAge(25 * 60 * 60 * 1000);
+    loadDraftSnapshot(USER);
+    expect(window.localStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
+  });
+
+  it("treats an unparseable savedAt as expired, not as fresh", () => {
+    // Snapshots written before the expiry check existed have no usable
+    // timestamp; those are the oldest plaintext on disk, not the newest.
+    window.localStorage.setItem(
+      `kypost-compose-draft:${USER}`,
+      JSON.stringify({ version: 1, subject: "ancient", attachmentNames: [], savedAt: "" })
+    );
+    expect(loadDraftSnapshot(USER)).toBeNull();
   });
 });
 

@@ -21,6 +21,23 @@ import type { ComposeAttachment } from "./types";
 const SNAPSHOT_VERSION = 1;
 
 /**
+ * How long a snapshot stays restorable before it is discarded on sight.
+ *
+ * This matters more here than in a typical autosave. The buffer being stored
+ * is the PLAINTEXT of a message the user may be about to PGP-encrypt, and it
+ * is stored unencrypted. clearDraftSnapshot on logout was the only thing that
+ * ever removed it — but closing the tab, crashing, rebooting, or simply never
+ * clicking Log Out all skip that path, and those are precisely the cases this
+ * feature exists to survive. Without an expiry the plaintext of an
+ * end-to-end-encrypted email sat in localStorage indefinitely.
+ *
+ * 24 hours keeps the actual recovery story (crash, accidental close, restart,
+ * "I'll finish this after lunch") while bounding how long the plaintext can
+ * outlive the session that produced it.
+ */
+const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Keyed per user. A shared browser must not hand one account's unsent draft to
  * whoever logs in next — clearDraftSnapshot on logout is the primary defence,
  * but the key means a missed clear still cannot cross accounts.
@@ -113,6 +130,15 @@ export function loadDraftSnapshot(userId: string): DraftSnapshot | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<DraftSnapshot>;
     if (parsed?.version !== SNAPSHOT_VERSION) {
+      window.localStorage.removeItem(storageKey(userId));
+      return null;
+    }
+    // Expire on read. An unparseable or absent savedAt is treated as expired
+    // rather than as "fresh": a snapshot whose age cannot be established is
+    // exactly the one that has been sitting there since before this check
+    // existed, and it is plaintext.
+    const savedAtMs = Date.parse(parsed.savedAt ?? "");
+    if (!Number.isFinite(savedAtMs) || Date.now() - savedAtMs > MAX_SNAPSHOT_AGE_MS) {
       window.localStorage.removeItem(storageKey(userId));
       return null;
     }

@@ -38,3 +38,36 @@ if (typeof HTMLDialogElement !== "undefined" && typeof HTMLDialogElement.prototy
     this.dispatchEvent(new Event("close"));
   };
 }
+
+// Node 26 (what CI pins, matching the Dockerfile) ships its own `localStorage`
+// global, and without --localstorage-file it evaluates to `undefined` — which
+// shadows the jsdom implementation. Node 24, which is what most local installs
+// still have, has no such global and jsdom's wins. That difference is why
+// draftAutosave.test.ts passed on every developer machine and failed all 14
+// cases in CI with "Cannot read properties of undefined (reading 'clear')".
+//
+// Installing a real, spec-shaped implementation here makes the tests depend on
+// this file rather than on which Node the runner happens to have. Paired with
+// .nvmrc and package.json "engines", which stop the local/CI drift at source.
+if (typeof window !== "undefined" && !window.localStorage) {
+  const backing = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string): string | null => backing.get(String(key)) ?? null,
+      setItem: (key: string, value: string): void => {
+        backing.set(String(key), String(value));
+      },
+      removeItem: (key: string): void => {
+        backing.delete(String(key));
+      },
+      clear: (): void => {
+        backing.clear();
+      },
+      key: (index: number): string | null => [...backing.keys()][index] ?? null,
+      get length(): number {
+        return backing.size;
+      }
+    } satisfies Storage
+  });
+}
