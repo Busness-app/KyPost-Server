@@ -1,8 +1,12 @@
 # Lint config for the backend module. Deliberately close to golangci-lint's
 # defaults — the point is a floor that catches ignored errors and dead code,
 # not a style tribunal.
-run:
-  timeout: 5m
+#
+# Schema v2. `golangci-lint migrate` offers four exclusion presets when
+# converting a v1 config; only std-error-handling is enabled here. The other
+# three ("legacy", "common-false-positives", "comments") suppress whole
+# categories of finding, which is most of what this file exists to catch.
+version: "2"
 
 linters:
   enable:
@@ -12,16 +16,50 @@ linters:
     - staticcheck
     - unused
 
+  settings:
+    staticcheck:
+      checks:
+        # golangci-lint's own default set, reproduced so that adding one
+        # exclusion below does not silently switch the others back on. A bare
+        # ["all", "-QF1002"] re-enables ST1000/ST1003/etc, which demand
+        # "Package foo ..." comments on files that already carry a more useful
+        # description of what the file contains.
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # QF1002 ("could use tagged switch") fires on the Sieve lexer's
+        # `switch { case r == '[': ... }`. One of its ten cases is not a
+        # comparison against r, so satisfying this means moving that case to
+        # default and changing evaluation order inside a parser — real risk,
+        # to satisfy an editor refactoring hint. Every other staticcheck
+        # check, including all SA* correctness checks, stays on.
+        - -QF1002
+
+  exclusions:
+    # Covers the deferred-cleanup idioms: `defer resp.Body.Close()`,
+    # `defer f.Close()`, Flush, and writes to stdout/stderr. v1 excluded these
+    # by default and v2 does not, so without this the gate reports ~30
+    # instances of universally accepted Go and nothing actionable. Errors that
+    # matter on a non-deferred Close (a write-then-close where Close is the
+    # only place a flush failure surfaces) are not caught by this rule and are
+    # still reported.
+    presets:
+      - std-error-handling
+
+    rules:
+      # errcheck in tests only ever flags setup helpers whose failure would
+      # fail the assertion on the next line anyway. Checking them adds noise
+      # without adding signal. Every other linter still applies to test files.
+      - path: _test\.go
+        linters:
+          - errcheck
+
 issues:
   # golangci-lint defaults to reporting only the first 3 instances of an issue
   # and 50 total, which quietly hides the tail of a real regression.
   max-issues-per-linter: 0
   max-same-issues: 0
-
-  exclude-rules:
-    # errcheck in tests only ever flags setup helpers whose failure would fail
-    # the assertion on the next line anyway. Checking them adds noise without
-    # adding a signal. Every other linter still applies to test files.
-    - path: _test\.go
-      linters:
-        - errcheck

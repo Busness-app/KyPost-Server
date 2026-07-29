@@ -408,10 +408,14 @@ func LoadVAPIDPrivateKey(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	scalar := key.D.Bytes()
-	out := make([]byte, 32)
-	copy(out[32-len(scalar):], scalar)
-	return base64.RawURLEncoding.EncodeToString(out), nil
+	// ecdh.PrivateKey.Bytes() returns the scalar already fixed-width and
+	// left-padded, which is what VAPID wants. key.D.Bytes() (deprecated since
+	// Go 1.26) strips leading zeros, hence the manual padding this replaces.
+	ecdhKey, err := key.ECDH()
+	if err != nil {
+		return "", fmt.Errorf("convert vapid private key: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(ecdhKey.Bytes()), nil
 }
 
 func parseNotificationPrivateKeyPEM(b []byte) (*ecdsa.PrivateKey, error) {

@@ -234,7 +234,7 @@ func (c *APIClient) CreateFolder(ctx context.Context, parent, name string) (stri
 		return "", errors.New("folder name is required")
 	}
 	if strings.ContainsAny(name, "/.") {
-		return "", errors.New("folder name must be a single level without / or .")
+		return "", errors.New(`folder name must be a single level, containing no "/" or "."`)
 	}
 	if err := ValidateMailboxName(name); err != nil {
 		return "", err
@@ -364,7 +364,7 @@ func (c *APIClient) RenameFolder(ctx context.Context, folder, name string) (stri
 		return "", errors.New("folder name is required")
 	}
 	if strings.ContainsAny(name, "/.") {
-		return "", errors.New("folder name must be a single level without / or .")
+		return "", errors.New(`folder name must be a single level, containing no "/" or "."`)
 	}
 	// Both halves reach RENAME: folder as the source, name as the leaf of the
 	// destination path built below.

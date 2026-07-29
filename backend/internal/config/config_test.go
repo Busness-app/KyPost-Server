@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"encoding/pem"
@@ -78,7 +79,7 @@ func TestLoadOrCreateNotificationPrivateKey_ConcurrentCallersConverge(t *testing
 		if key == nil {
 			t.Fatalf("caller %d returned nil key", i)
 		}
-		if key.D.Cmp(first.D) != 0 {
+		if !bytes.Equal(privateScalar(t, key), privateScalar(t, first)) {
 			t.Fatalf("caller %d generated/returned a DIFFERENT keypair than caller 0 (D mismatch) — losing callers must re-read the winner's key from disk, not keep their own generated key", i)
 		}
 		if key.X.Cmp(first.X) != 0 || key.Y.Cmp(first.Y) != 0 {
@@ -101,7 +102,7 @@ func TestLoadOrCreateNotificationPrivateKey_ConcurrentCallersConverge(t *testing
 	if err != nil {
 		t.Fatalf("parse persisted key: %v", err)
 	}
-	if onDisk.D.Cmp(first.D) != 0 {
+	if !bytes.Equal(privateScalar(t, onDisk), privateScalar(t, first)) {
 		t.Fatalf("key on disk does not match the keypair every caller converged on")
 	}
 
@@ -147,7 +148,7 @@ func TestLoadOrCreateNotificationPrivateKey_ReadsExistingKeyUnchanged(t *testing
 		if key == nil {
 			continue
 		}
-		if key.D.Cmp(first.D) != 0 {
+		if !bytes.Equal(privateScalar(t, key), privateScalar(t, first)) {
 			t.Fatalf("call %d returned a different key than the pre-existing one on disk", i)
 		}
 	}
@@ -165,4 +166,16 @@ func TestLoadOrCreateNotificationPrivateKey_UsesP256(t *testing.T) {
 	if key.Curve != elliptic.P256() {
 		t.Fatalf("expected P256 curve")
 	}
+}
+
+// privateScalar returns a key's raw private scalar. The obvious spelling,
+// key.D, is deprecated as of Go 1.26; ecdh.PrivateKey.Bytes() is the
+// supported way to get the same value, and it comes back fixed-width.
+func privateScalar(t *testing.T, k *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	e, err := k.ECDH()
+	if err != nil {
+		t.Fatalf("convert key to ecdh: %v", err)
+	}
+	return e.Bytes()
 }

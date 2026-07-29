@@ -136,7 +136,7 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 		if mailbox != "" {
 			req.Mailbox = mailbox
 		}
-	case !(suppliedHost && suppliedUser && suppliedPass):
+	case !suppliedHost || !suppliedUser || !suppliedPass:
 		http.Error(w, "supply host, username, and password together, or none of them", http.StatusBadRequest)
 		return
 	}

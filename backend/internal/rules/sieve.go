@@ -420,10 +420,7 @@ func (p *sieveParser) parseStringList() ([]string, error) {
 		return nil, err
 	}
 	var out []string
-	for {
-		if p.peek().kind == tokRBracket {
-			break
-		}
+	for p.peek().kind != tokRBracket {
 		s, err := p.expect(tokString, "string")
 		if err != nil {
 			return nil, err

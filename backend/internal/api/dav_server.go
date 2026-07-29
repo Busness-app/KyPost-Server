@@ -399,7 +399,7 @@ func contactToVCard(c contacts.Contact, groupNames []string, photoData []byte, p
 			Country:       a.Country,
 		}
 		if a.Label != "" {
-			addr.Field.Params = vcard.Params{vcard.ParamType: []string{a.Label}}
+			addr.Params = vcard.Params{vcard.ParamType: []string{a.Label}}
 		}
 		card.AddAddress(addr)
 	}
@@ -510,7 +510,7 @@ func contactFromVCard(uid string, card vcard.Card) parsedVCardContact {
 	for _, a := range card.Addresses() {
 		label := ""
 		if a.Field != nil {
-			label = a.Field.Params.Get(vcard.ParamType)
+			label = a.Params.Get(vcard.ParamType)
 		}
 		c.Addresses = append(c.Addresses, contacts.ContactAddress{
 			Label:      label,
