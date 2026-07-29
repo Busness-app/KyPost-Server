@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import QRCode from "qrcode";
 import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
 import {

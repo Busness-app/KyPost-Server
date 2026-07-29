@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 import { processEmailHtml } from "../lib/emailHtml";
 import { firstAddressFromText, listAddressesFromText } from "../lib/addressText";
 import { isFlaggedPhishing } from "../lib/phishing";
