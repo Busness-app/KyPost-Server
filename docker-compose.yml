@@ -43,6 +43,27 @@ services:
       - ${OLLAMA_MODELS_HOST_DIR:-./share/ollama/models}:/kypost/ollama-models
     restart: unless-stopped
 
+    # This container runs an LLM in-process with the mail server. Without a
+    # cap, the kernel's OOM killer arbitrates between Ollama and the API under
+    # memory pressure and picks whichever has the larger RSS — usually Ollama,
+    # but not reliably, and losing the API silently is much worse. Bounding the
+    # container makes the failure predictable and keeps a self-hoster's other
+    # services alive. Override via .env on a machine with room to spare.
+    mem_limit: ${KYPOST_MEM_LIMIT:-8g}
+    cpus: ${KYPOST_CPUS:-4.0}
+
+    # Docker only knows the container is unhealthy if something asks. The image
+    # defines the HEALTHCHECK; this is what makes an unhealthy container
+    # visible in `docker compose ps` rather than a process that is technically
+    # running while serving nothing.
+    healthcheck:
+      # start_period covers the first-boot model pull, which is far slower
+      # than any subsequent start.
+      start_period: 180s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
 volumes:
   kypost_config:
   kypost_private:

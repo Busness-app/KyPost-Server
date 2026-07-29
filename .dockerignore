@@ -1,2 +1,29 @@
+# Everything here is sent to the Docker daemon before the first instruction
+# runs, so anything large and unused is pure latency on every single build.
+#
+# The big one is share/ollama/models: it is the default bind-mount target for
+# OLLAMA_MODELS_HOST_DIR, so any machine that has run this stack has tens of
+# gigabytes of model blobs sitting there. A local `docker build` was uploading
+# a 33.88 GB context to produce an image that never touches it — the models
+# arrive at runtime through the volume, never through a COPY. (CI never
+# noticed: the directory is gitignored, so a fresh checkout has none of it.)
+share/
+
 **/node_modules
 .git
+.github
+
+# Produced by the frontend-builder stage inside the image. A stale local copy
+# is never wanted and can only mask a broken build.
+frontend/dist/
+
+# Tooling, editor and agent scratch directories.
+.playwright-mcp/
+.claude/
+.superpowers/
+.ua/
+
+# Not referenced by any build stage (TUNING.md is COPY'd, so it stays).
+ky50p.png
+fonts/
+docs/

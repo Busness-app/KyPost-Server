@@ -18,19 +18,21 @@ on:
     - cron: "20 5 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pull-requests: write
-
 env:
   MIN_RELEASE_AGE_DAYS: "3"
   OLLAMA_ASSET: ollama-linux-amd64.tar.zst
 
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
 jobs:
   bump:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Resolve newest sufficiently-soaked release
         id: resolve
@@ -130,7 +132,7 @@ jobs:
 
       - name: Open PR
         if: steps.resolve.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6
         with:
           branch: chore/bump-ollama
           base: main
@@ -146,3 +148,52 @@ jobs:
 
             Check the upstream release notes before merging.
           delete-branch: true
+
+      # A scheduled workflow that fails silently is worse than no workflow,
+      # because you believe you have coverage. This one failed every morning
+      # for a week on "GitHub Actions is not permitted to create or approve
+      # pull requests" — a repository setting, not a bug in this file — while
+      # the pin it exists to maintain went stale and nothing said so. A red
+      # tick on a scheduled run is not a notification; an issue is.
+      #
+      # Note that the underlying setting must still be enabled for the Open PR
+      # step to work at all:
+      #   Settings > Actions > General
+      #     > Workflow permissions
+      #     > "Allow GitHub Actions to create and approve pull requests"
+      - name: Report failure as an issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="ollama-bump workflow is failing"
+
+          # Create the label if it is missing. `gh issue create --label` fails
+          # outright on an unknown label, which would make this reporting step
+          # fail silently — reproducing the exact bug it exists to prevent.
+          # --force makes it idempotent.
+          gh label create automation --color ededed \
+            --description "Opened by a scheduled workflow" --force >/dev/null
+
+          # One open issue, not one per day. Commenting on the existing one
+          # keeps the signal without creating a second inbox.
+          existing="$(gh issue list --state open --label automation \
+            --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Still failing: $RUN_URL"
+          else
+            gh issue create \
+              --title "$title" \
+              --label automation \
+              --body "The scheduled Ollama pin bump failed.
+
+          Run: $RUN_URL
+
+          If the log says \"GitHub Actions is not permitted to create or approve
+          pull requests\", enable Settings > Actions > General > Workflow
+          permissions > \"Allow GitHub Actions to create and approve pull
+          requests\". Until then the pinned Ollama version in the Dockerfile is
+          not being maintained."
+          fi

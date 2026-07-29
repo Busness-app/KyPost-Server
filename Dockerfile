@@ -62,7 +62,12 @@ ENV TZ=America/New_York
 ENV OLLAMA_BASE_URL=http://127.0.0.1:11434
 ENV OLLAMA_MODEL=nemotron-3-nano:4b
 ENV OLLAMA_MODELS=/kypost/ollama-models
-ENV PAIRING_SECRET=
+# No `ENV PAIRING_SECRET=` here. An empty ENV is set-to-empty, not unset.
+# The one consumer today (resolvePairingSecret) trims before testing, so this
+# was never live — but it baked a value into the image that reads as "set" to
+# any presence check (`os.LookupEnv`, `[ -n "${VAR+x}" ]`), and the next
+# reader added has no reason to expect that. docker-compose.yml still passes
+# the variable through when the operator actually supplies one.
 
 RUN mkdir -p /kypost/config /kypost/private /kypost/logs /kypost/state \
 	&& mkdir -p /kypost/ollama-models \
@@ -70,6 +75,18 @@ RUN mkdir -p /kypost/config /kypost/private /kypost/logs /kypost/state \
 
 VOLUME ["/kypost/config", "/kypost/private", "/kypost/logs", "/kypost/state"]
 EXPOSE 5866
+
+# Without this, "the container is running" was the only liveness signal — and
+# it is a bad one. supervisord gives up on a program after startretries (3)
+# and marks it FATAL while continuing to run happily itself, so a permanently
+# dead API left PID 1 healthy, Docker reporting healthy, and compose's
+# `restart: unless-stopped` never firing. The endpoint is unauthenticated and
+# returns 503 (not 200) when the health service reports unhealthy, so this
+# tracks the application's own view of itself rather than just TCP liveness.
+#
+# start-period is generous because first boot pulls the Ollama model.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+	CMD curl -fsS "http://127.0.0.1:${WEB_PORT}/api/health" || exit 1
 
 # No `USER kypost` on purpose: entrypoint.sh must start as root to chown the
 # mounted volumes, then drops to kypost via setpriv before exec'ing supervisord,

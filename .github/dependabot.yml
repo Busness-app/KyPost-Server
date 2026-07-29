@@ -1,0 +1,34 @@
+version: 2
+
+# SHA-pinned actions do not update themselves, and a pin nobody advances is a
+# frozen dependency rather than a safe one. This is the counterpart to the
+# pinning in ci.yml and ollama-bump.yml: Dependabot proposes the new SHA, CI
+# proves the workflow still works, a human merges it.
+#
+# Note that these PRs need the same repository setting the ollama-bump workflow
+# needs — Settings > Actions > General > "Allow GitHub Actions to create and
+# approve pull requests" — or they are silently never opened.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: gomod
+    directory: "/backend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"

@@ -14,15 +14,36 @@ on:
 permissions:
   contents: read
 
+# Supersede an in-flight run when the same ref is pushed again. Without this,
+# three quick pushes to a PR branch keep three full matrices alive — including
+# three `docker build`s, the most expensive job here — reporting on two commits
+# nobody is waiting for. main is excluded from cancellation: a green tick
+# against a specific main commit is the record of whether that commit built,
+# and cancelling it destroys that record.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Every action below is pinned to a commit SHA rather than a tag. A tag is a
+# mutable pointer: whoever controls it controls a job running in this
+# repository, and ollama-bump.yml's job holds `contents: write` and
+# `pull-requests: write`. The Dockerfile already refuses to trust an unpinned
+# Ollama tarball for exactly this reason; the CI that builds it gets the same
+# standard. Dependabot keeps these current — see .github/dependabot.yml.
+
 jobs:
   backend:
     runs-on: ubuntu-latest
+    # The api package alone takes ~4 minutes under -race. 25 leaves headroom
+    # without inheriting GitHub's 6-hour default, which is what a genuinely
+    # hung test would otherwise burn before anyone noticed.
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
@@ -39,28 +60,52 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
+        with:
+          version: latest
+          working-directory: backend
+
+      # gofmt and go vet are a floor, not a security review. This server holds
+      # users' PGP private keys and IMAP credentials; a known-vulnerable
+      # dependency reaching main unremarked is not an acceptable failure mode.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       # -race matters more than usual here: this codebase runs the api and the
       # poller as goroutines in "all" mode and as two processes under
       # supervisord, and several stores are shared between them.
+      #
+      # -count=1 is not optional. Without it `go test` serves cached results
+      # for unchanged packages, which is exactly how internal/app stayed
+      # locally green for days while failing here on every push.
       - name: go test -race
-        run: go test -race ./...
+        run: go test -race -count=1 ./...
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Node and npm are pinned to what the Dockerfile actually builds with
       # (node:26.5.0-slim + npm@12.0.1). A CI job on a different npm major is
       # testing a toolchain nobody ships: npm 10 and npm 12 disagree about how
       # esbuild's optional per-platform packages are recorded, so a lockfile
       # written by one is rejected by the other. Matching the image means a
       # green frontend job actually predicts a green `docker build`.
-      - uses: actions/setup-node@v4
+      #
+      # The version is read from frontend/.nvmrc, which is also what pins
+      # developers (with package.json "engines"). Pinning CI alone was worse
+      # than not pinning it at all: Node 26 ships a `localStorage` global that
+      # shadows jsdom's, so the draft-autosave suite passed on every dev
+      # machine (Node 24) and failed all 14 cases here. CI must not be the
+      # first place a version difference shows up.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "26.5.0"
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -71,6 +116,26 @@ jobs:
       # build the dependency set the lockfile pins, not whatever resolves today.
       - name: npm ci
         run: npm ci
+
+      # Blocking gate on runtime dependencies only. dompurify, openpgp and
+      # quill are what a hostile email actually reaches; a high-severity
+      # advisory against any of them should stop a merge.
+      #
+      # --omit=dev is a deliberate scope, not a way to duck a finding. The
+      # dev-only tree currently carries a high against vite (dev-server path
+      # traversal, Windows-only, fixed by a semver-major bump), which never
+      # runs anywhere but a developer's laptop and is not present in the image
+      # — the runtime stage is debian-slim with no Node at all. Gating on it
+      # would hold every unrelated merge hostage to a major build-tool upgrade.
+      - name: npm audit (runtime dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
+      # Dev-dependency advisories still get surfaced, just not as a merge
+      # blocker. Reported rather than silent, which is the difference between
+      # a known risk and an unknown one.
+      - name: npm audit (dev dependencies, advisory only)
+        continue-on-error: true
+        run: npm audit --audit-level=high
 
       - name: typecheck
         run: npx tsc --noEmit
@@ -83,10 +148,51 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
       # Builds the image the same way a self-hoster does, which is what
       # catches a bad Ollama pin (the SHA-256 check fails the build) or a
       # lockfile that no longer satisfies `npm ci`.
+      #
+      # Cached through the GitHub Actions cache: uncached, every push
+      # recompiled the Go binary, re-ran `npm ci`, and re-downloaded the
+      # ~1.4 GB Ollama tarball from scratch.
       - name: docker build
-        run: docker build -t kypost-server:ci .
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: kypost-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # A built image that cannot start is not a passing build. This catches
+      # the class of failure the build step structurally cannot: a bad
+      # supervisord config, an entrypoint whose chown fails, a missing runtime
+      # dependency. It is also what makes the Dockerfile's HEALTHCHECK load
+      # bearing rather than decorative.
+      - name: container starts and reports healthy
+        run: |
+          docker run -d --name kypost-ci kypost-server:ci
+          for i in $(seq 1 90); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' kypost-ci 2>/dev/null || echo starting)"
+            if [ "$status" = "healthy" ]; then
+              echo "container reported healthy after ${i}s"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' kypost-ci)" != "true" ]; then
+              echo "container exited before becoming healthy" >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "container never became healthy" >&2
+          exit 1
+
+      - name: container logs
+        if: always()
+        run: docker logs kypost-ci 2>&1 | tail -80 || true
