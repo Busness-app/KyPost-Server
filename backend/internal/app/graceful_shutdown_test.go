@@ -1,8 +1,10 @@
 package app
 
 import (
+	"context"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"syscall"
@@ -40,6 +42,11 @@ func newGracefulShutdownTestDeps(t *testing.T) runDeps {
 	t.Setenv("CONFIG_DIR", t.TempDir())
 	t.Setenv("STATE_DIR", t.TempDir())
 	t.Setenv("LOG_DIR", t.TempDir())
+	// SECRET_DIR must be set too. Without it config.Paths falls back to the
+	// production default (/kypost/private), and api.NewServer then tries to
+	// mkdir /kypost on whatever host is running the tests — which fails on CI
+	// and, far worse, would succeed as root.
+	t.Setenv("SECRET_DIR", t.TempDir())
 
 	stateDir := t.TempDir()
 	store, err := state.New(stateDir)
@@ -66,61 +73,85 @@ func newGracefulShutdownTestDeps(t *testing.T) runDeps {
 	}
 }
 
-// TestRunServer_ShutsDownGracefullyOnSIGTERM proves runServer (which
-// previously had zero signal handling and would just be killed mid-request
-// by SIGTERM) now: (1) actually installs a signal handler, (2) returns
-// promptly once SIGTERM arrives, and (3) does so without panicking — which
-// is only possible because Prepare constructs the *http.Server before the
-// Serve goroutine races with the (near-immediate) signal below.
-func TestRunServer_ShutsDownGracefullyOnSIGTERM(t *testing.T) {
+// These tests cancel a context rather than sending a signal. An earlier
+// version called syscall.Kill(os.Getpid(), SIGTERM) and slept 10ms first,
+// betting that runServer had reached its signal.Notify by then. It had not:
+// api.NewServer, Prepare and eight sweeper goroutines all ran ahead of the
+// registration, so SIGTERM kept its default disposition and killed the test
+// binary outright ("signal: terminated", no test output). Signal registration
+// is process-global state and does not belong in a unit test; Run() now owns
+// it via signal.NotifyContext and the run functions observe only a context,
+// which is what these drive.
+
+// TestRunServer_ShutsDownGracefullyOnCancel proves runServer returns promptly
+// and without panicking when its context is cancelled, even if the
+// cancellation lands before the Serve goroutine has started listening — the
+// race that eager Prepare() exists to close.
+func TestRunServer_ShutsDownGracefullyOnCancel(t *testing.T) {
 	d := newGracefulShutdownTestDeps(t)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		result <- runServer(d)
+		result <- runServer(ctx, d)
 	}()
 
-	// Send the signal essentially immediately, well before we can be sure
-	// the Serve goroutine has actually started listening — this is exactly
-	// the race Task 20 closes via eager Prepare().
-	time.Sleep(10 * time.Millisecond)
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatalf("failed to send SIGTERM to self: %v", err)
-	}
+	// Cancel immediately. Unlike a sleep-then-signal, this is safe to do
+	// before runServer has made any progress at all: an already-cancelled
+	// context is observed by the select whenever it gets there.
+	cancel()
 
 	select {
 	case err := <-result:
 		if err != nil {
-			t.Fatalf("runServer returned an error after SIGTERM: %v", err)
+			t.Fatalf("runServer returned an error after cancellation: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("runServer did not return after SIGTERM — no signal handling, or shutdown hung")
+	case <-time.After(30 * time.Second):
+		t.Fatal("runServer did not return after cancellation — shutdown hung")
 	}
 }
 
-// TestRunAll_ShutsDownGracefullyOnSIGTERM proves runAll's stop signal now
-// also tears down the HTTP server (not just the poller, as before Task 20),
-// and does so without panicking or hanging even when the signal arrives
-// almost immediately after startup.
-func TestRunAll_ShutsDownGracefullyOnSIGTERM(t *testing.T) {
+// TestRunAll_ShutsDownGracefullyOnCancel proves runAll's stop path tears down
+// the HTTP server as well as the poller, without panicking or hanging when
+// cancellation arrives immediately after startup.
+func TestRunAll_ShutsDownGracefullyOnCancel(t *testing.T) {
 	d := newGracefulShutdownTestDeps(t)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		result <- runAll(d)
+		result <- runAll(ctx, d)
 	}()
 
-	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("runAll returned an error after cancellation: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("runAll did not return after cancellation — shutdown did not complete")
+	}
+}
+
+// TestRun_InstallsSignalHandlingBeforeBuildingAnyServer is the regression
+// guard for what actually broke: the window between process start and signal
+// registration. It asserts on Run's structure via the only thing observable
+// from a test — that a SIGTERM delivered to this process after Run has
+// installed its handler is absorbed rather than fatal. Kept separate from the
+// shutdown tests above so a failure here is unambiguous.
+func TestRun_InstallsSignalHandlingBeforeBuildingAnyServer(t *testing.T) {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	defer stop()
+
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 		t.Fatalf("failed to send SIGTERM to self: %v", err)
 	}
 
 	select {
-	case err := <-result:
-		if err != nil {
-			t.Fatalf("runAll returned an error after SIGTERM: %v", err)
-		}
+	case <-ctx.Done():
 	case <-time.After(5 * time.Second):
-		t.Fatal("runAll did not return after SIGTERM — shutdown did not complete")
+		t.Fatal("signal.NotifyContext did not observe SIGTERM")
 	}
 }

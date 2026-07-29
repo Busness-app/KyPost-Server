@@ -55,8 +55,26 @@ type Poller struct {
 	classifier           *classifier.HTTPClient
 	redaction            *redaction.Engine
 	nativePushDispatcher *NativePushDispatcher
-	cancel               context.CancelFunc
-	tickSem              chan struct{}
+	// ctx/cancel bound the background tick loop. They are established exactly
+	// once, via ctxOnce, and never reassigned afterwards. Previously cancel
+	// was assigned inside Run — which executes in its own goroutine — and
+	// read by Stop, which raced; when Stop won the read, cancel was still nil
+	// and Stop silently did nothing, leaving the poller running through a
+	// shutdown that believed it had stopped.
+	//
+	// New primes them, but Run and Stop prime them too: several tests build a
+	// Poller as a struct literal rather than through New, and the zero value
+	// has to stay usable.
+	ctxOnce sync.Once
+	ctx     context.Context
+	cancel  context.CancelFunc
+	// wg tracks the tick loop and the eager startup goroutines it spawns, so
+	// a caller can wait for all poller-owned work to unwind before tearing
+	// down the state directory underneath it. Start seeds the counter before
+	// Run begins, which is what makes the children's Add calls inside Run
+	// legal against a concurrent Wait.
+	wg      sync.WaitGroup
+	tickSem chan struct{}
 
 	// wkdStore is the single instance-level WKD domain-claim store, shared
 	// with (the same *wkdpublish.Store instance as) the API server — see
@@ -123,8 +141,8 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		wkdStore:             wkdStore,
 		stateDir:             stateDir,
 		configDir:            configDir,
-		imapKeyPath:          config.EnvOrDefault("IMAP_CONFIG_KEY_FILE", "/kypost/private/imap-config.key"),
-		pgpKeyPath:           config.EnvOrDefault("PGP_PRIVATE_KEY_FILE", "/kypost/private/pgp-private-key.key"),
+		imapKeyPath:          config.SecretFile("IMAP_CONFIG_KEY_FILE", "imap-config.key"),
+		pgpKeyPath:           config.SecretFile("PGP_PRIVATE_KEY_FILE", "pgp-private-key.key"),
 		stores:               map[string]*state.Store{},
 		mailClients:          map[string]*mailClientEntry{},
 		mailCaches:           map[string]*mailcache.Store{},
@@ -135,7 +153,18 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 	}
 	p.tickSem = make(chan struct{}, 1)
 	p.tickSem <- struct{}{}
+	p.initCtx()
 	return p, nil
+}
+
+// initCtx establishes the tick loop's context exactly once. Called from New so
+// the common path has it before any goroutine starts, and from both Run and
+// Stop so a directly-constructed Poller (as several tests build) still works
+// and still cannot race.
+func (p *Poller) initCtx() {
+	p.ctxOnce.Do(func() {
+		p.ctx, p.cancel = context.WithCancel(context.Background())
+	})
 }
 
 func (p *Poller) userStateDir(userID string) string {
@@ -259,8 +288,8 @@ func (p *Poller) SetConfigPath(path string) {
 }
 
 func (p *Poller) Run() {
-	ctx, cancel := context.WithCancel(context.Background())
-	p.cancel = cancel
+	p.initCtx()
+	ctx := p.ctx
 	interval := time.Duration(p.cfg.Scan.IntervalSeconds) * time.Second
 	if interval <= 0 {
 		interval = 90 * time.Second
@@ -280,14 +309,22 @@ func (p *Poller) Run() {
 	// due-guard skips anything checked recently), so running it once eagerly
 	// here is safe. Backgrounded so it never delays the tick/select loop
 	// below from starting.
-	go p.recheckWKDDomains()
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.recheckWKDDomains()
+	}()
 
 	// Retention housekeeping, not per-tick work. Eager first run for the same
 	// reason recheckWKDDomains has one: a host restarting more often than the
 	// interval would otherwise never run it.
 	cleanupTicker := time.NewTicker(stateCleanupInterval)
 	defer cleanupTicker.Stop()
-	go p.cleanupAllUsers()
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.cleanupAllUsers()
+	}()
 
 	for {
 		select {
@@ -344,10 +381,33 @@ func (p *Poller) cleanupAllUsers() {
 	}
 }
 
+// Start runs the tick loop in its own goroutine, tracked so Wait can observe
+// it. Prefer this over `go p.Run()`: Run spawns further goroutines that write
+// per-user state, and only work started through Start is covered by Wait.
+func (p *Poller) Start() {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.Run()
+	}()
+}
+
+// Stop cancels the background tick loop. It is safe to call before Run, after
+// Run, or concurrently with it, and safe to call more than once
+// (context.CancelFunc is idempotent). Stop only signals; use Wait to block
+// until the work has actually finished.
 func (p *Poller) Stop() {
-	if p.cancel != nil {
-		p.cancel()
-	}
+	p.initCtx()
+	p.cancel()
+}
+
+// Wait blocks until the tick loop and its startup goroutines have returned.
+// Callers that tear down the state directory after shutdown must call this:
+// Run eagerly launches recheckWKDDomains and cleanupAllUsers, both of which
+// write per-user state, and both of which used to outlive Stop entirely.
+// Safe to call on a Poller that was never started — the counter is zero.
+func (p *Poller) Wait() {
+	p.wg.Wait()
 }
 
 func (p *Poller) TriggerNow() {

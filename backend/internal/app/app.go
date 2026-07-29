@@ -43,9 +43,9 @@ func Run(args []string) error {
 	}
 
 	paths := config.Paths{
-		ConfigFile: filepath.Join(config.EnvOrDefault("CONFIG_DIR", "/kypost/config"), "config.yaml"),
-		StateDir:   config.EnvOrDefault("STATE_DIR", "/kypost/state"),
-		LogDir:     config.EnvOrDefault("LOG_DIR", "/kypost/logs"),
+		ConfigFile: filepath.Join(config.ConfigDir(), "config.yaml"),
+		StateDir:   config.StateDir(),
+		LogDir:     config.LogDir(),
 	}
 
 	// Capture legacy notification prefs before LoadOrInit rewrites
@@ -83,7 +83,7 @@ func Run(args []string) error {
 		return fmt.Errorf("create state store: %w", err)
 	}
 
-	configDir := config.EnvOrDefault("CONFIG_DIR", "/kypost/config")
+	configDir := config.ConfigDir()
 	usersStore, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		return fmt.Errorf("load users store: %w", err)
@@ -121,13 +121,24 @@ func Run(args []string) error {
 		wkdStore:   wkdStore,
 	}
 
+	// Signal handling is installed exactly once, here at the real entrypoint,
+	// and the run functions below observe it only as a context. That ordering
+	// matters: os/signal registration is process-global, so doing it inside
+	// runServer/runAll (as this used to) left a window between process start
+	// and signal.Notify in which SIGTERM kept its default disposition and
+	// killed the process outright. Registering before any server is built
+	// closes that window, and passing a context instead of a channel means
+	// tests can drive shutdown without signalling the whole process.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
 	switch *mode {
 	case "daemon":
-		return runDaemon(deps)
+		return runDaemon(ctx, deps)
 	case "server":
-		return runServer(deps)
+		return runServer(ctx, deps)
 	case "all":
-		return runAll(deps)
+		return runAll(ctx, deps)
 	default:
 		return errors.New("invalid mode; expected daemon, server, all, or bootstrap-admin")
 	}
@@ -145,25 +156,29 @@ type runDeps struct {
 	wkdStore   *wkdpublish.Store
 }
 
-func runDaemon(d runDeps) error {
+func runDaemon(ctx context.Context, d runDeps) error {
 	classifierClient := newClassifierClient(d.cfg)
 	poller, err := processor.New(d.cfg, d.logger, d.store, d.users, d.stateDir, d.configDir, d.health, classifierClient, d.wkdStore)
 	if err != nil {
 		return err
 	}
 	poller.SetConfigPath(d.configPath)
-	warmupClassifierOnStartup(d.logger, classifierClient, poller)
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	go poller.Run()
+	warmupDone := warmupClassifierOnStartup(ctx, d.logger, classifierClient, poller)
+	poller.Start()
 	d.logger.Info("poller goroutine started")
-	go monitorHealth(d.logger, d.health)
-	<-stop
+	go monitorHealth(ctx, d.logger, d.health)
+	<-ctx.Done()
 	poller.Stop()
+	awaitWarmup(d.logger, warmupDone)
+	// Wait for the poller's own goroutines (the tick loop, plus the eager
+	// recheckWKDDomains and cleanupAllUsers runs) to finish. Stop only
+	// cancels; without this the process could exit, or a test could remove
+	// its state directory, while those were still writing to it.
+	poller.Wait()
 	return nil
 }
 
-func runServer(d runDeps) error {
+func runServer(ctx context.Context, d runDeps) error {
 	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, nil, d.wkdStore)
 	srv.SetClassifier(newClassifierClient(d.cfg))
 
@@ -173,7 +188,7 @@ func runServer(d runDeps) error {
 	// api.Server.Prepare's doc comment for the race this avoids).
 	srv.Prepare()
 
-	sweeperCtx, cancelSweepers := context.WithCancel(context.Background())
+	sweeperCtx, cancelSweepers := context.WithCancel(ctx)
 	defer cancelSweepers()
 	go srv.StartPickupSweeper(sweeperCtx)
 	go srv.StartContactPhotoSweeper(sweeperCtx)
@@ -184,16 +199,13 @@ func runServer(d runDeps) error {
 	go srv.StartUserStoreSweeper(sweeperCtx)
 	go srv.StartVersionMonitor(sweeperCtx)
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- srv.Serve()
 	}()
 
 	select {
-	case <-stop:
+	case <-ctx.Done():
 		cancelSweepers()
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancelShutdown()
@@ -214,7 +226,7 @@ func runServer(d runDeps) error {
 // own SIGKILL timeout (typically 30s) firing first.
 const shutdownTimeout = 20 * time.Second
 
-func runAll(d runDeps) error {
+func runAll(ctx context.Context, d runDeps) error {
 	// Restore the sticky AI-credits flag onto the health status so a restart
 	// keeps surfacing it until a successful classify clears it.
 	if exhausted, at := d.store.AICreditsExhausted(); exhausted {
@@ -229,7 +241,7 @@ func runAll(d runDeps) error {
 	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, poller.UpdateConfig, d.wkdStore)
 	srv.SetPoller(poller)
 	srv.SetClassifier(classifierClient)
-	warmupClassifierOnStartup(d.logger, classifierClient, poller)
+	warmupDone := warmupClassifierOnStartup(ctx, d.logger, classifierClient, poller)
 
 	// Prepare constructs the *http.Server synchronously, before the Serve
 	// goroutine below is launched, so a stop signal arriving essentially
@@ -237,12 +249,10 @@ func runAll(d runDeps) error {
 	// api.Server.Prepare's doc comment for the race this avoids).
 	srv.Prepare()
 
-	sweeperCtx, cancelSweepers := context.WithCancel(context.Background())
+	sweeperCtx, cancelSweepers := context.WithCancel(ctx)
 	defer cancelSweepers()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	go poller.Run()
+	poller.Start()
 	d.logger.Info("poller goroutine started")
 	go srv.StartPickupSweeper(sweeperCtx)
 	go srv.StartContactPhotoSweeper(sweeperCtx)
@@ -252,14 +262,16 @@ func runAll(d runDeps) error {
 	go srv.StartPoWSweeper(sweeperCtx)
 	go srv.StartUserStoreSweeper(sweeperCtx)
 	go srv.StartVersionMonitor(sweeperCtx)
-	go monitorHealth(d.logger, d.health)
+	go monitorHealth(ctx, d.logger, d.health)
+	serveDone := make(chan struct{})
 	go func() {
+		defer close(serveDone)
 		if err := srv.Serve(); err != nil {
 			d.logger.Error("api server stopped", "error", err.Error())
 		}
 	}()
 
-	<-stop
+	<-ctx.Done()
 	// Cancel the sweepers right away. Draining the HTTP server before
 	// stopping the poller is an arbitrary-but-reasonable convention, not a
 	// correctness requirement: poller.Stop() only cancels the background
@@ -276,7 +288,20 @@ func runAll(d runDeps) error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		d.logger.Error("api server shutdown error", "error", err.Error())
 	}
+	// Wait for the Serve goroutine to actually return, exactly as runServer
+	// does. Without this, runAll reported a completed shutdown while Serve was
+	// still unwinding and still writing — the caller would then close the
+	// logger, and the process would exit, mid-write. It surfaced as a flaky
+	// "TempDir RemoveAll cleanup: directory not empty" in the shutdown test:
+	// the test's temp dir was still being written after runAll had returned.
+	<-serveDone
 	poller.Stop()
+	awaitWarmup(d.logger, warmupDone)
+	// Wait for the poller's own goroutines (the tick loop, plus the eager
+	// recheckWKDDomains and cleanupAllUsers runs) to finish. Stop only
+	// cancels; without this the process could exit, or a test could remove
+	// its state directory, while those were still writing to it.
+	poller.Wait()
 	return nil
 }
 
@@ -429,11 +454,21 @@ func clearAllMFAIfRequested(logger *logging.Logger, usersStore *users.Store, sta
 	logger.Error("MFA_CLEAR_ALL: cleared two-factor auth for all users and wrote a completion marker; this env var can now be left set safely, it will not clear MFA again")
 }
 
-func monitorHealth(logger *logging.Logger, healthSvc *health.Service) {
+func monitorHealth(ctx context.Context, logger *logging.Logger, healthSvc *health.Service) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	threshold := config.EnvInt("UNHEALTHY_RESTART_SECONDS", 300)
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			// Stop watching once shutdown starts. Left unbounded (as
+			// `for range ticker.C` was), this goroutine outlived every
+			// shutdown and could still fire os.Exit(2) while the process was
+			// draining — turning a clean exit into exit code 2 and a
+			// supervisord "unexpected exit" restart.
+			return
+		case <-ticker.C:
+		}
 		st := healthSvc.GetStatus()
 		if st.Healthy {
 			continue
@@ -495,9 +530,21 @@ func newClassifierClient(cfg config.Config) *classifier.HTTPClient {
 	return classifier.NewHTTPClient(baseURL, apiKey, classifyPath, tuning, 3*time.Minute)
 }
 
-func warmupClassifierOnStartup(logger *logging.Logger, client *classifier.HTTPClient, poller *processor.Poller) {
+// warmupClassifierOnStartup kicks off the model warmup and the post-warmup
+// unread sweep in the background, returning a channel closed once that work
+// has finished unwinding.
+//
+// The context is the caller's shutdown context, not context.Background(). It
+// used to be Background with a bare 5-minute timeout, which left the warmup
+// goroutine running — issuing IMAP calls and writing per-user state — for up
+// to five minutes after the process had been told to shut down, with no way
+// to stop it. Worse, TriggerUnreadSweep resets every active user's checkpoint
+// before it re-scans; starting that during shutdown risks tearing the write.
+func warmupClassifierOnStartup(ctx context.Context, logger *logging.Logger, client *classifier.HTTPClient, poller *processor.Poller) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer close(done)
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
 		logger.Info("classifier startup warmup requested")
 		if err := client.Warmup(ctx); err != nil {
@@ -505,7 +552,24 @@ func warmupClassifierOnStartup(logger *logging.Logger, client *classifier.HTTPCl
 			return
 		}
 		logger.Info("classifier startup warmup completed")
+		// Re-check before the sweep: Warmup can return nil on a context that
+		// was cancelled moments later, and the sweep is the half that writes.
+		if ctx.Err() != nil {
+			logger.Info("skipping post-warmup unread sweep; shutting down")
+			return
+		}
 		logger.Info("processing unread unlabeled mail after startup warmup")
 		poller.TriggerUnreadSweep()
 	}()
+	return done
+}
+
+// awaitWarmup waits for the startup warmup goroutine to unwind, bounded so a
+// sweep that is already in flight cannot hold shutdown open indefinitely.
+func awaitWarmup(logger *logging.Logger, done <-chan struct{}) {
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+		logger.Error("startup warmup did not finish within the shutdown timeout; exiting anyway")
+	}
 }
