@@ -10,6 +10,11 @@
 // The prompt is built by classifier.BuildRuntimePrompt — the same function the
 // poller uses — so the numbers describe the prompt that actually ships.
 //
+// Config M is the shipping shape. Configs A-L prepend a reference-decisions
+// block that production sent until it was measured and removed; they are kept
+// so their recorded numbers stay reproducible, not because they mirror
+// production.
+//
 // Run it from the backend/ module root:
 //
 // Results land in cmd/modeleval/results/ (gitignored) unless -out says otherwise.
@@ -134,6 +139,12 @@ type evalConfig struct {
 	// FewshotOutside hoists the reference-decisions block out of the untrusted
 	// body and into the trusted instruction text (production defect 5).
 	FewshotOutside bool
+	// NoFewshot drops the reference-decisions block entirely. THIS IS WHAT
+	// PRODUCTION NOW DOES: measured over three repeats the block changed overall
+	// accuracy by nothing (53/60 either way) while doubling p50 latency, so it
+	// was deleted. Configs that leave this false reproduce the older prompt
+	// shape and exist only to keep the historical numbers meaningful.
+	NoFewshot bool
 
 	tuningText string
 	thinkMode  string
@@ -285,6 +296,9 @@ func runOne(ctx context.Context, client *http.Client, base, model string, cfg ev
 func buildPrompt(cfg evalConfig, labels []string, e email, fewshot string) string {
 	tuning := cfg.tuningText
 	body := e.Body
+	if cfg.NoFewshot {
+		fewshot = ""
+	}
 	if cfg.FewshotOutside {
 		// Hoist the reference decisions into the trusted instruction text
 		// instead of leaving them inside the untrusted fence (defect 5).
@@ -326,8 +340,11 @@ func composeBody(body, fewshot string) string {
 	return body + "\n---\n" + fewshot
 }
 
-// renderFewshot reproduces processor/poller.go recentDecisionsContext exactly,
-// including the arrow, so the prompt shape matches production.
+// renderFewshot reproduces the reference-decisions block that production used
+// to prepend (processor/poller.go recentDecisionsContext, removed after config M
+// measured identical accuracy at half the latency). It is kept so the A-L
+// configs remain reproducible against the numbers they were measured with;
+// config M — no block at all — is what production now sends.
 func renderFewshot(entries []fewshotEntry) string {
 	if len(entries) == 0 {
 		return ""
@@ -889,13 +906,20 @@ func buildConfigs(spec, v1Path, v2Path, v3Path, thinkMode string) ([]evalConfig,
 			FewshotOutside: true},
 		"L": {ID: "L", Desc: "D + nonce fence ONLY", TuningPath: v2Path, tuningText: string(v2), Temperature: &zero, NumCtx: 4096, Schema: "enum",
 			NonceFence: true},
+
+		// Is the reference-decisions block earning its place? It costs ~240
+		// tokens per prompt, is a stored injection surface, and recycles the
+		// classifier's own past answers. M is D with it removed; if the numbers
+		// match, production should stop sending it.
+		"M": {ID: "M", Desc: "D with NO few-shot precedent block", TuningPath: v2Path, tuningText: string(v2), Temperature: &zero, NumCtx: 4096, Schema: "enum",
+			NoFewshot: true},
 	}
 
 	var out []evalConfig
 	for _, id := range splitCSV(spec) {
 		cfg, ok := byID[strings.ToUpper(id)]
 		if !ok {
-			return nil, fmt.Errorf("unknown config %q (want A-L)", id)
+			return nil, fmt.Errorf("unknown config %q (want A-M)", id)
 		}
 		cfg.thinkMode = thinkMode
 		if len(classifier.ParseAllowedLabels(cfg.tuningText)) == 0 {

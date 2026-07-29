@@ -755,37 +755,6 @@ func (p *Poller) reloadConfigIfNeeded() {
 	p.UpdateConfig(next)
 }
 
-// recentDecisionsContext returns a short summary of the last N applied decisions to give classifier labelling context.
-func recentDecisionsContext(store *state.Store, limit int) string {
-	all := store.Decisions(50)
-	var applied []state.Decision
-	for _, d := range all {
-		if d.Status == "applied" && d.Label != "" {
-			applied = append(applied, d)
-			if len(applied) >= limit {
-				break
-			}
-		}
-	}
-	if len(applied) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString("Recent labeling decisions for reference:\n")
-	for _, d := range applied {
-		sb.WriteString("- From: ")
-		sb.WriteString(d.Sender)
-		if d.Subject != "" {
-			sb.WriteString(", Subject: ")
-			sb.WriteString(d.Subject)
-		}
-		sb.WriteString(" → Label: ")
-		sb.WriteString(d.Label)
-		sb.WriteString("\n")
-	}
-	return strings.TrimRight(sb.String(), "\n")
-}
-
 func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.Message) error {
 	// A message ListUnreadInbox flagged as too large to safely fetch (see
 	// imapadapter.Message.TooLarge and mailmsg.MaxInboundMessageBytes) skips
@@ -899,17 +868,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	}
 	redacted := p.currentRedaction().Apply(body)
 
-	decisionsCtx := recentDecisionsContext(uc.store, 10)
-	bodyWithContext := redacted
-	if decisionsCtx != "" {
-		if bodyWithContext != "" {
-			bodyWithContext = redacted + "\n---\n" + decisionsCtx
-		} else {
-			bodyWithContext = decisionsCtx
-		}
-	}
-
-	label, err := classifyWithRetry(ctx, p.classifier, cfg.Labels.Allowlist, msg.Sender, msg.Subject, bodyWithContext, uc.tuning)
+	label, err := classifyWithRetry(ctx, p.classifier, cfg.Labels.Allowlist, msg.Sender, msg.Subject, redacted, uc.tuning)
 	// The model answering with something that isn't an allowed label is a
 	// normal outcome, not a classifier failure: fall through to the
 	// "no known label returned" skip path below (which retires the message
