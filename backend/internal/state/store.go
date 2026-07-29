@@ -359,8 +359,10 @@ func (s *Store) EnqueuePullNotification(n PullNotification) error {
 		if err != nil {
 			return err
 		}
+		// A missing or unparseable counter means "no notifications yet"; seq
+		// stays 0 and the increment below starts the sequence at 1.
 		var seq int64
-		fmt.Sscan(raw, &seq)
+		_, _ = fmt.Sscan(raw, &seq)
 		seq++
 		if strings.TrimSpace(n.CreatedAt) == "" {
 			n.CreatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -387,7 +389,8 @@ func (s *Store) EnqueuePullNotification(n PullNotification) error {
 func (s *Store) PullNotificationsAfter(after int64) ([]PullNotification, int64) {
 	var cursor int64
 	if raw, err := metaString(s.db, metaPullSeq); err == nil {
-		fmt.Sscan(raw, &cursor)
+		// Same as EnqueuePullNotification: unparseable means no cursor yet.
+		_, _ = fmt.Sscan(raw, &cursor)
 	}
 	rows, err := s.db.Query(
 		`SELECT seq, title, body, data, created_at FROM pull_notifications WHERE seq > ? ORDER BY seq`, after)

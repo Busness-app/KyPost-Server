@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"kypost-server/backend/internal/config"
 	"kypost-server/backend/internal/fsutil"
 	"kypost-server/backend/internal/logging"
 	"kypost-server/backend/internal/netguard"
@@ -89,13 +90,9 @@ func relayKeyFilePathWithPrefix(prefix string) string {
 	if p := strings.TrimSpace(os.Getenv(prefix + "_KEY_FILE")); p != "" {
 		return p
 	}
-	dir := strings.TrimSpace(os.Getenv("SECRET_DIR"))
-	if dir == "" {
-		dir = "/kypost/private"
-	}
 	// e.g. "push_relay_key" for PUSH_RELAY, "apns_relay_key" for APNS_RELAY.
 	name := strings.ToLower(strings.TrimSuffix(prefix, "_RELAY")) + "_relay_key"
-	return filepath.Join(dir, name)
+	return filepath.Join(config.SecretDir(), name)
 }
 
 // resolveRelayKeyWithPrefix obtains the per-server relay key for a given relay prefix,

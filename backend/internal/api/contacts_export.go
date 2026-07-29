@@ -64,7 +64,14 @@ func (s *Server) handleContactsExport(w http.ResponseWriter, r *http.Request) {
 		writer := csv.NewWriter(w)
 		defer writer.Flush()
 
-		writer.Write([]string{"Name", "Organization", "Title", "Email(s)", "Phone(s)", "Notes", "Birthday"})
+		// Header and rows are written to the response; a write error means the
+		// client went away mid-download. Nothing can be sent to report it (the
+		// 200 and Content-Type are already on the wire), so log and stop rather
+		// than keep serialising rows into a dead socket.
+		if err := writer.Write([]string{"Name", "Organization", "Title", "Email(s)", "Phone(s)", "Notes", "Birthday"}); err != nil {
+			s.logger.Error("contacts csv export failed", "error", err.Error())
+			return
+		}
 
 		for _, c := range list {
 			if c.Deleted {
@@ -204,5 +211,7 @@ func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 	result.ErrorCount = errorCount
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		s.logger.Error("contacts import response encode failed", "error", err.Error())
+	}
 }

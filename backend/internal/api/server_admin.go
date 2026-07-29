@@ -25,7 +25,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			lines = v
 		}
 	}
-	logDir := config.EnvOrDefault("LOG_DIR", "/kypost/logs")
+	logDir := config.LogDir()
 	// Resolve requested file — default to app.log, allow any *.log in logDir
 	filename := filepath.Base(r.URL.Query().Get("file"))
 	if filename == "" || filename == "." {
@@ -46,7 +46,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogsList(w http.ResponseWriter, r *http.Request) {
-	logDir := config.EnvOrDefault("LOG_DIR", "/kypost/logs")
+	logDir := config.LogDir()
 	entries, err := os.ReadDir(logDir)
 	if err != nil {
 		http.Error(w, "failed to list logs", http.StatusInternalServerError)

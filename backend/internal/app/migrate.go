@@ -35,10 +35,7 @@ func migrateLegacySingleUserData(logger *logging.Logger, usersStore *users.Store
 	copyIfMissing(logger, filepath.Join(stateDir, "decisions.json"), filepath.Join(userStateDir, "decisions.json"))
 
 	// Encrypted IMAP credentials (still encrypted under the global master key).
-	legacyIMAP := strings.TrimSpace(os.Getenv("IMAP_CONFIG_FILE"))
-	if legacyIMAP == "" {
-		legacyIMAP = "/kypost/private/imap-config.json"
-	}
+	legacyIMAP := config.SecretFile("IMAP_CONFIG_FILE", "imap-config.json")
 	copyIfMissing(logger, legacyIMAP, filepath.Join(userConfigDir, "imap-config.json"))
 
 	// Tuning prompt: first existing legacy candidate wins.

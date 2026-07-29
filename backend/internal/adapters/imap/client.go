@@ -17,6 +17,8 @@ import (
 
 	goimap "github.com/BrianLeishman/go-imap"
 	pgpcrypto "github.com/ProtonMail/gopenpgp/v3/crypto"
+
+	"kypost-server/backend/internal/config"
 )
 
 type Message struct {
@@ -315,19 +317,11 @@ func NewAPIClientFromStoredConfig(configPath, configKeyPath string) *APIClient {
 }
 
 func defaultConfigPath() string {
-	path := strings.TrimSpace(os.Getenv("IMAP_CONFIG_FILE"))
-	if path == "" {
-		path = "/kypost/private/imap-config.json"
-	}
-	return path
+	return config.SecretFile("IMAP_CONFIG_FILE", "imap-config.json")
 }
 
 func defaultConfigKeyPath() string {
-	path := strings.TrimSpace(os.Getenv("IMAP_CONFIG_KEY_FILE"))
-	if path == "" {
-		path = "/kypost/private/imap-config.key"
-	}
-	return path
+	return config.SecretFile("IMAP_CONFIG_KEY_FILE", "imap-config.key")
 }
 
 func (c *APIClient) ensureCredentialsFromStoredConfigLocked() error {

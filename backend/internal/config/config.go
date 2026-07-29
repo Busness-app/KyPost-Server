@@ -25,6 +25,39 @@ type Paths struct {
 	LogDir     string
 }
 
+// The container's data directories. These literals used to be copy-pasted as
+// EnvOrDefault fallbacks across eight packages and twenty-odd call sites, and
+// several secret files hardcoded "/kypost/private/..." independently of
+// SECRET_DIR — so overriding SECRET_DIR moved some secrets and not others,
+// and any code path that forgot one env var silently reached for the host's
+// root directory instead of failing. Declare them once.
+const (
+	DefaultConfigDir = "/kypost/config"
+	DefaultStateDir  = "/kypost/state"
+	DefaultLogDir    = "/kypost/logs"
+	DefaultSecretDir = "/kypost/private"
+)
+
+// ConfigDir, StateDir, LogDir and SecretDir resolve the four data directories
+// from the environment, falling back to the container defaults above.
+func ConfigDir() string { return EnvOrDefault("CONFIG_DIR", DefaultConfigDir) }
+func StateDir() string  { return EnvOrDefault("STATE_DIR", DefaultStateDir) }
+func LogDir() string    { return EnvOrDefault("LOG_DIR", DefaultLogDir) }
+func SecretDir() string { return EnvOrDefault("SECRET_DIR", DefaultSecretDir) }
+
+// SecretFile resolves the path to a single secret. A per-secret env override
+// (e.g. PGP_PRIVATE_KEY_FILE) still wins so existing deployments that point
+// individual keys elsewhere keep working, but the fallback is now derived
+// from SecretDir() rather than being its own hardcoded absolute path. That is
+// what makes SECRET_DIR actually relocate every secret — including in tests,
+// which is why this exists.
+func SecretFile(envKey, name string) string {
+	if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+		return v
+	}
+	return filepath.Join(SecretDir(), name)
+}
+
 // EnvOrDefault returns the trimmed value of the environment variable key, or
 // fallback if it is unset or blank after trimming.
 func EnvOrDefault(key, fallback string) string {
@@ -257,7 +290,7 @@ func Default() Config {
 func LoadOrInit(path string) (Config, error) {
 	configDir := filepath.Dir(path)
 	// Same SECRET_DIR convention processor.relayKeyFilePathWithPrefix uses.
-	secretDir := EnvOrDefault("SECRET_DIR", "/kypost/private")
+	secretDir := SecretDir()
 	if _, err := os.Stat(path); err == nil {
 		cfg, err := Load(path)
 		if err != nil {
@@ -345,7 +378,14 @@ func ensureNotificationKeyMaterial(configDir, secretDir string, cfg *Config) (bo
 	if err != nil {
 		return changed, err
 	}
-	publicKey := base64.RawURLEncoding.EncodeToString(elliptic.Marshal(elliptic.P256(), key.PublicKey.X, key.PublicKey.Y))
+	// elliptic.Marshal is deprecated since Go 1.21. ECDH().Bytes() produces
+	// the identical uncompressed SEC 1 point (0x04 || X || Y) that VAPID
+	// requires, so this is an encoding-compatible swap, not a format change.
+	ecdhPub, err := key.PublicKey.ECDH()
+	if err != nil {
+		return changed, fmt.Errorf("encode notification public key: %w", err)
+	}
+	publicKey := base64.RawURLEncoding.EncodeToString(ecdhPub.Bytes())
 	if cfg.Notifications.PublicKey != publicKey {
 		cfg.Notifications.PublicKey = publicKey
 		changed = true
@@ -416,7 +456,10 @@ func loadOrCreateNotificationPrivateKey(path string) (*ecdsa.PrivateKey, error) 
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
 		return nil, fmt.Errorf("lock notification key: %w", err)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	// Unlock errors are not actionable: the deferred Close below releases the
+	// lock regardless, and the process is on its way out of this function
+	// either way. Discard explicitly rather than implicitly.
+	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
 
 	// Re-check under the lock: another process/goroutine may have already
 	// generated and written the key while we were waiting for the lock. If

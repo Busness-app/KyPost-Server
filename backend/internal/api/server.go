@@ -137,17 +137,17 @@ type Server struct {
 }
 
 func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Service, usersStore *users.Store, onConfigUpdated func(config.Config), wkdStore *wkdpublish.Store) *Server {
-	configDir := config.EnvOrDefault("CONFIG_DIR", "/kypost/config")
-	stateDir := config.EnvOrDefault("STATE_DIR", "/kypost/state")
-	logPath := filepath.Join(config.EnvOrDefault("LOG_DIR", "/kypost/logs"), "app.log")
-	imapConfigKeyPath := config.EnvOrDefault("IMAP_CONFIG_KEY_FILE", "/kypost/private/imap-config.key")
-	totpSecretKeyPath := config.EnvOrDefault("TOTP_SECRET_KEY_FILE", "/kypost/private/totp-secret.key")
-	pgpPrivateKeyPath := config.EnvOrDefault("PGP_PRIVATE_KEY_FILE", "/kypost/private/pgp-private-key.key")
-	pickupStoreKeyPath := config.EnvOrDefault("PICKUP_STORE_KEY_FILE", "/kypost/private/pickup-store.key")
+	configDir := config.ConfigDir()
+	stateDir := config.StateDir()
+	logPath := filepath.Join(config.LogDir(), "app.log")
+	imapConfigKeyPath := config.SecretFile("IMAP_CONFIG_KEY_FILE", "imap-config.key")
+	totpSecretKeyPath := config.SecretFile("TOTP_SECRET_KEY_FILE", "totp-secret.key")
+	pgpPrivateKeyPath := config.SecretFile("PGP_PRIVATE_KEY_FILE", "pgp-private-key.key")
+	pickupStoreKeyPath := config.SecretFile("PICKUP_STORE_KEY_FILE", "pickup-store.key")
 	// Generated and persisted like every other key above when PAIRING_SECRET is
 	// unset; the env var still wins so a multi-replica deployment can share one.
 	// See resolvePairingSecret.
-	pairingSecretKeyPath := config.EnvOrDefault("PAIRING_SECRET_FILE", "/kypost/private/pairing.key")
+	pairingSecretKeyPath := config.SecretFile("PAIRING_SECRET_FILE", "pairing.key")
 	pairingSecret := resolvePairingSecret(pairingSecretKeyPath, logger)
 
 	captchaProvider := captcha.Provider(strings.ToLower(strings.TrimSpace(os.Getenv("CAPTCHA_PROVIDER"))))
@@ -159,7 +159,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	}
 	if captchaProvider == captcha.ProviderPoW {
 		captchaCfg.HMACKey = resolvePoWSecret(
-			config.EnvOrDefault("POW_SECRET_FILE", "/kypost/private/pow.key"), logger)
+			config.SecretFile("POW_SECRET_FILE", "pow.key"), logger)
 		captchaCfg.MaxNumber = config.EnvInt("POW_MAX_NUMBER", 0)
 	}
 	captchaVerifier, err := captcha.NewVerifier(captchaCfg)

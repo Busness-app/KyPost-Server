@@ -30,7 +30,7 @@ const bootstrapPasswordFile = "first-run-password.txt"
 // aggregator. MUST_CHANGE_PASSWORD narrows the window; it does not stop the
 // password sitting in a log forever.
 func BootstrapAdmin() error {
-	configDir := config.EnvOrDefault("CONFIG_DIR", "/kypost/config")
+	configDir := config.ConfigDir()
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}

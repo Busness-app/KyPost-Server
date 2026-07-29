@@ -19,6 +19,8 @@ import (
 	"kypost-server/backend/internal/logging"
 	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/retry"
+
+	"kypost-server/backend/internal/config"
 )
 
 const diagnosticLogMaxSize = 16 * 1024 * 1024
@@ -163,10 +165,7 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 	tuningTemplate := strings.TrimSpace(tuning)
 	concurrency, pace := classifyAdmission()
 
-	logDir := strings.TrimSpace(os.Getenv("LOG_DIR"))
-	if logDir == "" {
-		logDir = "/kypost/logs"
-	}
+	logDir := config.LogDir()
 
 	return &HTTPClient{
 		baseURL:        strings.TrimRight(baseURL, "/"),
@@ -779,7 +778,7 @@ func LoadTuningText() string {
 	if envPath := strings.TrimSpace(os.Getenv("TUNING_FILE")); envPath != "" {
 		paths = append(paths, envPath)
 	}
-	paths = append(paths, "/kypost/config/TUNING.md", "TUNING.md", "/opt/kypost/TUNING.md")
+	paths = append(paths, filepath.Join(config.ConfigDir(), "TUNING.md"), "TUNING.md", "/opt/kypost/TUNING.md")
 
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
