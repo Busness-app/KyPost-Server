@@ -121,9 +121,49 @@ function isStaleResponse(status: number, response: string): boolean {
 }
 
 /**
- * Send a single push via FCM HTTP v1. Reproduces the exact envelope the Go
- * backend used: message.token, message.notification.{title,body},
- * message.data, message.android.priority = "HIGH".
+ * Send a single push via FCM HTTP v1.
+ *
+ * **Deliberately carries no top-level `notification` block.** It used to, and
+ * that one field was the cause of three separate user-visible bugs on Android.
+ *
+ * FCM's rule: a message carrying a `notification` payload, delivered to an app
+ * that is backgrounded or killed, is rendered by the **system tray** and
+ * `FirebaseMessagingService.onMessageReceived` is never called. For kypost-android
+ * that meant:
+ *
+ *  1. Tapping an "Approve sign-in" notification opened the **inbox**. The system
+ *     tray's default tap target is the launcher activity (MainActivity), not the
+ *     app's own PendingIntent — which is the only thing that points at
+ *     MfaApprovalActivity. MainActivity's MFA routing was removed on the
+ *     reasoning that "the MFA notification's PendingIntent targets
+ *     MfaApprovalActivity directly", and that is true only in the foreground.
+ *  2. The challenge was never tracked. MfaChallengeTracker.markDelivered is only
+ *     reached from PushNotificationDispatcher.showMfaChallenge, i.e. only from
+ *     onMessageReceived — so a background-delivered challenge was rejected by
+ *     MfaApprovalActivity.adoptChallenge even when it was reached.
+ *  3. Notifications landed on a channel nobody configured. With no
+ *     `default_notification_channel_id` in the manifest, Play Services picks its
+ *     own fallback channel, bypassing the app's kypost_push/kypost_mfa channels,
+ *     their IMPORTANCE_HIGH, and any per-channel choice the user has made. Easy
+ *     to end up silenced with the relay still reporting every send as a success.
+ *
+ * Data-only, so onMessageReceived always runs and the app builds the notification
+ * with the right channel, the right tap target, and the tracker entry. That is
+ * what `android.priority: "HIGH"` is for: it is what lets a data-only message
+ * wake a Doze'd app.
+ *
+ * This relay is Android-only, and the envelope no longer pretends otherwise. It
+ * used to carry an `apns` override, which could not fire: the Go backend's
+ * selectSender maps platform ios/macos to the "apns" transport and its separate
+ * APNS_RELAY worker, and returns an error rather than falling back to FCM when
+ * that relay is unconfigured (see native_sender.go). No Apple device can reach
+ * this code path.
+ *
+ * `message.title`/`message.body` are consequently not forwarded anywhere — that
+ * is deliberate, not an oversight. They remain on FcmMessage because the Go
+ * backend still posts them, and Android does not need them: buildNativePushData
+ * duplicates the same values into `data` when content previews are on, and
+ * PushPayloadParser falls back to its own strings when they are off.
  */
 export async function sendFcmMessage(
   config: FcmConfig,
@@ -135,23 +175,9 @@ export async function sendFcmMessage(
   const payload = {
     message: {
       token: message.token,
-      notification: {
-        title: message.title,
-        body: message.body,
-      },
       data: message.data ?? {},
       android: {
         priority: "HIGH",
-      },
-      apns: {
-        headers: { "apns-priority": "10" },
-        payload: {
-          aps: {
-            alert: { title: message.title, body: message.body },
-            sound: "default",
-            "mutable-content": 1,
-          },
-        },
       },
     },
   };
