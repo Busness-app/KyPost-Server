@@ -134,6 +134,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         challengeId?: string;
         methods?: string[];
         matchDigits?: string;
+        pushRetryAfterSeconds?: number;
       }>("/api/auth/login", {
         username,
         ...(await deriveCredential(username, password)),
@@ -147,7 +148,16 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         setMfaMode(methods.includes("push") ? "push" : "totp");
         setMfaCode("");
         setUseRecoveryCode(false);
-        setStatus("");
+        // The server only offers "push" when it actually sent one. When it has
+        // throttled the notification it says how long for, and saying so is the
+        // point: a silent drop to the code field looks like the approval feature
+        // breaking, which is exactly how this presented before the server stopped
+        // advertising a push it had suppressed.
+        setStatus(
+          res.pushRetryAfterSeconds
+            ? `Approval requests are rate-limited — check your device for a request already waiting, or try again in ${res.pushRetryAfterSeconds}s. Enter a code to sign in now.`
+            : ""
+        );
         return;
       }
       await onAuthChanged();

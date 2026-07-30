@@ -268,3 +268,58 @@ func TestSealOpenTOTPSecretRoundTrip(t *testing.T) {
 		t.Fatalf("round trip = %q, want %q", got, secret)
 	}
 }
+
+// TestSupersedeUnansweredPushKeepsAnswersAndTheNewChallenge pins what
+// superseding is allowed to throw away. Deleting an approved-but-unconsumed
+// challenge would discard a decision the user already made and strand the
+// browser that is about to call ConsumePushApproval; deleting a denied one would
+// lose the "no" and let the next attempt re-ask as if nothing had happened.
+func TestSupersedeUnansweredPushKeepsAnswersAndTheNewChallenge(t *testing.T) {
+	s := NewStore()
+
+	pending, err := s.Create("user-1")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	approved, err := s.Create("user-1")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	denied, err := s.Create("user-1")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	other, err := s.Create("user-2")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	current, err := s.Create("user-1")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := s.ResolvePush(approved.ID, "dev-a", true); err != nil {
+		t.Fatalf("ResolvePush approve: %v", err)
+	}
+	if _, err := s.ResolvePush(denied.ID, "dev-b", false); err != nil {
+		t.Fatalf("ResolvePush deny: %v", err)
+	}
+
+	if got := s.SupersedeUnansweredPush("user-1", current.ID); got != 1 {
+		t.Fatalf("superseded = %d, want 1 (only the unanswered challenge)", got)
+	}
+
+	if _, ok := s.Get(pending.ID); ok {
+		t.Fatal("the unanswered challenge must be gone")
+	}
+	for name, id := range map[string]string{
+		"approved":       approved.ID,
+		"denied":         denied.ID,
+		"another user's": other.ID,
+		"the new":        current.ID,
+	} {
+		if _, ok := s.Get(id); !ok {
+			t.Fatalf("%s challenge must survive superseding", name)
+		}
+	}
+}

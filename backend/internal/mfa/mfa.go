@@ -240,6 +240,40 @@ func (s *Store) DeleteByUser(userID string) {
 	}
 }
 
+// SupersedeUnansweredPush deletes userID's still-unanswered push challenges,
+// skipping exceptID, and reports how many went.
+//
+// Called when a new push challenge is about to be dispatched for the same
+// account, so that at most one challenge is ever both pushed and answerable.
+// Without it, each login attempt minted another challenge while the cap on push
+// dispatch meant only one of them had actually been delivered — so a browser
+// could sit polling a challenge id that no device had ever been told about,
+// which is what made push MFA appear to stop working after the first sign-in.
+//
+// Only *unanswered* ones. An approved-but-not-yet-consumed challenge belongs to
+// a browser that is about to call ConsumePushApproval, and a denied one is a
+// decision the user already made; deleting either would discard a real answer.
+// Superseding an unanswered challenge does cancel whatever earlier attempt was
+// still waiting on it, and that is the intended trade: that attempt had no
+// reachable notification behind it anyway, and its poll now reports "expired"
+// instead of hanging until the TTL runs out.
+func (s *Store) SupersedeUnansweredPush(userID, exceptID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	superseded := 0
+	for id, ch := range s.m {
+		if ch.UserID != userID || id == exceptID {
+			continue
+		}
+		if ch.PushStatus == PushApproved || ch.PushStatus == PushDenied {
+			continue
+		}
+		delete(s.m, id)
+		superseded++
+	}
+	return superseded
+}
+
 // PushStatus returns the current push status for a live challenge: "pending",
 // "approved", or "denied". ok=false means missing or expired (caller should
 // treat as "expired"). It is in-memory only — cheap enough to poll frequently.
