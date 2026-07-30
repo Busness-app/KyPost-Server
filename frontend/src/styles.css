@@ -1963,6 +1963,520 @@ pre {
   margin-top: 3px;
 }
 
+/* ── Security page ───────────────────────────────────────────────────────────
+   This page is about custody: who can prove it is you, which devices you
+   trust, and who can read your mail. Every visual device below encodes that
+   state rather than decorating it.
+
+   State colour is derived, never literal. "Protected" borrows the theme's own
+   --accent instead of a fixed green, so the page belongs to whichever of the
+   fifteen themes is loaded. A fixed red is reserved for real consequence — the
+   server holding your key, turning a factor off — and is always mixed toward
+   --ink-strong or --panel so it stays legible on the light themes too. */
+.sec-page {
+  --sec-off: color-mix(in srgb, var(--ink) 58%, var(--panel));
+  --sec-risk: #e0523c;
+  --sec-risk-ink: color-mix(in srgb, #e0523c 46%, var(--ink-strong));
+  --sec-risk-line: color-mix(in srgb, #e0523c 40%, var(--line));
+  --sec-risk-bg: color-mix(in srgb, #e0523c 12%, var(--panel));
+  --sec-label: color-mix(in srgb, var(--ink) 68%, var(--ink-strong));
+  --sec-inset: color-mix(in srgb, var(--panel) 92%, var(--bg));
+  /* One measure for every block inside a section, so the sections read as a
+     column of decisions rather than stretching to whatever the window is. */
+  --sec-measure: 720px;
+}
+
+.sec-header h2 {
+  margin: 0;
+}
+
+/* Content links elsewhere in the app sit inside styled containers; here they
+   land in running prose, where the browser default renders near-invisible on
+   the dark themes. */
+.sec-page a {
+  color: color-mix(in srgb, var(--accent) 72%, var(--ink-strong));
+  text-underline-offset: 2px;
+}
+
+.sec-page a:hover {
+  color: var(--ink-strong);
+}
+
+.sec-header p {
+  margin: 6px 0 0;
+  max-width: 62ch;
+  color: color-mix(in srgb, var(--ink) 82%, var(--ink-strong));
+}
+
+/* The utility voice for this page is mono, because everything the page governs
+   — codes, fingerprints, device ids — is a monospace artifact. */
+.sec-eyebrow {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--sec-label);
+}
+
+/* The custody summary: where you stand, before any setting. Each cell states a
+   consequence in plain words rather than naming the mechanism, because the
+   consequence is what the reader is actually deciding about. */
+.sec-custody {
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.sec-custody li {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 13px 15px;
+  background: var(--sec-inset);
+}
+
+.sec-custody-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+
+.sec-custody p {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--ink) 78%, var(--ink-strong));
+}
+
+.sec-pip {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--sec-off);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sec-off) 22%, transparent);
+}
+
+.sec-pip-on {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.sec-pip-risk {
+  background: var(--sec-risk-ink);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sec-risk) 22%, transparent);
+}
+
+.sec-layout {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.sec-card {
+  position: relative;
+  padding: 22px 0 22px 20px;
+}
+
+/* The spine carries the section's state the whole way down, so the posture is
+   still visible once you are deep in a form and the summary has scrolled off. */
+.sec-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 24px;
+  bottom: 22px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--sec-off);
+}
+
+.sec-card-on::before {
+  background: var(--accent);
+}
+
+.sec-card-risk::before {
+  background: var(--sec-risk-ink);
+}
+
+.sec-card + .sec-card {
+  border-top: 1px solid var(--line);
+}
+
+.sec-card:last-child {
+  padding-bottom: 0;
+}
+
+.sec-card-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.sec-card-head h3 {
+  margin: 0;
+  font-size: 1.06rem;
+  letter-spacing: -0.01em;
+}
+
+.sec-section h4 {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+}
+
+.sec-muted {
+  margin: 8px 0 0;
+  max-width: 68ch;
+  color: color-mix(in srgb, var(--ink) 80%, var(--ink-strong));
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.sec-muted-inline {
+  color: var(--sec-label);
+}
+
+/* The one loud element: the answer to "can this server read my mail". */
+.sec-verdict {
+  margin: 12px 0 0;
+  max-width: var(--sec-measure);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--sec-inset);
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--ink-strong);
+}
+
+.sec-verdict .sec-pip {
+  margin-top: 6px;
+}
+
+.sec-verdict-ok {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+}
+
+.sec-verdict-risk {
+  border-color: var(--sec-risk-line);
+  background: var(--sec-risk-bg);
+  color: var(--sec-risk-ink);
+}
+
+.sec-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.sec-action-quiet {
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--panel) 82%, var(--bg));
+  color: var(--ink-strong);
+}
+
+.sec-action-quiet:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 40%, var(--panel));
+  filter: none;
+}
+
+.sec-action-danger {
+  border-color: var(--sec-risk-line);
+  background: var(--sec-risk-bg);
+  color: var(--sec-risk-ink);
+}
+
+.sec-action-danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--sec-risk) 60%, var(--line));
+  background: color-mix(in srgb, var(--sec-risk) 20%, var(--panel));
+  filter: none;
+}
+
+.sec-check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 9px;
+  margin-top: 12px;
+  max-width: var(--sec-measure);
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--ink) 68%, var(--ink-strong));
+}
+
+.sec-check input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+/* An explanation belongs to the checkbox above it, so it lines up with that
+   label's text rather than with the checkbox — otherwise it reads as a preamble
+   to the next setting. */
+.sec-check-note {
+  margin: 5px 0 0 25px;
+  max-width: 64ch;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--sec-label);
+}
+
+.sec-codes {
+  margin: 12px 0 0;
+  max-width: var(--sec-measure);
+  padding: 14px 16px;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 9px 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--sec-inset);
+}
+
+.sec-codes code {
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-strong);
+  user-select: all;
+}
+
+.sec-devices {
+  margin: 6px 0 0;
+  max-width: var(--sec-measure);
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.sec-devices li {
+  padding: 10px 0;
+}
+
+.sec-devices .sec-check {
+  margin-top: 0;
+}
+
+.sec-devices .sec-muted {
+  margin-left: 25px;
+  font-size: 0.82rem;
+}
+
+.sec-devices-label {
+  margin-top: 18px;
+}
+
+.sec-devices li + li {
+  border-top: 1px solid var(--line);
+}
+
+.sec-device-name {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--ink-strong);
+  word-break: break-all;
+}
+
+.sec-device-tag {
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sec-label);
+  white-space: nowrap;
+}
+
+.sec-inline-form {
+  margin-top: 16px;
+  padding: 15px 16px;
+  max-width: 560px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+}
+
+.sec-inline-form h4 {
+  margin: 0;
+}
+
+.sec-inline-form .sec-actions {
+  margin-top: 2px;
+}
+
+/* A QR code has to sit on white to stay scannable, whatever the theme. */
+.sec-qr {
+  width: fit-content;
+  margin: 4px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.sec-qr img {
+  display: block;
+}
+
+.sec-secret {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  letter-spacing: 0.1em;
+  color: var(--ink-strong);
+  user-select: all;
+  word-break: break-all;
+}
+
+.sec-fingerprint {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+  color: var(--ink-strong);
+  word-break: break-all;
+}
+
+.sec-details {
+  margin-top: 16px;
+}
+
+.sec-details summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--sec-label);
+}
+
+.sec-details summary:hover {
+  color: var(--ink-strong);
+}
+
+.sec-pubkey {
+  margin: 10px 0 0;
+  padding: 12px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--sec-inset);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--ink) 88%, var(--ink-strong));
+  word-break: break-all;
+}
+
+/* The key-custody question. Each option carries its consequence inline rather
+   than behind a tooltip, because the consequence is the whole decision. */
+.sec-choice {
+  margin: 14px 0 0;
+  max-width: var(--sec-measure);
+  padding: 8px 14px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--sec-inset);
+}
+
+.sec-choice legend {
+  padding: 0 8px;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+
+.sec-choice label {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.sec-choice label:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--line));
+  background: color-mix(in srgb, var(--accent) 9%, var(--panel));
+}
+
+.sec-choice label + label {
+  margin-top: 6px;
+}
+
+.sec-choice input[type="radio"] {
+  margin-top: 3px;
+}
+
+.sec-subsection {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.sec-subsection h5 {
+  margin: 0 0 10px;
+  font-size: 0.86rem;
+  color: var(--ink-strong);
+}
+
+.sec-list {
+  margin: 0;
+  max-width: var(--sec-measure);
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sec-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--sec-inset);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--ink-strong);
+}
+
+@media (max-width: 760px) {
+  .sec-custody {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sec-card {
+    padding-left: 15px;
+  }
+}
+
 .contacts-page {
   position: relative;
   height: calc(100vh - 74px);

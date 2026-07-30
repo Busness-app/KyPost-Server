@@ -543,47 +543,119 @@ export function SecurityPage() {
 
   const showRecoveryPanel = recoveryCodes.length > 0;
   const totpOn = showRecoveryPanel || Boolean(status?.totpEnabled);
+  const pushOn = Boolean(status?.pushMfaEnabled);
+  const approverCount =
+    status?.approverDevices.filter((d) => d.approver && d.canApprove !== false).length ?? 0;
+  const approvalsOn = pushOn && approverCount > 0;
+
+  // Four states, not two: an identity whose custody is still loading must not be
+  // reported as server-held, because that is the alarming answer.
+  const keyCustody: "none" | "client" | "server" | "unknown" = !pgpIdentity
+    ? pgpLoading
+      ? "unknown"
+      : "none"
+    : !pgpSession?.bootstrap
+      ? "unknown"
+      : pgpSession.bootstrap.protection === "client"
+        ? "client"
+        : "server";
+
   const messageTone = message.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
   return (
-    <section className="panel security-page">
-      <header className="security-header">
+    <section className="panel sec-page">
+      <header className="sec-header">
         <h2>Security</h2>
-        <p>Protect your account with an authenticator app, and optionally approve sign-ins from a paired device.</p>
+        <p>Who can sign in as you, which devices you trust, and who can read your mail.</p>
       </header>
 
       {message ? <p className={messageTone}>{message}</p> : null}
 
-      <div className="security-layout">
-        <div className="security-card">
-          <div className="security-card-head">
-            <h3>Authenticator app (TOTP)</h3>
-            <span className={`security-badge ${totpOn ? "security-badge-on" : "security-badge-off"}`}>
-              <span className="security-dot" aria-hidden="true" />
-              {totpOn ? "enabled" : "not enabled"}
-            </span>
+      {/* Where you stand, stated as consequences rather than as feature names —
+          the consequence is the part the reader is actually deciding about. */}
+      <ul className="sec-custody">
+        <li>
+          <p className="sec-eyebrow">Sign-in</p>
+          <span className="sec-custody-state">
+            <span className={`sec-pip ${totpOn ? "sec-pip-on" : ""}`} aria-hidden="true" />
+            {totpOn ? "Password and code" : "Password only"}
+          </span>
+          <p>
+            {totpOn
+              ? "Signing in needs a code from your authenticator as well as your password."
+              : "Anyone who learns your password can sign in as you."}
+          </p>
+        </li>
+        <li>
+          <p className="sec-eyebrow">Approvals</p>
+          <span className="sec-custody-state">
+            <span className={`sec-pip ${approvalsOn ? "sec-pip-on" : ""}`} aria-hidden="true" />
+            {approvalsOn ? `${approverCount} paired ${approverCount === 1 ? "device" : "devices"}` : "Codes only"}
+          </span>
+          <p>
+            {approvalsOn
+              ? "You can approve a sign-in with a tap instead of typing a code."
+              : pushOn
+                ? "Push approval is on, but no device is set to approve sign-ins."
+                : "Sign-ins are confirmed with a code, not a device."}
+          </p>
+        </li>
+        <li>
+          <p className="sec-eyebrow">Mail</p>
+          <span className="sec-custody-state">
+            <span
+              className={`sec-pip ${
+                keyCustody === "client" ? "sec-pip-on" : keyCustody === "server" ? "sec-pip-risk" : ""
+              }`}
+              aria-hidden="true"
+            />
+            {keyCustody === "client"
+              ? "End-to-end"
+              : keyCustody === "server"
+                ? "Server holds your key"
+                : keyCustody === "none"
+                  ? "No encryption key"
+                  : "Checking"}
+          </span>
+          <p>
+            {keyCustody === "client"
+              ? "Only this browser can open mail encrypted to you."
+              : keyCustody === "server"
+                ? "This server, and anyone who reaches it or its backups, can read your encrypted mail."
+                : keyCustody === "none"
+                  ? "Nobody can send you encrypted mail until you set up a PGP key."
+                  : "Reading your key's custody."}
+          </p>
+        </li>
+      </ul>
+
+      <div className="sec-layout">
+        <div className={`sec-card ${totpOn ? "sec-card-on" : ""}`}>
+          <div className="sec-card-head">
+            <p className="sec-eyebrow">Sign-in</p>
+            <h3>Authenticator app</h3>
           </div>
 
           {showRecoveryPanel ? (
-            <div className="security-section">
+            <div className="sec-section">
               <h4>Save your recovery codes</h4>
-              <p className="security-muted">
+              <p className="sec-muted">
                 Store these one-time recovery codes somewhere safe. Each works once if you lose access to
                 your authenticator. They will not be shown again.
               </p>
-              <ul className="security-codes">
+              <ul className="sec-codes">
                 {recoveryCodes.map((code) => (
                   <li key={code}>
                     <code>{code}</code>
                   </li>
                 ))}
               </ul>
-              <div className="security-actions">
-                <button type="button" onClick={copyRecoveryCodes}>
+              <div className="sec-actions">
+                <button type="button" className="sec-action-quiet" onClick={copyRecoveryCodes}>
                   Copy codes
                 </button>
               </div>
-              <label className="security-check">
+              <label className="sec-check">
                 <input
                   type="checkbox"
                   checked={savedAcknowledged}
@@ -591,26 +663,26 @@ export function SecurityPage() {
                 />
                 I have saved these recovery codes
               </label>
-              <div className="security-actions">
+              <div className="sec-actions">
                 <button type="button" disabled={!savedAcknowledged} onClick={() => setRecoveryCodes([])}>
                   Done
                 </button>
               </div>
             </div>
           ) : status?.totpEnabled ? (
-            <div className="security-section">
-              <p className="security-muted">Recovery codes remaining: {status.recoveryCodesRemaining}</p>
-              <div className="security-actions">
-                <button type="button" onClick={() => setShowRegenerate(true)}>
+            <div className="sec-section">
+              <p className="sec-muted">Recovery codes remaining: {status.recoveryCodesRemaining}</p>
+              <div className="sec-actions">
+                <button type="button" className="sec-action-quiet" onClick={() => setShowRegenerate(true)}>
                   Regenerate recovery codes
                 </button>
-                <button type="button" className="security-action-danger" onClick={() => setShowDisable(true)}>
+                <button type="button" className="sec-action-danger" onClick={() => setShowDisable(true)}>
                   Disable two-factor auth
                 </button>
               </div>
 
               {showRegenerate ? (
-                <form onSubmit={submitRegenerate} className="auth-form security-inline-form">
+                <form onSubmit={submitRegenerate} className="auth-form sec-inline-form">
                   <h4>Confirm your password</h4>
                   <label>
                     <div>Password</div>
@@ -621,11 +693,15 @@ export function SecurityPage() {
                       autoComplete="current-password"
                     />
                   </label>
-                  <div className="security-actions">
+                  <div className="sec-actions">
                     <button type="submit" disabled={busy || regeneratePassword === ""}>
                       {busy ? "Working..." : "Regenerate"}
                     </button>
-                    <button type="button" className="nav-link-button" onClick={() => setShowRegenerate(false)}>
+                    <button
+                      type="button"
+                      className="sec-action-quiet"
+                      onClick={() => setShowRegenerate(false)}
+                    >
                       Cancel
                     </button>
                   </div>
@@ -633,7 +709,7 @@ export function SecurityPage() {
               ) : null}
 
               {showDisable ? (
-                <form onSubmit={submitDisable} className="auth-form security-inline-form">
+                <form onSubmit={submitDisable} className="auth-form sec-inline-form">
                   <h4>Confirm your password</h4>
                   <label>
                     <div>Password</div>
@@ -644,11 +720,15 @@ export function SecurityPage() {
                       autoComplete="current-password"
                     />
                   </label>
-                  <div className="security-actions">
-                    <button type="submit" disabled={busy || disablePassword === ""}>
+                  <div className="sec-actions">
+                    <button type="submit" className="sec-action-danger" disabled={busy || disablePassword === ""}>
                       {busy ? "Working..." : "Disable"}
                     </button>
-                    <button type="button" className="nav-link-button" onClick={() => setShowDisable(false)}>
+                    <button
+                      type="button"
+                      className="sec-action-quiet"
+                      onClick={() => setShowDisable(false)}
+                    >
                       Cancel
                     </button>
                   </div>
@@ -656,14 +736,16 @@ export function SecurityPage() {
               ) : null}
             </div>
           ) : setup ? (
-            <form onSubmit={submitConfirm} className="auth-form security-inline-form">
-              <h4>Scan this QR code</h4>
-              <p className="security-muted">Scan with your authenticator app, or enter the key manually.</p>
+            <form onSubmit={submitConfirm} className="auth-form sec-inline-form">
+              <h4>Scan this code</h4>
+              <p className="sec-muted">Scan it with your authenticator app, or enter the key by hand.</p>
               {qrDataUrl ? (
-                <img src={qrDataUrl} alt="TOTP enrollment QR code" width={220} height={220} />
+                <div className="sec-qr">
+                  <img src={qrDataUrl} alt="TOTP enrollment QR code" width={220} height={220} />
+                </div>
               ) : null}
-              <p className="security-muted">
-                Manual entry key: <code>{setup.secret}</code>
+              <p className="sec-muted">
+                Manual entry key: <span className="sec-secret">{setup.secret}</span>
               </p>
               <label>
                 <div>Enter the 6-digit code to confirm</div>
@@ -675,19 +757,19 @@ export function SecurityPage() {
                   placeholder="123456"
                 />
               </label>
-              <div className="security-actions">
+              <div className="sec-actions">
                 <button type="submit" disabled={busy || confirmCode.trim().length !== 6}>
                   {busy ? "Confirming..." : "Confirm and enable"}
                 </button>
-                <button type="button" className="nav-link-button" onClick={() => setSetup(null)}>
+                <button type="button" className="sec-action-quiet" onClick={() => setSetup(null)}>
                   Cancel
                 </button>
               </div>
             </form>
           ) : (
-            <div className="security-section">
-              <p className="security-muted">Add an authenticator app as a second factor on sign-in.</p>
-              <div className="security-actions">
+            <div className="sec-section">
+              <p className="sec-muted">Add an authenticator app as a second factor on sign-in.</p>
+              <div className="sec-actions">
                 <button type="button" disabled={busy} onClick={() => void beginSetup()}>
                   {busy ? "Starting..." : "Enable 2FA"}
                 </button>
@@ -696,39 +778,36 @@ export function SecurityPage() {
           )}
         </div>
 
-        <div className="security-card">
-          <div className="security-card-head">
+        <div className={`sec-card ${approvalsOn ? "sec-card-on" : ""}`}>
+          <div className="sec-card-head">
+            <p className="sec-eyebrow">Approvals</p>
             <h3>Push approval</h3>
-            <span
-              className={`security-badge ${status?.pushMfaEnabled ? "security-badge-on" : "security-badge-off"}`}
-            >
-              <span className="security-dot" aria-hidden="true" />
-              {status?.pushMfaEnabled ? "enabled" : "not enabled"}
-            </span>
           </div>
 
           {!status?.totpEnabled ? (
-            <p className="security-muted">
+            <p className="sec-muted">
               Enable an authenticator app (TOTP) above first. Push approval always keeps TOTP as a
               fallback, so it can only be turned on once TOTP is active.
             </p>
           ) : (
-            <div className="security-section">
-              <p className="security-muted">
+            <div className="sec-section">
+              <p className="sec-muted">
                 Approve sign-ins from a paired device. You can still use your authenticator code at any
                 time.
               </p>
-              <label className="security-check">
+              <label className="sec-check">
                 <input
                   type="checkbox"
-                  checked={Boolean(status?.pushMfaEnabled)}
+                  checked={pushOn}
                   disabled={busy}
                   onChange={(e) => void togglePush(e.target.checked)}
                 />
                 Enable push approval
               </label>
               {status && status.approverDevices.length > 0 ? (
-                <ul className="security-devices">
+                <>
+                <p className="sec-eyebrow sec-devices-label">Paired devices</p>
+                <ul className="sec-devices">
                   {status.approverDevices.map((device) => {
                     // Older servers omit canApprove entirely; undefined means
                     // eligible, so this page degrades cleanly against one.
@@ -736,17 +815,20 @@ export function SecurityPage() {
                     const name = device.deviceName?.trim() || device.platform || device.deviceId;
                     return (
                       <li key={device.deviceId}>
-                        <label className="security-check">
+                        <label className="sec-check">
                           <input
                             type="checkbox"
                             checked={eligible && device.approver}
                             disabled={busy || !eligible}
                             onChange={(e) => void toggleApprover(device.deviceId, e.target.checked)}
                           />
-                          {name} — {eligible ? "may approve sign-ins" : "cannot approve sign-ins"}
+                          <span>
+                            <span className="sec-device-name">{name}</span>
+                            {!eligible ? <span className="sec-device-tag">cannot approve</span> : null}
+                          </span>
                         </label>
                         {!eligible && (
-                          <p className="security-muted">
+                          <p className="sec-muted">
                             {device.cannotApproveReason ||
                               "This device's push delivery cannot carry sign-in approvals. Mail notifications still work."}
                           </p>
@@ -755,8 +837,9 @@ export function SecurityPage() {
                     );
                   })}
                 </ul>
+                </>
               ) : (
-                <p className="security-muted">
+                <p className="sec-muted">
                   No paired devices yet. Pair a device on the Notifications page to use push approval.
                 </p>
               )}
@@ -764,39 +847,42 @@ export function SecurityPage() {
           )}
         </div>
 
-        <div className="security-card">
-          <div className="security-card-head">
-            <h3>Email Encryption (PGP)</h3>
-            <span className={`security-badge ${pgpIdentity ? "security-badge-on" : "security-badge-off"}`}>
-              <span className="security-dot" aria-hidden="true" />
-              {pgpIdentity ? "configured" : "not configured"}
-            </span>
+        <div
+          className={`sec-card ${
+            keyCustody === "client" ? "sec-card-on" : keyCustody === "server" ? "sec-card-risk" : ""
+          }`}
+        >
+          <div className="sec-card-head">
+            <p className="sec-eyebrow">Mail</p>
+            <h3>Email encryption (PGP)</h3>
           </div>
           {pgpLoading ? (
-            <p className="contacts-muted">Loading...</p>
+            <p className="sec-muted">Loading...</p>
           ) : pgpIdentity ? (
             <>
-              <p className="contacts-pgp-fingerprint">
-                Fingerprint: {pgpIdentity.fingerprint} · Source: {pgpIdentity.source}
+              <p className="sec-fingerprint">
+                <span className="sec-muted-inline">fingerprint</span> {pgpIdentity.fingerprint}
+                <br />
+                <span className="sec-muted-inline">source</span> {pgpIdentity.source}
               </p>
 
               {pgpSession?.bootstrap?.protection === "client" ? (
-                <div className="security-section">
-                  <span className="security-badge security-badge-on">
-                    <span className="security-dot" aria-hidden="true" />
-                    End-to-end: this server cannot read your encrypted mail
-                  </span>
-                  <p className="contacts-muted">
+                <div className="sec-section">
+                  <p className="sec-verdict sec-verdict-ok">
+                    <span className="sec-pip sec-pip-on" aria-hidden="true" />
+                    <span>End-to-end. This server cannot read your encrypted mail.</span>
+                  </p>
+                  <p className="sec-muted">
                     Your private key is encrypted with your account password and unlocked only in this browser tab.{" "}
                     {pgpSession.unlocked ? "It is unlocked for this session." : "It is locked — you will be asked for your password when you open or send encrypted mail."}
                   </p>
-                  <p className="contacts-muted">
+                  <p className="sec-muted">
                     <strong>Keep a backup of your key.</strong> Because the server cannot open it, an admin password
                     reset makes it permanently unrecoverable along with every message encrypted to it.
                   </p>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <div className="sec-actions">
                     {pgpSession.unlocked ? (
-                      <button type="button" className="contacts-action" onClick={() => lockPGPSession()}>
+                      <button type="button" className="sec-action-quiet" onClick={() => lockPGPSession()}>
                         Lock key
                       </button>
                     ) : (
@@ -804,13 +890,21 @@ export function SecurityPage() {
                         Unlock key
                       </button>
                     )}
-                    <button type="button" className="contacts-action" onClick={() => setRecoverOpen((v) => !v)}>
+                    <button
+                      type="button"
+                      className="sec-action-quiet"
+                      onClick={() => setRecoverOpen((v) => !v)}
+                    >
                       Key won&apos;t unlock?
                     </button>
                   </div>
                   {recoverOpen ? (
-                    <form onSubmit={(e) => void handleRecoverStaleEnvelope(e)}>
-                      <p className="contacts-muted">
+                    <form
+                      onSubmit={(e) => void handleRecoverStaleEnvelope(e)}
+                      className="auth-form sec-inline-form"
+                    >
+                      <h4>Re-encrypt your key</h4>
+                      <p className="sec-muted">
                         If your key stopped opening with your current password, a past password change saved only
                         half-way. Enter the password your key was last encrypted under, plus your current one, and it
                         will be re-encrypted to match.
@@ -833,14 +927,18 @@ export function SecurityPage() {
                           onChange={(e) => setRecoverCurrentPassword(e.target.value)}
                         />
                       </label>
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <div className="sec-actions">
                         <button
                           type="submit"
                           disabled={pgpBusy || recoverOldPassword === "" || recoverCurrentPassword === ""}
                         >
                           Re-encrypt key
                         </button>
-                        <button type="button" className="contacts-action" onClick={() => setRecoverOpen(false)}>
+                        <button
+                          type="button"
+                          className="sec-action-quiet"
+                          onClick={() => setRecoverOpen(false)}
+                        >
                           Cancel
                         </button>
                       </div>
@@ -848,23 +946,27 @@ export function SecurityPage() {
                   ) : null}
                 </div>
               ) : pgpSession?.bootstrap?.migrationAvailable ? (
-                <div className="security-section">
-                  <span className="security-badge security-badge-off">
-                    <span className="security-dot" aria-hidden="true" />
-                    This server can read your encrypted mail
-                  </span>
-                  <p className="contacts-muted">
+                <div className="sec-section">
+                  <p className="sec-verdict sec-verdict-risk">
+                    <span className="sec-pip sec-pip-risk" aria-hidden="true" />
+                    <span>This server can read your encrypted mail.</span>
+                  </p>
+                  <p className="sec-muted">
                     Your private key is stored on this server, encrypted with a key kept on the same machine. Anyone
                     with access to the server or its backups can decrypt everything you have received. Migrating moves
                     the key under your account password so only your browser can open it.
                   </p>
-                  <p className="contacts-muted">
+                  <p className="sec-muted">
                     After migrating, an admin password reset will make the key unrecoverable — export a backup first.
                   </p>
                   {migrateOpen ? (
-                    <form onSubmit={(e) => void handleMigrateToClientProtection(e)}>
+                    <form
+                      onSubmit={(e) => void handleMigrateToClientProtection(e)}
+                      className="auth-form sec-inline-form"
+                    >
+                      <h4>Confirm your password</h4>
                       <label>
-                        <div>Confirm your account password</div>
+                        <div>Account password</div>
                         <input
                           type="password"
                           autoComplete="current-password"
@@ -873,13 +975,13 @@ export function SecurityPage() {
                           required
                         />
                       </label>
-                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                      <div className="sec-actions">
                         <button type="submit" disabled={pgpBusy || migratePassword.length === 0}>
                           {pgpBusy ? "Migrating…" : "Migrate to end-to-end"}
                         </button>
                         <button
                           type="button"
-                          className="contacts-action"
+                          className="sec-action-quiet"
                           onClick={() => {
                             setMigrateOpen(false);
                             setMigratePassword("");
@@ -891,26 +993,35 @@ export function SecurityPage() {
                       </div>
                     </form>
                   ) : (
-                    <button type="button" onClick={() => setMigrateOpen(true)} disabled={pgpBusy}>
-                      Migrate to end-to-end
-                    </button>
+                    <div className="sec-actions">
+                      <button type="button" onClick={() => setMigrateOpen(true)} disabled={pgpBusy}>
+                        Migrate to end-to-end
+                      </button>
+                    </div>
                   )}
                 </div>
               ) : null}
-              <p className="contacts-muted">
+              <p className="sec-muted">
                 {selfContact ? (
                   <>Sharing contact card: {selfContact.fn} · <Link to="/contacts">Manage in Contacts</Link></>
                 ) : (
                   <>No contact card set — <Link to="/contacts">add one in Contacts</Link> and mark it as yours to include it when sharing your PGP key.</>
                 )}
               </p>
-              <details>
-                <summary className="contacts-muted">Show public key</summary>
-                <pre className="contact-details-notes">{pgpIdentity.publicKey}</pre>
+              <details className="sec-details">
+                <summary>Show public key</summary>
+                <pre className="sec-pubkey">{pgpIdentity.publicKey}</pre>
               </details>
-              <button type="button" onClick={() => void handleDeletePGPIdentity()} disabled={pgpBusy}>
-                Delete identity
-              </button>
+              <div className="sec-actions">
+                <button
+                  type="button"
+                  className="sec-action-danger"
+                  onClick={() => void handleDeletePGPIdentity()}
+                  disabled={pgpBusy}
+                >
+                  Delete identity
+                </button>
+              </div>
             </>
           ) : (
             <>
@@ -921,7 +1032,7 @@ export function SecurityPage() {
 
                 Defaults to no, so nothing downgrades by inattention.
               */}
-              <fieldset className="security-choice">
+              <fieldset className="sec-choice">
                 <legend>Read encrypted mail on your phone?</legend>
                 <label>
                   <input
@@ -931,9 +1042,11 @@ export function SecurityPage() {
                     onChange={() => setPgpReadOnMobile(false)}
                     disabled={pgpBusy}
                   />
-                  <strong>No</strong> (recommended) — only this browser can decrypt. Nobody with
-                  access to the server can read your encrypted mail, and the mobile app will show
-                  these messages as unreadable with a link to open them here.
+                  <span>
+                    <strong>No</strong> (recommended) — only this browser can decrypt. Nobody with
+                    access to the server can read your encrypted mail, and the mobile app will show
+                    these messages as unreadable with a link to open them here.
+                  </span>
                 </label>
                 <label>
                   <input
@@ -943,25 +1056,38 @@ export function SecurityPage() {
                     onChange={() => setPgpReadOnMobile(true)}
                     disabled={pgpBusy}
                   />
-                  <strong>Yes</strong> — this server stores your key so it can decrypt for your
-                  devices. Anyone with access to the server, its disk, or its backups can read your
-                  encrypted mail.
+                  <span>
+                    <strong>Yes</strong> — this server stores your key so it can decrypt for your
+                    devices. Anyone with access to the server, its disk, or its backups can read your
+                    encrypted mail.
+                  </span>
                 </label>
               </fieldset>
-              <button
-                type="button"
-                onClick={() =>
-                  void (pgpReadOnMobile ? handleGenerateServerPGPIdentity() : handleGeneratePGPIdentity())
-                }
-                disabled={pgpBusy}
-              >
-                Generate new identity
-              </button>
-              <button type="button" onClick={() => setPgpImportOpen(!pgpImportOpen)} disabled={pgpBusy}>
-                Import existing key
-              </button>
+              <div className="sec-actions">
+                <button
+                  type="button"
+                  onClick={() =>
+                    void (pgpReadOnMobile ? handleGenerateServerPGPIdentity() : handleGeneratePGPIdentity())
+                  }
+                  disabled={pgpBusy}
+                >
+                  Generate new identity
+                </button>
+                <button
+                  type="button"
+                  className="sec-action-quiet"
+                  onClick={() => setPgpImportOpen(!pgpImportOpen)}
+                  disabled={pgpBusy}
+                >
+                  Import existing key
+                </button>
+              </div>
               {pgpImportOpen ? (
-                <form onSubmit={(e) => void handleImportPGPIdentity(e)}>
+                <form
+                  onSubmit={(e) => void handleImportPGPIdentity(e)}
+                  className="auth-form sec-inline-form"
+                >
+                  <h4>Import a key</h4>
                   <label>
                     <div>Armored private key</div>
                     <textarea
@@ -980,12 +1106,14 @@ export function SecurityPage() {
                       onChange={(e) => setPgpImportPassphrase(e.target.value)}
                     />
                   </label>
-                  <button type="submit" disabled={pgpBusy}>Import</button>
+                  <div className="sec-actions">
+                    <button type="submit" disabled={pgpBusy}>Import</button>
+                  </div>
                 </form>
               ) : null}
             </>
           )}
-          {pgpStatus ? <p className="contacts-muted">{pgpStatus}</p> : null}
+          {pgpStatus ? <p className="sec-muted">{pgpStatus}</p> : null}
           <PgpUnlockDialog
             open={unlockOpen}
             reason="to unlock your PGP key for this session"
@@ -994,9 +1122,9 @@ export function SecurityPage() {
           />
 
           {discoverySettings ? (
-            <div className="security-section">
-              <h4>Key discovery</h4>
-              <label className="security-check">
+            <div className="sec-subsection">
+              <h5>Key discovery</h5>
+              <label className="sec-check">
                 <input
                   type="checkbox"
                   checked={discoverySettings.autoEncryptWhenKeyKnown}
@@ -1005,7 +1133,7 @@ export function SecurityPage() {
                 />
                 Encrypt automatically when I have a recipient's key
               </label>
-              <label className="security-check">
+              <label className="sec-check">
                 <input
                   type="checkbox"
                   checked={discoverySettings.storeDiscoveredKeys}
@@ -1014,7 +1142,7 @@ export function SecurityPage() {
                 />
                 Save keys I discover to my contacts
               </label>
-              <label className="security-check">
+              <label className="sec-check">
                 <input
                   type="checkbox"
                   checked={discoverySettings.advertiseAutocrypt}
@@ -1023,11 +1151,11 @@ export function SecurityPage() {
                 />
                 Advertise my public key on outgoing mail (Autocrypt)
               </label>
-              <p className="security-muted">
+              <p className="sec-check-note">
                 Adds an Autocrypt header so people you email can automatically discover your key. On by
                 default.
               </p>
-              <label className="security-check">
+              <label className="sec-check">
                 <input
                   type="checkbox"
                   checked={discoverySettings.publishWKD}
@@ -1036,21 +1164,25 @@ export function SecurityPage() {
                 />
                 Publish my public key via Web Key Directory (WKD)
               </label>
-              <p className="security-muted">
+              <p className="sec-check-note">
                 Lets people look up your key at your mail domain. Requires an administrator to have set up
                 WKD for that domain. On by default.
               </p>
-              {discoveryStatus ? <p className="contacts-muted">{discoveryStatus}</p> : null}
+              {discoveryStatus ? <p className="sec-muted">{discoveryStatus}</p> : null}
               {suppressions.length > 0 ? (
-                <div className="security-subsection">
+                <div className="sec-subsection">
                   <h5>Discovery opt-outs</h5>
-                  <ul className="security-list">
+                  <ul className="sec-list">
                     {suppressions.map((s) => (
                       <li key={s.email}>
                         <span>
-                          {s.email} <span className="contacts-muted">({s.reason})</span>
+                          {s.email} <span className="sec-muted-inline">({s.reason})</span>
                         </span>
-                        <button type="button" onClick={() => void allowDiscoveryAgain(s.email)}>
+                        <button
+                          type="button"
+                          className="sec-action-quiet"
+                          onClick={() => void allowDiscoveryAgain(s.email)}
+                        >
                           Allow discovery again
                         </button>
                       </li>
