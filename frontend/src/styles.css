@@ -625,8 +625,8 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
-/* The PLAIN-TEXT body. Text properties belong here and only here — this is a
-   real element holding real text nodes. */
+/* The plain-text body: a real element holding real text nodes, so text
+   properties belong here and only here. */
 .email-reader-body-block {
   margin: 0;
   max-height: none;
@@ -651,12 +651,9 @@ body {
    Separate from the class above because most of that class does nothing to a
    replaced element: color, white-space, word-break and font-family never reach
    a frame's document, and padding moves the frame's border box rather than its
-   content. Sharing one class made half those declarations dead code that read
-   as if it were styling the message.
-
-   Typography and colour for the frame's content are injected into its own
-   document instead — the frame inherits no stylesheet at all, deliberately.
-   Only geometry belongs out here. */
+   content. Typography and colour for the frame's content are injected into its
+   own document — the frame inherits no stylesheet, deliberately. Only geometry
+   belongs here. */
 .email-reader-body-frame {
   margin: 0;
   display: block;

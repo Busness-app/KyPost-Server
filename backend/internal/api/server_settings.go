@@ -248,10 +248,8 @@ func (s *Server) handleTuning(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		// No MkdirAll here: AtomicWriteFile already creates the parent, and it
-		// creates it 0700. This used to do it first at 0755, which made a
-		// per-user directory world-readable — exactly the drift fsutil's own
-		// comment says it exists to prevent.
+		// No MkdirAll here: AtomicWriteFile already creates the parent, at 0700.
+		// Creating it first at 0755 made the per-user directory world-readable.
 		//
 		// AtomicWriteFile, like every other persisted file here: os.WriteFile
 		// truncates in place, so a full disk or a mid-write exit (which

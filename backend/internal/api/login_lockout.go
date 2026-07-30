@@ -43,21 +43,17 @@ const (
 	mfaLockoutFor  = 15 * time.Minute
 
 	// passwordChangeMaxFailures/passwordChangeLockoutFor throttle the
-	// current-credential check on POST /api/auth/password, keyed on the acting
-	// account AND the client IP — see handleChangePassword.
+	// current-credential check on POST /api/auth/password — see
+	// handleChangePassword. A session is not proof of the password, so a stolen
+	// cookie must not buy unlimited guesses at an endpoint that answers
+	// definitively and pays a full scrypt per attempt. Looser than login's three
+	// strikes because mistyping the current password while changing it is
+	// ordinary.
 	//
-	// A session is not proof of the password. Someone holding a stolen cookie
-	// but not the credential could otherwise guess at it here without limit,
-	// against an endpoint that answers definitively and pays a full scrypt for
-	// every attempt. Looser than login's three strikes because a user mistyping
-	// their current password while changing it is ordinary, and because the
-	// caller already has a session — this bounds an oracle, it is not the front
-	// door.
-	//
-	// The IP half of the key is not optional. On the user ID alone, the thief
-	// holding that cookie burns the budget from their own machine and locks the
-	// REAL owner out of changing their password — during exactly the incident
-	// where changing it is the remedy, which turns the control into the attack.
+	// Keyed on the acting account AND the client IP. Keyed on the user ID alone,
+	// a thief holding the cookie burns the budget from their own machine and
+	// locks the real owner out of changing their password — the control becomes
+	// the attack.
 	passwordChangeMaxFailures = 10
 	passwordChangeLockoutFor  = 15 * time.Minute
 
@@ -316,21 +312,18 @@ func (l *failureLockout) recordSuccess(username string) {
 // A constant that has to be kept in step with another constant by hand will not
 // be. Pinned by TestLoginTimingDoesNotRevealUnknownUsernames.
 //
-// Computed once, on demand, and warmed eagerly by NewServer.
+// Computed on demand, not at package init: a plain package-level var would run
+// the 128 MiB / ~200 ms derivation in every binary importing this package, and
+// both processes supervisord starts are the same binary, so the daemon would pay
+// for a value it can never use. warmLoginTimingHash forces it during server
+// construction so no request pays the first-call penalty — a slower first
+// response on the unknown-username path discloses "no such account" just as well
+// as a faster one.
 //
-// Derived lazily, not at package init: a plain package-level var would run the
-// 128 MiB / ~200 ms derivation in every binary importing this package, and both
-// processes supervisord starts are the same binary, so the daemon would pay for
-// a value it can never use. warmLoginTimingHash forces it during server
-// construction so no request pays the first-call penalty — a SLOWER first
-// response on the unknown-username path discloses "no such account" just as
-// well as a faster one.
-//
-// Cached against the COST it was derived at rather than derived once and kept
-// forever. The equalization only works while this hash costs what a real
-// account's hash costs, so a value memoized across a cost change starts
-// equalizing against the wrong figure and silently reopens the oracle. The cost
-// never changes in production, so this still derives exactly once there.
+// Cached against the cost it was derived at, not derived once and kept forever:
+// a value memoized across a cost change equalizes against the wrong figure and
+// silently reopens the oracle. The cost never changes in production, so this
+// still derives exactly once there.
 var (
 	timingHashMu   sync.RWMutex
 	timingHashVal  string
@@ -348,8 +341,7 @@ func timingDummyHash() string {
 
 	// Derived outside the lock: holding it across a 128 MiB scrypt would
 	// serialize every concurrent unknown-username login behind one derivation.
-	// Two callers racing here both produce a valid hash at the same cost, and
-	// warmLoginTimingHash makes that essentially unreachable anyway.
+	// Two callers racing here both produce a valid hash at the same cost.
 	h, err := users.HashPassword("kypost-timing-equalization-dummy")
 	if err != nil {
 		// HashPassword only fails on a crypto/rand failure or invalid cost
@@ -384,22 +376,19 @@ func warmLoginTimingHash() {
 // that must therefore be paid for.
 //
 // The slot and the budget bound different things and both are required. The
-// budget is a RATE limit: it admits before the work runs, so it caps sustained
-// CPU but does nothing about how many derivations are in flight at one instant
-// — loginRateBurst is 15, and fifteen concurrent scrypts at N=1<<17 is ~1.9 GiB
-// of simultaneous allocation from an anonymous caller, on a container that is
-// also running an LLM. withKDFSlot is the CONCURRENCY limit that bounds the
-// memory. This is the unauthenticated path; it needs the guard more than the
-// CardDAV path that already had it, not less.
+// budget is a rate limit: it admits before the work runs, so it caps sustained
+// CPU but not how many derivations are in flight at one instant — loginRateBurst
+// is 15, and fifteen concurrent scrypts at N=1<<17 is ~1.9 GiB of simultaneous
+// allocation from an anonymous caller. withKDFSlot is the concurrency limit that
+// bounds that memory.
 //
-// The measurement is taken inside the slot for the same reason: time.Since
-// spanning the wait for a slot would bill this attempt for other callers'
-// queueing and drain the budget on a number that is not this attempt's cost.
+// The measurement is taken inside the slot: a time.Since spanning the wait for a
+// slot would bill this attempt for other callers' queueing.
 //
-// Returns errKDFBusy when the slots were saturated. handleLogin must refund
-// both lockout strikes and answer 503 on that: no credential was examined, and
-// spending a strike for a queue that was full turns a load spike into an
-// account lockout — the same reasoning that refunds ErrChallengeExpired.
+// Returns errKDFBusy when the slots were saturated. handleLogin must refund both
+// lockout strikes and answer 503 on that — no credential was examined, so
+// spending a strike would turn a load spike into an account lockout, the same
+// reasoning that refunds ErrChallengeExpired.
 func (s *Server) chargeLoginKDF(ctx context.Context, work func() bool) (bool, error) {
 	var ok bool
 	err := s.withKDFSlot(ctx, func() {
@@ -412,7 +401,7 @@ func (s *Server) chargeLoginKDF(ctx context.Context, work func() bool) (bool, er
 	if err != nil {
 		// The reservation handleLogin took up front bought derivation work that
 		// never happened. Give it back, or a shed burst drains the instance
-		// budget for the sign-ins that follow it.
+		// budget for the sign-ins that follow.
 		if s.loginRateLimiter != nil {
 			s.loginRateLimiter.settleCost(loginRateLimitKey, -loginKDFReserveSeconds)
 		}
@@ -505,45 +494,42 @@ const maxConcurrentKDF = 4
 const deviceRescanInterval = 30 * time.Second
 
 // errKDFBusy means the derivation slots were saturated for longer than
-// kdfMaxQueueWait. Callers must SHED — answer 503 with Retry-After — and must
-// not spend a lockout strike: the caller's credential was never examined, so
-// counting it would let a load spike lock out the users trying to sign in
-// through it.
+// kdfMaxQueueWait. Callers must shed — answer 503 with Retry-After — and must
+// not spend a lockout strike: the credential was never examined, so counting it
+// would let a load spike lock out the users trying to sign in through it.
 var errKDFBusy = errors.New("api: no derivation slot available")
 
-// kdfMaxQueueWait bounds how long a request may wait for a KDF slot.
+// kdfMaxQueueWait bounds how long a request may wait for a KDF slot. A var so
+// tests can shrink it; production always uses the value below.
 //
-// A var so tests can shrink it; production always uses the value below.
-//
-// This was an unbounded blocking send, which bounded the wrong thing. Capping
-// concurrent derivations caps scrypt's MEMORY, but a queue with no limit
-// replaces it with an unbounded backlog of goroutines — each holding a parsed
+// Capping concurrent derivations caps scrypt's memory, but an unbounded queue
+// replaces that with an unbounded backlog of goroutines — each holding a parsed
 // request — and a drain time set by the attacker. With four slots at ~200 ms a
 // derivation, two thousand queued logins are a hundred seconds during which
 // nobody can sign in, change a password, or reach CardDAV, because all four
 // paths share these slots. Neither http.Server's ReadTimeout nor a client
 // hanging up unblocks a goroutine parked on a channel send, so the work still
-// ran afterwards for callers that had long since gone.
+// runs afterwards for callers that are long gone.
 //
-// Shedding is the honest answer at that point: the server cannot currently
-// afford to check this credential, which is a 503, not a 401. Sized at roughly
-// ten derivations' worth of queue — long enough that a legitimate burst waits
-// rather than fails, short enough that the backlog can never become the denial.
+// Shedding is the honest answer there: the server cannot currently afford to
+// check this credential, which is a 503, not a 401. Sized at roughly ten
+// derivations' worth of queue — long enough that a legitimate burst waits rather
+// than fails, short enough that the backlog cannot become the denial.
 var kdfMaxQueueWait = 2 * time.Second
 
 // withKDFSlot runs fn holding one of the process-wide derivation slots,
 // abandoning the attempt if no slot comes free in kdfMaxQueueWait or the
 // caller's context is cancelled first.
 //
-// EVERY path that performs scrypt in response to a request must use it —
-// including authenticated ones. A session bounds who can ask, not how much
-// memory the asking costs, and 128 MiB per concurrent caller is an OOM
-// primitive either way. Current callers: chargeLoginKDF (login), the recovery
-// code check, the password change, and DAV basic auth.
+// Every path that performs scrypt in response to a request must use it,
+// including authenticated ones: a session bounds who can ask, not how much
+// memory the asking costs, and 128 MiB per concurrent caller is an OOM primitive
+// either way. Current callers: chargeLoginKDF (login), the recovery code check,
+// the password change, and DAV basic auth.
 //
-// Returns errKDFBusy or ctx.Err() WITHOUT running fn. A caller that ignores the
-// error silently treats "the server is overloaded" as "your password is wrong",
-// which is both a lie and a lockout.
+// Returns errKDFBusy or ctx.Err() without running fn. A caller that ignores the
+// error reports "the server is overloaded" as "your password is wrong", which is
+// both a lie and a lockout.
 //
 // A nil semaphore (zero-value Server in tests) degrades to running fn directly.
 func (s *Server) withKDFSlot(ctx context.Context, fn func()) error {
@@ -571,8 +557,8 @@ func (s *Server) withKDFSlot(ctx context.Context, fn func()) error {
 }
 
 // writeKDFBusy answers a shed derivation. 503 rather than 429: the caller did
-// nothing wrong and no per-caller budget was exceeded — this instance is simply
-// out of derivation capacity right now.
+// nothing wrong and no per-caller budget was exceeded — this instance is out of
+// derivation capacity.
 func writeKDFBusy(w http.ResponseWriter) {
 	// Derived from the queue tolerance rather than hardcoded: a caller told to
 	// come back sooner than the queue takes to drain just rejoins the same

@@ -456,9 +456,8 @@ const maxContentDepth = 8
 // (the protected-headers legacy-display part) are skipped. Anything
 // unrecognized degrades gracefully to an attachment rather than erroring, so
 // the message still renders.
-// bodyMode reports which render mode a part's Content-Type asks for. The
-// caller carries it to the client so nothing downstream has to sniff the
-// bytes and guess.
+// bodyMode reports which render mode a part's Content-Type asks for. The caller
+// carries it to the client so nothing downstream has to sniff the bytes.
 func bodyMode(contentType string) string {
 	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil &&
 		strings.EqualFold(mediaType, "text/html") {
@@ -467,8 +466,7 @@ func bodyMode(contentType string) string {
 	return BodyModePlain
 }
 
-// Body render modes, matching imapadapter's. A decrypted message's display
-// part is markup or it is not, and only the parse knows which.
+// Body render modes, matching imapadapter's.
 const (
 	BodyModeHTML  = "html"
 	BodyModePlain = "plain"
@@ -558,9 +556,9 @@ func parseMultipart(r io.Reader, boundary string, depth int, body, mode *string,
 			if *body == "" {
 				*body = string(partBody)
 				// The winning part's own type decides the render mode. Taken
-				// here rather than sniffed later: a text/plain part that
-				// mentions "<user@example.com>" is not markup, and treating it
-				// as markup deletes the address.
+				// here rather than sniffed later: a text/plain part mentioning
+				// "<user@example.com>" is not markup, and rendering it as markup
+				// deletes the address.
 				*mode = bodyMode(partType)
 			}
 			continue

@@ -176,12 +176,11 @@ export async function decryptMessage(
   }
 
   // The decrypted payload is a MIME entity, not display text: headers,
-  // boundaries and an encoded body. Parsing it here does two things at once —
-  // it stops the reader showing "Content-Type: text/html" and a boundary marker
-  // as part of the message, and it recovers the render mode from the part's own
-  // Content-Type so nothing downstream has to sniff the bytes for it. An
-  // inline-PGP message has no MIME headers; parseMimeContent returns null for
-  // that and the raw text is the body, as before.
+  // boundaries and an encoded body. Parsing it here keeps the reader from
+  // showing "Content-Type: text/html" and a boundary marker as part of the
+  // message, and recovers the render mode from the part's own Content-Type so
+  // nothing downstream has to sniff the bytes. An inline-PGP message has no MIME
+  // headers; parseMimeContent returns null and the raw text is the body.
   const raw = typeof result.data === "string" ? result.data : String(result.data);
   const parsed = parseMimeContent(raw);
 

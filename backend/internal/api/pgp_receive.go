@@ -14,10 +14,10 @@ import (
 type pgpDecryptResult struct {
 	Body string
 	// BodyMode is the decrypted display part's render mode ("html"/"plain"),
-	// from pgpmail.ParseContent. The outer message's mode says nothing about
-	// it — a multipart/encrypted envelope carries no readable text part at
-	// all, so without this the plaintext inside would inherit "plain" and an
-	// HTML message would render as escaped source.
+	// from pgpmail.ParseContent. The outer message's mode says nothing about it:
+	// a multipart/encrypted envelope carries no readable text part, so without
+	// this the plaintext inside would inherit "plain" and an HTML message would
+	// render as escaped source.
 	BodyMode          string
 	HasAttachments    bool
 	Signed            bool

@@ -9,14 +9,11 @@ import "net/http"
 // auth model on the route's own line, and so TestEveryRouteDeclaresItsAuthModel
 // can enforce that it does.
 //
-// The problem they solve is not hypothetical. With ~120 routes and five auth
-// mechanisms, "no wrapper" used to mean either "deliberately public", "gated by
-// a signed token in the URL", "authenticates itself further down the handler",
-// or "somebody forgot" — and the only way to tell was to open the handler. One
-// of those four is a vulnerability and the route table could not distinguish it
-// from the other three.
-//
-// Adding a route with no marker now fails a test rather than merging quietly.
+// With ~120 routes and five auth mechanisms, an unwrapped route meant one of
+// "deliberately public", "gated by a signed token in the URL", "authenticates
+// itself further down the handler", or "somebody forgot" — indistinguishable
+// without opening the handler, and only one of the four is a vulnerability.
+// Adding a route with no marker now fails a test.
 
 // withPublicRoute marks a handler reachable with no credential at all, because
 // it has to be: the caller has no session yet, or the response carries nothing
@@ -29,12 +26,11 @@ func withPublicRoute(next http.HandlerFunc) http.HandlerFunc { return next }
 // withTokenAuth marks a handler whose entire credential is a signed token
 // supplied in the request — in the URL for the pickup and QR routes
 // (validatePairingToken, consumeQRToken), in the body for native device
-// registration (decodeAndVerifyPairingToken), which is the route that MINTS a
-// device and therefore cannot yet have a device secret to present.
+// registration (decodeAndVerifyPairingToken), which mints the device and so
+// cannot yet have a device secret to present.
 //
-// There is no session and no cookie on any of them, so there is nothing for
-// CSRF to abuse — an attacker holding the token does not need a victim's
-// browser.
+// None of them takes a session or a cookie, so there is nothing for CSRF to
+// abuse: an attacker holding the token does not need a victim's browser.
 func withTokenAuth(next http.HandlerFunc) http.HandlerFunc { return next }
 
 // withDeviceAuth marks a handler that authenticates a paired device itself,

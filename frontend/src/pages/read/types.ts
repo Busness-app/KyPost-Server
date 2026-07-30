@@ -13,7 +13,7 @@ export type InboxEmail = {
    * the server could not know — a client-protected account's PGP mail, which
    * only this browser can decrypt, or a mail-cache entry written before the
    * field existed. Route it through displayBody (read/body.ts) rather than
-   * reading it directly: this describes the message the SERVER sent, and for a
+   * reading it directly: this describes the message the server sent, and for a
    * client-protected account that is the envelope, not the plaintext.
    */
   bodyMode?: "html" | "plain";
@@ -39,7 +39,7 @@ export type DecryptedView = {
    * Which MIME part `body` came from, read by pgpClient off the decrypted
    * entity's own Content-Type. Undefined only for inline PGP, which decrypts to
    * bare text with no MIME headers. Route it through displayBody, never
-   * directly — the server's `bodyMode` describes the ENVELOPE and says nothing
+   * directly: the server's `bodyMode` describes the envelope and says nothing
    * about a plaintext only this browser has.
    */
   bodyMode?: "html" | "plain";

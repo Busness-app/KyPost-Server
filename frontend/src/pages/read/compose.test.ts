@@ -76,12 +76,11 @@ describe("escapeHtml", () => {
   });
 });
 
-// Quoting a client-protected account's mail. The server sends the ENVELOPE for
+// Quoting a client-protected account's mail. The server sends the envelope for
 // these — an armored blob or nothing — and an envelope's bodyMode says nothing
-// about the plaintext inside it. Reply/forward read email.bodyMode
-// unconditionally and never looked at the decrypted view at all, so quoting an
-// encrypted message quoted the ciphertext, and an HTML one would have been
-// paired with the envelope's "plain".
+// about the plaintext inside. Reply/forward read email.bodyMode unconditionally
+// and never looked at the decrypted view, so quoting an encrypted message quoted
+// the ciphertext, and an HTML one was paired with the envelope's "plain".
 describe("quoting a locally decrypted message", () => {
   function decryptedView(over: Partial<DecryptedView> = {}): DecryptedView {
     return { body: "", signed: false, verified: false, signerFingerprint: "", error: "", ...over };

@@ -2,25 +2,21 @@
  * Parses the MIME entity that comes out of a PGP/MIME decryption, in the
  * browser, the same way the server's pgpmail.ParseContent does it.
  *
- * WHY THIS EXISTS. A PGP/MIME payload decrypts to a complete MIME entity —
- * headers, boundaries, encoded parts — not to display text. For a
- * client-protected account the server never sees any of it, so it cannot report
- * `bodyMode` and cannot extract the display part either. Everything downstream
- * was therefore working from a string that still had "Content-Type: text/html"
- * and a boundary marker in it, and guessing at the render mode by inspecting
- * those bytes.
+ * A PGP/MIME payload decrypts to a complete MIME entity — headers, boundaries,
+ * encoded parts — not to display text. For a client-protected account the server
+ * never sees any of it, so it can neither report `bodyMode` nor extract the
+ * display part, and everything downstream worked from a string that still had
+ * "Content-Type: text/html" and a boundary marker in it.
  *
- * Guessing is the thing to eliminate. Every heuristic tried on that string was
- * wrong in one direction or the other — "<user@example.com>" read as a tag and
- * deleted the address; a tag allowlist read "use <br> to break a line" as
- * markup and deleted that. The Content-Type is right there in the bytes. Read
- * it.
+ * Sniffing that string was wrong in both directions: "<user@example.com>" read
+ * as a tag and deleted the address, and a tag allowlist read "use <br> to break
+ * a line" as markup and deleted that. The Content-Type is in the bytes already.
  *
- * Deliberately mirrors the server implementation (backend/internal/pgpmail
- * mime.go) rather than inventing a second set of rules: same first-part-wins
- * selection, same text/rfc822-headers skip, same depth cap. If you change one,
- * change both — a client-protected account and a server-side one must not
- * render the same message differently.
+ * Mirrors the server implementation (backend/internal/pgpmail/mime.go) rather
+ * than inventing a second set of rules: same first-part-wins selection, same
+ * text/rfc822-headers skip, same depth cap. Change one, change both — a
+ * client-protected account and a server-side one must not render the same
+ * message differently.
  */
 
 /** Which MIME part the body was taken from. Matches the server's wire values. */

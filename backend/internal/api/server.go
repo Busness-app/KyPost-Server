@@ -576,10 +576,10 @@ func (s *Server) routesNotifications(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
 	mux.HandleFunc("POST /api/notifications/test", s.withAuth(s.handleNotificationTest))
 	mux.HandleFunc("GET /api/notifications/pairing", s.withAuth(s.handleNotificationPairing))
-	// withTokenAuth, not withDeviceAuth: registration is what CREATES the
-	// device, so there is no device secret to authenticate with yet. The
-	// credential is the single-use signed pairing token from the QR the user
-	// scanned, verified by decodeAndVerifyPairingToken.
+	// withTokenAuth, not withDeviceAuth: registration creates the device, so
+	// there is no device secret to authenticate with yet. The credential is the
+	// single-use signed pairing token from the scanned QR, verified by
+	// decodeAndVerifyPairingToken.
 	mux.HandleFunc("POST /api/notifications/native/register", withTokenAuth(s.handleNotificationNativeRegister))
 	mux.HandleFunc("GET /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
 	mux.HandleFunc("DELETE /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))

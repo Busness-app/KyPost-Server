@@ -37,14 +37,13 @@ func withShortKDFQueueWait(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { kdfMaxQueueWait = previous })
 }
 
-// TestWithKDFSlotShedsRatherThanQueueingForever is the property the whole
-// change exists for.
+// TestWithKDFSlotShedsRatherThanQueueingForever covers the shed path.
 //
-// The slot used to be an unbounded blocking channel send. That capped scrypt's
-// memory and replaced it with an unbounded backlog: goroutines parked forever,
-// each holding a parsed request, draining at four derivations at a time. Neither
-// ReadTimeout nor the client hanging up unblocks a channel send, so the work ran
-// anyway, minutes later, for callers long gone.
+// An unbounded blocking send capped scrypt's memory but replaced it with an
+// unbounded backlog: goroutines parked forever, each holding a parsed request,
+// draining four derivations at a time. Neither ReadTimeout nor the client
+// hanging up unblocks a channel send, so the work ran anyway, minutes later, for
+// callers long gone.
 func TestWithKDFSlotShedsRatherThanQueueingForever(t *testing.T) {
 	srv := newTestServer(t)
 	withShortKDFQueueWait(t, 50*time.Millisecond)
@@ -67,9 +66,9 @@ func TestWithKDFSlotShedsRatherThanQueueingForever(t *testing.T) {
 	}
 }
 
-// TestWithKDFSlotAbandonsOnCancelledContext covers the other half: a client that
-// has already disconnected must not be handed a slot ahead of one still waiting,
-// and must not cost a derivation.
+// TestWithKDFSlotAbandonsOnCancelledContext: a client that has already
+// disconnected must not be handed a slot ahead of one still waiting, and must
+// not cost a derivation.
 func TestWithKDFSlotAbandonsOnCancelledContext(t *testing.T) {
 	srv := newTestServer(t)
 	withShortKDFQueueWait(t, 5*time.Second)
@@ -122,8 +121,8 @@ func TestWithKDFSlotAdmitsWhenCapacityFrees(t *testing.T) {
 	}
 }
 
-// TestWithKDFSlotBoundsConcurrentDerivations is the original property, kept:
-// shedding must not have loosened the concurrency cap it replaced the queue for.
+// TestWithKDFSlotBoundsConcurrentDerivations: shedding must not have loosened
+// the concurrency cap it replaced the queue for.
 func TestWithKDFSlotBoundsConcurrentDerivations(t *testing.T) {
 	srv := newTestServer(t)
 	withShortKDFQueueWait(t, 5*time.Second)

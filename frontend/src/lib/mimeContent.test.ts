@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { parseMimeContent } from "./mimeContent";
 
-// This is what a client-protected account's mail actually goes through. Before
-// it existed, decryptMessage handed the reader the whole MIME entity — headers,
-// boundaries and all — and the render mode was then guessed by inspecting those
-// bytes. Both of those are what these tests hold shut.
+// What a client-protected account's mail goes through. Before it existed,
+// decryptMessage handed the reader the whole MIME entity — headers, boundaries
+// and all — and the render mode was guessed from those bytes.
 
 describe("parseMimeContent", () => {
   it("returns null for bare text so inline PGP is left alone", () => {
@@ -20,8 +19,8 @@ describe("parseMimeContent", () => {
 
   it("reads the mode off a simple text/plain entity", () => {
     const raw = "Content-Type: text/plain; charset=utf-8\r\n\r\nContact <admin@example.com> today";
-    // The exact case the sniffing heuristics kept destroying: the Content-Type
-    // says plain, so the address survives.
+    // The case the sniffing heuristics kept destroying: the Content-Type says
+    // plain, so the address survives.
     expect(parseMimeContent(raw)).toEqual({
       body: "Contact <admin@example.com> today",
       mode: "plain"
@@ -136,8 +135,8 @@ describe("parseMimeContent", () => {
   });
 
   it("terminates on deeply nested multiparts", () => {
-    // A decrypted payload is attacker-supplied by definition, so the walk has
-    // to stop on its own rather than on the sender's good manners.
+    // A decrypted payload is attacker-supplied, so the walk has to terminate on
+    // its own.
     let raw = "Content-Type: text/plain\r\n\r\ndeep body";
     for (let depth = 0; depth < 40; depth++) {
       const boundary = `b${depth}`;
