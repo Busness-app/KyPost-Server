@@ -220,9 +220,12 @@ func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) 
 	}
 	var req struct {
 		Password string `json:"password"`
+		// AuthSecret is the client-derived credential, for an account whose
+		// password never reaches this server. See login_params.go.
+		AuthSecret string `json:"authSecret,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
-		// Never reached a password check, so give the strike back.
+		// Never reached a credential check, so give the strike back.
 		s.loginLockout.cancelAttempt(ac.Username)
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return users.User{}, false
@@ -233,7 +236,7 @@ func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return users.User{}, false
 	}
-	if !users.VerifyPassword(u, req.Password) {
+	if !verifyAccountCredential(u, req.Password, req.AuthSecret) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid credentials"})
 		return users.User{}, false
 	}

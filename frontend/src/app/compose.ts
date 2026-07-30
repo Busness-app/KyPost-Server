@@ -5,8 +5,15 @@
 import { HttpError } from "../api/client";
 import type { ComposeAttachment } from "./types";
 
-// Mirror of the backend maxMailAttachmentBytes (25 MB total decoded).
-export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+// Mirror of the backend's derived maxMailAttachmentBytes in
+// internal/api/server.go: (25 MiB request cap - 1 MiB overhead) * 3/4.
+//
+// The 3/4 is base64: attachments travel encoded inside the JSON body, so the
+// decoded budget is necessarily smaller than the request cap. This previously
+// read 25 MiB — the same figure as the request-body cap at the time — which let
+// the UI accept a set of attachments the server then refused, with an error
+// naming a limit the user had not exceeded.
+export const MAX_ATTACHMENT_BYTES = Math.floor(((25 - 1) * 1024 * 1024) / 4) * 3;
 
 // readFileAsAttachment reads a File and strips the "data:...;base64," prefix
 // that FileReader.readAsDataURL prepends, yielding the raw base64 the API wants.

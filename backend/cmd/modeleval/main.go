@@ -135,6 +135,13 @@ type evalConfig struct {
 	// with a per-request random token. An attacker cannot forge a delimiter
 	// they cannot predict, which is what defeats the forged-fence and
 	// fake-system-directive attacks.
+	//
+	// THIS HAS SHIPPED. Config L measured it at parity with the D baseline
+	// (50/60 against 99/120 — no accuracy cost), so it was ported into
+	// classifier.buildRuntimePromptNonced and production now fences every
+	// prompt with a random token unconditionally. The flag and buildNoncePrompt
+	// below are kept only so the historical numbers in results/ stay
+	// reproducible; setting it false no longer reproduces production.
 	NonceFence bool
 	// FewshotOutside hoists the reference-decisions block out of the untrusted
 	// body and into the trusted instruction text (production defect 5).
@@ -365,10 +372,13 @@ func renderFewshot(entries []fewshotEntry) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// buildNoncePrompt is a CANDIDATE prompt assembly, not the production one. It
-// exists to measure whether an unforgeable delimiter beats the fixed markers in
-// buildRuntimePrompt. If it wins, it must be ported into the classifier package
-// and the numbers reproduced there before anything ships.
+// buildNoncePrompt WAS the candidate assembly for an unforgeable delimiter. It
+// won (parity, no accuracy cost) and has been ported into the classifier
+// package — classifier.BuildRuntimePrompt now emits a token-bearing fence for
+// every prompt. This copy survives only so the configs in results/ that were
+// measured against it still reproduce; new work belongs in the classifier
+// package, where classifier.BuildRuntimePromptNonced takes a fixed token for
+// deterministic comparison.
 func buildNoncePrompt(tuningTemplate string, sender, subject, body, nonce string) string {
 	begin := "<<<UNTRUSTED_EMAIL " + nonce + ">>>"
 	end := "<<<END_UNTRUSTED_EMAIL " + nonce + ">>>"

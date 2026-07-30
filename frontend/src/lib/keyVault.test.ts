@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CorruptEnvelopeError,
   WrongPasswordError,
   VaultLockedError,
   isUnlocked,
@@ -84,10 +85,16 @@ describe("keyVault wrapping", () => {
     ).rejects.toThrow(/Unsupported/);
   });
 
-  it("parseEnvelope returns null for anything that is not a v2 envelope", () => {
+  it("parseEnvelope returns null for anything that is not a usable v2 envelope", () => {
     expect(parseEnvelope("not json")).toBeNull();
     expect(parseEnvelope(JSON.stringify({ v: 1 }))).toBeNull();
-    expect(parseEnvelope(JSON.stringify({ v: 2, kdf: "PBKDF2-SHA256" }))).not.toBeNull();
+
+    // CHANGED: this previously asserted non-null, because parseEnvelope checked
+    // only `v === 2`. A blob with no salt, iv or ciphertext is not an envelope
+    // anyone can open, and passing it on meant the failure surfaced later as a
+    // decrypt error — reported to the user as a wrong password. Null is the
+    // honest answer and produces the correct "no wrapped key stored" message.
+    expect(parseEnvelope(JSON.stringify({ v: 2, kdf: "PBKDF2-SHA256" }))).toBeNull();
   });
 });
 
@@ -156,5 +163,78 @@ describe("keyVault lock state", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  }, TIMEOUT);
+});
+
+describe("keyVault envelope work-factor bounds", () => {
+  // `iterations` comes back out of a blob the server stores, so it is
+  // attacker-controlled input to a deliberately expensive function. An absurd
+  // value must be refused up front rather than handed to WebCrypto, which
+  // would wedge the tab with no error and no route to the Security page.
+  it("refuses an absurdly high iteration count instead of hanging", async () => {
+    const envelope = await wrapPrivateKey(SECRET, PASSWORD);
+    const hostile = { ...envelope, iterations: 4_000_000_000 };
+
+    await expect(unwrapPrivateKey(hostile, PASSWORD)).rejects.toThrow(/unsupported work factor/i);
+  }, TIMEOUT);
+
+  it("refuses a downgraded iteration count", async () => {
+    const envelope = await wrapPrivateKey(SECRET, PASSWORD);
+    for (const iterations of [1, 0, -1, 1_000]) {
+      await expect(unwrapPrivateKey({ ...envelope, iterations }, PASSWORD)).rejects.toThrow(
+        /unsupported work factor/i
+      );
+    }
+  }, TIMEOUT);
+
+  it("refuses a non-integer iteration count", async () => {
+    const envelope = await wrapPrivateKey(SECRET, PASSWORD);
+    for (const iterations of [NaN, Infinity, 600_000.5, "600000" as unknown as number]) {
+      await expect(unwrapPrivateKey({ ...envelope, iterations }, PASSWORD)).rejects.toThrow(
+        /unsupported work factor/i
+      );
+    }
+  }, TIMEOUT);
+
+  // A rejection must not be reported as a wrong password: the remedy for a
+  // hostile envelope is not "try your password again".
+  it("does not report a bad work factor as a wrong password", async () => {
+    const envelope = await wrapPrivateKey(SECRET, PASSWORD);
+    await expect(
+      unwrapPrivateKey({ ...envelope, iterations: 1 }, PASSWORD)
+    ).rejects.not.toBeInstanceOf(WrongPasswordError);
+  }, TIMEOUT);
+
+  it("reports a corrupt envelope distinctly from a wrong password", async () => {
+    const envelope = await wrapPrivateKey(SECRET, PASSWORD);
+    for (const field of ["salt", "iv", "ciphertext"] as const) {
+      const corrupt = { ...envelope, [field]: "not!valid!base64!" };
+      await expect(unwrapPrivateKey(corrupt, PASSWORD)).rejects.toBeInstanceOf(
+        CorruptEnvelopeError
+      );
+    }
+  }, TIMEOUT);
+
+  it("still accepts an envelope written under an older, lower default", async () => {
+    // Raising DEFAULT_ITERATIONS must never strand keys wrapped under the old
+    // one, so the floor sits below the current default.
+    const envelope = await wrapPrivateKey(SECRET, PASSWORD);
+    const older = { ...envelope, iterations: 210_000 };
+    // Re-wrap at the older count so the ciphertext actually matches it.
+    const rewrapped = { ...older, ...(await wrapPrivateKey(SECRET, PASSWORD)) };
+    expect(rewrapped.iterations).toBeGreaterThanOrEqual(210_000);
+    await expect(unwrapPrivateKey(rewrapped, PASSWORD)).resolves.toBe(SECRET);
+  }, TIMEOUT);
+});
+
+describe("parseEnvelope structural validation", () => {
+  it("rejects a blob missing the base64 fields", () => {
+    expect(parseEnvelope(JSON.stringify({ v: 2, kdf: "PBKDF2-SHA256", iterations: 600000 }))).toBeNull();
+    expect(parseEnvelope(JSON.stringify({ v: 2, salt: 1, iv: "a", ciphertext: "b" }))).toBeNull();
+  });
+
+  it("accepts a well-formed envelope", async () => {
+    const envelope = await wrapPrivateKey(SECRET, PASSWORD);
+    expect(parseEnvelope(JSON.stringify(envelope))).not.toBeNull();
   }, TIMEOUT);
 });

@@ -140,13 +140,51 @@ func TestDecodeMailRequestRejectsBadAttachmentBase64(t *testing.T) {
 }
 
 func TestDecodeMailRequestEnforcesAttachmentSizeCap(t *testing.T) {
-	// Two 13 MB attachments cross the 25 MB total budget.
-	chunk := base64.StdEncoding.EncodeToString(make([]byte, 13<<20))
+	// Just over the decoded attachment budget, while the base64 of it still
+	// fits inside maxMailRequestBytes — otherwise the raw body limit is what
+	// rejects the send and the attachment cap is never consulted. That window
+	// is what makes this test about the attachment cap specifically; see
+	// TestDecodeMailRequestReportsAnOversizedBodyAsTooLarge for the other side.
+	over := maxMailAttachmentBytes + (64 << 10)
+	chunk := base64.StdEncoding.EncodeToString(make([]byte, over))
 	body := `{"to": "a@example.com", "attachments": [` +
-		`{"name": "one", "dataBase64": "` + chunk + `"},` +
-		`{"name": "two", "dataBase64": "` + chunk + `"}]}`
+		`{"name": "one", "dataBase64": "` + chunk + `"}]}`
+	if int64(len(body)) > maxMailRequestBytes {
+		t.Fatalf("test body is %d bytes, over the %d-byte request cap: this would exercise the "+
+			"body limit instead of the attachment cap", len(body), maxMailRequestBytes)
+	}
+
 	_, errMsg, err := decodeMailRequest(httptest.NewRequest("POST", "/api/mail/send", strings.NewReader(body)))
 	if err == nil || !strings.Contains(errMsg, "attachments too large") {
-		t.Fatalf("err=%v msg=%q, want size-cap rejection", err, errMsg)
+		t.Fatalf("err=%v msg=%q, want attachment size-cap rejection", err, errMsg)
+	}
+}
+
+// TestDecodeMailRequestReportsAnOversizedBodyAsTooLarge covers the layer above
+// the attachment cap.
+//
+// A body past maxMailRequestBytes used to be truncated by the LimitReader, at
+// which point the JSON decoder failed with a syntax error and the user was told
+// "invalid request" — for the most common reason a send fails. The size has to
+// be named.
+func TestDecodeMailRequestReportsAnOversizedBodyAsTooLarge(t *testing.T) {
+	chunk := base64.StdEncoding.EncodeToString(make([]byte, maxMailRequestBytes))
+	body := `{"to": "a@example.com", "attachments": [` +
+		`{"name": "one", "dataBase64": "` + chunk + `"}]}`
+
+	// httptest.NewRequest sets ContentLength from the reader when it can.
+	req := httptest.NewRequest("POST", "/api/mail/send", strings.NewReader(body))
+	_, errMsg, err := decodeMailRequest(req)
+	if err == nil || !strings.Contains(errMsg, "message too large") {
+		t.Fatalf("err=%v msg=%q, want a body size rejection naming the limit", err, errMsg)
+	}
+
+	// And the same must hold when no Content-Length is declared (chunked), where
+	// only the LimitReader can catch it.
+	req = httptest.NewRequest("POST", "/api/mail/send", strings.NewReader(body))
+	req.ContentLength = -1
+	_, errMsg, err = decodeMailRequest(req)
+	if err == nil || !strings.Contains(errMsg, "message too large") {
+		t.Fatalf("chunked: err=%v msg=%q, want a body size rejection naming the limit", err, errMsg)
 	}
 }

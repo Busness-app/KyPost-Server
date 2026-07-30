@@ -622,7 +622,15 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
-	checkpoint := store.Checkpoint()
+	checkpoint, err := store.Checkpoint()
+	if err != nil {
+		// Refuse the tick rather than proceeding with an empty checkpoint. An
+		// unreadable checkpoint used to look identical to "never polled", and
+		// the response to that is to re-scan the whole mailbox — on every tick,
+		// for as long as the read keeps failing.
+		p.log.Error("cannot read poll checkpoint; skipping this tick", "user_id", u.ID, "error", err.Error())
+		return err
+	}
 	messages, nextCheckpoint, err := uc.mail.ListUnreadInbox(ctx, checkpoint)
 	if err != nil {
 		p.log.Error("fetch unread inbox failed", "user_id", u.ID, "error", err.Error())
@@ -663,7 +671,17 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	failedCount := 0
 	rateLimitedCount := 0
 	for _, msg := range messages {
-		if store.Seen(msg.ID) {
+		seen, err := store.Seen(msg.ID)
+		if err != nil {
+			// Unknown is not unprocessed. Reprocessing re-labels the message and
+			// re-notifies every paired device; skipping costs one poll interval
+			// and the next tick retries.
+			p.log.Error("cannot determine processed state; skipping message this tick",
+				"user_id", u.ID, "message_id", msg.ID, "error", err.Error())
+			skippedSeenCount++
+			continue
+		}
+		if seen {
 			skippedSeenCount++
 			continue
 		}
@@ -690,7 +708,7 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 			break
 		}
 		messageCtx, messageCancel := context.WithTimeout(context.Background(), 4*time.Minute)
-		err := p.handleMessage(messageCtx, uc, msg)
+		err = p.handleMessage(messageCtx, uc, msg)
 		messageCancel()
 		if err != nil {
 			failedCount++
@@ -753,6 +771,27 @@ func shouldMarkProcessedOnError(err error) bool {
 		return isPermanentClassifierError(cerr.err)
 	}
 	return true
+}
+
+// maxLoggedLabelBytes bounds a raw model output before it reaches the log.
+//
+// A well-behaved model answers with one label from the allowlist — a few bytes.
+// A misbehaving one can echo back whatever it was fed, which is attacker-
+// controlled email content, and app.log is served to any admin by
+// GET /api/logs. Truncating means a diagnostic stays a diagnostic instead of
+// becoming a channel for message content to escape the owning user's state.db.
+const maxLoggedLabelBytes = 64
+
+// clipForLog trims and bounds a model-produced string for logging, and strips
+// the newlines that would otherwise let attacker-influenced text forge whole
+// log records for anything parsing app.log line by line.
+func clipForLog(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.NewReplacer("\n", " ", "\r", " ").Replace(s)
+	if len(s) > maxLoggedLabelBytes {
+		return s[:maxLoggedLabelBytes] + "...(truncated)"
+	}
+	return s
 }
 
 // recordMessageFailure is what tickUser's message loop runs on every
@@ -1010,10 +1049,17 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	}
 	// A successful classification means the classifier has credits again; clear any flag.
 	p.clearAICreditsExhausted()
-	p.log.Info("classification result", "user_id", uc.id, "message_id", msg.ID, "raw_label", strings.TrimSpace(label), "sender", msg.Sender, "subject", msg.Subject)
+	// No sender and no subject. This logger writes to the instance-wide app.log
+	// that GET /api/logs serves to ANY admin, so anything put here leaves every
+	// user's correspondence metadata readable by an account that is not theirs —
+	// on a server whose whole premise is that only the recipient can read their
+	// mail. Sender and subject are already recorded in the state.Decision row
+	// below, which lives in the user's own state.db and is served only to them.
+	// The message id is enough to join the two when debugging.
+	p.log.Info("classification result", "user_id", uc.id, "message_id", msg.ID, "raw_label", clipForLog(label))
 	selected := classifier.SelectLabelFromText(cfg.Labels.Allowlist, label)
 	if selected == "" {
-		p.log.Info("classification skipped", "user_id", uc.id, "message_id", msg.ID, "reason", "no known label returned", "raw_label", strings.TrimSpace(label), "allowlist_count", strconv.Itoa(len(cfg.Labels.Allowlist)))
+		p.log.Info("classification skipped", "user_id", uc.id, "message_id", msg.ID, "reason", "no known label returned", "raw_label", clipForLog(label), "allowlist_count", strconv.Itoa(len(cfg.Labels.Allowlist)))
 		_ = uc.store.AddDecision(state.Decision{
 			MessageID: msg.ID,
 			Sender:    msg.Sender,
@@ -1036,8 +1082,6 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		"message_id", msg.ID,
 		"selected_label", selected,
 		"keywords", strings.Join(keywords, ","),
-		"sender", msg.Sender,
-		"subject", msg.Subject,
 	)
 	if err := applyKeywordsWithRetry(ctx, uc.mail, msg.ID, keywords); err != nil {
 		p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", selected, "error", err.Error())
@@ -1179,7 +1223,11 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 			"message_id", msg.ID,
 			"device_id", strings.TrimSpace(device.DeviceID),
 			"platform", platform,
-			"sender", "relay",
+			// "sent_via", not "sender": this names the delivery path, and
+			// overloading "sender" — which everywhere else in this package means
+			// an email's From address — is how a field that must never be logged
+			// ends up looking like one that already is.
+			"sent_via", "relay",
 			"error", sendErr.Error(),
 		)
 	})

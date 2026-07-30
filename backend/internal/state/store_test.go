@@ -129,7 +129,7 @@ func TestUpsertNotificationSubscriptionPreservesLatestSharedState(t *testing.T) 
 	if err != nil {
 		t.Fatalf("New reloaded store: %v", err)
 	}
-	if got := reloadedStore.Checkpoint(); got != "uid-42" {
+	if got := checkpointForTest(t, reloadedStore); got != "uid-42" {
 		t.Fatalf("checkpoint = %q, want %q", got, "uid-42")
 	}
 }
@@ -280,7 +280,7 @@ func TestSetCheckpointDoesNotWipeNativeDevices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New reloaded store: %v", err)
 	}
-	if got := reloadedStore.Checkpoint(); got != "uid-77" {
+	if got := checkpointForTest(t, reloadedStore); got != "uid-77" {
 		t.Fatalf("checkpoint = %q, want %q", got, "uid-77")
 	}
 	devices := reloadedStore.ListNativeDevices()
@@ -323,7 +323,7 @@ func TestMarkProcessedPreservesConcurrentCheckpointWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New reloaded: %v", err)
 	}
-	if got := reloaded.Checkpoint(); got != "uid-99" {
+	if got := checkpointForTest(t, reloaded); got != "uid-99" {
 		t.Fatalf("checkpoint = %q, want %q (MarkProcessed must not stomp a concurrent checkpoint write)", got, "uid-99")
 	}
 }
@@ -390,7 +390,7 @@ func TestCleanupPreservesConcurrentCheckpointWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New reloaded: %v", err)
 	}
-	if got := reloaded.Checkpoint(); got != "uid-cleanup" {
+	if got := checkpointForTest(t, reloaded); got != "uid-cleanup" {
 		t.Fatalf("checkpoint = %q, want %q (Cleanup must not stomp a concurrent checkpoint write)", got, "uid-cleanup")
 	}
 }
@@ -607,5 +607,61 @@ func TestValidateDesktopPairingCodeDoesNotHalfDeleteExpired(t *testing.T) {
 	}
 	if s2.ValidateDesktopPairingCode("code-abc") {
 		t.Fatal("expired code validated as good on reload")
+	}
+}
+
+// TestSeenAndCheckpointReportReadFailures is the regression test for
+// log-and-return-the-zero-value.
+//
+// Seen returning false on a read error means "not yet processed", and the
+// poller acts on that by classifying the message again — duplicate IMAP keyword
+// writes, duplicate Decision rows, and a push notification per already-read
+// message on every paired device. Checkpoint returning "" means "never polled",
+// and the poller acts on that by re-scanning the whole mailbox, on every tick,
+// for as long as the read keeps failing.
+//
+// A closed handle is the cheap, deterministic stand-in for the real cause:
+// SQLITE_BUSY past the busy_timeout, which is reachable because the api and
+// daemon processes contend on this same file.
+func TestSeenAndCheckpointReportReadFailures(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	if err := store.SetCheckpoint("uid-500"); err != nil {
+		t.Fatalf("SetCheckpoint: %v", err)
+	}
+	if err := store.MarkProcessed("msg-1"); err != nil {
+		t.Fatalf("MarkProcessed: %v", err)
+	}
+
+	// Sanity: both work while the store is open.
+	if seen, err := store.Seen("msg-1"); err != nil || !seen {
+		t.Fatalf("Seen before close = %v, %v; want true, nil", seen, err)
+	}
+	if cp, err := store.Checkpoint(); err != nil || cp != "uid-500" {
+		t.Fatalf("Checkpoint before close = %q, %v; want uid-500, nil", cp, err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	seen, err := store.Seen("msg-1")
+	if err == nil {
+		t.Error("Seen returned no error on a failed read; a failure that reads as " +
+			"\"not processed\" makes the poller reclassify and re-notify already-handled mail")
+	}
+	if seen {
+		t.Error("Seen returned true alongside an error; callers must not act on the boolean")
+	}
+
+	cp, err := store.Checkpoint()
+	if err == nil {
+		t.Error("Checkpoint returned no error on a failed read; \"\" is indistinguishable from " +
+			"\"never polled\", which triggers a full mailbox re-scan every tick")
+	}
+	if cp != "" {
+		t.Errorf("Checkpoint returned %q alongside an error, want empty", cp)
 	}
 }

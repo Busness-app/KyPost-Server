@@ -76,17 +76,35 @@ RUN mkdir -p /kypost/config /kypost/private /kypost/logs /kypost/state \
 VOLUME ["/kypost/config", "/kypost/private", "/kypost/logs", "/kypost/state"]
 EXPOSE 5866
 
-# Without this, "the container is running" was the only liveness signal — and
-# it is a bad one. supervisord gives up on a program after startretries (3)
-# and marks it FATAL while continuing to run happily itself, so a permanently
-# dead API left PID 1 healthy, Docker reporting healthy, and compose's
-# `restart: unless-stopped` never firing. The endpoint is unauthenticated and
-# returns 503 (not 200) when the health service reports unhealthy, so this
-# tracks the application's own view of itself rather than just TCP liveness.
+# Without this, "the container is running" was the only liveness signal — and it
+# is a bad one. The endpoint is unauthenticated and returns 503 (not 200) when the
+# health service reports unhealthy, so this tracks the application's own view of
+# itself rather than just TCP liveness.
+#
+# BE CLEAR ABOUT WHAT THIS DOES: it makes an unhealthy container VISIBLE (in
+# `docker compose ps`, and to any orchestrator that polls it). It does NOT restart
+# anything. Docker Engine's restart policies react to a container EXITING; health
+# status only drives replacement under Swarm. An earlier version of this comment
+# claimed the healthcheck was what made `restart: unless-stopped` fire, which is
+# not how Docker works.
+#
+# Self-healing comes from supervisord's startretries instead — see
+# supervisord.conf, where the default of 3 was what actually caused a dead API to
+# be abandoned while PID 1 stayed healthy.
 #
 # start-period is generous because first boot pulls the Ollama model.
+#
+# Tries http first, then https, because TLS_CERT_FILE/TLS_KEY_FILE can turn this
+# listener into HTTPS (see backend/internal/api/tls.go) and a fixed scheme here
+# would then fail every probe forever — marking a perfectly healthy container
+# unhealthy, which is the exact false signal this check was added to remove. -k
+# on the https attempt is correct and not a shortcut: the probe is a loopback
+# call to the same process, and the certificate is issued for the public
+# hostname, not for 127.0.0.1, so verification could never succeed.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
-	CMD curl -fsS "http://127.0.0.1:${WEB_PORT}/api/health" || exit 1
+	CMD curl -fsS "http://127.0.0.1:${WEB_PORT}/api/health" \
+	|| curl -fsSk "https://127.0.0.1:${WEB_PORT}/api/health" \
+	|| exit 1
 
 # No `USER kypost` on purpose: entrypoint.sh must start as root to chown the
 # mounted volumes, then drops to kypost via setpriv before exec'ing supervisord,

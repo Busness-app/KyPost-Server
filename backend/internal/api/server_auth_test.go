@@ -18,9 +18,9 @@ import (
 func authRequestAs(s *Server, req *http.Request, userID string) {
 	token := "session-token-" + userID
 	csrfToken := "csrf-token-" + userID
-	s.mu.Lock()
+	s.sessMu.Lock()
 	s.sessions[token] = Session{UserID: userID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: csrfToken}
-	s.mu.Unlock()
+	s.sessMu.Unlock()
 	// Represent a fully-onboarded session: users are created with
 	// MustChangePassword=true, which is now enforced server-side (see withAuth),
 	// so clear it here to model a user past first login. Tests that specifically
@@ -134,7 +134,9 @@ func TestLoginMeLogoutFlow(t *testing.T) {
 // whenever the request arrived over HTTPS, including via a TLS-terminating
 // reverse proxy that signals this with X-Forwarded-Proto.
 func TestSessionCookieSecureFlag(t *testing.T) {
-	t.Setenv("TRUST_PROXY_HEADERS", "true")
+	// httptest.NewRequest's default peer is 192.0.2.1; trust it as the
+	// TLS-terminating proxy so X-Forwarded-Proto is honored below.
+	trustProxyCIDRsForTest(t, "192.0.2.0/24")
 	srv := newTestServer(t)
 	u, err := srv.users.Create("carol", "correct-horse-battery", users.RoleUser)
 	if err != nil {
@@ -282,9 +284,9 @@ func TestCSRFProtectionOnCookieAuthedMutations(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{"oldPassword": "old-password-testpassword", "newPassword": "new-password-testpassword"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(body))
 	token := "session-token-" + u.ID
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	srv.sessions[token] = Session{UserID: u.ID, IssuedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour), CSRFToken: "the-real-csrf-token"}
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: token})
 	rec := httptest.NewRecorder()
 	protected(rec, req)
@@ -393,7 +395,7 @@ func TestSessionAbsoluteLifetimeCapsRenewal(t *testing.T) {
 	srv, u := newTestServerWithUser(t)
 
 	token := "aged-session"
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	srv.sessions[token] = Session{
 		UserID: u.ID,
 		// Issued just over the ceiling ago, but kept "fresh" by activity —
@@ -402,7 +404,7 @@ func TestSessionAbsoluteLifetimeCapsRenewal(t *testing.T) {
 		ExpiresAt: time.Now().Add(sessionIdleTimeout),
 		CSRFToken: "csrf",
 	}
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: token})
@@ -410,9 +412,9 @@ func TestSessionAbsoluteLifetimeCapsRenewal(t *testing.T) {
 		t.Fatal("a session past sessionMaxLifetime authenticated; the absolute cap is not enforced")
 	}
 
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	_, still := srv.sessions[token]
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 	if still {
 		t.Fatal("expired-by-lifetime session was not dropped from the map")
 	}
@@ -426,7 +428,7 @@ func TestSessionSweeperReclaimsAbandonedSessions(t *testing.T) {
 	srv, u := newTestServerWithUser(t)
 	now := time.Now()
 
-	srv.mu.Lock()
+	srv.sessMu.Lock()
 	srv.sessions["idle-expired"] = Session{
 		UserID: u.ID, IssuedAt: now.Add(-48 * time.Hour),
 		ExpiresAt: now.Add(-time.Minute), CSRFToken: "a",
@@ -438,17 +440,112 @@ func TestSessionSweeperReclaimsAbandonedSessions(t *testing.T) {
 	srv.sessions["healthy"] = Session{
 		UserID: u.ID, IssuedAt: now, ExpiresAt: now.Add(sessionIdleTimeout), CSRFToken: "c",
 	}
-	srv.mu.Unlock()
+	srv.sessMu.Unlock()
 
 	if removed := srv.sweepSessions(now); removed != 2 {
 		t.Fatalf("sweepSessions removed %d, want 2", removed)
 	}
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
+	srv.sessMu.Lock()
+	defer srv.sessMu.Unlock()
 	if _, ok := srv.sessions["healthy"]; !ok {
 		t.Fatal("sweeper removed a live session")
 	}
 	if len(srv.sessions) != 1 {
 		t.Fatalf("sessions left = %d, want 1", len(srv.sessions))
+	}
+}
+
+// TestSessionSlideIsQuantized covers the change that took the session expiry
+// rewrite off the exclusive-lock path.
+//
+// currentUser used to take sessMu (then mu) for WRITING on every authenticated
+// request, to push a 24-hour horizon forward by however many milliseconds had
+// passed. That made the RWMutex a plain Mutex for all request traffic. It now
+// only writes once the window has actually advanced by sessionSlideGranularity.
+//
+// The behaviour that must survive: an active session still gets extended, and
+// the extension still cannot breach the absolute lifetime cap.
+func TestSessionSlideIsQuantized(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create("slider", "correct-horse-battery-staple", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := srv.users.ClearMustChangePassword(u.ID); err != nil {
+		t.Fatalf("ClearMustChangePassword: %v", err)
+	}
+
+	const token = "slide-token"
+	issued := time.Now()
+	srv.sessMu.Lock()
+	srv.sessions[token] = Session{
+		UserID:    u.ID,
+		IssuedAt:  issued,
+		ExpiresAt: issued.Add(sessionIdleTimeout),
+		CSRFToken: "csrf",
+	}
+	srv.sessMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: "kypost_session", Value: token})
+
+	// A request arriving immediately must NOT rewrite the expiry.
+	if _, ok := srv.currentUser(req); !ok {
+		t.Fatal("currentUser rejected a live session")
+	}
+	srv.sessMu.RLock()
+	after := srv.sessions[token].ExpiresAt
+	srv.sessMu.RUnlock()
+	if !after.Equal(issued.Add(sessionIdleTimeout)) {
+		t.Errorf("expiry moved on an immediate second request (%v -> %v); the slide should be quantized",
+			issued.Add(sessionIdleTimeout), after)
+	}
+
+	// Backdate so the window has advanced past the granularity, and confirm the
+	// session IS extended — the quantization must not become a session that
+	// never renews.
+	stale := time.Now().Add(-2 * sessionSlideGranularity)
+	srv.sessMu.Lock()
+	srv.sessions[token] = Session{
+		UserID:    u.ID,
+		IssuedAt:  issued,
+		ExpiresAt: stale.Add(sessionIdleTimeout),
+		CSRFToken: "csrf",
+	}
+	srv.sessMu.Unlock()
+
+	if _, ok := srv.currentUser(req); !ok {
+		t.Fatal("currentUser rejected a live session on the second pass")
+	}
+	srv.sessMu.RLock()
+	extended := srv.sessions[token]
+	srv.sessMu.RUnlock()
+	if !extended.ExpiresAt.After(stale.Add(sessionIdleTimeout)) {
+		t.Errorf("expiry did not advance (%v) after the granularity elapsed; an active user would "+
+			"be logged out mid-work", extended.ExpiresAt)
+	}
+	if !extended.IssuedAt.Equal(issued) {
+		t.Errorf("IssuedAt moved from %v to %v; the absolute lifetime cap is measured from it",
+			issued, extended.IssuedAt)
+	}
+
+	// And a session past its absolute cap is still refused and reclaimed,
+	// regardless of how recently it was touched.
+	srv.sessMu.Lock()
+	srv.sessions[token] = Session{
+		UserID:    u.ID,
+		IssuedAt:  time.Now().Add(-sessionMaxLifetime - time.Minute),
+		ExpiresAt: time.Now().Add(sessionIdleTimeout),
+		CSRFToken: "csrf",
+	}
+	srv.sessMu.Unlock()
+	if _, ok := srv.currentUser(req); ok {
+		t.Error("currentUser accepted a session past sessionMaxLifetime")
+	}
+	srv.sessMu.RLock()
+	_, still := srv.sessions[token]
+	srv.sessMu.RUnlock()
+	if still {
+		t.Error("a session past its absolute cap was not reclaimed")
 	}
 }

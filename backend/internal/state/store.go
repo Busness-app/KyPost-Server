@@ -182,25 +182,41 @@ func (s *Store) tx(fn func(tx *sql.Tx) error) error {
 
 // ---- checkpoint / processed ------------------------------------------------
 
-func (s *Store) Checkpoint() string {
+// Checkpoint returns the last recorded poll checkpoint.
+//
+// The error is returned rather than logged-and-swallowed. Returning "" on a read
+// failure made a broken database indistinguishable from a fresh one, and the
+// caller's "no checkpoint yet" branch is "start from the beginning of the
+// mailbox" — so a transient SQLITE_BUSY turned into a full re-scan, and a
+// corrupt database turned into a full re-scan on every single tick, forever,
+// burning the model each time.
+func (s *Store) Checkpoint() (string, error) {
 	v, err := metaString(s.db, metaCheckpoint)
 	if err != nil {
-		slog.Error("state read failed", "field", "checkpoint", "dir", s.baseDir, "error", err.Error())
+		return "", fmt.Errorf("read checkpoint (%s): %w", s.baseDir, err)
 	}
-	return v
+	return v, nil
 }
 
 func (s *Store) SetCheckpoint(value string) error {
 	return setMeta(s.db, metaCheckpoint, value)
 }
 
-func (s *Store) Seen(id string) bool {
+// Seen reports whether a message has already been classified.
+//
+// The error is returned rather than swallowed into false, because false means
+// "not yet processed" and the caller acts on it by processing the message. A
+// read failure — SQLITE_BUSY past the busy_timeout is reachable here, since the
+// api and daemon processes contend on this file — therefore meant reclassifying
+// mail that was already done: duplicate IMAP keyword writes, duplicate Decision
+// rows, and a push notification per already-read message on every paired
+// device. "I don't know" is not "no".
+func (s *Store) Seen(id string) (bool, error) {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM processed WHERE message_id = ?`, id).Scan(&n); err != nil {
-		slog.Error("state read failed", "field", "processed", "dir", s.baseDir, "error", err.Error())
-		return false
+		return false, fmt.Errorf("read processed (%s): %w", s.baseDir, err)
 	}
-	return n > 0
+	return n > 0, nil
 }
 
 // MarkProcessed records that a message has been classified. One row, not a

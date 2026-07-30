@@ -9,11 +9,45 @@ services:
   kypost-server:
     build: .
     container_name: KyPost-Server
+    # Bound to loopback by default. "5866:5866" publishes on 0.0.0.0, which is
+    # the wrong default for this service twice over: it serves plain HTTP with
+    # no TLS, and it is the deployment in which forged X-Forwarded-* headers
+    # would defeat every IP-keyed lockout — an operator who puts a reverse proxy
+    # on 443 but leaves this line alone leaves the unproxied port reachable
+    # alongside it, so an attacker simply skips the proxy.
+    #
+    # Set KYPOST_BIND=0.0.0.0 in .env only if you genuinely intend to serve this
+    # port directly to a network, and read the TLS warning in the README first.
     ports:
-      - "5866:5866"
-    #  - "11434:11434"  #Uncomment to expose Ollama API
+      - "${KYPOST_BIND:-127.0.0.1}:5866:5866"
+    #  - "127.0.0.1:11434:11434"  #Uncomment to expose Ollama API
     environment:
       WEB_PORT: 5866
+      # Peers whose X-Forwarded-For/Proto/Host may be believed, as a
+      # comma-separated list of CIDRs or bare IPs. Empty (the default) trusts
+      # nothing and uses the connection's own address.
+      #
+      # This replaced a TRUST_PROXY_HEADERS=true boolean, which trusted those
+      # headers on every connection from any peer — so it only did the right
+      # thing when nothing but the proxy could reach the port, and silently did
+      # the wrong thing otherwise. Set this to your proxy's address, not to a
+      # wide range.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      # Optional inbound TLS. Set both to serve HTTPS directly instead of plain
+      # HTTP; leave both empty for the default. Setting only one is a startup
+      # error rather than a silent fallback to cleartext.
+      #
+      # With these set, the session cookie's Secure flag, HSTS, and the login
+      # proof-of-work's secure-context requirement are all satisfied by the
+      # connection itself — TRUSTED_PROXY_CIDRS stops mattering, because no
+      # forwarded header has to be believed.
+      #
+      # Mount the files read-only (see the commented volume below). Certificates
+      # are never baked into the image: a self-signed one in a shipped image
+      # trains users to click through browser warnings, and a real one leaks its
+      # private key into a distributable layer.
+      TLS_CERT_FILE: ${TLS_CERT_FILE:-}
+      TLS_KEY_FILE: ${TLS_KEY_FILE:-}
       TZ: ${TZ:-America/New_York}
       SECRET_DIR: ${SECRET_DIR:-/kypost/private}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
@@ -36,6 +70,12 @@ services:
     # whose premise is self-hosting, and it breaks split-horizon/internal DNS.
     # Docker's default (the host resolver) is correct.
     volumes:
+      # Uncomment to mount certificates for TLS_CERT_FILE/TLS_KEY_FILE above.
+      # Read-only, and pointed at wherever your ACME client writes. Renewals are
+      # picked up without a restart (the server re-reads the pair when it changes
+      # on disk), which matters because a restart logs every user out — sessions
+      # are in-memory by design.
+      # - /etc/letsencrypt/live/mail.example.com:/kypost/tls:ro
       - kypost_config:/kypost/config
       - kypost_private:/kypost/private
       - kypost_logs:/kypost/logs

@@ -383,7 +383,7 @@ func TestRecordMessageFailure_TransientClassifierErrorLeavesMessageUnprocessed(t
 	classifyErr := &classifierErr{err: errors.New("dial tcp 127.0.0.1:11434: connect: connection refused")}
 	p.recordMessageFailure(store, uc.id, uc, msg, classifyErr)
 
-	if store.Seen(msg.ID) {
+	if seenForTest(t, store, msg.ID) {
 		t.Fatal("expected the message to remain unmarked after a transient classifier outage, so it is retried next poll tick")
 	}
 	decisions := store.Decisions(10)
@@ -413,7 +413,7 @@ func TestRecordMessageFailure_PermanentClassifierErrorMarksProcessed(t *testing.
 	classifyErr := &classifierErr{err: errors.New("out of ai credits")}
 	p.recordMessageFailure(store, uc.id, uc, msg, classifyErr)
 
-	if !store.Seen(msg.ID) {
+	if !seenForTest(t, store, msg.ID) {
 		t.Fatal("expected the message to still be marked processed for a permanent classifier error")
 	}
 }
@@ -440,7 +440,7 @@ func TestRecordMessageFailure_NonClassifierErrorMarksProcessed(t *testing.T) {
 	ruleErr := errors.New("imap: connection reset by peer")
 	p.recordMessageFailure(store, uc.id, uc, msg, ruleErr)
 
-	if !store.Seen(msg.ID) {
+	if !seenForTest(t, store, msg.ID) {
 		t.Fatal("expected a non-classifier (rule/IMAP) error to still mark the message processed (regression guard)")
 	}
 }
@@ -491,7 +491,7 @@ func TestHandleMessage_StopRuleShortCircuitsClassification(t *testing.T) {
 	if len(mail.inboxActions) != 1 || mail.inboxActions[0] != "archive" {
 		t.Fatalf("expected the archive action to be applied, got %+v", mail.inboxActions)
 	}
-	if !store.Seen(msg.ID) {
+	if !seenForTest(t, store, msg.ID) {
 		t.Fatal("expected the message to be marked processed")
 	}
 	decisions := store.Decisions(10)
@@ -551,7 +551,7 @@ func TestHandleMessage_StopRuleActionFailureIsSurfaced(t *testing.T) {
 	// The failed archive doesn't stop control flow — stop still short-circuits
 	// classification and the message is still marked processed (design is
 	// unchanged); what must change is that the failure is observable.
-	if !store.Seen(msg.ID) {
+	if !seenForTest(t, store, msg.ID) {
 		t.Fatal("expected the message to still be marked processed (Stopped control flow unchanged)")
 	}
 
@@ -816,7 +816,7 @@ func TestHandleMessage_TooLargeMessageRejectsAndNotifies(t *testing.T) {
 		t.Fatalf("expected no rule action to be applied to a rejected message, got %v", mail.inboxActions)
 	}
 
-	if !store.Seen(msg.ID) {
+	if !seenForTest(t, store, msg.ID) {
 		t.Fatal("expected the rejected message to be marked processed so it isn't retried every poll tick")
 	}
 	decisions := store.Decisions(10)
@@ -861,7 +861,7 @@ func TestHandleMessage_TooLargeMessageStillRecordsDecisionWhenNotifyFails(t *tes
 	if len(*calls) != 0 {
 		t.Fatalf("expected sendRejectionNotice never to be reached without a stored imap config, got %d calls", len(*calls))
 	}
-	if !store.Seen(msg.ID) {
+	if !seenForTest(t, store, msg.ID) {
 		t.Fatal("expected the message to still be marked processed even when the notice couldn't be sent")
 	}
 	decisions := store.Decisions(10)

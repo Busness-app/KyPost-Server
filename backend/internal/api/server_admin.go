@@ -123,9 +123,9 @@ func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
+	s.cfgMu.RLock()
 	cfg := s.cfg
-	s.mu.RUnlock()
+	s.cfgMu.RUnlock()
 
 	baseURL := strings.TrimSpace(cfg.Classifier.BaseURL)
 	if baseURL == "" {

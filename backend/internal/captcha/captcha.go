@@ -25,6 +25,15 @@ const (
 	// ProviderPoW is self-hosted: it verifies a proof-of-work this server
 	// issued rather than a token from someone else's service. See pow.go.
 	ProviderPoW Provider = "pow"
+	// ProviderDisabled is the EXPLICIT opt-out spelling, normalized to
+	// ProviderNone by NewVerifier.
+	//
+	// It exists because ProviderNone is the empty string, and the empty string
+	// now means "use the default" (pow) rather than "off" — see
+	// api.resolveCaptchaProvider. Without a word for "off", an operator who
+	// wants no CAPTCHA has no way to say so that is distinguishable from having
+	// said nothing.
+	ProviderDisabled Provider = "none"
 )
 
 // Verifier checks a client-submitted CAPTCHA token server-side. remoteIP is
@@ -57,7 +66,7 @@ type Config struct {
 func NewVerifier(cfg Config) (Verifier, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	switch cfg.Provider {
-	case ProviderNone:
+	case ProviderNone, ProviderDisabled:
 		return nil, nil
 	case ProviderTurnstile:
 		if strings.TrimSpace(cfg.SecretKey) == "" {
@@ -72,8 +81,8 @@ func NewVerifier(cfg Config) (Verifier, error) {
 	case ProviderPoW:
 		return NewPoWVerifier(cfg.HMACKey, cfg.MaxNumber)
 	default:
-		return nil, fmt.Errorf("captcha: unknown provider %q (want %q, %q or %q)",
-			cfg.Provider, ProviderTurnstile, ProviderFriendly, ProviderPoW)
+		return nil, fmt.Errorf("captcha: unknown provider %q (want %q, %q, %q or %q)",
+			cfg.Provider, ProviderTurnstile, ProviderFriendly, ProviderPoW, ProviderDisabled)
 	}
 }
 

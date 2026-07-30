@@ -143,7 +143,7 @@ func TestConcurrentMarkProcessedLosesNothing(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		for j := 0; j < perWriter; j++ {
 			id := fmt.Sprintf("w%d-m%d", i, j)
-			if !a.Seen(id) {
+			if !seenForTest(t, a, id) {
 				t.Fatalf("%s was lost — a concurrent writer overwrote it", id)
 			}
 		}

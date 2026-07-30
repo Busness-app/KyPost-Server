@@ -1,4 +1,5 @@
 import { getJSON, postJSON, putJSON, deleteJSON } from "./client";
+import { deriveCredential } from "./auth";
 
 export type PGPIdentity = {
   fingerprint: string;
@@ -192,8 +193,18 @@ export function rewrapPGPPrivateKey(wrapped: string): Promise<{ ok: boolean }> {
  * One-time migration: hands a legacy server-held key back so the browser can
  * rewrap it. Requires the account password, not just a session.
  */
-export function exportLegacyPGPKey(password: string): Promise<{ privateKey: string; publicKey: string }> {
-  return postJSON<{ privateKey: string; publicKey: string }>("/api/pgp/identity/export-legacy", { password });
+// Sends both credential forms because the server picks which one to check based
+// on what the ACCOUNT stores, not on what arrives — see lib/authSecret.ts. The
+// derivation parameters come from the caller's own session, so no username is
+// needed here.
+export async function exportLegacyPGPKey(
+  password: string
+): Promise<{ privateKey: string; publicKey: string }> {
+  const { authSecret } = await deriveCredential("", password);
+  return postJSON<{ privateKey: string; publicKey: string }>("/api/pgp/identity/export-legacy", {
+    password,
+    authSecret
+  });
 }
 
 export type PGPMessagePayload = {

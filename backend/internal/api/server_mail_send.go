@@ -66,7 +66,22 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 		Sign                bool `json:"sign"`
 		AllowPickupFallback bool `json:"allowPickupFallback"`
 	}
+	// Check the declared size before reading, so an oversized send says so.
+	// Without this the LimitReader below just truncates the JSON mid-value and
+	// the decoder reports a syntax error, which reaches the user as "invalid
+	// request" — indistinguishable from malformed JSON, for what is the single
+	// most likely reason a send fails.
+	if r.ContentLength > maxMailRequestBytes {
+		return mailRequest{}, mailTooLargeMessage, errors.New("request body limit exceeded")
+	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxMailRequestBytes)).Decode(&raw); err != nil {
+		// A chunked request declares no length, so the limit above cannot see
+		// it and the reader truncates instead. Truncation surfaces as an
+		// unexpected EOF, which is far more often an over-cap body than a
+		// client that stopped writing valid JSON halfway.
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return mailRequest{}, mailTooLargeMessage, err
+		}
 		return mailRequest{}, "invalid request", err
 	}
 
@@ -79,7 +94,7 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 		}
 		attachmentTotal += len(content)
 		if attachmentTotal > maxMailAttachmentBytes {
-			return mailRequest{}, "attachments too large (max 25 MB total)",
+			return mailRequest{}, attachmentsTooLargeMessage,
 				errors.New("attachment size limit exceeded")
 		}
 		attachments = append(attachments, mailmsg.Attachment{

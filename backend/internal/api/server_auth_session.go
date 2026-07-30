@@ -9,6 +9,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -68,6 +69,14 @@ const (
 	// sessionSweepInterval is how often StartSessionSweeper reclaims
 	// sessions that expired without anyone presenting them again.
 	sessionSweepInterval = time.Hour
+	// sessionSlideGranularity is how much the idle window must have advanced
+	// before currentUser bothers rewriting a session's ExpiresAt.
+	//
+	// This is the resolution sessionIdleTimeout is enforced at: a session may
+	// die up to this long before a strict reading of "24 hours since the last
+	// request". Against a 24-hour horizon that is noise, and it is what keeps
+	// the common request path on a read lock instead of an exclusive one.
+	sessionSlideGranularity = 5 * time.Minute
 )
 
 // AuthContext identifies the caller of an authenticated request.
@@ -80,9 +89,23 @@ type AuthContext struct {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Username     string `json:"username"`
-		Password     string `json:"password"`
-		CaptchaToken string `json:"captchaToken,omitempty"`
+		Username string `json:"username"`
+		// Password is the LEGACY credential, sent only while this account still
+		// authenticates with one. A converted account's client leaves it empty
+		// and the server never sees the password again.
+		Password string `json:"password"`
+		// AuthSecret is the client-derived authentication half of the stretched
+		// password — see login_params.go and frontend/src/lib/authSecret.ts. The
+		// key-wrapping half is derived from the same stretch under a different
+		// HKDF label and never leaves the browser, which is what makes the PGP
+		// vault genuinely end-to-end rather than "sealed with a key the server is
+		// handed on every login".
+		AuthSecret string `json:"authSecret,omitempty"`
+		// LoginSalt/LoginIterations are what the client actually used, echoed
+		// back so a legacy upgrade can pin the credential to them.
+		LoginSalt       string `json:"loginSalt,omitempty"`
+		LoginIterations int    `json:"loginIterations,omitempty"`
+		CaptchaToken    string `json:"captchaToken,omitempty"`
 	}
 	// Bounded before it is buffered. This is the only unauthenticated decode in
 	// the codebase, and it runs before the lockout and captcha checks below, so
@@ -92,6 +115,41 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// and a captcha token.
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Instance-wide rate limit FIRST, before anything that costs real work.
+	//
+	// The per-account lockout below cannot bound total work: it is keyed on
+	// username+IP and the username comes out of the request body, so a caller
+	// who never repeats one never trips it — while every attempt against an
+	// unknown account runs scrypt on purpose (see equalizeLoginTiming). This
+	// bucket is what stands between that and an unauthenticated caller pegging
+	// every CPU on a host that is also running an LLM.
+	if s.loginRateLimiter != nil {
+		if ok, retryAfter := s.loginRateLimiter.allow(loginRateLimitKey); !ok {
+			retrySeconds := int(retryAfter.Seconds()) + 1
+			w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":             "too many sign-in attempts right now, try again shortly",
+				"retryAfterSeconds": retrySeconds,
+			})
+			return
+		}
+	}
+
+	// Per-IP lockout, independent of the username. Closes the rotating-username
+	// hole in the per-account budget below: 50 failures from one address in 15
+	// minutes stops that address, whatever names it tried. Loose on purpose —
+	// a NAT egress or an office must not be easier to lock out than an account.
+	ipLockoutKey := clientIP(r)
+	if allowed, retryAfter := s.loginIPLockout.tryAttempt(ipLockoutKey); !allowed {
+		retrySeconds := int(retryAfter.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":             "too many failed attempts from this address, try again later",
+			"retryAfterSeconds": retrySeconds,
+		})
 		return
 	}
 
@@ -129,6 +187,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			// there is no provider here. No password is checked on this path,
 			// so the refund buys an attacker no guesses.
 			s.loginLockout.cancelAttempt(lockoutKey)
+			s.loginIPLockout.cancelAttempt(ipLockoutKey)
 			http.Error(w, "security check expired, please try again", http.StatusUnauthorized)
 			return
 		case errors.Is(err, captcha.ErrChallengeWrongClient):
@@ -139,6 +198,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			// wifi to cellular mid-solve looks identical. A changed address is
 			// a network event, not a wrong credential, so refund the strike.
 			s.loginLockout.cancelAttempt(lockoutKey)
+			s.loginIPLockout.cancelAttempt(ipLockoutKey)
 			http.Error(w, "your network address changed during the security check, please try again", http.StatusUnauthorized)
 			return
 		case err != nil:
@@ -146,6 +206,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			// far as offering a password. Give the strike back, or an outage
 			// would lock out every user of the instance.
 			s.loginLockout.cancelAttempt(lockoutKey)
+			s.loginIPLockout.cancelAttempt(ipLockoutKey)
 			s.logger.Error("captcha verification failed", "error", err.Error())
 			http.Error(w, "captcha verification unavailable", http.StatusServiceUnavailable)
 			return
@@ -162,9 +223,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	u, err := s.users.GetByUsername(req.Username)
 	if err != nil || !u.Active {
-		// Pay the same scrypt cost a real password check would, so response
-		// timing doesn't reveal whether the username exists (or is inactive).
-		equalizeLoginTiming(req.Password)
+		// Pay the same scrypt cost a real check would, so response timing
+		// doesn't reveal whether the username exists (or is inactive).
+		//
+		// Equalize against whichever credential was offered: a converted client
+		// sends only AuthSecret, so equalizing on the empty Password would make
+		// the unknown-account path cheap again for exactly the callers that
+		// matter.
+		equalizeLoginTiming(cmp.Or(req.AuthSecret, req.Password))
 		// Make the next challenge from this address more expensive. Recorded
 		// for the unknown-username case too: spraying a list of guessed
 		// usernames is exactly the pattern this is here to price.
@@ -173,12 +239,73 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	if !users.VerifyPassword(u, req.Password) {
-		s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
-		return
+	// Two credential shapes, chosen by what the ACCOUNT stores rather than by
+	// what the client sent. Letting the request pick would mean a caller could
+	// present a plaintext password against a derived-auth account (or the
+	// reverse) and have the server try both — and since the derivation salt is
+	// public (login_params.go), "try both" would let anyone authenticate with a
+	// value they can compute from the salt alone.
+	if u.UsesDerivedAuth() {
+		if !users.VerifyAuthSecret(u, req.AuthSecret) {
+			s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
+			http.Error(w, "invalid credentials", http.StatusUnauthorized)
+			return
+		}
+	} else {
+		if !users.VerifyPassword(u, req.Password) {
+			s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
+			http.Error(w, "invalid credentials", http.StatusUnauthorized)
+			return
+		}
 	}
 	s.loginLockout.recordSuccess(lockoutKey)
+	// A correct credential clears this address's accumulated failures too. The
+	// per-IP budget exists to stop a caller with no valid credential from
+	// spending unbounded CPU; someone who just proved one is not that caller.
+	s.loginIPLockout.recordSuccess(ipLockoutKey)
+
+	// Transparently upgrade a password hash written at an older, cheaper scrypt
+	// cost. This is the only moment the plaintext is legitimately in hand, so it
+	// is the only place the upgrade can happen — otherwise raising the cost
+	// protects new accounts and leaves every existing one at the old strength
+	// forever, which is most of what an attacker with users.json would be
+	// cracking.
+	//
+	// Best-effort and non-blocking to the login: a failure here means the
+	// account keeps its old hash and gets another chance next time, which is
+	// strictly better than refusing a correct password.
+	if users.NeedsRehash(u.PasswordHash) {
+		credential := req.Password
+		if u.UsesDerivedAuth() {
+			credential = req.AuthSecret
+		}
+		if err := s.users.RehashPassword(u.ID, credential); err != nil {
+			s.logger.Error("password hash upgrade failed", "user_id", u.ID, "error", err.Error())
+		}
+	}
+
+	// Convert a legacy account to derived auth, now that the password has been
+	// proven and the client has supplied the secret it derived from it. This is
+	// the only moment both are in hand, and after it the password stops being
+	// transmitted at all.
+	//
+	// Pinned to the salt the CLIENT used, which for a legacy account is the
+	// synthetic one loginParamsFor handed out — recomputed here rather than
+	// trusted from the request, so a caller cannot pin their credential to a
+	// salt of their choosing.
+	if !u.UsesDerivedAuth() && req.AuthSecret != "" {
+		salt := s.syntheticLoginSalt(req.Username)
+		iterations := req.LoginIterations
+		if iterations < users.MinLoginIterations {
+			iterations = clientLoginIterations
+		}
+		if err := s.users.UpgradeToDerivedAuth(u.ID, req.Password, req.AuthSecret, salt, iterations); err != nil {
+			// Non-fatal: the account keeps authenticating the legacy way and
+			// gets another chance next sign-in. Refusing a correct password
+			// because an optimization failed would be worse.
+			s.logger.Error("auth derivation upgrade failed", "user_id", u.ID, "error", err.Error())
+		}
+	}
 	// A correct password proves whoever is at this address holds THIS
 	// account's credential — and nothing about any other account they have
 	// been guessing at from the same address. Forgive only this one; see
@@ -263,9 +390,9 @@ func (s *Server) handleCSRFToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
-	s.mu.Lock()
+	s.sessMu.Lock()
 	sess, ok := s.sessions[cookie.Value]
-	s.mu.Unlock()
+	s.sessMu.Unlock()
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
@@ -286,14 +413,14 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID str
 		return err
 	}
 	now := time.Now()
-	s.mu.Lock()
+	s.sessMu.Lock()
 	s.sessions[token] = Session{
 		UserID:    userID,
 		IssuedAt:  now,
 		ExpiresAt: now.Add(sessionIdleTimeout),
 		CSRFToken: csrfToken,
 	}
-	s.mu.Unlock()
+	s.sessMu.Unlock()
 	secure := isRequestSecure(r)
 	http.SetCookie(w, &http.Cookie{Name: "kypost_session", Value: token, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
 	// Deliberately NOT HttpOnly: the frontend must be able to read this and
@@ -450,9 +577,9 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	c, err := r.Cookie("kypost_session")
 	if err == nil {
-		s.mu.Lock()
+		s.sessMu.Lock()
 		delete(s.sessions, c.Value)
-		s.mu.Unlock()
+		s.sessMu.Unlock()
 	}
 	secure := isRequestSecure(r)
 	http.SetCookie(w, &http.Cookie{Name: "kypost_session", Value: "", Path: "/", Expires: time.Unix(0, 0), MaxAge: -1, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
@@ -480,8 +607,8 @@ func currentSessionToken(r *http.Request) string {
 // those recovery actions, rather than remaining valid for up to the
 // remaining 24h sliding-expiry window.
 func (s *Server) revokeUserSessions(userID, keepToken string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
 	for token, sess := range s.sessions {
 		if sess.UserID == userID && token != keepToken {
 			delete(s.sessions, token)
@@ -525,33 +652,108 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		// Legacy plaintext fields, for a client that has not converted and for
+		// an account whose credential is still a password (an admin-set
+		// temporary one, or a first sign-in).
 		OldPassword string `json:"oldPassword"`
 		NewPassword string `json:"newPassword"`
+
+		// Derived-auth fields. NewAuthSecret plus NewLoginSalt/NewIterations
+		// replace the credential without the server ever seeing the new
+		// password; OldAuthSecret proves the current one for an account that has
+		// already converted.
+		OldAuthSecret string `json:"oldAuthSecret,omitempty"`
+		NewAuthSecret string `json:"newAuthSecret,omitempty"`
+		NewLoginSalt  string `json:"newLoginSalt,omitempty"`
+		NewIterations int    `json:"newIterations,omitempty"`
+
+		// RewrappedPGPKey is the client-wrapped private-key envelope re-sealed
+		// under the NEW password, written in the SAME transaction as the
+		// credential.
+		//
+		// It used to be a second, separate request the browser fired after this
+		// one returned. A dropped connection in between left the password changed
+		// and the envelope still sealed under the old one — permanently, because
+		// the only rewrap path re-derives from the CURRENT password and therefore
+		// could never open it again. The documented recovery ("unlock with your
+		// PREVIOUS password, then change your password again") could not work.
+		RewrappedPGPKey string `json:"rewrappedPgpKey,omitempty"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if err := users.ValidatePassword(req.NewPassword); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+
 	u, err := s.users.Get(ac.UserID)
 	if err != nil {
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return
 	}
-	if !u.MustChangePassword && !users.VerifyPassword(u, req.OldPassword) {
+
+	// Verify the CURRENT credential in whichever form this account stores, for
+	// the same reason handleLogin does: the account decides, not the request.
+	verifyCurrent := func() bool {
+		if u.UsesDerivedAuth() {
+			return users.VerifyAuthSecret(u, req.OldAuthSecret)
+		}
+		return users.VerifyPassword(u, req.OldPassword)
+	}
+	offeredCurrent := req.OldAuthSecret
+	if !u.UsesDerivedAuth() {
+		offeredCurrent = req.OldPassword
+	}
+	if !u.MustChangePassword && !verifyCurrent() {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	if u.MustChangePassword && strings.TrimSpace(req.OldPassword) != "" && !users.VerifyPassword(u, req.OldPassword) {
+	if u.MustChangePassword && strings.TrimSpace(offeredCurrent) != "" && !verifyCurrent() {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	if _, err := s.users.SetPassword(u.ID, req.NewPassword, false); err != nil {
-		http.Error(w, "failed to update password", http.StatusInternalServerError)
-		return
+
+	// Prefer the derived form when the client supplied it. The plaintext branch
+	// stays only for clients that have not converted; it is the one that still
+	// lets the server see a password, so it must never be the path taken when
+	// the better one is available.
+	switch {
+	case req.NewAuthSecret != "":
+		if req.NewLoginSalt == "" {
+			http.Error(w, "newLoginSalt is required with newAuthSecret", http.StatusBadRequest)
+			return
+		}
+		iterations := req.NewIterations
+		if iterations <= 0 {
+			iterations = clientLoginIterations
+		}
+		// One mutation for the credential and the PGP envelope, or neither.
+		if _, err := s.users.SetDerivedAuthAndRewrapPGP(
+			u.ID, req.NewAuthSecret, req.NewLoginSalt, iterations, false, req.RewrappedPGPKey,
+		); err != nil {
+			if errors.Is(err, users.ErrAuthSecretMalformed) || errors.Is(err, users.ErrNotClientProtected) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			http.Error(w, "failed to update password", http.StatusInternalServerError)
+			return
+		}
+	default:
+		// The server can still measure length here, so it does.
+		if err := users.ValidatePassword(req.NewPassword); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.RewrappedPGPKey != "" {
+			// A plaintext password change cannot carry a rewrap: SetPassword
+			// resets the account to legacy derivation, and accepting an envelope
+			// alongside it would store one sealed under a key nothing will ask
+			// for. Refuse rather than write a mismatched pair.
+			http.Error(w, "rewrappedPgpKey requires newAuthSecret", http.StatusBadRequest)
+			return
+		}
+		if _, err := s.users.SetPassword(u.ID, req.NewPassword, false); err != nil {
+			http.Error(w, "failed to update password", http.StatusInternalServerError)
+			return
+		}
 	}
 	// A password change is what a user reaches for when they think they have
 	// been compromised, so it must cut off EVERY credential, not just
@@ -606,9 +808,9 @@ func (s *Server) csrfCheckOK(r *http.Request) bool {
 	if err != nil {
 		return true
 	}
-	s.mu.RLock()
+	s.sessMu.RLock()
 	sess, ok := s.sessions[cookie.Value]
-	s.mu.RUnlock()
+	s.sessMu.RUnlock()
 	if !ok {
 		// No matching session for this cookie value: either it's stale (the
 		// caller-visible auth check elsewhere will already reject the
@@ -683,30 +885,55 @@ func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
 	}
 
 	now := time.Now()
-	s.mu.Lock()
+	// Read under the read lock first. The overwhelmingly common case is a live
+	// session that was already touched moments ago and does not need its expiry
+	// rewritten, and taking the write lock for that turned every authenticated
+	// request into an exclusive critical section — see the sessMu note on
+	// Server.
+	s.sessMu.RLock()
 	sess, ok := s.sessions[cookie.Value]
+	s.sessMu.RUnlock()
 	if !ok {
-		s.mu.Unlock()
 		return AuthContext{}, false
 	}
+
 	// Idle timeout, then the absolute cap. The cap is checked separately so
 	// that renewing below can never push a session past sessionMaxLifetime.
 	if now.After(sess.ExpiresAt) || now.Sub(sess.IssuedAt) >= sessionMaxLifetime {
-		delete(s.sessions, cookie.Value)
-		s.mu.Unlock()
+		s.sessMu.Lock()
+		// Re-check identity before deleting: this token could have been logged
+		// out and a new session minted under the same map key in between (not
+		// possible today — tokens are 24 random bytes — but deleting a session
+		// this goroutine never validated is wrong regardless).
+		if cur, still := s.sessions[cookie.Value]; still && cur.IssuedAt.Equal(sess.IssuedAt) {
+			delete(s.sessions, cookie.Value)
+		}
+		s.sessMu.Unlock()
 		return AuthContext{}, false
 	}
+
 	// Sliding idle window for active users; IssuedAt is deliberately carried
 	// through unchanged so the absolute ceiling still applies.
-	sess.ExpiresAt = now.Add(sessionIdleTimeout)
-	s.sessions[cookie.Value] = sess
-	s.mu.Unlock()
+	//
+	// Only written when the window has actually moved by a meaningful amount.
+	// The expiry is a 24-hour horizon, so rewriting it because 40 milliseconds
+	// elapsed since the last request buys nothing and costs an exclusive lock
+	// on the hot path. sessionSlideGranularity is the resolution the idle
+	// timeout is enforced at, and it is minutes against a horizon of hours.
+	if now.Sub(sess.ExpiresAt.Add(-sessionIdleTimeout)) >= sessionSlideGranularity {
+		s.sessMu.Lock()
+		if cur, still := s.sessions[cookie.Value]; still {
+			cur.ExpiresAt = now.Add(sessionIdleTimeout)
+			s.sessions[cookie.Value] = cur
+		}
+		s.sessMu.Unlock()
+	}
 
 	u, err := s.users.Get(sess.UserID)
 	if err != nil || !u.Active {
-		s.mu.Lock()
+		s.sessMu.Lock()
 		delete(s.sessions, cookie.Value)
-		s.mu.Unlock()
+		s.sessMu.Unlock()
 		return AuthContext{}, false
 	}
 	return AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role, MustChangePassword: u.MustChangePassword}, true
