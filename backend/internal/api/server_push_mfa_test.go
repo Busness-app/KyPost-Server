@@ -174,63 +174,96 @@ func enablePush(t *testing.T, srv *Server, userID string) {
 	}
 }
 
-func TestPushLoginApproveFlow(t *testing.T) {
+// TestPushApprovalLifecycle covers what a paired device's response does to a
+// challenge end to end: approve then finish mints a session, deny makes finish a
+// 409, and whichever answer lands first is the only one that counts.
+//
+// One fixture for all three. Each used to build its own server and user -- two
+// scrypt derivations apiece at scryptN=1<<17, the first-run admin from
+// users.LoadOrMigrate inside newTestServer plus the test's own users.Create --
+// for roughly 3.5s before any assertion ran, and all three want the same
+// starting state without mutating it.
+//
+// The loop resets the per-account state a login touches so the cases stay
+// order-independent: the push burst (mfaPushBurst is 3, and these are three
+// logins) and any challenge left behind by the previous case.
+func TestPushApprovalLifecycle(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("quinn", "pw-quinn-testpassword", users.RoleUser)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	enrollTOTP(t, srv, u.ID)
-	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-quinn")
-	enablePush(t, srv, u.ID)
+	const username, password = "quinn", "pw-quinn-testpassword"
+	userID, deviceID, deviceSecret := pushMFAUser(t, srv, username, password, "dev-quinn")
 
-	challengeID, methods := loginChallenge(t, srv, "quinn", "pw-quinn-testpassword")
-	if !methodsContain(methods, "push") || !methodsContain(methods, "totp") {
-		t.Fatalf("methods = %v, want both push and totp", methods)
-	}
-	if pollPush(srv, challengeID) != "pending" {
-		t.Fatalf("expected pending before response")
+	// Same reason as TestPushNumberMatchAtTheHTTPLayer: the instance-wide login
+	// budget is denominated in wall-clock seconds of KDF work, so under -race it
+	// is spent well before loginRateBurst attempts. None of these cases is about
+	// it.
+	srv.loginRateLimiter = nil
+
+	cases := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"approve then finish mints a session", func(t *testing.T) {
+			challengeID, methods := loginChallenge(t, srv, username, password)
+			if !methodsContain(methods, "push") || !methodsContain(methods, "totp") {
+				t.Fatalf("methods = %v, want both push and totp", methods)
+			}
+			if pollPush(srv, challengeID) != "pending" {
+				t.Fatalf("expected pending before response")
+			}
+
+			if rec := respondPush(srv, challengeID, deviceID, deviceSecret, true); rec.Code != http.StatusOK {
+				t.Fatalf("respond approve: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if pollPush(srv, challengeID) != "approved" {
+				t.Fatalf("expected approved after response")
+			}
+
+			finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
+				map[string]string{"challengeId": challengeID})
+			if finishRec.Code != http.StatusOK {
+				t.Fatalf("finish: status=%d body=%s", finishRec.Code, finishRec.Body.String())
+			}
+			cookies := finishRec.Result().Cookies()
+			if findCookie(cookies, "kypost_session") == nil {
+				t.Fatalf("expected session cookie after finish, got %+v", cookies)
+			}
+		}},
+
+		{"deny makes finish a conflict", func(t *testing.T) {
+			challengeID, _ := loginChallenge(t, srv, username, password)
+			if rec := respondPush(srv, challengeID, deviceID, deviceSecret, false); rec.Code != http.StatusOK {
+				t.Fatalf("respond deny: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if pollPush(srv, challengeID) != "denied" {
+				t.Fatalf("expected denied")
+			}
+			finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
+				map[string]string{"challengeId": challengeID})
+			if finishRec.Code != http.StatusConflict {
+				t.Fatalf("finish after deny: status=%d, want 409", finishRec.Code)
+			}
+		}},
+
+		{"first response wins", func(t *testing.T) {
+			challengeID, _ := loginChallenge(t, srv, username, password)
+			if rec := respondPush(srv, challengeID, deviceID, deviceSecret, true); rec.Code != http.StatusOK {
+				t.Fatalf("first respond: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			// A second response (even from the same device) is rejected, not overwritten.
+			second := respondPush(srv, challengeID, deviceID, deviceSecret, false)
+			if second.Code != http.StatusConflict {
+				t.Fatalf("second respond: status=%d, want 409 (body=%s)", second.Code, second.Body.String())
+			}
+			if pollPush(srv, challengeID) != "approved" {
+				t.Fatalf("status must remain approved after a rejected second response")
+			}
+		}},
 	}
 
-	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, true); rec.Code != http.StatusOK {
-		t.Fatalf("respond approve: status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if pollPush(srv, challengeID) != "approved" {
-		t.Fatalf("expected approved after response")
-	}
-
-	finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
-		map[string]string{"challengeId": challengeID})
-	if finishRec.Code != http.StatusOK {
-		t.Fatalf("finish: status=%d body=%s", finishRec.Code, finishRec.Body.String())
-	}
-	cookies := finishRec.Result().Cookies()
-	if findCookie(cookies, "kypost_session") == nil {
-		t.Fatalf("expected session cookie after finish, got %+v", cookies)
-	}
-}
-
-func TestPushLoginDenyFlow(t *testing.T) {
-	srv := newTestServer(t)
-	u, err := srv.users.Create("rex", "pw-rex-testpassword", users.RoleUser)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	enrollTOTP(t, srv, u.ID)
-	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-rex")
-	enablePush(t, srv, u.ID)
-
-	challengeID, _ := loginChallenge(t, srv, "rex", "pw-rex-testpassword")
-	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, false); rec.Code != http.StatusOK {
-		t.Fatalf("respond deny: status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if pollPush(srv, challengeID) != "denied" {
-		t.Fatalf("expected denied")
-	}
-	finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
-		map[string]string{"challengeId": challengeID})
-	if finishRec.Code != http.StatusConflict {
-		t.Fatalf("finish after deny: status=%d, want 409", finishRec.Code)
+	for _, tc := range cases {
+		srv.mfaPushLimiter = newMfaPushLimiter()
+		srv.mfaChallenges.DeleteByUser(userID)
+		t.Run(tc.name, tc.run)
 	}
 }
 
@@ -451,29 +484,5 @@ func TestPushFinishRejectsAfterAdminClearsMFA(t *testing.T) {
 	}
 	if cookies := finishRec.Result().Cookies(); findCookie(cookies, "kypost_session") != nil {
 		t.Fatalf("expected no session cookie minted after clear-mfa, got %+v", cookies)
-	}
-}
-
-func TestPushFirstResponseWins(t *testing.T) {
-	srv := newTestServer(t)
-	u, err := srv.users.Create("sam", "pw-sam-testpassword", users.RoleUser)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	enrollTOTP(t, srv, u.ID)
-	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-sam")
-	enablePush(t, srv, u.ID)
-
-	challengeID, _ := loginChallenge(t, srv, "sam", "pw-sam-testpassword")
-	if rec := respondPush(srv, challengeID, deviceID, deviceSecret, true); rec.Code != http.StatusOK {
-		t.Fatalf("first respond: status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	// A second response (even from the same device) is rejected, not overwritten.
-	second := respondPush(srv, challengeID, deviceID, deviceSecret, false)
-	if second.Code != http.StatusConflict {
-		t.Fatalf("second respond: status=%d, want 409 (body=%s)", second.Code, second.Body.String())
-	}
-	if pollPush(srv, challengeID) != "approved" {
-		t.Fatalf("status must remain approved after a rejected second response")
 	}
 }
