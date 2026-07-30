@@ -10,48 +10,39 @@ services:
     build: .
     container_name: KyPost-Server
 
-    # Live on Docker's pre-existing default bridge instead of a per-project
-    # network of our own.
+    # Join `kypost-net` (defined at the bottom of this file) at a fixed address.
     #
-    # A private network is the usual Compose default and sounds like the safer
-    # choice, but here it put a NAT hop between this container and the proxy in
-    # front of it. Traffic crossing from one bridge to another is source-NATed to
-    # the receiving bridge's gateway, so the peer address this server sees is
-    # 172.x.0.1 for every caller no matter who they are — and that address is the
-    # lockout key. The login, CardDAV, device and proof-of-work lockouts and the
-    # WKD rate limit then collapse into ONE bucket shared by every user (enough
-    # failures from anyone locks out everyone), and the MFA sign-in push reports
-    # the gateway instead of the address of whoever is signing in. The default
-    # bridge is the network a proxy started with a plain `docker run` also lands
-    # on, so the two share it without either side being configured for the other
-    # and the peer address stays the proxy's own.
+    # THE PROXY IN FRONT OF THIS SERVER MUST BE ON THIS NETWORK TOO. That is not
+    # a tidiness preference, it is what makes the client IP correct. Traffic that
+    # crosses from one Docker network to another — or leaves and comes back
+    # through the published port below — is source-NATed on the way in, so the
+    # peer address this server sees is a bridge gateway (172.x.0.1) that is the
+    # SAME for every caller. That address is the lockout key: the login, CardDAV,
+    # device and proof-of-work lockouts and the WKD rate limit all collapse into
+    # one bucket shared by every user (enough failures from anyone locks out
+    # everyone), and the MFA sign-in push reports the gateway instead of the
+    # address of whoever is signing in. Sharing one network is what keeps the peer
+    # address the proxy's own.
     #
-    # This is `network_mode` and not a top-level `networks:` entry pointing at
-    # `bridge`, because that form does not work: Compose gives each service a
-    # network-scoped alias, the default bridge does not support aliases, and the
-    # container fails to start with "network-scoped aliases are only supported for
-    # user-defined networks". network_mode attaches with no alias.
-    #
-    # Two things this does NOT do, both of which bite if you assume otherwise:
-    #
-    #  1. It does not set the client IP by itself. TRUSTED_PROXY_CIDRS below must
-    #     still name your proxy's address, or forwarded headers are still
-    #     discarded and you still get the gateway.
-    #  2. It does not give you name resolution. The default bridge has no
-    #     embedded DNS — that is a user-defined-network feature — so a proxy here
-    #     must be pointed at this container's IP, not at `kypost-server:5866`:
-    #       docker inspect -f \
-    #         '{{.NetworkSettings.Networks.bridge.IPAddress}}' KyPost-Server
-    #
-    # Note also that every container on the default bridge can reach 5866
-    # directly, published port or not. That is why TRUSTED_PROXY_CIDRS should name
-    # one address and not the bridge's whole subnet: anything trusted there can
-    # name its own client IP.
-    #
-    # If you would rather have an isolated network, delete this line and add the
-    # proxy to the network Compose then creates — do not leave the proxy outside
-    # it, or you are back to the gateway address described above.
-    network_mode: bridge
+    # See the `networks:` block at the bottom for how a proxy in another Compose
+    # project joins this, and for why this is a named network rather than Docker's
+    # default bridge.
+    networks:
+      kypost-net:
+        # Pinned so the address a proxy is configured with survives a rebuild.
+        # Docker otherwise allocates from the subnet in start order, so a
+        # recreate can move this container and silently break a tunnel or an
+        # nginx upstream that names an IP.
+        #
+        # A pinned address requires a network with a user-configured subnet;
+        # Docker refuses `ipv4_address` on the default bridge outright ("user
+        # specified IP address is supported on user-defined networks only").
+        #
+        # Prefer addressing this container by NAME where you can — this network
+        # has DNS, so `http://KyPost-Server:5866` is rebuild-proof too and stays
+        # right even if the subnet or this pin changes. The pin is for proxies
+        # that will only take an IP.
+        ipv4_address: ${KYPOST_IP:-10.89.0.5}
 
     # Published on all interfaces by default; KYPOST_BIND narrows it.
     #
@@ -73,11 +64,13 @@ services:
     #   KYPOST_BIND=127.0.0.1     # proxy on this host, reaching 127.0.0.1:5866
     #   KYPOST_BIND=192.168.1.5   # only the interface the proxy talks to
     #
-    # Better still: put the proxy on the default bridge too (see network_mode
-    # above) and point it at this container's address there. Container-to-container
+    # Better still: put the proxy on kypost-net (see `networks:` above and at the
+    # bottom) and point it at http://KyPost-Server:5866. Container-to-container
     # traffic ignores published ports entirely, so nothing needs publishing at
     # all — and the peer address this server sees is then the proxy's own rather
-    # than a NAT gateway shared by every caller.
+    # than a NAT gateway shared by every caller. Reaching this container through
+    # the published port instead defeats that even if both are on kypost-net,
+    # because the round trip out to the host and back in is NATed.
     ports:
       - "${KYPOST_BIND:-0.0.0.0}:5866:5866"
     #  - "127.0.0.1:11434:11434"  #Uncomment to expose Ollama API
@@ -93,9 +86,13 @@ services:
       # the wrong thing otherwise. Set this to your proxy's address, not to a
       # wide range.
       #
-      # For a proxy container on the default bridge, that address is:
-      #   docker inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' <proxy>
-      # For a proxy on this host reaching a published port, it is 127.0.0.1/32.
+      # For a proxy container on kypost-net, that is the address you pinned for it
+      # there (see the `networks:` block at the bottom), e.g. 10.89.0.10/32. For
+      # a proxy on this host reaching a published port, it is 127.0.0.1/32.
+      #
+      # This takes an address, not a hostname — the server parses CIDRs and bare
+      # IPs — so it cannot be pointed at a container name the way the proxy's own
+      # upstream URL can. Pin the proxy's address and name it here.
       #
       # Do not leave this empty behind a proxy. Failing closed is correct — the
       # alternative lets any caller name their own IP — but the closed state keys
@@ -179,3 +176,62 @@ volumes:
   kypost_private:
   kypost_logs:
   kypost_state:
+
+# The network this server and the proxy in front of it share.
+#
+# Named (rather than Compose's per-project default) and given an explicit subnet,
+# for two reasons: a proxy in a DIFFERENT Compose project can join it by a name
+# that does not depend on this checkout's directory, and a user-configured subnet
+# is the prerequisite for the pinned ipv4_address above — Docker rejects pinned
+# addresses on any network it auto-configured, including the default bridge.
+#
+# TO PUT YOUR PROXY ON IT, in the proxy's own compose file:
+#
+#   services:
+#     cloudflared:
+#       networks:
+#         kypost-net:
+#           ipv4_address: 10.89.0.10    # pin it: TRUSTED_PROXY_CIDRS names this
+#   networks:
+#     kypost-net:
+#       external: true
+#
+# Then point the proxy at http://KyPost-Server:5866 (this network has DNS, so the
+# name is stable across rebuilds) and set TRUSTED_PROXY_CIDRS=10.89.0.10/32.
+# `external: true` because this project is what creates the network — start
+# KyPost first, or create it by hand with:
+#   docker network create --subnet 10.89.0.0/24 kypost-net
+#
+# Keep this network to just those containers, or pin addresses high (.200, .201).
+# Docker allocates dynamic addresses from the low end of the subnet, so a third
+# container joining can be handed the address you pinned for something else.
+#
+# IF STARTUP FAILS WITH "Pool overlaps with other one on this address space", the
+# subnet below is already taken on your host. Change it, along with KYPOST_IP:
+#
+#   KYPOST_SUBNET=10.90.0.0/24
+#   KYPOST_IP=10.90.0.5
+#
+# List what is taken with:
+#   docker network ls -q | xargs docker network inspect \
+#     -f '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}'
+#
+# The default is 10.89.0.0/24 rather than a 172.x one deliberately. Docker
+# auto-allocates project networks as /16s out of 172.17.0.0/12 — 172.17, 172.18,
+# 172.19 and up — so any 172.x default here collides the moment a host has enough
+# Compose projects to reach it, and the collision surfaces as the error above
+# rather than as anything mentioning this file. 10.89.0.0/24 is outside that pool.
+# Change it if it clashes with your own LAN or VPN routes.
+#
+# A proxy started with a plain `docker run` and no --network lands on Docker's
+# default bridge, NOT here, and will reach this server only through the published
+# port — which NATs the source and gives every caller the same gateway address.
+# That is the failure this file works to prevent, so if you are wiring up a proxy
+# and the addresses stay identical for every visitor, this is the first thing to
+# check. Verify with GET /api/status, do not assume.
+networks:
+  kypost-net:
+    name: ${KYPOST_NETWORK:-kypost-net}
+    ipam:
+      config:
+        - subnet: ${KYPOST_SUBNET:-10.89.0.0/24}
