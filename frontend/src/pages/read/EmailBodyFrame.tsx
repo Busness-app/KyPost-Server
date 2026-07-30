@@ -70,12 +70,40 @@ const FRAME_HEAD = `<meta name="referrer" content="no-referrer"><base target="_b
 // a sink either way.
 const CSS_COLOR = /^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%/]+\)|hsla?\([\d\s.,%/deg]+\)|[a-z]+)$/i;
 
-function themeColor(name: string, fallback: string): string {
+// Dark ink on a light ground: legible on its own, and the pair to use whenever
+// the theme cannot supply one.
+const FALLBACK_INK = "#111111";
+const FALLBACK_BG = "#ffffff";
+
+function themeColor(name: string): string {
   if (typeof getComputedStyle !== "function" || typeof document === "undefined") {
-    return fallback;
+    return "";
   }
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return CSS_COLOR.test(value) ? value : fallback;
+  return CSS_COLOR.test(value) ? value : "";
+}
+
+/**
+ * The frame's foreground and background, resolved AS A PAIR.
+ *
+ * Falling back independently is what made this worth a function. `--ink-strong`
+ * unreadable while `--bg` is fine gave the light-mode fallback ink (#111111)
+ * over the theme's real dark background (#1a1a1e) — 1.09:1, black on
+ * near-black. That is the identical failure the colour injection exists to
+ * prevent, just reached through a partly-broken theme instead of through a
+ * system colour keyword, and it is the more likely of the two: it needs only one
+ * of the two custom properties to be missing, misspelled, or mid-transition.
+ *
+ * Contrast is a property of two colours, so neither may be chosen alone. Either
+ * the theme supplies both or neither is used.
+ */
+function framePalette(): { ink: string; bg: string } {
+  const ink = themeColor("--ink-strong");
+  const bg = themeColor("--bg");
+  if (!ink || !bg) {
+    return { ink: FALLBACK_INK, bg: FALLBACK_BG };
+  }
+  return { ink, bg };
 }
 
 // Typography for the frame's own document. Colours are injected; the rest is the
@@ -117,8 +145,7 @@ export function EmailBodyFrame({ html, className, title = "Message body" }: Prop
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const [height, setHeight] = useState(120);
 
-  const ink = themeColor("--ink-strong", "#111111");
-  const bg = themeColor("--bg", "#ffffff");
+  const { ink, bg } = framePalette();
 
   // The frame runs no script of its own, so it cannot post its height out.
   // The parent measures it instead, which is what allow-same-origin buys and

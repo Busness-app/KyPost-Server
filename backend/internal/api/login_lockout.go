@@ -278,15 +278,39 @@ func (l *failureLockout) sweepIfCrowdedLocked(now time.Time) {
 	// Everything left is either locked or recently active. Evict down to a
 	// low-water mark rather than exactly to the cap, so the next attempt does
 	// not immediately trigger another full scan.
+	//
+	// LOCKED ENTRIES GO FIRST. An unlocked entry has a zero lockedUntil, and
+	// time.Time's zero value sorts before every real timestamp — so ordering on
+	// lockedUntil alone put the mid-accumulation entries at the front of the
+	// eviction list and deleted every real user's 1-of-3 and 2-of-3 progress
+	// before touching a single attacker-manufactured lockout. That is the exact
+	// bypass lastSeen was added to close in stage 1, reintroduced thirty lines
+	// below it: flood past the hard cap and no key ever reaches its third
+	// strike, so the lockout stops engaging for anybody.
+	//
+	// Locked entries are also the right thing to drop on the merits. They are
+	// what an attacker manufactures on purpose (maxFailures requests buys one),
+	// and losing one only forgives a cooldown early — whereas losing a partial
+	// strike record disables the control itself.
 	type keyed struct {
-		key   string
-		until time.Time
+		key    string
+		locked bool
+		until  time.Time
 	}
 	remaining := make([]keyed, 0, len(l.entries))
 	for k, e := range l.entries {
-		remaining = append(remaining, keyed{key: k, until: e.lockedUntil})
+		remaining = append(remaining, keyed{
+			key:    k,
+			locked: !e.lockedUntil.IsZero() && now.Before(e.lockedUntil),
+			until:  e.lockedUntil,
+		})
 	}
-	sort.Slice(remaining, func(i, j int) bool { return remaining[i].until.Before(remaining[j].until) })
+	sort.Slice(remaining, func(i, j int) bool {
+		if remaining[i].locked != remaining[j].locked {
+			return remaining[i].locked
+		}
+		return remaining[i].until.Before(remaining[j].until)
+	})
 	for i := 0; i < len(remaining)-loginLockoutLowWater; i++ {
 		delete(l.entries, remaining[i].key)
 	}
@@ -389,26 +413,68 @@ func warmLoginTimingHash() {
 // lockout strikes and answer 503 on that — no credential was examined, so
 // spending a strike would turn a load spike into an account lockout, the same
 // reasoning that refunds ErrChallengeExpired.
-func (s *Server) chargeLoginKDF(ctx context.Context, work func() bool) (bool, error) {
+//
+// held is the reservation handleLogin is carrying (see loginBudget). This
+// function settles it on BOTH paths — billing the true cost when the derivation
+// ran, refunding it when the slot was shed — and clears the flag either way, so
+// the caller's deferred refund becomes a no-op. Taking the flag as a parameter
+// rather than leaving the caller to clear it is what keeps a future call site
+// from double-refunding, which would mint budget out of nothing.
+func (s *Server) chargeLoginKDF(ctx context.Context, held *loginBudget, work func() bool) (bool, error) {
 	var ok bool
 	err := s.withKDFSlot(ctx, func() {
 		start := time.Now()
 		ok = work()
-		if s.loginRateLimiter != nil {
-			s.loginRateLimiter.settleCost(loginRateLimitKey, time.Since(start).Seconds()-loginKDFReserveSeconds)
-		}
+		held.settle(time.Since(start).Seconds() - loginKDFReserveSeconds)
 	})
 	if err != nil {
 		// The reservation handleLogin took up front bought derivation work that
 		// never happened. Give it back, or a shed burst drains the instance
 		// budget for the sign-ins that follow.
-		if s.loginRateLimiter != nil {
-			s.loginRateLimiter.settleCost(loginRateLimitKey, -loginKDFReserveSeconds)
-		}
+		held.refund()
 		return false, err
 	}
 	return ok, nil
 }
+
+// loginBudget is one outstanding reservation against the instance-wide login
+// bucket, held from the admitCost at the top of handleLogin until something
+// settles it.
+//
+// It exists because handleLogin reserves BEFORE the per-IP lockout, the
+// per-account lockout and the CAPTCHA check — deliberately, so that an outbound
+// CAPTCHA verification is inside the budget too — and every one of those can
+// return without ever reaching a derivation. Those early returns each used to
+// walk away holding 200 ms of a bucket that refills at 0.2 s/s, which made an
+// already-locked-out caller a free, CPU-free drain on the ONE control standing
+// between an anonymous client and every user's ability to sign in. Ten empty
+// POSTs a second held the bucket permanently at zero and answered every
+// legitimate login with 429.
+//
+// A reservation is therefore settled exactly once, by whichever comes first:
+//
+//   - chargeLoginKDF, which bills what the derivation really cost, or refunds
+//     in full when the KDF slot was shed
+//   - the deferred refund in handleLogin, for every path that never got that far
+//
+// The zero value (no limiter configured, or no reservation taken) is inert.
+type loginBudget struct {
+	limiter *ipRateLimiter
+}
+
+// settle bills delta (actual cost minus the reservation) and releases the hold.
+func (b *loginBudget) settle(delta float64) {
+	if b.limiter == nil {
+		return
+	}
+	b.limiter.settleCost(loginRateLimitKey, delta)
+	b.limiter = nil
+}
+
+// refund returns the whole reservation and releases the hold. Idempotent: the
+// second call is a no-op, so the deferred refund in handleLogin is safe to arm
+// unconditionally on every return path.
+func (b *loginBudget) refund() { b.settle(-loginKDFReserveSeconds) }
 
 // equalizeLoginTiming verifies candidate against a throwaway scrypt hash so
 // the unknown-username (and inactive-account) login path costs the same as a

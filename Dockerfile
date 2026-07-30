@@ -1,11 +1,26 @@
-FROM golang:1.26.5 AS backend-builder
+# Every base image is pinned by DIGEST, not just by tag.
+#
+# The Ollama tarball below is pinned to a published SHA-256 with a paragraph
+# explaining why unpinned build inputs are unacceptable. That argument does not
+# stop at the one dependency it was written about: a tag is a mutable pointer,
+# `debian:stable-slim` moves on every point release, and even `golang:1.26.5`
+# is republished when its own base is rebuilt. Two builds of the same commit
+# shipped different userlands, which is exactly the property the Ollama pin
+# exists to prevent.
+#
+# Tag and digest are both written out. The tag is what a human reads; the digest
+# is what Docker resolves. They must be bumped together — a digest that no longer
+# matches its tag is a silent lie about what is being built, so re-resolve with:
+#
+#   docker buildx imagetools inspect golang:<tag> --format '{{.Manifest.Digest}}'
+FROM golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647 AS backend-builder
 WORKDIR /app
 COPY backend/go.mod backend/go.sum* ./backend/
 RUN cd backend && go mod download
 COPY backend ./backend
 RUN cd backend && go build -o /app/bin/kypost-server ./cmd/main.go
 
-FROM node:26.5.0-slim AS frontend-builder
+FROM node:26.5.0-slim@sha256:715e55e4b84e4bb0ff48e49b398a848f08e55daed8eb6a0ea1839ae53bc57583 AS frontend-builder
 WORKDIR /frontend
 # `npm ci` and a required, non-globbed lockfile. `npm install` re-resolves
 # every caret range at build time, so two builds of the same commit can ship
@@ -20,9 +35,15 @@ RUN npm run build
 # the stage above, and the admin-password hashing that once needed `node` is now
 # `kypost-server --mode bootstrap-admin`. Keep it that way — a Node runtime here
 # is a CVE stream to track for no runtime benefit. See scripts/AGENTS.md.
-FROM debian:stable-slim
+FROM debian:stable-slim@sha256:328d16499860ae6cb9b345e2e4cebca08c2a36e4f7278482c7bd1f39d71e5bfd
 # liblzma5 and tar are named explicitly so apt re-resolves them to the latest
 # available, picking up Debian security fixes published after this base tag.
+#
+# This `apt-get update` is the one remaining floating input, and it is a
+# deliberate exception: pinning package versions here would freeze the runtime
+# on the CVEs the digest above was built with, and this image parses hostile
+# MIME, vCards and OpenPGP packets for a living. The digest fixes the base; apt
+# is what keeps it patched. Rebuild to pick up fixes.
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends supervisor tzdata curl ca-certificates zstd liblzma5 tar util-linux \
 	&& rm -rf /var/lib/apt/lists/* \

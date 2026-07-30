@@ -113,13 +113,22 @@ func (l *ipRateLimiter) refillLocked(key string, now time.Time) *rateBucket {
 // attempt costs far more than reserve would refuse everything forever. Debt lets
 // the true cost land after the fact and simply delays the next admission until
 // the deficit has refilled, which is the behaviour the budget describes.
+//
+// The debt is FLOORED at one full burst below zero. Without
+// a floor, a caller who can make the reservation without paying it back drives
+// the balance arbitrarily negative and the retryAfter handed to everybody else
+// grows without bound — a few minutes of that is an hours-long outage that
+// outlives the abuse by as long as it takes to refill. A floor caps the recovery
+// time at burst/refillPerSec no matter how long the abuse ran. Every caller must
+// still settle its own reservation; this only bounds the blast radius when one
+// forgets.
 func (l *ipRateLimiter) admitCost(key string, reserve float64) (ok bool, retryAfter time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e := l.refillLocked(key, l.now())
 
 	if e.tokens > 0 {
-		e.tokens -= reserve
+		e.tokens = math.Max(e.tokens-reserve, -l.burst)
 		return true, 0
 	}
 	if l.refillPerSec <= 0 {
@@ -132,6 +141,13 @@ func (l *ipRateLimiter) admitCost(key string, reserve float64) (ok bool, retryAf
 // settleCost reconciles the reservation admitCost took against what the work
 // actually cost. delta is (actual - reserve): positive bills the difference,
 // negative refunds it.
+//
+// Clamped at both ends, to the same bounds admitCost uses: a refund cannot
+// mint tokens above burst, and a bill cannot drive the balance further than
+// one burst into debt. The floor forgives some genuinely-incurred cost when a
+// single derivation runs pathologically long, and that is the right trade —
+// an unbounded deficit turns one slow attempt into an outage measured in
+// hours for every other caller of the bucket.
 func (l *ipRateLimiter) settleCost(key string, delta float64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -139,7 +155,7 @@ func (l *ipRateLimiter) settleCost(key string, delta float64) {
 	if !exists {
 		return
 	}
-	e.tokens = math.Min(l.burst, e.tokens-delta)
+	e.tokens = math.Max(math.Min(l.burst, e.tokens-delta), -l.burst)
 }
 
 // sweepLocked drops entries that have refilled to full — an idle bucket is
