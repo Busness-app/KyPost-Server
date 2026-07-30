@@ -162,8 +162,31 @@ export function App() {
     };
   }, []);
 
+  // unsubscribeThisDevice removes the browser's push registration, server-side
+  // then locally. Best-effort: a failure here must never block signing out.
+  async function unsubscribeThisDevice() {
+    try {
+      if (!("serviceWorker" in navigator)) return;
+      const reg = await navigator.serviceWorker.getRegistration();
+      const subscription = await reg?.pushManager.getSubscription();
+      if (!subscription) return;
+      await deleteJSON<{ ok: boolean }>("/api/notifications/subscriptions", {
+        endpoint: subscription.endpoint
+      });
+      await subscription.unsubscribe();
+    } catch {
+      // Ignored on purpose: logout must proceed regardless.
+    }
+  }
+
   async function logout() {
     try {
+      // Drop this browser's push subscription BEFORE the session goes away.
+      // The DELETE route requires a live session, so doing it afterwards would
+      // 401 and leave the row in place — and a web-push subscription is not
+      // tied to the session, so the previous user's mail notifications would
+      // keep arriving on a shared browser indefinitely.
+      await unsubscribeThisDevice();
       await postJSON<{ ok: boolean }>("/api/auth/logout", {});
     } finally {
       setMailboxFolders([]);

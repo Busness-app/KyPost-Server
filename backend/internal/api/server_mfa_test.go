@@ -39,6 +39,17 @@ func totpCodeForTest(t *testing.T, base32Secret string, at time.Time) string {
 	return fmt.Sprintf("%06d", bin%1_000_000)
 }
 
+// testPasswordFor reconstructs a test account's password from the
+// pw-<username>-testpassword convention every test in this package uses.
+func testPasswordFor(t *testing.T, srv *Server, userID string) string {
+	t.Helper()
+	u, err := srv.users.Get(userID)
+	if err != nil {
+		t.Fatalf("get user %s: %v", userID, err)
+	}
+	return "pw-" + u.Username + "-testpassword"
+}
+
 // enrollTOTP runs setup + confirm for userID and returns the base32 secret and
 // the recovery codes.
 func enrollTOTP(t *testing.T, srv *Server, userID string) (secret string, recoveryCodes []string) {
@@ -72,8 +83,14 @@ func enrollTOTP(t *testing.T, srv *Server, userID string) (secret string, recove
 	// One step earlier is still within totp.Validate's +/-1 skew window
 	// against the real current time, so confirmation itself still succeeds.
 	code := totpCodeForTest(t, setupResp.Secret, time.Now().Add(-30*time.Second))
+	// Confirming now re-authenticates: enrolling a factor is gated the same way
+	// removing one is. Test accounts all use the pw-<username>-testpassword
+	// convention, so the helper can derive it rather than every caller passing it.
 	confirmRec := doJSONAuth(srv, srv.withAuth(srv.handleMFAConfirm), http.MethodPost,
-		"/api/mfa/totp/confirm", map[string]string{"code": code}, userID)
+		"/api/mfa/totp/confirm", map[string]string{
+			"code":     code,
+			"password": testPasswordFor(t, srv, userID),
+		}, userID)
 	if confirmRec.Code != http.StatusOK {
 		t.Fatalf("confirm: status=%d body=%s", confirmRec.Code, confirmRec.Body.String())
 	}
@@ -512,7 +529,10 @@ func TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge(t *testing.T) {
 
 	confirmCode := totpCodeForTest(t, setupResp.Secret, time.Now())
 	confirmRec := doJSONAuth(srv, srv.withAuth(srv.handleMFAConfirm), http.MethodPost,
-		"/api/mfa/totp/confirm", map[string]string{"code": confirmCode}, u.ID)
+		"/api/mfa/totp/confirm", map[string]string{
+			"code":     confirmCode,
+			"password": testPasswordFor(t, srv, u.ID),
+		}, u.ID)
 	if confirmRec.Code != http.StatusOK {
 		t.Fatalf("confirm: status=%d body=%s", confirmRec.Code, confirmRec.Body.String())
 	}

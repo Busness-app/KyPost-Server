@@ -275,7 +275,17 @@ func isRequestSecure(r *http.Request) bool {
 			return strings.EqualFold(proto, "https")
 		}
 	}
-	return r.TLS != nil
+	if r.TLS != nil {
+		return true
+	}
+	// SERVER_BASE_URL is the operator's own statement of the scheme users reach
+	// them on, and it is already trusted to mint pickup and pairing links. With
+	// TLS terminated at a proxy and TRUSTED_PROXY_CIDRS unset — a common
+	// deployment, warned about only once per process — this predicate was false,
+	// so the session cookie and the CSRF double-submit value both shipped
+	// without Secure and no HSTS was sent. Users on https cannot be locked out
+	// by honouring it: their browser is already on TLS.
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(os.Getenv("SERVER_BASE_URL"))), "https://")
 }
 
 // uploadReadDeadline is how long a request that carries a multi-megabyte body

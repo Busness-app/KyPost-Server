@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"kypost-server/backend/internal/config"
 	"net/http"
 	"strconv"
 	"strings"
@@ -199,6 +200,16 @@ func truncateContext(v string) string {
 // UnifiedPush devices are excluded from MFA challenges pending end-to-end encryption
 // support; MFA metadata is sensitive and should not traverse unencrypted public
 // UnifiedPush brokers (e.g., ntfy.sh). Devices remain usable for mail notifications.
+// contentPreviewEnabled reports whether userID opted into sending message
+// metadata through the push relay. Defaults false on any read error.
+func (s *Server) contentPreviewEnabled(userID string) bool {
+	settings, err := config.LoadUserSettings(s.userSettingsPath(userID))
+	if err != nil {
+		return false
+	}
+	return settings.Notifications.ContentPreview
+}
+
 func (s *Server) dispatchPushChallenge(userID, challengeID string, ctx loginContext, issuedAt time.Time, matchDigits string, decoyDigits []string) {
 	store, err := s.userStore(userID)
 	if err != nil {
@@ -239,11 +250,21 @@ func (s *Server) dispatchPushChallenge(userID, challengeID string, ctx loginCont
 		"challengeId": challengeID,
 		"issuedAt":    strconv.FormatInt(issuedAt.UnixMilli(), 10),
 	}
-	if ctx.ipAddress != "" {
-		data["ipAddress"] = ctx.ipAddress
-	}
-	if ctx.userAgent != "" {
-		data["userAgent"] = ctx.userAgent
+	// ipAddress/userAgent are gated on the same setting as mail previews.
+	// This payload takes the identical route — backend, relay Worker, then
+	// Google or Apple, in cleartext to each hop — and ContentPreview exists
+	// precisely so that route carries no correspondence metadata by default.
+	// The sign-in source IP is often a different machine from the phone being
+	// asked to approve, so it is genuinely new information to those parties.
+	// Everything the client needs to render number matching (type, challengeId,
+	// issuedAt, matchDigits) is still sent.
+	if s.contentPreviewEnabled(userID) {
+		if ctx.ipAddress != "" {
+			data["ipAddress"] = ctx.ipAddress
+		}
+		if ctx.userAgent != "" {
+			data["userAgent"] = ctx.userAgent
+		}
 	}
 	if matchDigits != "" {
 		data["matchDigits"] = matchDigits

@@ -266,3 +266,38 @@ describe("isAllowedUri whitespace normalization matches DOMPurify", () => {
     });
   }
 });
+
+describe("run-5 audit regressions", () => {
+  it("strips class, id and open so mail cannot borrow the app stylesheet", () => {
+    // The stylesheet is global: five rules are position:fixed inset:0 at
+    // z-index up to 2600, guarded by :not([open]). A sender naming them gets a
+    // full-viewport, click-intercepting overlay with no script and no remote
+    // content.
+    const out = processEmailHtml(
+      '<div class="rules-help-backdrop" id="x" open><span class="security-badge security-badge-on">PGP signature verified</span></div>',
+      false,
+    );
+    expect(out).not.toContain("rules-help-backdrop");
+    expect(out).not.toContain("security-badge");
+    expect(out).not.toContain("class=");
+    expect(out).not.toContain(" id=");
+    expect(out).not.toContain("open");
+  });
+
+  it("blocks schemes containing a digit", () => {
+    // RFC 3986 allows digits after the first character of a scheme. The old
+    // character class omitted them, so these read as "no scheme at all" and
+    // fell through to the relative-URL allowance.
+    for (const uri of ["ts3server://evil.example?password=x", "h323:evil", "sip2:x", "s3://x"]) {
+      const out = processEmailHtml(`<a href="${uri}">click</a>`, false);
+      expect(out).not.toContain(uri);
+    }
+  });
+
+  it("still allows the schemes ordinary mail needs", () => {
+    for (const uri of ["https://example.com/x", "mailto:a@b.c", "tel:+15551234", "/relative", "#frag"]) {
+      const out = processEmailHtml(`<a href="${uri}">click</a>`, false);
+      expect(out).toContain(uri);
+    }
+  });
+});

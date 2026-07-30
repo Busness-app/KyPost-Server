@@ -31,7 +31,14 @@ import DOMPurify from "dompurify";
 // are in DOMPurify's DEFAULT_FORBID_CONTENTS, so forbidding them drops the
 // whole subtree — no separate <source>/<track> entry needed.
 const forbiddenTags = ["form", "input", "button", "textarea", "select", "option", "style"];
-const forbiddenAttrs = ["style"];
+// class/id are stripped for the same reason as style: the app's stylesheet is
+// global and unscoped, so a sender who can name our classes gets our CSS
+// without needing any of their own. Five rules are position:fixed inset:0 at
+// z-index up to 2600 — enough to cover the viewport with app-styled chrome,
+// intercept every click and paint a forged "PGP verified" badge, all with no
+// script and no remote content. `open` goes too: those rules are guarded by
+// :not([open]), and DOMPurify allows the attribute by default.
+const forbiddenAttrs = ["style", "class", "id", "open"];
 
 // The URI schemes an email is allowed to link to.
 //
@@ -46,7 +53,7 @@ const forbiddenAttrs = ["style"];
 // The trailing alternations keep ordinary mail working — relative paths, bare
 // fragments and protocol-relative URLs have no scheme to check. cid: is
 // required for inline images.
-const allowedUriSchemes = /^(?:(?:https?|mailto|tel|cid):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+const allowedUriSchemes = /^(?:(?:https?|mailto|tel|cid):|[^a-z]|[a-z][a-z0-9+.\-]*(?:[^a-z0-9+.\-:]|$))/i;
 
 // Matches a leading "scheme:" so a refusal can name what it refused.
 const leadingScheme = /^([a-z][a-z0-9+.\-]*):/i;

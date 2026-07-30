@@ -629,6 +629,11 @@ body {
   margin: 0;
   max-height: none;
   overflow: visible;
+  /* Containment, independent of the sanitizer: this makes the block a
+     containing block for fixed-position descendants and clips painting to it,
+     so message content cannot escape into the viewport even if it acquires a
+     position:fixed rule. */
+  contain: layout paint style;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px 12px;

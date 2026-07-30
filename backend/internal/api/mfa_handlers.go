@@ -105,8 +105,14 @@ func (s *Server) handleMFAConfirm(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
+	// Decoded in one pass: the credential travels in the same body as the code,
+	// so this cannot go through requirePasswordConfirm (which consumes r.Body).
 	var req struct {
-		Code string `json:"code"`
+		Code     string `json:"code"`
+		Password string `json:"password"`
+		// AuthSecret is the client-derived credential, for an account whose
+		// password never reaches this server. See login_params.go.
+		AuthSecret string `json:"authSecret,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -117,6 +123,27 @@ func (s *Server) handleMFAConfirm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return
 	}
+	// Re-authenticate before INSTALLING the factor, mirroring handleMFADisable
+	// and handleMFARecoveryCodesRegenerate. The asymmetry was the bug: removing
+	// a factor was gated and adding one was not, so a stolen session could
+	// enrol a secret the owner does not hold and take all ten recovery codes —
+	// and a password change clears no MFA state, so it survived the victim's
+	// own remediation. Checked here rather than at setup because handing out a
+	// secret is harmless; committing it is not.
+	if allowed, retryAfter := s.loginLockout.tryAttempt(ac.Username); !allowed {
+		retrySeconds := int(retryAfter.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":             "too many failed attempts, try again later",
+			"retryAfterSeconds": retrySeconds,
+		})
+		return
+	}
+	if !verifyAccountCredential(u, req.Password, req.AuthSecret) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid credentials"})
+		return
+	}
+	s.loginLockout.recordSuccess(ac.Username)
 	if u.TOTPEnabled {
 		http.Error(w, "two-factor auth is already enabled", http.StatusConflict)
 		return

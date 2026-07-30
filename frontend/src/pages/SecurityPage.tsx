@@ -68,6 +68,7 @@ export function SecurityPage() {
   const [setup, setSetup] = useState<SetupResponse | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [confirmCode, setConfirmCode] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
 
   // Recovery-code display (shown once after confirm or regenerate).
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
@@ -449,13 +450,20 @@ export function SecurityPage() {
     setBusy(true);
     setMessage("");
     try {
+      // The password is required to ENABLE, not just to disable: enrolling a
+      // factor the account owner does not hold is at least as consequential as
+      // removing one, and a later password change does not undo it.
+      const { authSecret } = await deriveCredential("", confirmPassword);
       const res = await postJSON<ConfirmResponse>("/api/mfa/totp/confirm", {
-        code: confirmCode.trim()
+        code: confirmCode.trim(),
+        password: confirmPassword,
+        authSecret
       });
       setRecoveryCodes(res.recoveryCodes);
       setSavedAcknowledged(false);
       setSetup(null);
       setConfirmCode("");
+      setConfirmPassword("");
       await refreshStatus();
     } catch (err) {
       setMessage(toErrorMessage(err, "Invalid code. Try again."));
@@ -757,8 +765,17 @@ export function SecurityPage() {
                   placeholder="123456"
                 />
               </label>
+              <label>
+                <div>Confirm your password</div>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  autoComplete="current-password"
+                />
+              </label>
               <div className="sec-actions">
-                <button type="submit" disabled={busy || confirmCode.trim().length !== 6}>
+                <button type="submit" disabled={busy || confirmCode.trim().length !== 6 || confirmPassword === ""}>
                   {busy ? "Confirming..." : "Confirm and enable"}
                 </button>
                 <button type="button" className="sec-action-quiet" onClick={() => setSetup(null)}>
