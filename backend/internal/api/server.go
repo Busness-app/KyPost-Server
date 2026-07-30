@@ -95,7 +95,7 @@ type Server struct {
 	mfaLockout             *failureLockout
 	deviceLockout          *failureLockout
 	wkdLimiter             *ipRateLimiter
-	mfaPushCooldown        *mfaPushCooldown
+	mfaPushLimiter         *mfaPushLimiter
 	sendAsCooldown         *sendAsVerificationCooldown
 	classifierTestCooldown *classifierTestCooldown
 	nativePairingNonces    *consumedNativePairingNonces
@@ -271,7 +271,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		mfaLockout:             newFailureLockout(mfaMaxFailures, mfaLockoutFor),
 		deviceLockout:          newFailureLockout(deviceMaxFailures, deviceLockoutFor),
 		wkdLimiter:             newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
-		mfaPushCooldown:        newMfaPushCooldown(),
+		mfaPushLimiter:         newMfaPushLimiter(),
 		sendAsCooldown:         newSendAsVerificationCooldown(),
 		classifierTestCooldown: newClassifierTestCooldown(),
 		nativePairingNonces:    newConsumedNativePairingNonces(),
@@ -281,7 +281,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		powVerifier:            powVerifier,
 		powChallenges:          newPowChallengeLimiter(),
 		powDifficulty:          newPowEscalation(),
-		loginRateLimiter:       newIPRateLimiter(loginRateBurst, loginRateRefillPerSec),
+		loginRateLimiter:       newIPRateLimiter(loginKDFBurstSeconds, loginKDFDutyCycle),
 		loginIPLockout:         newFailureLockout(loginIPMaxFailures, loginIPLockoutFor),
 		globalStore:            globalStore,
 		wkdStore:               wkdStore,
@@ -831,6 +831,22 @@ func (s *Server) StartSendAsCooldownSweeper(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.sendAsCooldown.sweep(sendAsCooldownSweepMaxAge)
+		}
+	}
+}
+
+// StartMfaPushLimiterSweeper runs mfaPushLimiter.sweep on an interval for the
+// process lifetime, mirroring StartSendAsCooldownSweeper's ticker/select pattern
+// exactly. Call once after NewServer.
+func (s *Server) StartMfaPushLimiterSweeper(ctx context.Context) {
+	ticker := time.NewTicker(mfaPushLimiterSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mfaPushLimiter.sweep(mfaPushLimiterSweepMaxAge)
 		}
 	}
 }

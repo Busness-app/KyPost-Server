@@ -126,8 +126,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// unknown account runs scrypt on purpose (see equalizeLoginTiming). This
 	// bucket is what stands between that and an unauthenticated caller pegging
 	// every CPU on a host that is also running an LLM.
+	// The bucket holds seconds of derivation work, so this reserves one attempt's
+	// worth and chargeLoginKDF below settles up with what the attempt really
+	// cost. That is what makes the ceiling hold on a machine where a derivation
+	// is slower than the reference: the budget drains faster, rather than the
+	// same number of requests being waved through to burn more CPU each.
 	if s.loginRateLimiter != nil {
-		if ok, retryAfter := s.loginRateLimiter.allow(loginRateLimitKey); !ok {
+		if ok, retryAfter := s.loginRateLimiter.admitCost(loginRateLimitKey, loginKDFReserveSeconds); !ok {
 			retrySeconds := int(retryAfter.Seconds()) + 1
 			w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
@@ -142,6 +147,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// hole in the per-account budget below: 50 failures from one address in 15
 	// minutes stops that address, whatever names it tried. Loose on purpose —
 	// a NAT egress or an office must not be easier to lock out than an account.
+	// Login is where a constant clientIP does the most damage and the first place
+	// an operator notices it, so it is where the misconfiguration announces itself.
+	s.warnOnUnusedProxyHeaders(r)
 	ipLockoutKey := clientIP(r)
 	if allowed, retryAfter := s.loginIPLockout.tryAttempt(ipLockoutKey); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
@@ -230,7 +238,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// sends only AuthSecret, so equalizing on the empty Password would make
 		// the unknown-account path cheap again for exactly the callers that
 		// matter.
-		equalizeLoginTiming(cmp.Or(req.AuthSecret, req.Password))
+		s.chargeLoginKDF(func() bool {
+			equalizeLoginTiming(cmp.Or(req.AuthSecret, req.Password))
+			return false
+		})
 		// Make the next challenge from this address more expensive. Recorded
 		// for the unknown-username case too: spraying a list of guessed
 		// usernames is exactly the pattern this is here to price.
@@ -246,13 +257,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// public (login_params.go), "try both" would let anyone authenticate with a
 	// value they can compute from the salt alone.
 	if u.UsesDerivedAuth() {
-		if !users.VerifyAuthSecret(u, req.AuthSecret) {
+		if !s.chargeLoginKDF(func() bool { return users.VerifyAuthSecret(u, req.AuthSecret) }) {
 			s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
 	} else {
-		if !users.VerifyPassword(u, req.Password) {
+		if !s.chargeLoginKDF(func() bool { return users.VerifyPassword(u, req.Password) }) {
 			s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
@@ -326,29 +337,50 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if u.TOTPEnabled {
 			methods = append(methods, "totp")
 		}
+		// Rate-limit the push itself, not challenge creation or login: a user who
+		// mistyped a TOTP code must still be able to retry. See mfaPushLimiter for
+		// why this is a burst cap rather than one-per-window.
+		pushDispatched, pushRetryAfter := false, time.Duration(0)
 		if u.PushMFAEnabled {
-			methods = append(methods, "push")
-			// Rate-limit the push itself, not challenge creation or login: a user who
-			// mistyped a TOTP code must still be able to retry, but repeated logins
-			// within the cooldown window reuse the existing push rather than fanning
-			// another one out — see mfaPushCooldown's doc for why.
-			if allowed, _ := s.mfaPushCooldown.tryConsume(u.ID); allowed {
+			if allowed, retryAfter := s.mfaPushLimiter.tryConsume(u.ID); allowed {
+				// At most one challenge for this account is ever both pushed and
+				// answerable. Earlier attempts that were never answered are dropped
+				// rather than left polling an id no device was told about — which,
+				// combined with the old one-push-per-window cap, is exactly how push
+				// MFA came to look broken after the first sign-in.
+				s.mfaChallenges.SupersedeUnansweredPush(u.ID, ch.ID)
+				pushDispatched = true
 				// Snapshot the request context before the goroutine: r is not
 				// safe to touch once this handler returns.
 				go s.dispatchPushChallenge(u.ID, ch.ID, newLoginContext(r), ch.CreatedAt, ch.MatchDigits, ch.DecoyDigits)
+			} else {
+				pushRetryAfter = retryAfter
 			}
+		}
+		// Offered only when a notification actually went out for THIS challenge.
+		// Advertising "push" for a challenge whose push was suppressed left the
+		// browser polling a challenge no device could answer, with nothing on the
+		// phone and no explanation, until the TTL ran out.
+		if pushDispatched {
+			methods = append(methods, "push")
 		}
 		resp := map[string]any{
 			"mfaRequired": true,
 			"challengeId": ch.ID,
 			"methods":     methods,
 		}
-		if u.PushMFAEnabled {
+		if pushDispatched {
 			// The number the approving device must send back. Safe to hand to
 			// this caller: they are the one being asked to read it off this
 			// screen, and knowing it proves nothing on its own — approving
 			// still needs a paired device's credentials.
 			resp["matchDigits"] = ch.MatchDigits
+		}
+		if pushRetryAfter > 0 {
+			// So the UI can say "you have requested too many approvals, try again
+			// in N seconds" instead of silently falling back to TOTP with no
+			// account of where the push option went.
+			resp["pushRetryAfterSeconds"] = int(pushRetryAfter.Seconds()) + 1
 		}
 		writeJSON(w, http.StatusOK, resp)
 		return

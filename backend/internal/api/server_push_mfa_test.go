@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"kypost-server/backend/internal/mfa"
 	"kypost-server/backend/internal/users"
 )
 
@@ -291,13 +292,24 @@ func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 	}
 }
 
-// TestLoginDoesNotRedispatchPushWithinCooldown covers the MFA-fatigue mitigation:
-// repeated logins for the same push-enabled account within mfaPushCooldownFor
-// must not each re-arm the push cooldown, or a stream of logins could still
-// bypass the intended one-push-per-window limit. The login/challenge flow
-// itself must keep working throughout (a user who mistyped a TOTP code must
-// still be able to retry) — only the underlying push dispatch is rate-limited.
-func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
+// TestSecondLoginWithinWindowPushesAgainAndSupersedesTheFirst is the regression
+// test for "after one push, MFA push notifications break", plus the invariant
+// that makes the burst safe. Both are properties of the same scenario -- two
+// consecutive logins inside one window -- so they share a setup rather than
+// paying for two. Setup here is ~21s under -race (scrypt, TOTP enrolment,
+// device pairing, push enable) against ~2s per login, and this package is close
+// to the CI test timeout.
+//
+// The policy used to be one push per window, while every login mints a fresh
+// challenge id and fresh MatchDigits. So the second attempt returned a challenge
+// that no device had been pushed, still advertised "push" as a usable method,
+// and left the browser polling until the TTL expired with nothing on the phone.
+// Retrying a sign-in is normal behaviour and must produce a real notification.
+//
+// Superseding is the other half: at most one challenge per account may be both
+// pushed and answerable, or a stream of logins accumulates live approvable
+// prompts -- the fatigue surface the cap exists to close.
+func TestSecondLoginWithinWindowPushesAgainAndSupersedesTheFirst(t *testing.T) {
 	srv := newTestServer(t)
 	u, err := srv.users.Create("uma", "pw-uma-testpassword", users.RoleUser)
 	if err != nil {
@@ -307,7 +319,7 @@ func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
 	pairApproverDevice(t, srv, u.ID, "dev-uma")
 	enablePush(t, srv, u.ID)
 
-	if _, sent := srv.mfaPushCooldown.lastSent[u.ID]; sent {
+	if _, sent := srv.mfaPushLimiter.sent[u.ID]; sent {
 		t.Fatal("expected no push recorded before any login")
 	}
 
@@ -315,23 +327,87 @@ func TestLoginDoesNotRedispatchPushWithinCooldown(t *testing.T) {
 	if !methodsContain(methods, "push") {
 		t.Fatalf("methods = %v, want push offered on first login", methods)
 	}
-	if _, sent := srv.mfaPushCooldown.lastSent[u.ID]; !sent {
-		t.Fatal("expected push cooldown armed after first login's dispatch")
+	if status, ok := srv.mfaChallenges.PushStatus(first); !ok || status != mfa.PushPending {
+		t.Fatalf("first challenge: status=%q ok=%v, want pending and live", status, ok)
 	}
-	firstSentAt := srv.mfaPushCooldown.lastSent[u.ID]
 
-	// A second login attempt shortly after must still succeed and issue a
-	// fresh challenge (TOTP retry must never be blocked) but must not push
-	// again — the cooldown timestamp must not move.
+	// The whole point: a second attempt moments later still gets a push of its
+	// own, for the challenge it actually handed back.
 	second, methods := loginChallenge(t, srv, "uma", "pw-uma-testpassword")
 	if second == first {
 		t.Fatal("expected a distinct challenge id for the second login")
 	}
 	if !methodsContain(methods, "push") {
-		t.Fatalf("methods = %v, want push still offered as a login method", methods)
+		t.Fatalf("methods = %v, want push offered on the second login too", methods)
 	}
-	if !srv.mfaPushCooldown.lastSent[u.ID].Equal(firstSentAt) {
-		t.Fatal("second login within the cooldown window must not re-arm it")
+	if got := len(srv.mfaPushLimiter.sent[u.ID]); got != 2 {
+		t.Fatalf("recorded pushes = %d, want 2 (one per attempt)", got)
+	}
+
+	if _, ok := srv.mfaChallenges.PushStatus(first); ok {
+		t.Fatal("the unanswered first challenge must be superseded once a newer one is pushed")
+	}
+	if status, ok := srv.mfaChallenges.PushStatus(second); !ok || status != mfa.PushPending {
+		t.Fatalf("second challenge: status=%q ok=%v, want pending and live", status, ok)
+	}
+}
+
+// TestLoginStopsOfferingPushWhenThrottled covers the other half of the fix: once
+// the burst is spent, login must keep working and must NOT advertise a method
+// whose notification was suppressed. Advertising it is what produced a browser
+// polling a challenge no device could answer.
+func TestLoginStopsOfferingPushWhenThrottled(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create("ulf", "pw-ulf-testpassword", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	enrollTOTP(t, srv, u.ID)
+	pairApproverDevice(t, srv, u.ID, "dev-ulf")
+	enablePush(t, srv, u.ID)
+
+	// Spend the burst against the limiter directly rather than through mfaPushBurst
+	// full logins. Every login pays password derivation and equalizeLoginTiming, and
+	// this package is already close to the -race test timeout in CI; three of them
+	// bought nothing here. That the logins *within* the burst are offered push is
+	// covered by TestLoginKeepsPushingForRepeatAttemptsWithinWindow, and the window
+	// arithmetic by TestMfaPushLimiterAllowsBurstThenBlocks. What is unique to this
+	// test is the first login *after* the burst is spent, so that is the only one it
+	// pays for.
+	for i := 0; i < mfaPushBurst; i++ {
+		if ok, _ := srv.mfaPushLimiter.tryConsume(u.ID); !ok {
+			t.Fatalf("could not spend burst slot %d of %d", i+1, mfaPushBurst)
+		}
+	}
+
+	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": "ulf", "password": "pw-ulf-testpassword"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("throttled login must still succeed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ChallengeID           string   `json:"challengeId"`
+		Methods               []string `json:"methods"`
+		MatchDigits           string   `json:"matchDigits"`
+		PushRetryAfterSeconds int      `json:"pushRetryAfterSeconds"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal login: %v", err)
+	}
+	if resp.ChallengeID == "" {
+		t.Fatal("a throttled push must not block challenge creation: TOTP retry has to keep working")
+	}
+	if !methodsContain(resp.Methods, "totp") {
+		t.Fatalf("methods = %v, want totp still offered when push is throttled", resp.Methods)
+	}
+	if methodsContain(resp.Methods, "push") {
+		t.Fatalf("methods = %v, must not offer push for a challenge that was never pushed", resp.Methods)
+	}
+	if resp.MatchDigits != "" {
+		t.Fatal("matchDigits belongs to a push that did not go out; sending it invites a blind approval")
+	}
+	if resp.PushRetryAfterSeconds <= 0 {
+		t.Fatal("expected pushRetryAfterSeconds so the UI can explain where the push option went")
 	}
 }
 

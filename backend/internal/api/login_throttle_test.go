@@ -163,10 +163,22 @@ func TestLoginIPLockoutCatchesRotatingUsernames(t *testing.T) {
 	// Take the instance-wide bucket out of the picture so this test is about the
 	// per-IP lockout specifically.
 	srv.loginRateLimiter = nil
+	// And shrink the threshold, in the same spirit and for a blunter reason.
+	// Every attempt below runs a full scrypt derivation on purpose -- see
+	// equalizeLoginTiming, which makes an unknown username cost what a wrong
+	// password costs -- so at the production loginIPMaxFailures of 50 this test
+	// paid 55 of them: 84s under -race, the most expensive test in the package.
+	// What is under test is that the per-IP counter accumulates across
+	// *different* usernames and eventually stops the address, and that a
+	// different address is untouched. Neither depends on the threshold's value;
+	// 50 is a tuning decision, not behaviour, and asserting it here bought
+	// nothing but wall-clock.
+	const maxFailures = 4
+	srv.loginIPLockout = newFailureLockout(maxFailures, loginIPLockoutFor)
 
 	const ip = "198.51.100.77"
 	locked := false
-	for i := range loginIPMaxFailures + 5 {
+	for i := range maxFailures + 5 {
 		body, _ := json.Marshal(map[string]string{
 			"username": "victim-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
 			"password": "wrong-password-entirely",
@@ -182,7 +194,7 @@ func TestLoginIPLockoutCatchesRotatingUsernames(t *testing.T) {
 	}
 	if !locked {
 		t.Errorf("one address made %d failed attempts against %d different usernames without "+
-			"being locked out", loginIPMaxFailures+5, loginIPMaxFailures+5)
+			"being locked out", maxFailures+5, maxFailures+5)
 	}
 
 	// A different address must be unaffected — this must not become a way to
