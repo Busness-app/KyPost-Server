@@ -83,8 +83,21 @@ Optional for local development (outside Docker):
    > `X-Forwarded-For` and bypass the lockouts. **Check first that your proxy
    > does not reach this container by the host's LAN address**, because loopback
    > publishing severs that; a proxy on another machine needs the default.
-   > Better still, put the proxy on the same Docker network and address the
-   > container by name — that path ignores published ports entirely.
+   > Better still, run the proxy as a container on Docker's default bridge, which
+   > is where this container lives, and point it at this container's address
+   > there:
+   >
+   > ```bash
+   > docker inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' KyPost-Server
+   > ```
+   >
+   > That path ignores published ports entirely, so nothing needs publishing.
+   > It also keeps the peer address the server sees equal to the proxy's own: a
+   > proxy on a *separate* Docker network is source-NATed to a bridge gateway on
+   > the way in, so the server sees `172.x.0.1` for every caller — one shared
+   > lockout key, and an MFA push that names the gateway instead of whoever is
+   > signing in. Use the IP and not a container name; the default bridge has no
+   > DNS between containers.
    >
    > Three ways to get TLS, and they are not equivalent:
    >
@@ -104,8 +117,12 @@ Optional for local development (outside Docker):
    > **3. A reverse proxy you run** (nginx, Caddy).
    >
    > Options 2 and 3 need `TRUSTED_PROXY_CIDRS` set to the proxy's address — e.g.
-   > `127.0.0.1/32` for a proxy on the same host, or the bridge address of a proxy
-   > container. Only then does the server believe
+   > `127.0.0.1/32` for a proxy on the same host, or the default-bridge address of
+   > a proxy container (`docker inspect -f
+   > '{{.NetworkSettings.Networks.bridge.IPAddress}}' <proxy>`). Moving the proxy
+   > onto the same bridge is what makes that address meaningful, but it is not a
+   > substitute for setting this: with it empty, forwarded headers are discarded
+   > and every caller is keyed as the proxy. Only with it set does the server believe
    > `X-Forwarded-Proto`/`-Host`/`-For`, which is what marks the cookie `Secure`
    > and keys the login and CardDAV lockouts off the real caller rather than the
    > proxy. **Name the proxy's address specifically, not a wide range:** any peer
