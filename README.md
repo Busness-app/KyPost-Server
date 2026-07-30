@@ -206,15 +206,24 @@ The costs are real. Know them before you choose this mode:
   automatically.** That edit re-signs the key and needs the private half. The
   browser makes the edit, not the background poller.
 
-**Server-protected (legacy).** The server seals the key with a master key on the
-same volume. The server, and any person who can read that volume, can decrypt
-everything you have ever received. KyPost used this mode before client
-protection existed. It remains only so that upgraded installations keep working.
+**Server-protected.** The server seals the key with a master key on the same
+volume and unwraps it whenever it needs to. You get the convenience: mail
+decrypts without you unlocking anything, a password reset never costs you the
+key, send-as addresses get signed in for you, and the background poller can do
+its work while no browser is open. Nothing about the key is your problem after
+setup.
 
-This mode is **not** end-to-end encryption, and earlier versions of this README
-described it as if it were. Migrate when you can. The Security page offers a
-one-time migration. The migration hands the key to your browser, rewraps it
-under your password, and deletes the server-readable copy.
+You pay for that with the trust boundary. This mode is **not** end-to-end
+encryption, and earlier versions of this README described it as if it were. The
+server, and any person who can read that volume — whoever holds root, whoever
+holds a backup, whoever seizes the disk — can decrypt everything you have ever
+received. If you run this server yourself on hardware you control, that may be a
+trade you are happy to make. If someone else runs it, you are trusting them with
+your mail in the clear.
+
+Choose this mode deliberately, not by accident. If you decide the trade is not
+worth it, the Security page offers a one-time migration: it hands the key to your
+browser, rewraps it under your password, and deletes the server-readable copy.
 
 Some facts apply to both modes, and they are worth a plain statement:
 
