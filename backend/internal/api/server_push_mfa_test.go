@@ -292,16 +292,24 @@ func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 	}
 }
 
-// TestLoginKeepsPushingForRepeatAttemptsWithinWindow is the regression test for
-// "after one push, MFA push notifications break".
+// TestSecondLoginWithinWindowPushesAgainAndSupersedesTheFirst is the regression
+// test for "after one push, MFA push notifications break", plus the invariant
+// that makes the burst safe. Both are properties of the same scenario -- two
+// consecutive logins inside one window -- so they share a setup rather than
+// paying for two. Setup here is ~21s under -race (scrypt, TOTP enrolment,
+// device pairing, push enable) against ~2s per login, and this package is close
+// to the CI test timeout.
 //
-// The policy used to be one push per five minutes per account, while every login
-// attempt mints a fresh challenge id and fresh MatchDigits. So the second
-// attempt inside the window returned a challenge that no device had been pushed,
-// still advertised "push" as a usable method, and left the browser polling until
-// the TTL expired with nothing on the phone. Retrying a sign-in is normal
-// behaviour and must produce a real notification.
-func TestLoginKeepsPushingForRepeatAttemptsWithinWindow(t *testing.T) {
+// The policy used to be one push per window, while every login mints a fresh
+// challenge id and fresh MatchDigits. So the second attempt returned a challenge
+// that no device had been pushed, still advertised "push" as a usable method,
+// and left the browser polling until the TTL expired with nothing on the phone.
+// Retrying a sign-in is normal behaviour and must produce a real notification.
+//
+// Superseding is the other half: at most one challenge per account may be both
+// pushed and answerable, or a stream of logins accumulates live approvable
+// prompts -- the fatigue surface the cap exists to close.
+func TestSecondLoginWithinWindowPushesAgainAndSupersedesTheFirst(t *testing.T) {
 	srv := newTestServer(t)
 	u, err := srv.users.Create("uma", "pw-uma-testpassword", users.RoleUser)
 	if err != nil {
@@ -319,6 +327,9 @@ func TestLoginKeepsPushingForRepeatAttemptsWithinWindow(t *testing.T) {
 	if !methodsContain(methods, "push") {
 		t.Fatalf("methods = %v, want push offered on first login", methods)
 	}
+	if status, ok := srv.mfaChallenges.PushStatus(first); !ok || status != mfa.PushPending {
+		t.Fatalf("first challenge: status=%q ok=%v, want pending and live", status, ok)
+	}
 
 	// The whole point: a second attempt moments later still gets a push of its
 	// own, for the challenge it actually handed back.
@@ -332,29 +343,6 @@ func TestLoginKeepsPushingForRepeatAttemptsWithinWindow(t *testing.T) {
 	if got := len(srv.mfaPushLimiter.sent[u.ID]); got != 2 {
 		t.Fatalf("recorded pushes = %d, want 2 (one per attempt)", got)
 	}
-}
-
-// TestLoginSupersedesTheUnansweredPushChallenge pins the invariant that makes
-// the burst cap safe: at most one challenge per account is ever both pushed and
-// answerable. Without this, each attempt left another answerable challenge
-// behind, so a stream of logins accumulated live approvable prompts — the
-// fatigue surface the cap exists to close.
-func TestLoginSupersedesTheUnansweredPushChallenge(t *testing.T) {
-	srv := newTestServer(t)
-	u, err := srv.users.Create("una", "pw-una-testpassword", users.RoleUser)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	enrollTOTP(t, srv, u.ID)
-	pairApproverDevice(t, srv, u.ID, "dev-una")
-	enablePush(t, srv, u.ID)
-
-	first, _ := loginChallenge(t, srv, "una", "pw-una-testpassword")
-	if status, ok := srv.mfaChallenges.PushStatus(first); !ok || status != mfa.PushPending {
-		t.Fatalf("first challenge: status=%q ok=%v, want pending and live", status, ok)
-	}
-
-	second, _ := loginChallenge(t, srv, "una", "pw-una-testpassword")
 
 	if _, ok := srv.mfaChallenges.PushStatus(first); ok {
 		t.Fatal("the unanswered first challenge must be superseded once a newer one is pushed")
@@ -378,9 +366,17 @@ func TestLoginStopsOfferingPushWhenThrottled(t *testing.T) {
 	pairApproverDevice(t, srv, u.ID, "dev-ulf")
 	enablePush(t, srv, u.ID)
 
+	// Spend the burst against the limiter directly rather than through mfaPushBurst
+	// full logins. Every login pays password derivation and equalizeLoginTiming, and
+	// this package is already close to the -race test timeout in CI; three of them
+	// bought nothing here. That the logins *within* the burst are offered push is
+	// covered by TestLoginKeepsPushingForRepeatAttemptsWithinWindow, and the window
+	// arithmetic by TestMfaPushLimiterAllowsBurstThenBlocks. What is unique to this
+	// test is the first login *after* the burst is spent, so that is the only one it
+	// pays for.
 	for i := 0; i < mfaPushBurst; i++ {
-		if _, methods := loginChallenge(t, srv, "ulf", "pw-ulf-testpassword"); !methodsContain(methods, "push") {
-			t.Fatalf("login %d: methods = %v, want push within the burst", i+1, methods)
+		if ok, _ := srv.mfaPushLimiter.tryConsume(u.ID); !ok {
+			t.Fatalf("could not spend burst slot %d of %d", i+1, mfaPushBurst)
 		}
 	}
 
