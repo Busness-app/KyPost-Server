@@ -277,7 +277,16 @@ const themes: Record<ThemeName, ThemeVars> = {
   "Patina Ky": {
     bg: "#0d0f14",
     panel: "#161a22",
-    ink: "#64748b",
+    // slate-400, not slate-500. This is the DEFAULT theme (see getStoredTheme),
+    // and #64748b scored 4.03:1 on this background and 3.66:1 on the panel —
+    // under the 4.5:1 floor for body text, and the only theme of the fifteen
+    // below it; every other `ink` sits between 6.7:1 and 14:1. `ink` is the
+    // secondary text colour, which includes reader chrome rendered at 0.75rem
+    // and 0.7 opacity, so it needed more contrast than the others, not less.
+    // Stepping to slate-400 mirrors what the light sibling does in the opposite
+    // direction (Polished Ky uses slate-600 for the same role) and lands at
+    // 7.48:1 / 6.80:1. Pinned by pages/read/readability.test.tsx.
+    ink: "#94a3b8",
     inkStrong: "#e2e8f0",
     accent: "#4deeea",
     accentSoft: "#0e4a48",

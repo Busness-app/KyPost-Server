@@ -38,7 +38,24 @@ const forbiddenTags = ["form", "input", "button", "textarea", "select", "option"
 // intercept every click and paint a forged "PGP verified" badge, all with no
 // script and no remote content. `open` goes too: those rules are guarded by
 // :not([open]), and DOMPurify allows the attribute by default.
-const forbiddenAttrs = ["style", "class", "id", "open"];
+//
+// color/bgcolor are the presentational spelling of the same thing, and they are
+// stripped for readability rather than for safety. A message is rendered on the
+// reader's theme background (EmailBodyFrame injects --bg and --ink-strong; the
+// plain-text block uses the same pair), and a sender cannot see which theme that
+// is. `<font color="#000000">` is black on #1a1a1e under Dark Matter — the exact
+// black-on-near-black failure the frame's own colour injection exists to fix,
+// arriving from the sender instead of from a system colour keyword.
+//
+// STRIP BOTH OR NEITHER. Half of this pair is worse than all of it: a message
+// that sets only a background keeps a dark panel under theme-light text, and one
+// that sets only a foreground puts dark text on a dark theme. Since `style` is
+// already stripped — which is how the overwhelming majority of HTML mail carries
+// colour — leaving these two was an inconsistency, not a design: the same
+// message lost its CSS colours and kept its attribute ones. Mail now renders in
+// the reader's palette, always legible, and the layout attributes DOMPurify
+// allows (align, width, height) are untouched.
+const forbiddenAttrs = ["style", "class", "id", "open", "color", "bgcolor"];
 
 // The URI schemes an email is allowed to link to.
 //
