@@ -44,8 +44,8 @@ RUN chmod +x /opt/kypost/scripts/*.sh
 #
 # Bumped by .github/workflows/ollama-bump.yml, which only advances to a release
 # that has been public for at least 3 days.
-ARG OLLAMA_VERSION=0.32.3
-ARG OLLAMA_SHA256=2597d74fbe654ef6a37db56f771cf37d4a85c6bde4018127874e3927d3113800
+ARG OLLAMA_VERSION=0.32.5
+ARG OLLAMA_SHA256=f7d6bdbcf71b83aa8670c4e7dc4b6936c0952fcf8b114eaf6a11cbadb9684214
 RUN curl -fsSL -o /tmp/ollama.tar.zst \
 	"https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
 	&& echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c - \
