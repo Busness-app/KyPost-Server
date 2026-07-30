@@ -49,9 +49,11 @@ func getOrCreateUserStore[T any](mu *sync.Mutex, cache map[string]T, lastSeen ma
 // in RAM for the process lifetime.
 //
 // Eviction is safe because these stores hold no state a reopen cannot rebuild:
-// state.Store owns a SQLite handle (closed below), the rest are file-backed
-// JSON. A dropped store costs one reopen. Anything added here that holds a
-// live resource MUST be released in sweepIdleUserStores.
+// state.Store owns a SQLite handle, the rest are file-backed JSON. A dropped
+// store costs one reopen. Anything added here that holds a live resource MUST
+// release it on becoming unreachable (state.New's runtime cleanup is the
+// pattern) — never by closing it in sweepIdleUserStores, which cannot tell
+// whether a caller is still using it.
 const userStoreIdleTTL = 2 * time.Hour
 
 // userStoreSweepInterval is how often idle per-user stores are reclaimed. A
@@ -86,13 +88,22 @@ func (s *Server) sweepIdleUserStores(now time.Time) int {
 		if now.Sub(seen) < userStoreIdleTTL {
 			continue
 		}
-		// state.Store owns a SQLite handle and its WAL; dropping the map entry
-		// without closing leaks both for the process lifetime.
-		if st, ok := s.userStores[userID]; ok {
-			if err := st.Close(); err != nil {
-				s.logger.Error("closing evicted user state store", "user_id", userID, "error", err.Error())
-			}
-		}
+		// Dropping the map entry is the whole eviction. It deliberately does NOT
+		// Close the state.Store's SQLite handle.
+		//
+		// The caches hand out bare pointers and release userMu before the caller
+		// has finished with them, and userLastSeen records when a store was
+		// ACQUIRED, not when it was released — so "idle for two hours" does not
+		// mean "nobody is holding it". Closing here severed the handle under any
+		// caller that outlived the TTL (a stalled IMAP fetch inside the 10-minute
+		// WriteTimeout, a large attachment stream, a goroutine outliving its
+		// request) and turned their next query into "database is closed".
+		//
+		// state.New registers a runtime cleanup instead, so the fd and WAL are
+		// released once the Store is genuinely unreachable. Reachability is the
+		// reference count this cache never kept. Anything added here that holds a
+		// live resource must arrange the same, NOT a close on eviction.
+		// Pinned by TestEvictedStoreStaysUsableForItsHolder.
 		delete(s.userStores, userID)
 		delete(s.userContacts, userID)
 		delete(s.userSendAs, userID)

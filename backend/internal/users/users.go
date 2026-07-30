@@ -361,6 +361,10 @@ func newStore(path string) *Store {
 // load returns the current file contents, from cache when the file on disk is
 // unchanged since it was last parsed.
 //
+// The returned usersFile's Users slice ALIASES the cache. Reach it through
+// withCachedUsers, which is the only caller, so the alias cannot escape to a
+// reader that keeps or reorders it.
+//
 // Callers must NOT hold mu: this takes it, for reading and then possibly for
 // writing. Mutators hold the inter-process file lock and call readFileUnlocked
 // directly instead — a cached copy is exactly what a read-modify-write cycle
@@ -648,18 +652,43 @@ func FirstAdminFrom(all []User) User {
 // but corrupts a shared cache: the sort reorders the cached backing array while
 // another goroutine is ranging over it.
 func (s *Store) List() ([]User, error) {
-	f, err := s.load()
+	var out []User
+	err := s.withCachedUsers(func(all []User) {
+		out = make([]User, 0, len(all))
+		for _, u := range all {
+			out = append(out, u.clone())
+		}
+	})
 	if err != nil {
 		return nil, err
-	}
-	out := make([]User, 0, len(f.Users))
-	for _, u := range f.Users {
-		out = append(out, u.clone())
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return NormalizeUsername(out[i].Username) < NormalizeUsername(out[j].Username)
 	})
 	return out, nil
+}
+
+// withCachedUsers calls fn with the cached user records.
+//
+// The slice fn receives IS the cache's own backing array — not a copy. It is
+// passed to a callback rather than returned so it cannot escape: a reader that
+// keeps it, sorts it, or writes through it corrupts what every subsequent
+// request in the process reads, and "the returned slice aliases the cache" is a
+// rule that survives exactly as long as the next person to add a reader happens
+// to read the comment. Nothing here can retain it by accident.
+//
+// fn must therefore clone anything it keeps (see User.clone, which also copies
+// RecoveryCodesHash — the one field a plain struct copy still shares).
+//
+// Mutators do NOT use this: a read-modify-write cycle must start from what is on
+// disk, inside the file lock. See readFileUnlocked.
+func (s *Store) withCachedUsers(fn func(all []User)) error {
+	f, err := s.load()
+	if err != nil {
+		return err
+	}
+	fn(f.Users)
+	return nil
 }
 
 // Get returns a user by ID.
@@ -669,32 +698,46 @@ func (s *Store) List() ([]User, error) {
 // material to answer "is this account still active?" was the single hottest
 // avoidable cost in the request path.
 func (s *Store) Get(id string) (User, error) {
-	f, err := s.load()
+	found := false
+	var out User
+	err := s.withCachedUsers(func(all []User) {
+		for _, u := range all {
+			if u.ID == id {
+				out, found = u.clone(), true
+				return
+			}
+		}
+	})
 	if err != nil {
 		return User{}, err
 	}
-	for _, u := range f.Users {
-		if u.ID == id {
-			return u.clone(), nil
-		}
+	if !found {
+		return User{}, ErrNotFound
 	}
-	return User{}, ErrNotFound
+	return out, nil
 }
 
 // GetByUsername returns a user by username, compared case-insensitively —
 // see NormalizeUsername.
 func (s *Store) GetByUsername(username string) (User, error) {
-	f, err := s.load()
+	want := NormalizeUsername(username)
+	found := false
+	var out User
+	err := s.withCachedUsers(func(all []User) {
+		for _, u := range all {
+			if NormalizeUsername(u.Username) == want {
+				out, found = u.clone(), true
+				return
+			}
+		}
+	})
 	if err != nil {
 		return User{}, err
 	}
-	want := NormalizeUsername(username)
-	for _, u := range f.Users {
-		if NormalizeUsername(u.Username) == want {
-			return u.clone(), nil
-		}
+	if !found {
+		return User{}, ErrNotFound
 	}
-	return User{}, ErrNotFound
+	return out, nil
 }
 
 // Create adds a new user with the given username/password/role.

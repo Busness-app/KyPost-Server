@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -143,12 +144,36 @@ func New(baseDir string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// Close the handle when the last reference to this Store goes away.
+	//
+	// A Store is cached and handed out as a bare pointer (api.Server's per-user
+	// store cache), and the cache evicts on an idle timer. Closing at eviction
+	// meant closing a live *sql.DB out from under whoever was still holding it —
+	// a long attachment stream, a slow IMAP-backed handler, a goroutine that
+	// outlived its request — and every query they made afterwards failed with
+	// "database is closed". The evictor cannot know; it has a timestamp, not a
+	// reference count.
+	//
+	// Reachability is the reference count, and the runtime already tracks it.
+	// The eviction now just drops the map entry; the fd and its WAL are released
+	// once nothing can reach the Store any more. Close stays for callers that
+	// know they are the last owner (tests, shutdown) and is idempotent, so the
+	// two cannot conflict.
+	//
+	// The cleanup captures db, never s: capturing the Store would keep it
+	// reachable forever and the cleanup would never run.
+	runtime.AddCleanup(s, func(db *sql.DB) { _ = db.Close() }, db)
 	return s, nil
 }
 
-// Close releases the database handle. Callers that cache Stores must call it
-// on eviction — api.Server.sweepIdleUserStores does — or the handle and its
-// WAL leak for the process lifetime.
+// Close releases the database handle.
+//
+// Optional. New registers a runtime cleanup that closes the handle once the
+// Store becomes unreachable, so a cache that simply forgets a Store leaks
+// nothing. Call this only where the caller genuinely owns the last reference
+// and wants the fd back now rather than at the next GC. Safe to call twice, and
+// safe to call while another goroutine still holds the Store — which is exactly
+// why the idle-store eviction does NOT call it.
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil

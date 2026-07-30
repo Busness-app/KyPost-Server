@@ -132,6 +132,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// cost. That is what makes the ceiling hold on a machine where a derivation
 	// is slower than the reference: the budget drains faster, rather than the
 	// same number of requests being waved through to burn more CPU each.
+	//
+	// The reservation is held in `budget` and released exactly once — by
+	// chargeLoginKDF when a derivation actually runs, or by the deferred refund
+	// otherwise. Every return between here and there is a path that reserved
+	// derivation work and then did none of it; keeping the reservation on those
+	// is what let a locked-out caller drain the instance budget with requests
+	// that cost the server nothing. See loginBudget.
+	var budget loginBudget
 	if s.loginRateLimiter != nil {
 		if ok, retryAfter := s.loginRateLimiter.admitCost(loginRateLimitKey, loginKDFReserveSeconds); !ok {
 			retrySeconds := int(retryAfter.Seconds()) + 1
@@ -142,7 +150,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		budget.limiter = s.loginRateLimiter
 	}
+	defer budget.refund()
 
 	// Per-IP lockout, independent of the username. Closes the rotating-username
 	// hole in the per-account budget below: 50 failures from one address in 15
@@ -239,7 +249,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// sends only AuthSecret, so equalizing on the empty Password would make
 		// the unknown-account path cheap again for exactly the callers that
 		// matter.
-		if _, err := s.chargeLoginKDF(r.Context(), func() bool {
+		if _, err := s.chargeLoginKDF(r.Context(), &budget, func() bool {
 			equalizeLoginTiming(cmp.Or(req.AuthSecret, req.Password))
 			return false
 		}); err != nil {
@@ -270,7 +280,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if u.UsesDerivedAuth() {
 		verify = func() bool { return users.VerifyAuthSecret(u, req.AuthSecret) }
 	}
-	verified, err := s.chargeLoginKDF(r.Context(), verify)
+	verified, err := s.chargeLoginKDF(r.Context(), &budget, verify)
 	if err != nil {
 		// Saturated slots, not a wrong password. Refund both strikes: a 401
 		// here would spend a third of this account's budget on a credential
