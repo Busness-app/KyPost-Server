@@ -107,6 +107,13 @@ Default section order:
 5. Run existing verification when relevant
 6. Report any docs intentionally left unchanged and why
 
+## Root-owned files
+
+`Dockerfile`, `docker-compose.yml`, `supervisord.conf` and `.env.example` are owned here, not by any child.
+
+- **Every build input is pinned, and "every" includes the base images.** All three `FROM` lines carry `tag@sha256:...`; the Ollama tarball carries its published SHA-256. A tag is a mutable pointer — `debian:stable-slim` moves on each point release and even an exact `golang:1.26.5` is republished when its own base is rebuilt — so a tag-only `FROM` means two builds of the same commit ship different userlands, which is the property the Ollama pin exists to prevent. Bump tag and digest together; a digest that no longer matches its tag is a silent lie about what is being built. Re-resolve with `docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`.
+- The runtime stage's `apt-get update` is the one deliberate exception. Pinning package versions would freeze the runtime on whatever CVEs the base digest shipped with, and this image parses hostile MIME, vCards and OpenPGP packets. The digest fixes the base; apt keeps it patched.
+
 ## User Preferences
 
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md

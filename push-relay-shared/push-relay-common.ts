@@ -259,7 +259,19 @@ export async function claimTokenForSend(env: CommonEnv, token: string, keyId: st
 
 // ---- per-key rate limits ---------------------------------------------------
 
-/** Resolve a limit var: unset -> default; "0"/negative/invalid -> disabled. */
+/**
+ * Resolve a limit var:
+ *
+ *   unset / blank  -> fallback
+ *   "0" or negative -> 0 (negatives clamp up, they are not a smaller limit)
+ *   unparseable    -> fallback
+ *
+ * Unparseable resolves to the FALLBACK, not to 0. A typo in a deployment
+ * variable must not read as "no limit configured" — that is the same
+ * fail-open-on-misconfiguration the whole of checkMinuteLimit below exists to
+ * refuse, and the old doc comment claimed this function did exactly that while
+ * the code (correctly) did not.
+ */
 export function resolveLimit(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim() === "") {
     return fallback;
