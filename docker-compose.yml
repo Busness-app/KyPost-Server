@@ -9,6 +9,50 @@ services:
   kypost-server:
     build: .
     container_name: KyPost-Server
+
+    # Live on Docker's pre-existing default bridge instead of a per-project
+    # network of our own.
+    #
+    # A private network is the usual Compose default and sounds like the safer
+    # choice, but here it put a NAT hop between this container and the proxy in
+    # front of it. Traffic crossing from one bridge to another is source-NATed to
+    # the receiving bridge's gateway, so the peer address this server sees is
+    # 172.x.0.1 for every caller no matter who they are — and that address is the
+    # lockout key. The login, CardDAV, device and proof-of-work lockouts and the
+    # WKD rate limit then collapse into ONE bucket shared by every user (enough
+    # failures from anyone locks out everyone), and the MFA sign-in push reports
+    # the gateway instead of the address of whoever is signing in. The default
+    # bridge is the network a proxy started with a plain `docker run` also lands
+    # on, so the two share it without either side being configured for the other
+    # and the peer address stays the proxy's own.
+    #
+    # This is `network_mode` and not a top-level `networks:` entry pointing at
+    # `bridge`, because that form does not work: Compose gives each service a
+    # network-scoped alias, the default bridge does not support aliases, and the
+    # container fails to start with "network-scoped aliases are only supported for
+    # user-defined networks". network_mode attaches with no alias.
+    #
+    # Two things this does NOT do, both of which bite if you assume otherwise:
+    #
+    #  1. It does not set the client IP by itself. TRUSTED_PROXY_CIDRS below must
+    #     still name your proxy's address, or forwarded headers are still
+    #     discarded and you still get the gateway.
+    #  2. It does not give you name resolution. The default bridge has no
+    #     embedded DNS — that is a user-defined-network feature — so a proxy here
+    #     must be pointed at this container's IP, not at `kypost-server:5866`:
+    #       docker inspect -f \
+    #         '{{.NetworkSettings.Networks.bridge.IPAddress}}' KyPost-Server
+    #
+    # Note also that every container on the default bridge can reach 5866
+    # directly, published port or not. That is why TRUSTED_PROXY_CIDRS should name
+    # one address and not the bridge's whole subnet: anything trusted there can
+    # name its own client IP.
+    #
+    # If you would rather have an isolated network, delete this line and add the
+    # proxy to the network Compose then creates — do not leave the proxy outside
+    # it, or you are back to the gateway address described above.
+    network_mode: bridge
+
     # Published on all interfaces by default; KYPOST_BIND narrows it.
     #
     # Loopback is the better posture and it is one line away
@@ -29,9 +73,11 @@ services:
     #   KYPOST_BIND=127.0.0.1     # proxy on this host, reaching 127.0.0.1:5866
     #   KYPOST_BIND=192.168.1.5   # only the interface the proxy talks to
     #
-    # Better still: put the proxy on the same Docker network and address this
-    # container by name. Container-to-container traffic ignores published ports
-    # entirely, so nothing needs publishing at all.
+    # Better still: put the proxy on the default bridge too (see network_mode
+    # above) and point it at this container's address there. Container-to-container
+    # traffic ignores published ports entirely, so nothing needs publishing at
+    # all — and the peer address this server sees is then the proxy's own rather
+    # than a NAT gateway shared by every caller.
     ports:
       - "${KYPOST_BIND:-0.0.0.0}:5866:5866"
     #  - "127.0.0.1:11434:11434"  #Uncomment to expose Ollama API
@@ -46,6 +92,16 @@ services:
       # thing when nothing but the proxy could reach the port, and silently did
       # the wrong thing otherwise. Set this to your proxy's address, not to a
       # wide range.
+      #
+      # For a proxy container on the default bridge, that address is:
+      #   docker inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' <proxy>
+      # For a proxy on this host reaching a published port, it is 127.0.0.1/32.
+      #
+      # Do not leave this empty behind a proxy. Failing closed is correct — the
+      # alternative lets any caller name their own IP — but the closed state keys
+      # every caller as the proxy or gateway address, which is one shared lockout
+      # bucket. Verify with GET /api/status: `clientIp` must be your own public
+      # address and `proxyHeadersTrusted` must be true.
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       # Optional inbound TLS. Set both to serve HTTPS directly instead of plain
       # HTTP; leave both empty for the default. Setting only one is a startup
