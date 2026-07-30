@@ -329,6 +329,23 @@ func warmLoginTimingHash() {
 	_ = timingDummyHash()
 }
 
+// chargeLoginKDF runs a password-derivation step and bills what it actually
+// cost to the instance-wide login budget, reconciling against the reservation
+// handleLogin took up front.
+//
+// Every derivation on the login path goes through here, including the
+// equalization one on the unknown-username path — that path is the cheap one to
+// abuse (no account needed, never trips the per-account lockout) and the one
+// that must therefore be paid for.
+func (s *Server) chargeLoginKDF(work func() bool) bool {
+	start := time.Now()
+	ok := work()
+	if s.loginRateLimiter != nil {
+		s.loginRateLimiter.settleCost(loginRateLimitKey, time.Since(start).Seconds()-loginKDFReserveSeconds)
+	}
+	return ok
+}
+
 // equalizeLoginTiming verifies candidate against a throwaway scrypt hash so
 // the unknown-username (and inactive-account) login path costs the same as a
 // real wrong-password check.
@@ -346,22 +363,40 @@ func equalizeLoginTiming(candidate string) {
 // 16 MB and tens of milliseconds for a 200-byte request, on a host whose other
 // job is running an LLM.
 const (
-	// loginRateBurst/loginRateRefillPerSec bound TOTAL login attempts for the
-	// whole instance.
+	// The instance-wide login budget is denominated in SECONDS OF KEY-DERIVATION
+	// WORK, not in requests.
 	//
-	// Sized against the actual cost rather than picked round: one attempt is one
-	// scrypt at HashPassword's parameters, measured at roughly 200 ms of a core
-	// at N=2^17. At 1/sec sustained that is about a fifth of one core, on a box
-	// whose other job is running an LLM. 60 attempts a minute is still far above
-	// any real self-hosted instance — even fifty users all signing in at 9am
-	// peak below 1/sec — while a burst of 15 absorbs a genuine morning cluster
-	// without a legitimate user ever seeing a 429.
+	// Counting requests requires assuming a cost per request, and that
+	// assumption fails exactly when it matters. The same one-per-second that is
+	// a fifth of a core here is two full cores on a box where a derivation costs
+	// ten times as much — a slower machine, one contending with the LLM, or a
+	// future raise to scryptN — and a request counter cannot tell the difference,
+	// so it keeps admitting at the same rate while the CPU it exists to protect
+	// disappears. Metering the work itself needs no assumption: a derivation that
+	// costs twice as much draws twice as much budget, and the ceiling holds.
 	//
 	// Instance-wide rather than per-IP because the resource being protected is
 	// this server's CPU, which is shared, and because a per-IP limit is defeated
 	// by using more IPs.
-	loginRateBurst        = 15
-	loginRateRefillPerSec = 1.0
+
+	// loginKDFReserve is what one attempt is assumed to cost when it starts:
+	// one scrypt at HashPassword's parameters, roughly 200 ms of a core at
+	// N=2^17. It is only the opening reservation — what an attempt finally pays
+	// is what it actually took, reconciled by settleCost.
+	loginKDFReserve        = 200 * time.Millisecond
+	loginKDFReserveSeconds = float64(loginKDFReserve) / float64(time.Second)
+
+	// loginKDFDutyCycle is the share of one core the instance will spend on
+	// login derivations in the steady state. At the reference cost that is the
+	// same one attempt per second this allowed before, and unlike that figure it
+	// stays true when an attempt costs more.
+	loginKDFDutyCycle = 0.2
+
+	// loginRateBurst stays expressed in attempts, because it is a statement
+	// about sign-ins: fifty users arriving at 9am must not meet a 429.
+	// loginKDFBurstSeconds is what the bucket actually holds.
+	loginRateBurst       = 15
+	loginKDFBurstSeconds = loginRateBurst * loginKDFReserveSeconds
 
 	// loginIPMaxFailures/loginIPLockoutFor cut off one address that is cycling
 	// through usernames. Deliberately much looser than the 3-strike per-account

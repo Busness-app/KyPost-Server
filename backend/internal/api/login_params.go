@@ -48,8 +48,13 @@ func (s *Server) handleLoginParams(w http.ResponseWriter, r *http.Request) {
 	// Same instance-wide bucket as login: this endpoint is cheap, but it is
 	// unauthenticated and sits directly in front of the expensive one, so
 	// leaving it unmetered would just move the target.
+	// Charged one attempt's reservation, not its own (negligible) cost: the
+	// bucket is denominated in derivation seconds, and the point here is to keep
+	// this endpoint from becoming a cheaper way to reach the expensive one. That
+	// is the same one-slot-per-request share it drew when the bucket counted
+	// requests.
 	if s.loginRateLimiter != nil {
-		if ok, _ := s.loginRateLimiter.allow(loginRateLimitKey); !ok {
+		if ok, _ := s.loginRateLimiter.admitCost(loginRateLimitKey, loginKDFReserveSeconds); !ok {
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
 				"error": "too many sign-in attempts right now, try again shortly",
 			})

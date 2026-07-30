@@ -70,23 +70,7 @@ func newIPRateLimiter(burst, refillPerSec float64) *ipRateLimiter {
 func (l *ipRateLimiter) allow(key string) (ok bool, retryAfter time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	now := l.now()
-
-	e, exists := l.entries[key]
-	if !exists {
-		if len(l.entries) >= l.sweepThreshold {
-			l.sweepLocked(now)
-		}
-		e = &rateBucket{tokens: l.burst, last: now}
-		l.entries[key] = e
-	} else {
-		// Refill for elapsed time, capped at burst so an idle client can't
-		// accumulate an unbounded allowance.
-		if elapsed := now.Sub(e.last).Seconds(); elapsed > 0 {
-			e.tokens = math.Min(l.burst, e.tokens+elapsed*l.refillPerSec)
-		}
-		e.last = now
-	}
+	e := l.refillLocked(key, l.now())
 
 	if e.tokens >= 1 {
 		e.tokens--
@@ -96,6 +80,66 @@ func (l *ipRateLimiter) allow(key string) (ok bool, retryAfter time.Duration) {
 		return false, time.Second
 	}
 	return false, time.Duration((1-e.tokens)/l.refillPerSec*float64(time.Second)) + time.Millisecond
+}
+
+// refillLocked brings key's bucket up to date, creating it at full burst if it
+// is new, and returns it. Callers must hold l.mu.
+func (l *ipRateLimiter) refillLocked(key string, now time.Time) *rateBucket {
+	e, exists := l.entries[key]
+	if !exists {
+		if len(l.entries) >= l.sweepThreshold {
+			l.sweepLocked(now)
+		}
+		e = &rateBucket{tokens: l.burst, last: now}
+		l.entries[key] = e
+		return e
+	}
+	// Refill for elapsed time, capped at burst so an idle client can't
+	// accumulate an unbounded allowance.
+	if elapsed := now.Sub(e.last).Seconds(); elapsed > 0 {
+		e.tokens = math.Min(l.burst, e.tokens+elapsed*l.refillPerSec)
+	}
+	e.last = now
+	return e
+}
+
+// admitCost is allow() for a bucket denominated in seconds of work rather than
+// in requests, for callers that are about to do something whose true cost they
+// cannot know until it is done.
+//
+// It takes reserve up front and admits on any positive balance, so a bucket may
+// go into debt — that is deliberate. The alternative is to refuse work until a
+// full attempt's worth of budget has accrued, which on a machine where an
+// attempt costs far more than reserve would refuse everything forever. Debt lets
+// the true cost land after the fact and simply delays the next admission until
+// the deficit has refilled, which is the behaviour the budget describes.
+func (l *ipRateLimiter) admitCost(key string, reserve float64) (ok bool, retryAfter time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e := l.refillLocked(key, l.now())
+
+	if e.tokens > 0 {
+		e.tokens -= reserve
+		return true, 0
+	}
+	if l.refillPerSec <= 0 {
+		return false, time.Second
+	}
+	// Time to climb back out of debt and be admissible again.
+	return false, time.Duration(-e.tokens/l.refillPerSec*float64(time.Second)) + time.Millisecond
+}
+
+// settleCost reconciles the reservation admitCost took against what the work
+// actually cost. delta is (actual - reserve): positive bills the difference,
+// negative refunds it.
+func (l *ipRateLimiter) settleCost(key string, delta float64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, exists := l.entries[key]
+	if !exists {
+		return
+	}
+	e.tokens = math.Min(l.burst, e.tokens-delta)
 }
 
 // sweepLocked drops entries that have refilled to full — an idle bucket is
