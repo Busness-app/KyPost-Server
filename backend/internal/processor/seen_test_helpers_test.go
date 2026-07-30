@@ -18,13 +18,3 @@ func seenForTest(t *testing.T, store *state.Store, id string) bool {
 	}
 	return seen
 }
-
-// checkpointForTest is store.Checkpoint with the error asserted away.
-func checkpointForTest(t *testing.T, store *state.Store) string {
-	t.Helper()
-	cp, err := store.Checkpoint()
-	if err != nil {
-		t.Fatalf("store.Checkpoint(): %v", err)
-	}
-	return cp
-}
