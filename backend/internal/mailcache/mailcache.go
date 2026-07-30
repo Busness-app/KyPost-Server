@@ -57,10 +57,10 @@ type Entry struct {
 	Body string `json:"body,omitempty"`
 
 	// BodyMode says which MIME part Body came from ("html" or "plain"), and
-	// follows the same warm-path-only rule as Body itself. Empty means "not
-	// warmed yet, or written by a build from before this field existed" — the
-	// client falls back to a conservative sniff for that case rather than
-	// mis-rendering an entry it inherited from an older cache file.
+	// follows the same warm-path-only rule as Body itself. Empty means not
+	// warmed yet, or written before this field existed; the client falls back to
+	// a conservative sniff there rather than mis-rendering an entry inherited
+	// from an older cache file.
 	BodyMode string `json:"bodyMode,omitempty"`
 
 	// HasAttachments follows the same warm-path-only rule as Body: the poller

@@ -85,12 +85,12 @@ jobs:
       # dependency reaching main unremarked is not an acceptable failure mode.
       #
       # Pinned for the same reason golangci-lint above is, and the Dockerfile
-      # refuses `curl | sh`: @latest is remote code fetched at build time from
-      # a source this repo does not control, executed against the tree with the
-      # workflow's token. Every action here is SHA-pinned; running an unpinned
-      # program inside them gave that back. The vulnerability DATABASE is
-      # fetched fresh at run time regardless of this pin, so pinning the tool
-      # does not stale the results — it only fixes which code does the checking.
+      # refuses `curl | sh`: @latest is remote code fetched at build time from a
+      # source this repo does not control, executed against the tree with the
+      # workflow's token, undoing the SHA-pinning of every action here. The
+      # vulnerability database is fetched fresh at run time regardless, so this
+      # pin does not stale the results — it only fixes which code does the
+      # checking.
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
@@ -149,17 +149,16 @@ jobs:
       # runs anywhere but a developer's laptop and is not present in the image
       # — the runtime stage is debian-slim with no Node at all. Gating on it
       # would hold every unrelated merge hostage to a major build-tool upgrade.
-      # --audit-level=low for RUNTIME dependencies, not high.
+      # --audit-level=low for runtime dependencies, not high.
       #
-      # This gate was set to `high` and therefore could not see the thing it
-      # exists to see: quill 2.0.3 shipped with a published XSS advisory
-      # (GHSA-v3m3-f69x-jf25) rated LOW, in the compose editor, which is where
-      # reply/forward quoting puts sender-controlled HTML. It passed CI on
-      # every push. Severity ratings are assigned for a generic consumer; "low"
-      # for a text editor is not low for a text editor that eats hostile email.
+      # At `high` this gate passed on every push while quill 2.0.3 carried a
+      # published XSS advisory (GHSA-v3m3-f69x-jf25) rated low, in the compose
+      # editor — where reply/forward quoting puts sender-controlled HTML.
+      # Severity ratings are assigned for a generic consumer; "low" for a text
+      # editor is not low for one that eats hostile email.
       #
-      # The runtime dependency list is seven packages long. If a low-severity
-      # advisory lands on one of them, that is worth a human looking at it.
+      # The runtime dependency list is seven packages long, so a low-severity
+      # advisory on one of them is worth a human looking at it.
       - name: npm audit (runtime dependencies)
         run: npm audit --omit=dev --audit-level=low
 

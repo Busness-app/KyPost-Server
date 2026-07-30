@@ -243,9 +243,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			equalizeLoginTiming(cmp.Or(req.AuthSecret, req.Password))
 			return false
 		}); err != nil {
-			// Shed before the equalization ran. Refunding here is not just
+			// Shed before the equalization ran. The refund is not just
 			// courtesy: answering 401 instantly on the unknown-username path
-			// while a real account still waits for a slot is the exact timing
+			// while a real account still waits for a slot is the timing
 			// disclosure equalizeLoginTiming exists to erase.
 			s.loginLockout.cancelAttempt(lockoutKey)
 			s.loginIPLockout.cancelAttempt(ipLockoutKey)
@@ -272,12 +272,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	verified, err := s.chargeLoginKDF(r.Context(), verify)
 	if err != nil {
-		// Saturated slots, not a wrong password. Refund both strikes and say
-		// so: a 401 here would spend a third of this account's budget for a
-		// credential nobody looked at, and three unlucky arrivals during a
-		// burst would lock out a user who typed everything correctly.
-		// recordFailure is skipped for the same reason — proof-of-work
-		// escalation must price guessing, not queueing.
+		// Saturated slots, not a wrong password. Refund both strikes: a 401
+		// here would spend a third of this account's budget on a credential
+		// nobody looked at, so three unlucky arrivals during a burst would lock
+		// out a user who typed everything correctly. recordFailure is skipped
+		// for the same reason — proof-of-work escalation prices guessing, not
+		// queueing.
 		s.loginLockout.cancelAttempt(lockoutKey)
 		s.loginIPLockout.cancelAttempt(ipLockoutKey)
 		writeKDFBusy(w)
@@ -601,23 +601,22 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Under a KDF slot PER COMPARISON, not one slot around the whole call.
-	// ConsumeRecoveryCode compares the candidate against every stored hash
-	// until one matches, so a WRONG code is up to ten scrypt derivations at
-	// 128 MiB each — and this endpoint takes no session, a challenge id is the
-	// whole credential. Holding a single slot across all ten would park a
-	// quarter of the instance's derivation capacity for ~2 s per request, so
-	// four concurrent wrong codes would stall every login on the server.
-	// Guarding each comparison keeps peak memory per caller at one derivation
-	// and lets logins interleave between them.
+	// A KDF slot per comparison, not one slot around the whole call.
+	// ConsumeRecoveryCode compares the candidate against every stored hash until
+	// one matches, so a wrong code is up to ten scrypt derivations at 128 MiB
+	// each — and this endpoint takes no session, a challenge id is the whole
+	// credential. A single slot held across all ten would park a quarter of the
+	// instance's derivation capacity for ~2 s per request, so four concurrent
+	// wrong codes would stall every login. Guarding each comparison keeps peak
+	// memory per caller at one derivation and lets logins interleave.
 	var matched bool
 	_, matched, err = s.users.ConsumeRecoveryCode(u.ID, strings.TrimSpace(req.Code),
 		func(compare func()) error { return s.withKDFSlot(r.Context(), compare) })
 	switch {
 	case errors.Is(err, errKDFBusy), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// Shed mid-check. No verdict was reached on this code, so refund the
-		// strike — the alternative is that a load spike burns an MFA budget the
-		// user needs to get back into their account.
+		// strike: otherwise a load spike burns an MFA budget the user needs to
+		// get back into their account.
 		s.mfaLockout.cancelAttempt(ch.UserID)
 		writeKDFBusy(w)
 		return
@@ -763,13 +762,12 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// Verify the CURRENT credential in whichever form this account stores, for
 	// the same reason handleLogin does: the account decides, not the request.
 	//
-	// Under a KDF slot, and behind a lockout. Having a session is not a licence
-	// to spend the box's memory: this is three 128 MiB derivations per request
-	// (the check here, plus the hash and any rewrap below), on an endpoint any
-	// authenticated account — including a compromised low-privilege one — can
-	// call in a loop. The lockout also stops the old-credential check being an
-	// unlimited offline-quality oracle for a stolen session: without it, a
-	// thief who has the cookie but not the password can guess at it forever.
+	// Under a KDF slot, and behind a lockout. A session is not a licence to
+	// spend the box's memory: this is three 128 MiB derivations per request (the
+	// check here, plus the hash and any rewrap below), on an endpoint any
+	// authenticated account can call in a loop. The lockout stops the
+	// old-credential check being an unlimited oracle for a stolen session — a
+	// thief with the cookie but not the password could otherwise guess forever.
 	verifyCurrent := func() (bool, error) {
 		var ok bool
 		err := s.withKDFSlot(r.Context(), func() {
@@ -792,11 +790,10 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	mustVerify := !u.MustChangePassword || strings.TrimSpace(offeredCurrent) != ""
 	if mustVerify {
 		// Keyed on user AND client IP, like the login lockout and for the same
-		// reason: on the user alone, an attacker holding a stolen cookie can
-		// burn the whole budget from their own machine and lock the real owner
-		// out of changing their password — during precisely the incident where
-		// changing it is the remedy. Keyed on the pair, a thief locks out only
-		// themselves while the owner's own address keeps a full budget.
+		// reason: on the user alone, an attacker holding a stolen cookie burns
+		// the whole budget from their own machine and locks the real owner out
+		// of changing their password — during the incident where changing it is
+		// the remedy. Keyed on the pair, a thief locks out only themselves.
 		lockKey := ac.UserID + "\x00" + lockoutKeyForIP(clientIP(r))
 		if allowed, retryAfter := s.passwordChangeLockout.tryAttempt(lockKey); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))

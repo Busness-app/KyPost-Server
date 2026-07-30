@@ -81,9 +81,9 @@ EXPOSE 5866
 # health service reports unhealthy, so this tracks the application's own view of
 # itself rather than just TCP liveness.
 #
-# This makes an unhealthy container VISIBLE (in `docker compose ps`, and to any
-# orchestrator that polls it). It does NOT restart anything: Docker Engine's
-# restart policies react to a container EXITING, and health status only drives
+# This makes an unhealthy container visible (in `docker compose ps`, and to any
+# orchestrator that polls it). It does not restart anything: Docker Engine's
+# restart policies react to a container exiting, and health status only drives
 # replacement under Swarm.
 #
 # Self-healing comes from supervisord's startretries instead — see

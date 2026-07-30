@@ -302,8 +302,8 @@ describe("run-5 audit regressions", () => {
   });
 });
 
-// The pipeline AROUND the sanitizer, which is where the message actually got
-// eaten. Every case below was reproduced against the previous implementation.
+// The pipeline around the sanitizer, which is where the message got eaten. Every
+// case below was reproduced against the previous implementation.
 describe("processEmailHtml does not lose message content", () => {
   it("keeps everything after a stray closing div", () => {
     // The old code wrapped content in a <div> and returned that element's
@@ -316,8 +316,8 @@ describe("processEmailHtml does not lose message content", () => {
   });
 
   it("hardens links that follow a stray closing div", () => {
-    // Same root cause, worse consequence: an anchor outside the wrapper never
-    // reached the rel/target pass, and a disallowed scheme there never got its
+    // Same root cause: an anchor outside the wrapper never reached the
+    // rel/target pass, and a disallowed scheme there never got its
     // [Blocked link] marker.
     const out = processEmailHtml('<p>hi</p></div><a href="https://ok.example">click</a>', false);
     expect(out).toContain("https://ok.example");
@@ -346,8 +346,8 @@ describe("processEmailHtml does not lose message content", () => {
 
 describe("resolveBodyMode", () => {
   it("trusts the server's answer over the shape of the bytes", () => {
-    // The whole point. This body is plain text that happens to contain an
-    // angle-bracketed address; the server said so, and that has to win.
+    // Plain text that happens to contain an angle-bracketed address; the server
+    // said so, and that has to win.
     expect(resolveBodyMode("Contact <admin@example.com> today", "plain")).toBe("plain");
     // And markup the server called markup stays markup even if the fallback
     // heuristic would have been unsure.
@@ -360,7 +360,7 @@ describe("resolveBodyMode", () => {
     // unknown element, and it was deleted from the message with no marker.
     const body = "Please contact <admin@example.com> about the invoice.";
     expect(resolveBodyMode(body, undefined)).toBe("plain");
-    // Prove the consequence the old path had, so nobody reintroduces it.
+    // The consequence of the old path, pinned so it cannot return.
     expect(processEmailHtml(body, false)).not.toContain("admin@example.com");
   });
 
@@ -393,11 +393,10 @@ describe("resolveBodyMode", () => {
     }
   });
 
-  // The residual ambiguity, pinned deliberately rather than left to be
-  // rediscovered. Prose mentioning a real tag cannot be told from markup
-  // without a Content-Type, so this errs toward "html" — and the point of the
-  // test is that erring that way is CHEAP: a known element renders as itself
-  // and the words around it survive.
+  // The residual ambiguity, pinned. Prose mentioning a real tag cannot be told
+  // from markup without a Content-Type, so this errs toward "html"; the cost of
+  // erring that way is bounded, since a known element renders as itself and the
+  // words around it survive.
   it("errs toward markup for prose mentioning a real tag, without eating the words", () => {
     const body = "Use <br> to break a line in HTML.";
     expect(resolveBodyMode(body, undefined)).toBe("html");
@@ -406,8 +405,8 @@ describe("resolveBodyMode", () => {
     expect(out).toContain("to break a line in HTML.");
   });
 
-  // The expensive direction, which must never happen: an UNKNOWN element
-  // swallows its content, so misreading these deletes text outright.
+  // The expensive direction: an unknown element swallows its content, so
+  // misreading these deletes text outright.
   it("never routes an unknown-element body through the markup pipeline", () => {
     for (const body of [
       "Please contact <admin@example.com> about the invoice.",

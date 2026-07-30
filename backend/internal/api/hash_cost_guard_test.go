@@ -16,14 +16,10 @@ import (
 // TestMain and withProductionHashCost both depend on.
 //
 // users.hashCostN is an unsynchronized package variable. TestMain lowers it once
-// before anything runs, which is safe, and withProductionHashCost raises it back
-// for individual tests, which is safe ONLY while tests run one at a time. A
-// single t.Parallel() anywhere in this package makes that a data race — and one
-// that -race will report against users.HashPassword, a file nobody would think
-// to look in for the cause.
-//
-// This was a comment asking future authors not to do it. Comments do not fail
-// builds.
+// before anything runs, and withProductionHashCost raises it back for individual
+// tests, which is safe only while tests run one at a time. A single t.Parallel()
+// anywhere in this package makes that a data race, and -race reports it against
+// users.HashPassword — a file nobody would think to look in for the cause.
 func TestNoTestInThisPackageCallsParallel(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -47,8 +43,8 @@ func TestNoTestInThisPackageCallsParallel(t *testing.T) {
 			if !ok || sel.Sel.Name != "Parallel" {
 				return true
 			}
-			// t.Parallel() / b.Parallel(). Any receiver is a problem here; the
-			// point is that two tests in this package must never overlap.
+			// t.Parallel() / b.Parallel(). Any receiver is a problem: two tests
+			// in this package must never overlap.
 			t.Errorf("%s:%d calls %s.Parallel().\n"+
 				"internal/api lowers users.hashCostN in TestMain and raises it per-test in "+
 				"withProductionHashCost, both writing an unsynchronized package variable. That "+
@@ -59,8 +55,8 @@ func TestNoTestInThisPackageCallsParallel(t *testing.T) {
 		})
 	}
 
-	// A rename or a build-tag change that stops this from seeing the test files
-	// would otherwise leave it passing forever while checking nothing.
+	// A rename or build-tag change that stops this from seeing the test files
+	// would otherwise leave it passing while checking nothing.
 	if scanned < 20 {
 		t.Fatalf("scanned only %d _test.go files in this package; the guard is no longer looking at the suite", scanned)
 	}
@@ -89,9 +85,8 @@ func TestSetHashCostForTestRefusesBelowVerifiableFloor(t *testing.T) {
 }
 
 // TestProductionHashCostHelperRestoresTheTestCost proves withProductionHashCost
-// cleans up after itself without the caller writing a defer. The old signature
-// returned a restore func, and a caller that forgot to invoke it leaked the
-// 128 MiB cost into every subsequent test in the package with nothing failing.
+// cleans up after itself without the caller writing a defer, so a forgotten
+// restore cannot leak the 128 MiB cost into every subsequent test.
 func TestProductionHashCostHelperRestoresTheTestCost(t *testing.T) {
 	lowered := users.HashCostN()
 	if lowered != users.MinVerifiableScryptN {
@@ -111,9 +106,7 @@ func TestProductionHashCostHelperRestoresTheTestCost(t *testing.T) {
 }
 
 // TestMainTestAppliesTheLoweredCost guards the other direction: that TestMain is
-// actually in effect. Without it the suite still passes, just twenty times
-// slower, which is the failure mode that gets a suite abandoned rather than
-// fixed.
+// in effect. Without it the suite still passes, twenty times slower.
 func TestMainTestAppliesTheLoweredCost(t *testing.T) {
 	if users.HashCostN() >= users.ProductionScryptN {
 		t.Fatalf("hash cost is %d: TestMain's override is not in effect and this suite will take minutes",

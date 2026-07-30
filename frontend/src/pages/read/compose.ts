@@ -33,10 +33,10 @@ export function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-// decrypted is the locally-decrypted view when there is one. Quoting a
-// client-protected account's mail without it quoted the ENVELOPE — an armored
-// blob or nothing at all — and paired the plaintext with the envelope's render
-// mode. See read/body.ts.
+// decrypted is the locally-decrypted view when there is one. Without it, quoting
+// a client-protected account's mail quotes the envelope — an armored blob or
+// nothing at all — and pairs the plaintext with the envelope's render mode. See
+// read/body.ts.
 export function buildReplyBody(email: InboxEmail, decrypted?: DecryptedView): string {
   const time = formatTimestamp(email.atUtc);
   const sender = email.sender || "-";

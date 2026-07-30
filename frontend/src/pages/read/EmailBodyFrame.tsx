@@ -1,23 +1,23 @@
 // EmailBodyFrame renders a message body inside a sandboxed iframe.
 //
-// WHY AN IFRAME. Sanitized email HTML used to go straight into the reader's
-// own DOM via dangerouslySetInnerHTML, which made DOMPurify the only
-// structural boundary between a sender and a document that also holds the
-// non-HttpOnly csrf_token cookie and, for a client-protected account, an
-// unlocked OpenPGP private key in module memory (lib/keyVault.ts). One
-// sanitizer bypass reached both. A sandboxed iframe is a second, independent
-// boundary that does not depend on getting the allowlist right.
+// Sanitized email HTML used to go straight into the reader's own DOM via
+// dangerouslySetInnerHTML, which made DOMPurify the only structural boundary
+// between a sender and a document that also holds the non-HttpOnly csrf_token
+// cookie and, for a client-protected account, an unlocked OpenPGP private key in
+// module memory (lib/keyVault.ts). One sanitizer bypass reached both. The
+// sandboxed iframe is a second, independent boundary that does not depend on
+// getting the allowlist right.
 //
-// THE SANDBOX VALUE IS LOAD-BEARING. Read this before changing it.
+// The sandbox value is load-bearing. Read this before changing it.
 //
-//   (absent)                     — no allow-scripts, so NO SCRIPT RUNS in this
-//                                  frame, full stop. Sandbox flags are additive
+//   (absent)                     — no allow-scripts, so no script runs in this
+//                                  frame. Sandbox flags are additive
 //                                  permissions; omitting allow-scripts sets the
 //                                  sandboxed-scripts flag and the browser
 //                                  refuses inline script, <script src>, event
 //                                  handler attributes and javascript: URLs
 //                                  regardless of anything else here.
-//   allow-same-origin            — needed ONLY so the parent can read
+//   allow-same-origin            — needed only so the parent can read
 //                                  contentDocument to size the frame; an
 //                                  opaque-origin frame cannot be measured and
 //                                  every message renders clipped to a stub.
@@ -25,18 +25,17 @@
 //                                  same-origin is dangerous in combination
 //                                  with script execution, and there is none.
 //   allow-popups +
-//   allow-popups-to-escape-sandbox — so a link actually opens. Without the
-//                                  first, clicking does nothing (the dead
-//                                  link [Blocked link] exists to prevent);
-//                                  without the second, the opened page
-//                                  inherits the sandbox and loads broken.
+//   allow-popups-to-escape-sandbox — so a link opens. Without the first,
+//                                  clicking does nothing; without the second,
+//                                  the opened page inherits the sandbox and
+//                                  loads broken.
 //
-// NEVER ADD allow-scripts. With allow-same-origin present it voids the sandbox
-// completely and hands the frame the parent's origin. If you ever need scripts
-// here, drop allow-same-origin in the same commit and size the frame another
-// way. allow-forms and allow-top-navigation are absent deliberately: a
-// sender-controlled form is a credential-phishing surface, and a frame that
-// can navigate the top level can replace the whole app.
+// Never add allow-scripts: with allow-same-origin present it voids the sandbox
+// and hands the frame the parent's origin. If scripts are ever needed here, drop
+// allow-same-origin in the same commit and size the frame another way.
+// allow-forms and allow-top-navigation are absent deliberately — a
+// sender-controlled form is a credential-phishing surface, and a frame that can
+// navigate the top level can replace the whole app.
 //
 // srcdoc rather than src: the content never becomes a URL, so nothing can
 // fetch, cache, or link to it. A srcdoc document also inherits the parent's
@@ -60,17 +59,15 @@ const FRAME_HEAD = `<meta name="referrer" content="no-referrer"><base target="_b
 //
 // The frame gets none of the app's stylesheet — that is the point, since the
 // stylesheet is what a sender with class/id control could otherwise borrow — so
-// anything it needs has to be handed over explicitly. This used to say
-// `color: CanvasText` with `color-scheme: normal` on the element, which resolves
-// to BLACK, over a frame whose backdrop is the app's `--bg`. The shipped default
-// theme is #1a1a1e, and most of the fifteen are dark: every HTML email rendered
-// black text on a near-black background. System colour keywords cannot see a
-// theme that lives in CSS custom properties.
+// anything it needs is handed over explicitly. System colour keywords are no
+// help: `color: CanvasText` resolves to black over a frame backed by the app's
+// `--bg`, and the default theme is #1a1a1e, so HTML email rendered black on
+// near-black. A theme living in CSS custom properties is invisible to them.
 //
 // Read from the document element at render time so a theme switch is picked up
-// on the next render, and validated before interpolation — these are our own
-// values rather than sender input, but a CSS value spliced into a style block
-// is a sink either way and "it's ours" is how that stops being true.
+// on the next render, and validated before interpolation: these are our own
+// values rather than sender input, but a CSS value spliced into a style block is
+// a sink either way.
 const CSS_COLOR = /^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%/]+\)|hsla?\([\d\s.,%/deg]+\)|[a-z]+)$/i;
 
 function themeColor(name: string, fallback: string): string {
@@ -149,9 +146,9 @@ export function EmailBodyFrame({ html, className, title = "Message body" }: Prop
     const onLoad = () => {
       // Disconnect first. This runs twice on mount — once because a fresh
       // frame's about:blank is already readyState "complete" when the effect
-      // fires, and again when the srcdoc finishes parsing — and the previous
-      // version reassigned `observer` without disconnecting, leaking one
-      // observer and one detached document per message opened.
+      // fires, and again when the srcdoc finishes parsing — so reassigning
+      // `observer` without disconnecting leaks one observer and one detached
+      // document per message opened.
       observer?.disconnect();
       observer = undefined;
       const body = frame.contentDocument?.body;
@@ -167,9 +164,9 @@ export function EmailBodyFrame({ html, className, title = "Message body" }: Prop
 
     frame.addEventListener("load", onLoad);
     // A srcdoc frame can already be loaded by the time this effect runs. Only
-    // measure an document that actually holds this message: about:blank is
-    // "complete" too, and measuring it collapsed the frame to zero height and
-    // made every message flash on open.
+    // measure a document that holds this message: about:blank is "complete"
+    // too, and measuring it collapses the frame to zero height, which shows as
+    // every message flashing on open.
     if (frame.contentDocument?.readyState === "complete" && frame.contentDocument.body?.hasChildNodes()) {
       onLoad();
     }

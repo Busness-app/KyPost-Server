@@ -30,10 +30,9 @@ func changePassword(t *testing.T, srv *Server, u users.User, ip, oldPassword, ne
 	return rec
 }
 
-// TestPasswordChangeLockoutBoundsCurrentCredentialGuessing is the reason the
-// lockout exists: a session is not proof of the password, so a stolen cookie
-// must not buy unlimited guesses at it against an endpoint that answers
-// definitively.
+// TestPasswordChangeLockoutBoundsCurrentCredentialGuessing: a session is not
+// proof of the password, so a stolen cookie must not buy unlimited guesses at it
+// against an endpoint that answers definitively.
 func TestPasswordChangeLockoutBoundsCurrentCredentialGuessing(t *testing.T) {
 	srv := newTestServer(t)
 	u, err := srv.users.Create("victim", "correct-horse-battery-staple", users.RoleUser)
@@ -58,14 +57,13 @@ func TestPasswordChangeLockoutBoundsCurrentCredentialGuessing(t *testing.T) {
 	}
 }
 
-// TestPasswordChangeLockoutIsKeyedOnUserAndAddress is the property that keeps
-// the control from becoming the attack.
+// TestPasswordChangeLockoutIsKeyedOnUserAndAddress keeps the control from
+// becoming the attack.
 //
 // Keyed on the user ID alone, a thief holding a stolen cookie burns the whole
-// budget from their own machine and locks the REAL owner out of changing their
-// password — during exactly the incident where changing it is the remedy. The
-// login lockout has been keyed on username+IP for this reason since it was
-// written; this one has to be too.
+// budget from their own machine and locks the real owner out of changing their
+// password — during the incident where changing it is the remedy. The login
+// lockout is keyed on username+IP for the same reason.
 func TestPasswordChangeLockoutIsKeyedOnUserAndAddress(t *testing.T) {
 	srv := newTestServer(t)
 	const password = "correct-horse-battery-staple"
@@ -129,18 +127,17 @@ func TestPasswordChangeSuccessClearsTheStrikes(t *testing.T) {
 // TestPasswordChangeFirstLoginSpendsNoStrike pins the mustVerify branch.
 //
 // A MustChangePassword account offering no old credential is the one request
-// that verifies nothing, and it must not consume the budget — the whole point of
-// the flag is that the user may have no password to prove. If this branch ever
-// inverts, the endpoint becomes a password reset for anyone holding a cookie,
-// so it is worth a test that says so out loud.
+// that verifies nothing, and it must not consume the budget — the point of the
+// flag is that the user may have no password to prove. Inverted, this branch
+// turns the endpoint into a password reset for anyone holding a cookie.
 func TestPasswordChangeFirstLoginSpendsNoStrike(t *testing.T) {
 	srv := newTestServer(t)
 	u, err := srv.users.Create("newcomer", "temporary-issued-password", users.RoleUser)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	// An admin-set temporary password, which is exactly how a real account
-	// arrives at MustChangePassword.
+	// An admin-set temporary password, which is how a real account arrives at
+	// MustChangePassword.
 	u, err = srv.users.SetPassword(u.ID, "temporary-issued-password", true)
 	if err != nil {
 		t.Fatalf("SetPassword: %v", err)

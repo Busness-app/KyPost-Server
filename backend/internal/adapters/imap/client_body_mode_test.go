@@ -6,9 +6,9 @@ import (
 	goimap "github.com/BrianLeishman/go-imap"
 )
 
-// TestClientBodyReportsWhichPartItTook covers the value the whole bodyMode wire
-// field carries: which MIME part the body actually came from, so no client has
-// to guess by inspecting the bytes.
+// TestClientBodyReportsWhichPartItTook covers what the bodyMode wire field
+// carries: which MIME part the body came from, so no client has to guess by
+// inspecting the bytes.
 func TestClientBodyReportsWhichPartItTook(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -35,12 +35,11 @@ func TestClientBodyReportsWhichPartItTook(t *testing.T) {
 			wantMode: BodyModePlain,
 		},
 		{
-			// The fix. An empty body has no mode to report, and "" is the wire
-			// contract's "the server does not know". Reporting "plain" stamped a
-			// confident answer on a body that was never parsed — a PGP envelope
-			// or an attachment-only message — mailcache.Store.Sync then preserved
-			// it across every later update, and the client trusted it over the
-			// fallback it would otherwise have applied.
+			// An empty body has no mode to report, and "" is the wire contract's
+			// "the server does not know". Reporting "plain" for a PGP envelope
+			// or an attachment-only message states a mode for a body that was
+			// never parsed; mailcache.Store.Sync then preserves it across every
+			// later update and the client trusts it over its own fallback.
 			name:     "no readable part reports no mode at all",
 			email:    goimap.Email{},
 			wantBody: "",
@@ -68,9 +67,8 @@ func TestClientBodyReportsWhichPartItTook(t *testing.T) {
 	}
 }
 
-// TestClientBodyNeverReportsAModeWithoutABody is the invariant stated directly,
-// so a future refactor cannot reintroduce the confident-empty combination
-// without failing here.
+// TestClientBodyNeverReportsAModeWithoutABody states the invariant directly, so
+// a refactor cannot reintroduce a mode on an empty body without failing here.
 func TestClientBodyNeverReportsAModeWithoutABody(t *testing.T) {
 	for _, e := range []goimap.Email{
 		{},

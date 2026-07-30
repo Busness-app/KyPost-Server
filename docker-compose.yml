@@ -12,7 +12,7 @@ services:
 
     # Join `kypost-net` (defined at the bottom) at a fixed address.
     #
-    # THE PROXY IN FRONT OF THIS SERVER MUST BE ON THIS NETWORK TOO, or every
+    # The proxy in front of this server must be on this network too, or every
     # caller arrives source-NATed as the same gateway address and every IP-keyed
     # lockout collapses into one shared bucket.
     # See docs/Reverse_Proxy_Networking.md.
@@ -22,7 +22,7 @@ services:
         # Docker otherwise allocates in start order and a recreate can move this
         # container out from under a tunnel or an nginx upstream.
         #
-        # Prefer addressing this container by NAME where you can — this network
+        # Prefer addressing this container by name where you can — this network
         # has DNS, so `http://KyPost-Server:5866` is rebuild-proof and stays
         # right even if the subnet changes. The pin is for proxies that will
         # only take an IP.
@@ -33,7 +33,7 @@ services:
     # with TRUSTED_PROXY_CIDRS set, anything that can reach 5866 directly can
     # forge X-Forwarded-For and defeat every IP-keyed lockout.
     #
-    # All-interfaces is NOT the better posture, it is the only default that does
+    # All-interfaces is not the better posture, it is the only default that does
     # not break existing installs: 127.0.0.1 shipped for one release and took
     # working Cloudflare Tunnel setups offline, because the tunnel reached the
     # origin at the host's LAN address. Only the operator knows how their proxy
@@ -177,11 +177,11 @@ volumes:
 # join it by a stable name, and because Docker only accepts the pinned
 # ipv4_address above on a user-configured network.
 #
-# PUTTING A PROXY ON IT, recovering from "incorrect label" or "Pool overlaps",
+# Putting a proxy on it, recovering from "incorrect label" or "Pool overlaps",
 # and why the peer address is wrong without this:
 #   docs/Reverse_Proxy_Networking.md
 #
-# Do NOT create this network with `docker network create` — Compose only manages
+# Do not create this network with `docker network create` — Compose only manages
 # networks carrying its own labels. See the doc above to recover if you have.
 networks:
   kypost-net:

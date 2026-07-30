@@ -35,9 +35,8 @@ export interface CommonEnv {
    * wrangler.toml). This var is display-only (/health + 429 body) and should be
    * kept equal to that binding's limit.
    *
-   * Hour/day rolling tiers are deliberately absent — see the
-   * SINGLE-TIER RATE LIMITING note above checkMinuteLimit, which the
-   * fail-closed behaviour there depends on.
+   * Hour/day rolling tiers are deliberately absent — see the single-tier note
+   * above checkMinuteLimit, which its fail-closed behaviour depends on.
    */
   RATE_LIMIT_PER_MINUTE?: string; // display only; default 10
   /** Public self-registration (`POST /register`). "true" opens it; default closed. */
@@ -269,41 +268,33 @@ export function resolveLimit(raw: string | undefined, fallback: number): number 
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
 }
 
-// SINGLE-TIER RATE LIMITING: a decision, not a gap.
+// Single-tier rate limiting: a decision, not a gap. It is stated here rather
+// than as a TODO because checkMinuteLimit's fail-closed behaviour depends on the
+// minute tier being the only tier.
 //
-// This was a TODO, which was the wrong shape for it. Two things below cite it
-// as load-bearing — checkMinuteLimit fails CLOSED on both a missing and a
-// throwing binding specifically BECAUSE the minute tier is the only tier — and
-// a security control whose correctness argument rests on an unresolved TODO has
-// an expiry date nobody wrote down. Stating it as a decision makes the coupling
-// explicit and reviewable.
-//
-// WHAT IS ENFORCED: a per-minute cap, via the native rate-limiting bindings
+// Enforced: a per-minute cap, via the native rate-limiting bindings
 // (PUSH_RATE_LIMITER per key, REGISTER_RATE_LIMITER per IP). No KV writes on an
 // accepted send.
 //
-// WHAT IS NOT: rolling hour and day caps. They required a KV read-modify-write
-// per send, which capped the free tier at ~1,000 pushes/day — the limiter
-// became the outage. They were removed for that reason and are not coming back
-// in that form.
+// Not enforced: rolling hour and day caps. They required a KV read-modify-write
+// per send, which capped the free tier at ~1,000 pushes/day — the limiter became
+// the outage. They are not coming back in that form.
 //
-// WHAT THAT COSTS: a caller who stays under the per-minute cap can sustain it
-// indefinitely, so the minute limit alone bounds burst rate but not daily
-// volume against someone else's FCM quota. That residual is accepted, and it is
-// why the fail-closed behaviour below is not negotiable: with one tier, a
-// limiter outage is the difference between a rate-limited relay and an
-// unmetered one.
+// The cost: a caller who stays under the per-minute cap can sustain it
+// indefinitely, so the minute limit bounds burst rate but not daily volume
+// against someone else's FCM quota. That residual is accepted, and it is why the
+// fail-closed behaviour below is not negotiable — with one tier, a limiter
+// outage is the difference between a rate-limited relay and an unmetered one.
 //
-// IF YOU RESTORE THE UPPER TIERS, use Durable Objects (exact atomic counters,
-// no KV write pressure) — available on Workers Paid — and revisit the
-// fail-closed reasoning at both call sites, which is stated in terms of "the
-// only tier".
+// To restore the upper tiers, use Durable Objects (exact atomic counters, no KV
+// write pressure, Workers Paid) and revisit the fail-closed reasoning at both
+// call sites, which is stated in terms of "the only tier".
 
 /**
  * Minute-tier check via a native rate-limiting binding (no KV writes). Returns
  * true when allowed.
  *
- * Fails CLOSED on both a missing binding and a throwing one. Shared by the
+ * Fails closed on both a missing binding and a throwing one. Shared by the
  * per-key send limiter (PUSH_RATE_LIMITER) and the per-IP registration limiter
  * (REGISTER_RATE_LIMITER) — key is whatever the caller wants to bucket on (a
  * key hash or a client IP).
@@ -319,7 +310,7 @@ export async function checkMinuteLimit(
   if (!limiter || typeof limiter.limit !== "function") {
     // Fail CLOSED on a missing binding. "The limiter is misconfigured" and
     // "there is no limiter" are indistinguishable from outside, and the minute
-    // tier is the ONLY tier enforced (see the note above) — so failing
+    // tier is the only tier enforced (see the note above) — so failing
     // open here removed rate limiting entirely, silently, from a deployment
     // whose wrangler.toml had drifted. Local dev without binding support opts
     // out explicitly via RATELIMIT_FAIL_OPEN.
@@ -333,22 +324,17 @@ export async function checkMinuteLimit(
     const { success } = await limiter.limit({ key });
     return success;
   } catch (err) {
-    // Fail CLOSED, same as a missing binding.
+    // Fail closed, same as a missing binding.
     //
-    // This returned true, on the reasoning that a throwing binding is an
-    // outage and failing closed would take delivery down with it. The problem
-    // is what it fails open INTO: the minute tier is the only tier enforced
-    // (see the note above — the hour and day tiers are deliberately absent), so
-    // this branch is the difference between a rate-limited relay and one with
-    // no limits at all. A limiter outage would have handed an attacker an
-    // unbounded send primitive against someone else's FCM quota, and the only
-    // trace would be this log line.
+    // Returning true here treats a throwing binding as an outage that should not
+    // take delivery down with it, but the minute tier is the only tier enforced
+    // (see the note above), so this branch is the difference between a
+    // rate-limited relay and one with no limits at all — an unbounded send
+    // primitive against someone else's FCM quota, traced only by this log line.
     //
-    // Callers surface it as 429 with a Retry-After, which is the honest answer:
-    // the request was not refused because the caller misbehaved, it was refused
-    // because the relay cannot currently tell whether they did. A brief
-    // delivery pause during a limiter incident is recoverable; an unmetered
-    // relay is not.
+    // Callers surface it as 429 with a Retry-After: the request is refused not
+    // because the caller misbehaved but because the relay cannot currently tell
+    // whether they did.
     rc.log({ level: "error", event: "ratelimit.binding_error", error: String((err as Error).message ?? err) });
     return false;
   }

@@ -14,9 +14,8 @@ import (
 // auth model — the four real middlewares, plus the four no-op markers in
 // route_auth_markers.go for the routes that authenticate some other way.
 //
-// Adding a name here is how you exempt a route from the check below, so adding
-// one should be a deliberate act with a reason attached, not a way to make a
-// failing test pass.
+// Adding a name here exempts a route from the check below, so it needs a reason
+// attached — it is not a way to green a failing test.
 var authMarkers = map[string]bool{
 	// Real middleware: rejects the request when the check fails.
 	"withAuth":         true,
@@ -34,16 +33,14 @@ var authMarkers = map[string]bool{
 // TestEveryRouteDeclaresItsAuthModel reads the route table and fails on any
 // route registered with a bare handler.
 //
-// The failure this catches is a forgotten wrapper on a new route. Across ~120
-// routes and five auth mechanisms, an unwrapped registration is
-// indistinguishable at a glance from the dozen routes that are unwrapped on
-// purpose — /api/contacts/sync authenticates a paired device inside the
-// handler, /pickup/{id} validates a signed token, /api/health is public — so
-// the eye slides over a missing withAuth exactly where it matters most.
+// It catches a forgotten wrapper on a new route. Across ~120 routes and five
+// auth mechanisms, an unwrapped registration looks like the dozen that are
+// unwrapped on purpose — /api/contacts/sync authenticates a paired device inside
+// the handler, /pickup/{id} validates a signed token, /api/health is public.
 //
-// Reading the source rather than the mux because http.ServeMux gives no way to
-// ask what a pattern resolves to, and a handler that has lost its wrapper is
-// still a perfectly valid http.HandlerFunc at runtime.
+// Reads the source rather than the mux: http.ServeMux gives no way to ask what a
+// pattern resolves to, and a handler that has lost its wrapper is still a valid
+// http.HandlerFunc at runtime.
 func TestEveryRouteDeclaresItsAuthModel(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "server.go", nil, 0)
@@ -86,10 +83,9 @@ func TestEveryRouteDeclaresItsAuthModel(t *testing.T) {
 		return true
 	})
 
-	// Guards against the check silently passing because it stopped finding any
-	// routes at all — a refactor that moves registration out of server.go, or
-	// renames the mux variable, would otherwise turn this into a no-op test
-	// that reports success forever.
+	// Guards against the check passing because it found no routes at all: a
+	// refactor that moves registration out of server.go, or renames the mux
+	// variable, would otherwise turn this into a no-op that reports success.
 	if registrations < 100 {
 		t.Fatalf("found only %d route registrations in server.go; the route table moved and this test is no longer looking at it", registrations)
 	}
@@ -110,13 +106,12 @@ func mentionsAuthMarker(expr ast.Expr) bool {
 // markerRequiresCall maps each inert marker to the call its handler must
 // actually make.
 //
-// This is the check that makes the markers mean something. TestEveryRoute...
-// above only asks whether one of eight names appears in the expression — so on
-// its own, the fastest way to green a forgotten withAuth is to type
-// withPublicRoute instead, and a marker that lies is worse than no marker at
-// all: it launders "somebody forgot" into "documented decision".
+// TestEveryRouteDeclaresItsAuthModel above only asks whether one of eight names
+// appears in the expression, so on its own the fastest way to green a forgotten
+// withAuth is to type withPublicRoute instead — and a marker that lies launders
+// "somebody forgot" into "documented decision".
 //
-// withPublicRoute is absent on purpose — "authenticates nothing" has no call to
+// withPublicRoute is absent on purpose: "authenticates nothing" has no call to
 // look for. It is constrained by publicRoutes below instead.
 var markerRequiresCall = map[string][]string{
 	// Resolves the acting user from a paired device's credentials.
@@ -131,15 +126,14 @@ var markerRequiresCall = map[string][]string{
 // publicRoutes is every route allowed to carry withPublicRoute, with the reason
 // it is reachable by an anonymous caller on the open internet.
 //
-// An allowlist rather than a free-for-all because withPublicRoute is the one
-// marker with nothing to verify against the handler, which makes it the path of
-// least resistance for a route that simply lost its withAuth. Adding an entry
-// here is a deliberate second edit with a written justification attached; that
-// is the cost that keeps it from being a rubber stamp.
+// An allowlist because withPublicRoute is the one marker with nothing to verify
+// against the handler, which makes it the path of least resistance for a route
+// that lost its withAuth. Adding an entry is a second, deliberate edit with a
+// written justification.
 //
-// If you are adding a route here, the bar is: it returns nothing that is not
-// already public, OR the caller cannot have a session yet because obtaining one
-// is what the route is for.
+// The bar for adding one: the route returns nothing that is not already public,
+// or the caller cannot have a session yet because obtaining one is what the
+// route is for.
 var publicRoutes = map[string]string{
 	"POST /api/auth/login":             "issues the session; by definition has none yet",
 	"GET /api/auth/captcha-config":     "tells an anonymous browser which CAPTCHA widget to render",
@@ -159,8 +153,8 @@ var publicRoutes = map[string]string{
 // TestAuthMarkersMatchTheirHandlers checks that a route's declared auth model is
 // the one its handler actually implements.
 //
-// Without this, route_auth_markers.go is documentation that the compiler cannot
-// check, sitting on the security boundary of ~120 routes.
+// Without it, route_auth_markers.go is documentation nothing checks, sitting on
+// the security boundary of ~120 routes.
 func TestAuthMarkersMatchTheirHandlers(t *testing.T) {
 	handlers := packageFuncDecls(t)
 
@@ -351,8 +345,8 @@ func bodyCallsAny(fn *ast.FuncDecl, names []string) bool {
 	return found
 }
 
-// TestAuthMarkersAreInert pins the one property the no-op markers must keep:
-// they declare, they do not gate. A marker that grew a check would be a second,
+// TestAuthMarkersAreInert pins the property the no-op markers must keep: they
+// declare, they do not gate. A marker that grew a check would be a second,
 // invisible auth path that the route table claims is something else.
 func TestAuthMarkersAreInert(t *testing.T) {
 	fset := token.NewFileSet()

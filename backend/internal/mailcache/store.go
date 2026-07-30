@@ -189,8 +189,8 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 			e.PGPVerified = prev.PGPVerified
 			e.PGPSignerFingerprint = prev.PGPSignerFingerprint
 			e.PGPProtectedSubject = prev.PGPProtectedSubject
-			// Same rule, and it has to be preserved alongside Body or a flag
-			// flip would strip the render mode off a body that is still there.
+			// Same rule; preserved alongside Body, or a flag flip strips the
+			// render mode off a body that is still there.
 			e.BodyMode = prev.BodyMode
 			next = append(next, e)
 		default:

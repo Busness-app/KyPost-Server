@@ -5,12 +5,11 @@ import { EmailBodyFrame, FRAME_SANDBOX } from "./EmailBodyFrame";
 // The isolation boundary between a sender and a document holding the CSRF
 // cookie and (for a client-protected account) an unlocked private key.
 //
-// jsdom does NOT enforce sandbox or CSP, so nothing here proves a script is
-// actually blocked — only a browser can prove that. What these DO pin is every
-// property that is decidable from the markup: the sandbox token set, the
-// absence of allow-scripts, that content goes in srcdoc rather than src, and
-// that the frame carries colours instead of system keywords. Those are the
-// things that broke.
+// jsdom does not enforce sandbox or CSP, so nothing here proves a script is
+// blocked — only a browser can. What these pin is what is decidable from the
+// markup: the sandbox token set, the absence of allow-scripts, that content goes
+// in srcdoc rather than src, and that the frame carries colours instead of
+// system keywords.
 
 function frame(): HTMLIFrameElement {
   const el = document.querySelector("iframe");
@@ -26,9 +25,8 @@ beforeEach(() => {
 
 describe("EmailBodyFrame sandbox", () => {
   it("never grants allow-scripts", () => {
-    // The single most important line in the file. With allow-same-origin also
-    // present, allow-scripts voids the sandbox entirely and hands the frame the
-    // parent's origin — every reason for the iframe to exist, undone.
+    // With allow-same-origin also present, allow-scripts voids the sandbox and
+    // hands the frame the parent's origin — every reason for the iframe, undone.
     render(<EmailBodyFrame html="<p>hi</p>" />);
     expect(frame().getAttribute("sandbox")).not.toContain("allow-scripts");
     expect(FRAME_SANDBOX).not.toContain("allow-scripts");
@@ -84,10 +82,9 @@ describe("EmailBodyFrame document", () => {
 
 describe("EmailBodyFrame colours", () => {
   it("uses the app's theme colours rather than system keywords", () => {
-    // The regression this exists for: `color: CanvasText` with
-    // `color-scheme: normal` resolves to BLACK, over a frame backed by the
-    // app's --bg. The shipped default theme is #1a1a1e, so every HTML email
-    // rendered black-on-near-black and no test could see it.
+    // `color: CanvasText` with `color-scheme: normal` resolves to black over a
+    // frame backed by the app's --bg. The default theme is #1a1a1e, so every
+    // HTML email rendered black-on-near-black.
     document.documentElement.style.setProperty("--ink-strong", "#e8e8ea");
     document.documentElement.style.setProperty("--bg", "#1a1a1e");
     render(<EmailBodyFrame html="<p>hi</p>" />);
@@ -108,9 +105,8 @@ describe("EmailBodyFrame colours", () => {
   });
 
   it("refuses a theme value that is not a colour", () => {
-    // These are our own custom properties rather than sender input, but they
-    // are interpolated into a <style> block, and "it's ours" is exactly the
-    // assumption that stops being true later.
+    // These are our own custom properties rather than sender input, but they are
+    // interpolated into a <style> block, which is a sink either way.
     document.documentElement.style.setProperty("--ink-strong", "red;} body{display:none");
     render(<EmailBodyFrame html="<p>hi</p>" />);
     const srcdoc = frame().getAttribute("srcdoc") ?? "";
@@ -131,7 +127,7 @@ describe("EmailBodyFrame sizing", () => {
 
   it("renders without a ResizeObserver present", () => {
     // jsdom has none by default, and the component must degrade rather than
-    // throw — the guard is what keeps this suite from testing a stub.
+    // throw.
     expect(() => render(<EmailBodyFrame html="<p>hi</p>" />)).not.toThrow();
   });
 
@@ -181,10 +177,10 @@ describe("EmailBodyFrame sizing", () => {
 
 describe("EmailBodyFrame observer lifecycle", () => {
   it("disconnects every observer it creates", async () => {
-    // The leak: onLoad ran twice on mount (about:blank is readyState
-    // "complete" when the effect fires, then the srcdoc load event fires) and
-    // reassigned `observer` without disconnecting, stranding one observer and
-    // one detached document per message opened.
+    // onLoad runs twice on mount (about:blank is readyState "complete" when the
+    // effect fires, then the srcdoc load event fires), so reassigning `observer`
+    // without disconnecting strands one observer and one detached document per
+    // message opened.
     const connected: Array<{ disconnected: boolean }> = [];
     class TrackingResizeObserver {
       private record = { disconnected: false };

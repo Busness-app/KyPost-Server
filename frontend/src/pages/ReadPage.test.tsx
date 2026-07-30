@@ -100,8 +100,8 @@ function renderReadPage() {
  *
  * An HTML body renders inside a sandboxed iframe (read/EmailBodyFrame.tsx), so
  * the content lives in the frame's srcdoc rather than in the app's own DOM.
- * That is the isolation working; asserting through it keeps these tests about
- * what the user sees rather than about which element holds it.
+ * Asserting through it keeps these tests about what the user sees rather than
+ * about which element holds it.
  */
 function readerBodyHtml(): string {
   const block = document.querySelector(".email-reader-body-frame, .email-reader-body-block");

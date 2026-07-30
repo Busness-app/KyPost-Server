@@ -1108,18 +1108,18 @@ const (
 // clientBody picks the body every client-facing path reports, and says which
 // part it came from.
 //
-// The mode is the point. Sniffing "does this look like HTML?" at the render
-// site cannot distinguish markup from a plain-text message that merely
-// contains angle brackets, and "<user@example.com>" — RFC 5322's own address
-// form — is the common case it gets wrong: routed through the HTML pipeline it
-// parses as an unknown tag and is dropped, silently deleting an address out of
-// the message. The parse already knows the answer here; carry it.
-// An empty body reports an EMPTY mode, not BodyModePlain. "" is the wire
-// contract's "the server does not know" — and a message with no readable text
-// part (a PGP envelope, an attachment-only mail) is precisely a case where it
-// does not. Returning "plain" there stamped a confident answer on a body that
-// was never parsed, mailcache.Store.Sync then preserved it forever, and the
-// client trusted it over the fallback it would otherwise have used.
+// Sniffing "does this look like HTML?" at the render site cannot distinguish
+// markup from a plain-text message that merely contains angle brackets, and
+// "<user@example.com>" — RFC 5322's own address form — is the common case it
+// gets wrong: routed through the HTML pipeline it parses as an unknown tag and
+// is dropped, deleting an address from the message. The parse already knows the
+// answer, so carry it.
+//
+// An empty body reports an empty mode, not BodyModePlain. "" is the wire
+// contract's "the server does not know", and a message with no readable text
+// part (a PGP envelope, an attachment-only mail) is exactly that case.
+// mailcache.Store.Sync preserves whatever is reported here, and the client
+// trusts it over the fallback it would otherwise have used.
 func clientBody(e *goimap.Email) (body, mode string) {
 	if body = strings.TrimSpace(e.HTML); body != "" {
 		return body, BodyModeHTML
