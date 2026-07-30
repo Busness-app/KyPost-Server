@@ -198,9 +198,31 @@ volumes:
 #
 # Then point the proxy at http://KyPost-Server:5866 (this network has DNS, so the
 # name is stable across rebuilds) and set TRUSTED_PROXY_CIDRS=10.89.0.10/32.
-# `external: true` because this project is what creates the network — start
-# KyPost first, or create it by hand with:
-#   docker network create --subnet 10.89.0.0/24 kypost-net
+#
+# `external: true` on the PROXY side, and only there: this Compose project is what
+# creates and owns the network, so bring KyPost up first. The proxy fails with
+# "network kypost-net declared as external, but could not be found" if it starts
+# first — start it again once KyPost is up.
+#
+# DO NOT create this network with `docker network create`. Compose only manages
+# networks carrying its own labels, so a hand-made one is refused with:
+#
+#   network kypost-net was found but has incorrect label
+#   com.docker.compose.network set to "" (expected: "kypost-net")
+#
+# To recover, hand the network back to Compose — detach whatever is on it, remove
+# it, and let `up` recreate it:
+#
+#   docker compose down                                  # in this directory
+#   docker network inspect kypost-net \
+#     -f '{{range .Containers}}{{.Name}} {{end}}'         # what is still attached
+#   docker network disconnect -f kypost-net <each>        # or stop those containers
+#   docker network rm kypost-net
+#   docker compose up -d                                 # recreates it, labelled
+#
+# Then start the proxy again so it rejoins. Nothing is lost: the network holds no
+# state, and the addresses are pinned here and in the proxy's compose file, so
+# both containers come back at the same addresses.
 #
 # Keep this network to just those containers, or pin addresses high (.200, .201).
 # Docker allocates dynamic addresses from the low end of the subnet, so a third
