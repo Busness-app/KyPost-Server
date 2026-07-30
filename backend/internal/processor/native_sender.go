@@ -437,19 +437,17 @@ func (s *RelaySender) Send(ctx context.Context, device state.NativeDevice, messa
 // token is no longer registered. The relay returns HTTP 410 with
 // {"stale":true} for unregistered tokens; we also match the underlying FCM
 // wording defensively in case it is surfaced verbatim.
+// Deliberately narrow: 410 AND the structured body, which is exactly what both
+// relay Workers emit. The previous form matched a bare 410 with no body, and
+// four substrings anywhere in an 8 KiB body at any non-2xx status, with nothing
+// tying the response to the token that was sent. Since the consequence is
+// retiring a device — and a device row carries its authentication secret, not
+// just a push token — that handed the relay far more authority than delivering
+// a notification requires.
 func isRelayStaleResponse(statusCode int, response string) bool {
-	if statusCode == http.StatusGone {
-		return true
+	if statusCode != http.StatusGone {
+		return false
 	}
 	lower := strings.ToLower(response)
-	if strings.Contains(lower, `"stale":true`) || strings.Contains(lower, `"stale": true`) {
-		return true
-	}
-	if strings.Contains(lower, "unregistered") || strings.Contains(lower, "notregistered") || strings.Contains(lower, "registration-token-not-registered") {
-		return true
-	}
-	if statusCode == http.StatusNotFound && strings.Contains(lower, "requested entity was not found") {
-		return true
-	}
-	return false
+	return strings.Contains(lower, `"stale":true`) || strings.Contains(lower, `"stale": true`)
 }

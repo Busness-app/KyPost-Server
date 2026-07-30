@@ -444,14 +444,22 @@ func (p *Poller) TriggerUnreadSweep() {
 func (p *Poller) UpdateConfig(cfg config.Config) {
 	p.cfgMu.Lock()
 	patternsChanged := !slices.Equal(p.cfg.Redaction.Patterns, cfg.Redaction.Patterns)
-	p.cfg = cfg
 	if patternsChanged {
-		if re, err := redaction.New(cfg.Redaction.Patterns); err == nil {
-			p.redaction = re
-		} else {
-			p.log.Error("failed to rebuild redaction engine after config update", "error", err.Error())
+		re, err := redaction.New(cfg.Redaction.Patterns)
+		if err != nil {
+			// Refuse the update rather than committing it. Assigning p.cfg
+			// first meant a pattern set that failed to compile was still
+			// recorded as current, so every later diff said "unchanged", the
+			// rebuild never retried, and redaction silently kept enforcing the
+			// OLD set while the API reported the new one as live — a privacy
+			// control failing open and quietly.
+			p.log.Error("refusing config update: redaction patterns do not compile", "error", err.Error())
+			p.cfgMu.Unlock()
+			return
 		}
+		p.redaction = re
 	}
+	p.cfg = cfg
 	p.cfgMu.Unlock()
 }
 

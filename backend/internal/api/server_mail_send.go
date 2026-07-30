@@ -22,6 +22,24 @@ import (
 	"strings"
 )
 
+// maxRecipientsPerSend bounds one outbound message's recipient count, well
+// above any real send and far below what the 25 MiB body could carry.
+const maxRecipientsPerSend = 500
+
+// countRecipients counts comma-separated entries without allocating a parsed
+// list, so an oversized request is refused before any per-address work.
+func countRecipients(fields ...string) int {
+	n := 0
+	for _, f := range fields {
+		for _, part := range strings.Split(f, ",") {
+			if strings.TrimSpace(part) != "" {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 func parseRecipientList(raw string) ([]string, error) {
 	normalized := strings.TrimSpace(strings.ReplaceAll(raw, ";", ","))
 	if normalized == "" {
@@ -102,6 +120,14 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 			MimeType: a.MimeType,
 			Content:  content,
 		})
+	}
+
+	// Bounded. Key resolution re-reads and re-unmarshals the entire contacts
+	// file per address, so an unbounded list made one 25 MiB request into hours
+	// of uninterruptible O(addresses x contacts) work that a client disconnect
+	// could not stop.
+	if n := countRecipients(raw.To, raw.CC, raw.BCC); n > maxRecipientsPerSend {
+		return mailRequest{}, "too many recipients", fmt.Errorf("too many recipients: %d (limit %d)", n, maxRecipientsPerSend)
 	}
 
 	toList, err := parseRecipientList(raw.To)

@@ -91,10 +91,14 @@ func (s *Server) serveAttachmentDownload(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	contentType := strings.TrimSpace(info.MimeType)
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
+	// The media type is sender-controlled, and Content-Disposition: attachment
+	// governs NAVIGATION only — browsers honour a JavaScript type on a
+	// subresource fetch, so <script src=...> against this endpoint executed on
+	// our own origin. nosniff does not help: it blocks types that are NOT
+	// script, and the sender simply picks one that is. That turns
+	// script-src 'self' into "and anything anyone mails you", which is exactly
+	// the backstop the CSP exists to provide.
+	contentType := normalizeAttachmentContentType(info.MimeType)
 	name := mailmsg.SanitizeHeaderValue(info.Name)
 	if name == "" {
 		name = "attachment"
@@ -104,6 +108,37 @@ func (s *Server) serveAttachmentDownload(w http.ResponseWriter, r *http.Request,
 		"attachment", map[string]string{"filename": name},
 	))
 	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+	// Not cacheable: the URL is a small integer pair, so a cached response is a
+	// per-URL gadget that outlives the message.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(content)
+}
+
+// safeAttachmentContentTypes are the media types served as-is. Everything else
+// downloads as an opaque octet-stream, which is what Content-Disposition:
+// attachment already implies.
+var safeAttachmentContentTypes = map[string]bool{
+	"image/jpeg":      true,
+	"image/png":       true,
+	"image/gif":       true,
+	"image/webp":      true,
+	"image/bmp":       true,
+	"image/tiff":      true,
+	"application/pdf": true,
+	"text/plain":      true,
+	"text/csv":        true,
+}
+
+// normalizeAttachmentContentType maps a sender-supplied MIME type onto the
+// allowlist. Note image/svg+xml is deliberately absent: it is script-bearing.
+func normalizeAttachmentContentType(raw string) string {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(raw))
+	if err != nil {
+		return "application/octet-stream"
+	}
+	if safeAttachmentContentTypes[strings.ToLower(mediaType)] {
+		return strings.ToLower(mediaType)
+	}
+	return "application/octet-stream"
 }

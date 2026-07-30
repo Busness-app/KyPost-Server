@@ -4,12 +4,16 @@
 package api
 
 import (
+	"time"
+
 	"encoding/json"
 	"errors"
 	"io"
 	"kypost-server/backend/internal/adapters/classifier"
+	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/config"
 	"kypost-server/backend/internal/fsutil"
+	"kypost-server/backend/internal/redaction"
 	"kypost-server/backend/internal/users"
 	"net/http"
 	"os"
@@ -60,6 +64,33 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// drop) a non-admin change so a broken save is never masked.
 		if ac, ok := authFromContext(r); classifierChanged && (!ok || ac.Role != users.RoleAdmin) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "remote llm settings require admin access"})
+			return
+		}
+		// Validate here, not only at process start. Values that fail a boot
+		// check were accepted, persisted and echoed back as live, and then took
+		// effect as a crash loop or a silently disabled control at the next
+		// restart — with the only interface for fixing config.yaml being this
+		// same API.
+		if _, err := time.LoadLocation(next.Timezone); next.Timezone != "" && err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid timezone: " + err.Error()})
+			return
+		}
+		if _, err := redaction.New(next.Redaction.Patterns); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid redaction pattern: " + err.Error()})
+			return
+		}
+		// Allowlist labels become IMAP keywords verbatim. Mailbox names may
+		// contain spaces and keywords may not, and the UI populates this list
+		// from discovered mailbox names — so an unvalidated entry here is a
+		// per-message stall in the shared poller later.
+		for _, label := range next.Labels.Allowlist {
+			if err := imapadapter.ValidateKeyword(label); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "label cannot be used as an IMAP keyword: " + err.Error()})
+				return
+			}
+		}
+		if next.RateLimits.PerMinute <= 0 || next.RateLimits.PerHour <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "rate limits must be greater than zero"})
 			return
 		}
 		if err := config.Save(s.configPath, next); err != nil {

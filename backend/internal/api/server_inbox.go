@@ -248,10 +248,20 @@ func buildInboxTabScaffold(allowedKeywords []string) ([]string, map[string][]inb
 	return tabs, byTab
 }
 
+// maxInboxLimit bounds one inbox page. The SPA asks for 500; the old ceiling of
+// 5000 was reachable only by hand and bought nothing but buffered message bodies.
+const maxInboxLimit = 500
+
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
+	// Clamped to what the client actually asks for. The cold path fetches every
+	// message body in ONE FETCH with no size pre-filter — unlike ListUnreadInbox
+	// and GetMessageBodies, which both partition oversized UIDs out first — and
+	// go-imap buffers the whole response, retaining a copy in a package global.
+	// A hand-written limit=5000 was therefore a memory multiplier bounded only
+	// by the mailbox.
 	limit := 500
 	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 5000 {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= maxInboxLimit {
 			limit = v
 		}
 	}

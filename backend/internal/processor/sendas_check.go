@@ -125,10 +125,21 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 			if !verifyDKIMCoversHeader(raw, domain, "Subject") {
 				continue
 			}
-			// And the signing domain must align with the From that carries the
-			// alias address, so a signature over some unrelated message from
-			// the same domain is not enough.
-			if !strings.EqualFold(domainOf(rawFromAddress(raw)), domain) {
+			// And the signature must cover the From header, checked the same
+			// way as Subject. Without this the comparison below is worthless:
+			// rawFromAddress reads the FIRST From, while the DKIM header picker
+			// scans backwards and signs the LAST, so an unsigned
+			// "From: <alias>" stapled above the signed one would satisfy it.
+			if !verifyDKIMCoversHeader(raw, domain, "From") {
+				continue
+			}
+			// The signed From must be the alias ITSELF, not merely something at
+			// the same domain. Comparing domains meant any account holder with
+			// one mailbox at a domain could verify every other address there —
+			// including a colleague's — and the instance would then publish
+			// their key over WKD under it. autocrypt_harvest.go binds the exact
+			// address for the same reason.
+			if !strings.EqualFold(strings.TrimSpace(rawFromAddress(raw)), strings.TrimSpace(alias.Email)) {
 				continue
 			}
 			verified = true
