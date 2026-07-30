@@ -1106,14 +1106,36 @@ var errRecoveryCodeNoMatch = errors.New("recovery code no match")
 // ConsumeRecoveryCode verifies candidate against the user's stored recovery
 // hashes; on the first match it removes that hash (one-time use) and persists.
 // It returns matched=false with a nil error and no write when nothing matches.
+// The scrypt comparisons run OUTSIDE the store lock, against a snapshot. Doing
+// them inside mutate held both s.mu and the users.json file lock across up to
+// ten 128 MiB derivations (~3s), and every authenticated request in the process
+// takes s.mu.RLock via currentUser -> Get, so one wrong code stalled the whole
+// API. Matching on the hash string rather than an index keeps the removal
+// correct even if the list changed while we were deriving.
 func (s *Store) ConsumeRecoveryCode(id, candidate string) (User, bool, error) {
+	snapshot, err := s.Get(id)
+	if err != nil {
+		return User{}, false, err
+	}
+	matched := ""
+	for _, h := range snapshot.RecoveryCodesHash {
+		if verifyScryptHash(h, candidate) {
+			matched = h
+			break
+		}
+	}
+	if matched == "" {
+		return User{}, false, nil
+	}
+
 	u, err := s.mutate(id, func(u *User) error {
 		for i, h := range u.RecoveryCodesHash {
-			if verifyScryptHash(h, candidate) {
+			if h == matched {
 				u.RecoveryCodesHash = append(u.RecoveryCodesHash[:i], u.RecoveryCodesHash[i+1:]...)
 				return nil
 			}
 		}
+		// Consumed concurrently between the snapshot and here.
 		return errRecoveryCodeNoMatch
 	})
 	if errors.Is(err, errRecoveryCodeNoMatch) {

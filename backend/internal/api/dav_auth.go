@@ -133,8 +133,10 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		if err != nil || !u.Active {
 			// Pay the same scrypt cost a real password check would, so
 			// response timing doesn't reveal whether the username exists —
-			// mirrors equalizeLoginTiming's use on the login endpoint.
-			equalizeLoginTiming(password)
+			// mirrors equalizeLoginTiming's use on the login endpoint. Under
+			// the shared KDF slot: this is unauthenticated, and 128 MiB per
+			// concurrent attempt is otherwise an OOM primitive.
+			s.withKDFSlot(func() { equalizeLoginTiming(password) })
 			s.requireDAVAuth(w)
 			return
 		}
@@ -143,11 +145,13 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// No CardDAV app-password configured for this account: still pay
 			// the scrypt cost so this path isn't distinguishable by timing
 			// from a wrong-password attempt against a configured account.
-			equalizeLoginTiming(password)
+			s.withKDFSlot(func() { equalizeLoginTiming(password) })
 			s.requireDAVAuth(w)
 			return
 		}
-		if !users.VerifySecretHash(passFile.Hash, password) {
+		verified := false
+		s.withKDFSlot(func() { verified = users.VerifySecretHash(passFile.Hash, password) })
+		if !verified {
 			s.requireDAVAuth(w)
 			return
 		}

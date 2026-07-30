@@ -37,14 +37,24 @@ func VerifyDKIMForDomain(raw []byte, domain string) bool {
 // verifyDKIMForDomainWithLookup is VerifyDKIMForDomain's testable core: a
 // nil lookupTXT defers to dkim.Verify's own default (net.LookupTXT); tests
 // in this package inject a fake lookup instead of requiring live DNS.
+// maxDKIMVerifications caps how many signatures on one message we will verify.
+// A legitimate message carries one or two; the cap exists so a hostile one
+// cannot turn each extra header into a goroutine and a DNS query.
+const maxDKIMVerifications = 3
+
 func verifyDKIMForDomainWithLookup(raw []byte, domain string, lookupTXT func(string) ([]string, error)) bool {
 	var verifications []*dkim.Verification
 	var err error
-	if lookupTXT == nil {
-		verifications, err = dkim.Verify(bytes.NewReader(raw))
-	} else {
-		verifications, err = dkim.VerifyWithOptions(bytes.NewReader(raw), &dkim.VerifyOptions{LookupTXT: lookupTXT})
-	}
+	// MaxVerifications is load-bearing, not tidiness: go-msgauth spawns one
+	// goroutine, one io.Pipe and one DNS TXT lookup PER DKIM-Signature header,
+	// all concurrently, and the d= filter below only runs once they have all
+	// finished. Left unbounded, one inbound message is a goroutine and
+	// attacker-chosen-DNS amplifier against the shared daemon. RFC 6376 6.1
+	// explicitly allows a verifier to stop early.
+	verifications, err = dkim.VerifyWithOptions(bytes.NewReader(raw), &dkim.VerifyOptions{
+		LookupTXT:        lookupTXT,
+		MaxVerifications: maxDKIMVerifications,
+	})
 	if err != nil {
 		// A malformed message, or dkim.ErrTooManySignatures alongside a
 		// partial result — fail closed either way rather than trusting a
@@ -102,11 +112,10 @@ func verifyDKIMCoversHeaderWithLookup(raw []byte, domain, header string, lookupT
 	}
 
 	var verifications []*dkim.Verification
-	if lookupTXT == nil {
-		verifications, err = dkim.Verify(bytes.NewReader(raw))
-	} else {
-		verifications, err = dkim.VerifyWithOptions(bytes.NewReader(raw), &dkim.VerifyOptions{LookupTXT: lookupTXT})
-	}
+	verifications, err = dkim.VerifyWithOptions(bytes.NewReader(raw), &dkim.VerifyOptions{
+		LookupTXT:        lookupTXT,
+		MaxVerifications: maxDKIMVerifications,
+	})
 	if err != nil {
 		return false
 	}

@@ -1027,7 +1027,17 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	}
 	redacted := p.currentRedaction().Apply(body)
 
-	label, err := classifyWithRetry(ctx, p.classifier, cfg.Labels.Allowlist, msg.Sender, msg.Subject, redacted, uc.tuning)
+	// Clamp the headers too. The prompt builder puts the instruction block, the
+	// nonced fence and the tuning document BEFORE the email text, and Ollama
+	// truncates from the front — so an unbounded Subject pushes the fence out
+	// of num_ctx and the model sees attacker text with no instructions. The
+	// classifier's own num_ctx note assumes a bounded worst-case prompt; only
+	// the body was actually bounded. Rune-wise so a multi-byte character is
+	// never split.
+	sender := truncateRunes(strings.TrimSpace(msg.Sender), maxClassifySenderRunes)
+	subject := truncateRunes(strings.TrimSpace(msg.Subject), maxClassifySubjectRunes)
+
+	label, err := classifyWithRetry(ctx, p.classifier, cfg.Labels.Allowlist, sender, subject, redacted, uc.tuning)
 	// The model answering with something that isn't an allowed label is a
 	// normal outcome, not a classifier failure: fall through to the
 	// "no known label returned" skip path below (which retires the message
@@ -1457,6 +1467,27 @@ func applyKeywordsWithRetry(ctx context.Context, c imapadapter.Client, messageID
 	return nil
 }
 
+// maxClassifySenderRunes/maxClassifySubjectRunes bound the two header values
+// that reach the classification prompt. Generous for real headers, and small
+// enough that neither can push the instruction block out of the model's
+// context window.
+const (
+	maxClassifySenderRunes  = 256
+	maxClassifySubjectRunes = 512
+)
+
+// truncateRunes clips s to at most n runes, never splitting a character.
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 func applySingleKeywordWithRetry(ctx context.Context, c imapadapter.Client, messageID, keyword string) error {
 	_, err := retry.Loop(ctx, 3, func(attempt int) time.Duration {
 		return 30 * time.Second
@@ -1467,6 +1498,15 @@ func applySingleKeywordWithRetry(ctx context.Context, c imapadapter.Client, mess
 		}
 		if err == nil {
 			return struct{}{}, nil, false
+		}
+		// A keyword the IMAP grammar cannot express fails the same way every
+		// time, before any network I/O. Retrying it bought nothing and cost
+		// two 30s sleeps per message inside the instance-wide tick semaphore,
+		// stalling classification for every user. Config can hand us one:
+		// mailbox names may contain spaces, keywords may not, and the label
+		// allowlist is populated from mailbox names by the UI.
+		if errors.Is(err, imapadapter.ErrUnsafeKeyword) {
+			return struct{}{}, err, false
 		}
 		return struct{}{}, err, true
 	})

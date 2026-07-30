@@ -95,6 +95,18 @@ type Server struct {
 	mfaLockout             *failureLockout
 	deviceLockout          *failureLockout
 	wkdLimiter             *ipRateLimiter
+	// loginParamsLimiter meters GET /api/auth/login-params PER IP. It used to
+	// draw a full attempt's reservation from the instance-wide derivation
+	// budget below, which priced a ~5us HMAC at 0.2 core-seconds: sixteen free
+	// requests emptied the bucket and denied sign-in to the whole instance, and
+	// because the bucket is global no per-IP proxy rule could restore it.
+	loginParamsLimiter *ipRateLimiter
+	// kdfSem bounds how many memory-hard derivations may run at once, process
+	// wide. Each scrypt at N=1<<17 allocates 128 MiB, and the per-IP lockouts
+	// bound guessing, not concurrency — so ~64 simultaneous unauthenticated
+	// CardDAV auth attempts could sum past the container memory limit and get
+	// the process OOM-killed. Sessions are in-memory, so that logs out everyone.
+	kdfSem                 chan struct{}
 	mfaPushLimiter         *mfaPushLimiter
 	sendAsCooldown         *sendAsVerificationCooldown
 	classifierTestCooldown *classifierTestCooldown
@@ -271,6 +283,8 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		mfaLockout:             newFailureLockout(mfaMaxFailures, mfaLockoutFor),
 		deviceLockout:          newFailureLockout(deviceMaxFailures, deviceLockoutFor),
 		wkdLimiter:             newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
+		loginParamsLimiter:     newIPRateLimiter(loginParamsBurst, loginParamsRefillPerSec),
+		kdfSem:                 make(chan struct{}, maxConcurrentKDF),
 		mfaPushLimiter:         newMfaPushLimiter(),
 		sendAsCooldown:         newSendAsVerificationCooldown(),
 		classifierTestCooldown: newClassifierTestCooldown(),

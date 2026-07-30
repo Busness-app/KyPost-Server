@@ -405,7 +405,37 @@ const (
 	// easier way to lock out a building than to lock out an account.
 	loginIPMaxFailures = 50
 	loginIPLockoutFor  = 15 * time.Minute
+
+	// loginParamsBurst/loginParamsRefillPerSec meter the pre-login handshake
+	// PER IP, in requests. It does no derivation — one cached lookup and one
+	// HMAC — so pricing it in derivation seconds against the instance bucket
+	// was a ~40,000x overcharge that let one address deny sign-in globally.
+	// Generous, because a browser legitimately calls this once per sign-in and
+	// the re-authentication flows call it again.
+	loginParamsBurst       = 30
+	loginParamsRefillPerSec = 1
 )
+
+// maxConcurrentKDF bounds simultaneous memory-hard derivations process-wide.
+// Each scrypt at N=1<<17 holds 128 MiB, so this caps peak KDF memory at roughly
+// maxConcurrentKDF*128 MiB regardless of how many callers arrive at once. The
+// per-IP lockouts bound how many attempts an address may make; nothing bounded
+// how many could be in flight together, which is what turns an auth endpoint
+// into an OOM primitive on a memory-limited container.
+const maxConcurrentKDF = 4
+
+// withKDFSlot runs fn holding one of the process-wide derivation slots. Callers
+// that perform scrypt on an unauthenticated path must use it; a nil semaphore
+// (zero-value Server in tests) degrades to running fn directly.
+func (s *Server) withKDFSlot(fn func()) {
+	if s.kdfSem == nil {
+		fn()
+		return
+	}
+	s.kdfSem <- struct{}{}
+	defer func() { <-s.kdfSem }()
+	fn()
+}
 
 // loginRateLimitKey is the single bucket key for the instance-wide login
 // throttle. ipRateLimiter is keyed, so a constant key gives one shared bucket

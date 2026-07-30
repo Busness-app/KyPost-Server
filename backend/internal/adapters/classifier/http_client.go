@@ -21,7 +21,6 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/retry"
 
 	"kypost-server/backend/internal/config"
@@ -231,7 +230,14 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 	// and no escaping, so an unsanitized value here would let a crafted
 	// header forge fake, genuinely-timestamped log entries. Flatten CR/LF
 	// before logging, the same way outbound mail headers already are.
-	c.logServer(fmt.Sprintf("[CLASSIFY] From: %s | Subject: [%s]", mailmsg.SanitizeHeaderValue(sender), mailmsg.SanitizeHeaderValue(subject)))
+	// Deliberately no sender and no subject. These writers open inside
+	// config.LogDir(), and GET /api/logs serves any *.log there to ANY admin
+	// account — so a per-message From/Subject line hands every user's
+	// correspondence metadata to an account that is not theirs, on a server
+	// whose premise is that only the recipient can read their mail. The poller
+	// and api packages each enforce this with an AST test; neither can see this
+	// package's writers, which is how it was missed here.
+	c.logServer("[CLASSIFY] request")
 
 	tuning = strings.TrimSpace(tuning)
 	if tuning == "" {
