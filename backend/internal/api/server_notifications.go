@@ -329,21 +329,29 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		return
 	}
 
-	// For UnifiedPush, the deviceToken is an HTTPS endpoint URL the client
-	// fully controls, not an opaque token — reject anything that could be used
-	// for SSRF against internal services (private/loopback/link-local hosts).
-	// The sender re-checks at send time too, against DNS rebinding.
-	if transport == "unifiedpush" {
-		if err := processor.ValidateUnifiedPushEndpointURL(deviceToken); err != nil {
-			http.Error(w, "invalid unifiedpush deviceToken: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-
+	// Authorize FIRST. Validating the endpoint URL ends in a DNS lookup, so
+	// doing it before this check let an anonymous caller aim the server's
+	// resolver at any nameserver they chose, and read back — from the error
+	// text — whether an internal name existed and what private address it
+	// resolved to, out of the handler whose job is to prevent SSRF.
 	claims, err := s.decodeAndVerifyPairingToken(pairingToken, pairingPurposeNativeDevice, time.Now().UTC())
 	if err != nil {
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
 		return
+	}
+
+	// For UnifiedPush, the deviceToken is an HTTPS endpoint URL the client
+	// fully controls, not an opaque token — reject anything that could be used
+	// for SSRF against internal services (private/loopback/link-local hosts).
+	// The sender re-checks at send time too, against DNS rebinding.
+	//
+	// The reason is deliberately not echoed: it distinguished a nonexistent
+	// host from one that resolved into RFC1918, and named the address.
+	if transport == "unifiedpush" {
+		if err := processor.ValidateUnifiedPushEndpointURL(deviceToken); err != nil {
+			http.Error(w, "invalid unifiedpush deviceToken", http.StatusBadRequest)
+			return
+		}
 	}
 	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(claims.Sub)), []byte(subscriberID)) != 1 {
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)

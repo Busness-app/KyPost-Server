@@ -153,15 +153,36 @@ func (s *Server) storeContactPhoto(userID string, body []byte) (string, error) {
 	// overwrites it and adds nothing. Charging for it would refuse a no-op,
 	// which is how a CardDAV client that re-PUTs unchanged cards would hit the
 	// cap without ever growing anything.
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
-		used, uerr := s.contactPhotoBytesUsed(userID)
-		if uerr == nil && used+int64(len(body)) > maxContactPhotoBytesPerUser {
-			return "", errors.New("contact photo storage is full for this account; remove some photos and try again")
-		}
+	// The per-photo cap is enforced HERE, not only at the HTTP entrances. The
+	// two upload handlers bound their bodies at maxContactPhotoBytes, but the
+	// vCard import and CardDAV client-sync paths reach this function under
+	// their own, larger limits, so an inline data: URI PHOTO could store a file
+	// well past the per-photo ceiling.
+	if len(body) > maxContactPhotoBytes {
+		return "", errors.New("contact photo is too large")
 	}
 
-	if err := fsutil.AtomicWriteFile(path, body, 0o600); err != nil {
-		return "", fmt.Errorf("failed to store photo: %w", err)
+	// Measure and write under one lock. Without it the ReadDir total and the
+	// write were a check-then-act: concurrent uploads all observed the same
+	// pre-write usage, all passed, and the per-account cap was exceeded by
+	// roughly (concurrency x photo size).
+	if err := fsutil.WithFileLock(s.userContactPhotosDir(userID), func() error {
+		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+			used, uerr := s.contactPhotoBytesUsed(userID)
+			// Refuse when the quota cannot be measured. Skipping the check on a
+			// read error meant any transient ReadDir failure — EMFILE under the
+			// very burst this bounds, EACCES, a flaky volume — silently
+			// disabled the cap.
+			if uerr != nil {
+				return fmt.Errorf("cannot verify photo quota: %w", uerr)
+			}
+			if used+int64(len(body)) > maxContactPhotoBytesPerUser {
+				return errors.New("contact photo storage is full for this account; remove some photos and try again")
+			}
+		}
+		return fsutil.AtomicWriteFile(path, body, 0o600)
+	}); err != nil {
+		return "", err
 	}
 	return ref, nil
 }

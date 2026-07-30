@@ -462,7 +462,14 @@ func (s *Server) lookupUserByDevice(deviceID string) (string, bool) {
 	}
 	s.userMu.Unlock()
 
-	s.rescanDeviceIndex()
+	// Throttled. The index is a resolution hint with no startup warm, so a miss
+	// must still be able to rebuild it — but deviceID is caller-supplied with
+	// unbounded cardinality, and the device lockout is keyed on it, so rotating
+	// the id meant every unauthenticated request forced a full rescan that
+	// opens SQLite for every account on the instance.
+	if s.deviceRescan.allow() {
+		s.rescanDeviceIndex()
+	}
 
 	s.userMu.Lock()
 	defer s.userMu.Unlock()
@@ -534,6 +541,16 @@ func (s *Server) revokeAllUserCredentials(u users.User) {
 func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken string) {
 	s.revokeUserSessions(u.ID, keepSessionToken)
 	s.revokeUserDevices(u.ID)
+	// Delete the credential, not just the cache entry. invalidateUser clears an
+	// in-memory verification cache; the scrypt hash lives in carddav-auth.json,
+	// so on the next request readDAVPassword loaded it again and minted a fresh
+	// AuthContext. A stolen app password therefore survived admin
+	// reset-password, admin clear-MFA and the self-service password change —
+	// every path whose whole contract is to cut off access. Deactivate was the
+	// only one that held, and only because Active is re-checked live.
+	if err := os.Remove(s.userCardDAVAuthPath(u.ID)); err != nil && !os.IsNotExist(err) {
+		s.logger.Error("failed to revoke carddav credential", "user_id", u.ID, "error", err.Error())
+	}
 	s.davCredentials.invalidateUser(u.Username)
 }
 

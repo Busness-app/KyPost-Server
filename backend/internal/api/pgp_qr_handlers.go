@@ -53,17 +53,23 @@ func (s *Server) handlePGPQRKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "token is required", http.StatusBadRequest)
 		return
 	}
-	userID, err := s.parsePairingTokenUserID(token, pairingPurposePGPQRKey, time.Now())
+	claims, err := s.decodeAndVerifyPairingToken(token, pairingPurposePGPQRKey, time.Now())
 	if err != nil {
 		http.Error(w, "invalid or expired token", http.StatusForbidden)
 		return
 	}
+	userID := claims.Sub
 	// Single use. A two-minute window is not a substitute for it: the token
 	// travels in a URL and in a QR code on a screen, so anyone who photographs
 	// or shoulder-surfs it inside that window could otherwise replay it. Marked
 	// before the response is built, so a slow render cannot let a second
 	// request in behind the first.
-	if !s.consumeQRToken(token) {
+	// Keyed on the signed nonce rather than the token STRING: RawURLEncoding
+	// accepts non-canonical trailing bits, so one minted token has several
+	// distinct encodings that all verify, and a string-keyed guard books each
+	// as a separate token. handleNotificationNativeRegister already keys on
+	// claims.Nonce for this reason.
+	if !s.consumeQRToken(claims.Nonce) {
 		http.Error(w, "this qr code has already been used; generate a new one", http.StatusForbidden)
 		return
 	}

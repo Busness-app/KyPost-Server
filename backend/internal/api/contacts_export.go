@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -130,7 +132,22 @@ func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 	// Limit to 10 MB for import file
 	limitedBody := io.LimitReader(r.Body, 10<<20)
 
-	decoder := vcard.NewDecoder(limitedBody)
+	// go-vcard unfolds continuation lines with `l += ...` inside a loop, which
+	// is quadratic in the number of folds. The byte and card caps do not bound
+	// folds WITHIN one card, so a single card made of continuation lines turned
+	// a 10 MiB upload into minutes of memcpy on a shared, CPU-limited box.
+	// Buffer and pre-scan: cheap next to what it prevents.
+	raw, err := io.ReadAll(limitedBody)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read import"})
+		return
+	}
+	if err := checkVCardFolding(raw); err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": err.Error()})
+		return
+	}
+
+	decoder := vcard.NewDecoder(bytes.NewReader(raw))
 
 	type importResult struct {
 		Imported   int      `json:"imported"`
@@ -214,4 +231,23 @@ func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		s.logger.Error("contacts import response encode failed", "error", err.Error())
 	}
+}
+
+// maxFoldedLinesPerImport bounds RFC 6350 continuation lines across one import.
+// Real address books fold occasionally — a long NOTE, a base64 PHOTO — so this
+// is set far above ordinary use and only refuses the pathological shape.
+const maxFoldedLinesPerImport = 50_000
+
+// checkVCardFolding refuses input whose folding would make decoding quadratic.
+func checkVCardFolding(raw []byte) error {
+	folded := 0
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+			folded++
+			if folded > maxFoldedLinesPerImport {
+				return errors.New("vcard is too heavily folded to import")
+			}
+		}
+	}
+	return nil
 }

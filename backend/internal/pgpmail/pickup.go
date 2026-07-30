@@ -90,6 +90,44 @@ func (s *PickupStore) recordPath(id string) string {
 // occasional correspondent who has no PGP key, not for bulk sending.
 const maxOutstandingPickupsPerUser = 100
 
+// maxPickupBytesTotal bounds the whole pickup directory.
+//
+// The record COUNT above does not bound bytes: each record may carry ~34 MiB,
+// and a viewed record stops counting toward the quota the moment its sender
+// follows their own link while its file stays on disk until the retention
+// sweep. So the count cap could be recycled indefinitely inside one retention
+// window, which is exactly the shared-volume exhaustion it was written to
+// prevent. This ceiling is measured from directory metadata — no file is read
+// to enforce it — and it also bounds the cost of the per-sender scan below,
+// since that scan can only ever walk what fits under this.
+const maxPickupBytesTotal = 2 << 30
+
+// ErrPickupStorageFull reports that the pickup directory is at its byte
+// ceiling. Distinct from the per-account quota: the sender may be well under
+// their own limit and still be refused because the shared volume is not.
+var ErrPickupStorageFull = errors.New("pgpmail: pickup storage is full, try again once pending messages have been read")
+
+// pickupBytesTotalLocked sums the pickup directory from ReadDir metadata.
+// Deliberately does not open anything: this runs on every create.
+func (s *PickupStore) pickupBytesTotalLocked() int64 {
+	entries, err := os.ReadDir(s.baseDir)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, ierr := entry.Info()
+		if ierr != nil {
+			continue
+		}
+		total += info.Size()
+	}
+	return total
+}
+
 // ErrPickupQuotaExceeded reports that senderUserID already holds the maximum
 // number of live pickup records. Surfaced to the sender, so the text names the
 // feature and nothing else.
@@ -143,6 +181,11 @@ func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body, mode s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Byte ceiling first: it is metadata-only, and it bounds how much the
+	// per-sender scan below can be made to walk.
+	if s.pickupBytesTotalLocked() >= maxPickupBytesTotal {
+		return "", ErrPickupStorageFull
+	}
 	if s.outstandingForLocked(senderUserID) >= maxOutstandingPickupsPerUser {
 		return "", ErrPickupQuotaExceeded
 	}
@@ -196,6 +239,11 @@ func (s *PickupStore) CreateClientSealed(senderUserID, recipientEmail, sealed st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Byte ceiling first: it is metadata-only, and it bounds how much the
+	// per-sender scan below can be made to walk.
+	if s.pickupBytesTotalLocked() >= maxPickupBytesTotal {
+		return "", ErrPickupStorageFull
+	}
 	if s.outstandingForLocked(senderUserID) >= maxOutstandingPickupsPerUser {
 		return "", ErrPickupQuotaExceeded
 	}
@@ -377,8 +425,19 @@ func (s *PickupStore) Kind(id string) (clientSealed bool, err error) {
 	return record.ClientSealed != "", nil
 }
 
+// viewedPickupRetention is how long a consumed record's file lingers after it
+// stops counting toward the per-account quota.
+//
+// Tombstones are kept briefly so a recipient who reloads the page gets the
+// "already opened" answer rather than a bare 404. They must not be kept for the
+// full link TTL: a consumed record frees a quota slot immediately, so pairing a
+// 7-day file lifetime with an instantly-reusable slot let one account park
+// unbounded bytes on the shared volume inside one window.
+const viewedPickupRetention = time.Hour
+
 // Sweep deletes tombstones (already-viewed or expired-and-unviewed records)
 // older than retention, keeping the pickup directory from growing forever.
+// Consumed records are collected on the shorter viewedPickupRetention clock.
 func (s *PickupStore) Sweep(retention time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -390,7 +449,9 @@ func (s *PickupStore) Sweep(retention time.Duration) error {
 	if err != nil {
 		return err
 	}
-	cutoff := time.Now().UTC().Add(-retention)
+	now := time.Now().UTC()
+	cutoff := now.Add(-retention)
+	viewedCutoff := now.Add(-viewedPickupRetention)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -406,6 +467,12 @@ func (s *PickupStore) Sweep(retention time.Duration) error {
 		}
 		createdAt, err := time.Parse(time.RFC3339, record.CreatedAt)
 		if err != nil || createdAt.Before(cutoff) {
+			_ = os.Remove(path)
+			continue
+		}
+		// A consumed record has already freed its quota slot, so its bytes must
+		// not linger for the full retention window.
+		if record.Viewed && createdAt.Before(viewedCutoff) {
 			_ = os.Remove(path)
 		}
 	}

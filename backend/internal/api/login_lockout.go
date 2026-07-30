@@ -412,7 +412,7 @@ const (
 	// was a ~40,000x overcharge that let one address deny sign-in globally.
 	// Generous, because a browser legitimately calls this once per sign-in and
 	// the re-authentication flows call it again.
-	loginParamsBurst       = 30
+	loginParamsBurst        = 30
 	loginParamsRefillPerSec = 1
 )
 
@@ -423,6 +423,11 @@ const (
 // how many could be in flight together, which is what turns an auth endpoint
 // into an OOM primitive on a memory-limited container.
 const maxConcurrentKDF = 4
+
+// deviceRescanInterval is the floor between full device-index rebuilds.
+// Long enough that a flood of unknown device ids cannot drive them, short
+// enough that a device paired on another process shows up promptly.
+const deviceRescanInterval = 30 * time.Second
 
 // withKDFSlot runs fn holding one of the process-wide derivation slots. Callers
 // that perform scrypt on an unauthenticated path must use it; a nil semaphore

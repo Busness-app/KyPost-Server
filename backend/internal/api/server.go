@@ -86,15 +86,15 @@ type Server struct {
 	baseURLFallbackWarn sync.Once
 	pairingSecretWarn   sync.Once
 	// qrTokens makes each PGP QR key-exchange token redeemable exactly once.
-	qrTokens               *qrTokenGuard
-	nativePushDispatcher   *processor.NativePushDispatcher
-	pickupStore            *pgpmail.PickupStore
-	poller                 *processor.Poller
-	loginLockout           *failureLockout
-	davLockout             *failureLockout
-	mfaLockout             *failureLockout
-	deviceLockout          *failureLockout
-	wkdLimiter             *ipRateLimiter
+	qrTokens             *qrTokenGuard
+	nativePushDispatcher *processor.NativePushDispatcher
+	pickupStore          *pgpmail.PickupStore
+	poller               *processor.Poller
+	loginLockout         *failureLockout
+	davLockout           *failureLockout
+	mfaLockout           *failureLockout
+	deviceLockout        *failureLockout
+	wkdLimiter           *ipRateLimiter
 	// loginParamsLimiter meters GET /api/auth/login-params PER IP. It used to
 	// draw a full attempt's reservation from the instance-wide derivation
 	// budget below, which priced a ~5us HMAC at 0.2 core-seconds: sixteen free
@@ -167,10 +167,14 @@ type Server struct {
 	userMailCache map[string]*mailcache.Store
 	// userLastSeen stamps the last request that touched each user's cached
 	// stores above, so sweepIdleUserStores knows what to reclaim.
-	userLastSeen   map[string]time.Time
-	userMail       map[string]*serverMailEntry
-	subIndex       map[string]string
-	deviceIndex    map[string]string
+	userLastSeen map[string]time.Time
+	userMail     map[string]*serverMailEntry
+	subIndex     map[string]string
+	deviceIndex  map[string]string
+	// deviceRescan throttles full device-index rebuilds. A rebuild opens every
+	// account's SQLite store, and an unauthenticated caller can force a cache
+	// miss on every request just by varying the device id.
+	deviceRescan   *intervalGate
 	davCredentials davCredentialCache
 
 	// wkdStore is the single instance-level WKD domain-claim store, injected
@@ -285,6 +289,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		wkdLimiter:             newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
 		loginParamsLimiter:     newIPRateLimiter(loginParamsBurst, loginParamsRefillPerSec),
 		kdfSem:                 make(chan struct{}, maxConcurrentKDF),
+		deviceRescan:           newIntervalGate(deviceRescanInterval),
 		mfaPushLimiter:         newMfaPushLimiter(),
 		sendAsCooldown:         newSendAsVerificationCooldown(),
 		classifierTestCooldown: newClassifierTestCooldown(),

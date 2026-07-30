@@ -175,3 +175,31 @@ func (s *Server) withWKDRateLimit(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
+
+// intervalGate allows an action at most once per interval, process-wide.
+// Used where a miss must still be able to trigger expensive repair work, but
+// the miss itself is attacker-controlled and so cannot be allowed to drive it.
+type intervalGate struct {
+	mu       sync.Mutex
+	interval time.Duration
+	last     time.Time
+	now      func() time.Time
+}
+
+func newIntervalGate(interval time.Duration) *intervalGate {
+	return &intervalGate{interval: interval, now: time.Now}
+}
+
+func (g *intervalGate) allow() bool {
+	if g == nil {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	if !g.last.IsZero() && now.Sub(g.last) < g.interval {
+		return false
+	}
+	g.last = now
+	return true
+}

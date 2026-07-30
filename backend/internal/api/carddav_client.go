@@ -489,6 +489,10 @@ func discoverAddressBooksFrom(ctx context.Context, httpClient webdav.HTTPClient,
 // reports every collection found (with its contact count) so the caller can
 // see what was found and pin a specific path if the auto-pick is still
 // wrong.
+// maxRemoteCardsPerSync bounds one pull from a user-configured CardDAV server,
+// mirroring maxContactsSyncChanges on the mobile-sync path.
+const maxRemoteCardsPerSync = 5000
+
 func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, store *contacts.Store, groupsStore *groups.Store, storePhoto func([]byte) (string, error)) (imported, updated int, addressBookPath string, discovered []discoveredAddressBook, err error) {
 	// https only — see the matching check in the POST handler. This one also
 	// catches a config written before that check existed, so an install that
@@ -559,7 +563,21 @@ func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, stor
 		}
 	}
 
+	// Bound the remote address book. Each Upsert re-reads and rewrites the whole
+	// contacts file with two fsyncs, so the loop is quadratic in card count —
+	// and the attacker supplies the server, so nothing else bounded it. At the
+	// 16 MiB response limit that was hours of shared-volume I/O per request.
+	if len(cards) > maxRemoteCardsPerSync {
+		return imported, updated, addressBookPath, discovered, fmt.Errorf("remote address book too large: %d cards (limit %d)", len(cards), maxRemoteCardsPerSync)
+	}
+
 	for _, c := range cards {
+		// Honour the caller's deadline. The handler builds a 45s context and
+		// this loop never consulted it, so a client disconnect left the work
+		// running to completion regardless.
+		if err := ctx.Err(); err != nil {
+			return imported, updated, addressBookPath, discovered, err
+		}
 		uid := remoteContactUID(c)
 		_, existed := store.Get(uid)
 		parsed := contactFromVCard(uid, c.Card)

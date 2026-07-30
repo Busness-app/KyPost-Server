@@ -187,12 +187,20 @@ func (b *contactsDAVBackend) ListAddressObjects(ctx context.Context, p string, _
 	}
 	list := store.List()
 	out := make([]carddav.AddressObject, 0, len(list))
+	// Photo bytes are inlined as base64 data: URIs, and go-webdav builds the
+	// entire MultiStatus in memory before encoding it (its ServeMultiStatus
+	// carries a "TODO: streaming"). Contacts may share one photo by content
+	// hash — one file on disk, charged to the quota once — so the response
+	// could be orders of magnitude larger than anything stored. Budget it.
+	inlined := 0
 	for _, c := range list {
+		card, photoBytes := b.toVCardWithPhotoBudget(ac.UserID, c, inlined < maxInlinedPhotoBytesPerResponse)
+		inlined += photoBytes
 		out = append(out, carddav.AddressObject{
 			Path:    b.objectPath(ac, c.UID),
 			ETag:    c.ETag(),
 			ModTime: parseContactTime(c.UpdatedAt),
-			Card:    b.toVCard(ac.UserID, c),
+			Card:    card,
 		})
 	}
 	return out, nil
@@ -203,6 +211,54 @@ func (b *contactsDAVBackend) ListAddressObjects(ctx context.Context, p string, _
 // PhotoRef), then renders the vCard.
 func (b *contactsDAVBackend) toVCard(userID string, c contacts.Contact) vcard.Card {
 	return b.server.contactToVCardForUser(userID, c)
+}
+
+// maxInlinedPhotoBytesPerResponse bounds the photo bytes one multistatus may
+// inline. go-webdav buffers the whole response before encoding, and base64
+// inflates by ~1.37, so without a budget the peak heap for a single PROPFIND is
+// set by the caller's contact count rather than by anything they stored.
+const maxInlinedPhotoBytesPerResponse = 32 << 20
+
+// maxValuesPerField bounds how many entries one repeatable vCard field family
+// may contribute to a stored contact.
+//
+// maxCategoriesPerCard already capped CATEGORIES, with a comment noting a
+// single 1.49 MB vCard can carry 200,000 of them — but every other repeatable
+// field was left unbounded, so the same shape through EMAIL turned a 10 MiB
+// import into a permanent multi-megabyte contacts.json that every later read,
+// search and write re-parses.
+const maxValuesPerField = 64
+
+// appendCappedValue appends v to dst unless dst is already at maxValuesPerField.
+func appendCappedValue[T any](dst []T, v T) []T {
+	if len(dst) >= maxValuesPerField {
+		return dst
+	}
+	return append(dst, v)
+}
+
+// toVCardWithPhotoBudget renders c, inlining its photo only when the caller
+// still has budget. Returns the vCard and how many photo bytes it consumed.
+func (b *contactsDAVBackend) toVCardWithPhotoBudget(userID string, c contacts.Contact, allowPhoto bool) (vcard.Card, int) {
+	if !allowPhoto {
+		return b.server.contactToVCardForUser(userID, contactWithoutPhoto(c)), 0
+	}
+	card := b.server.contactToVCardForUser(userID, c)
+	if c.PhotoRef == "" {
+		return card, 0
+	}
+	data, _, ok := b.server.loadContactPhoto(userID, c.PhotoRef)
+	if !ok {
+		return card, 0
+	}
+	return card, len(data)
+}
+
+// contactWithoutPhoto is c with its photo reference cleared, so rendering it
+// resolves no photo bytes at all.
+func contactWithoutPhoto(c contacts.Contact) contacts.Contact {
+	c.PhotoRef = ""
+	return c
 }
 
 // contactToVCardForUser resolves a Contact's GroupIDs/PhotoRef references
@@ -502,17 +558,17 @@ func contactFromVCard(uid string, card vcard.Card) parsedVCardContact {
 	c.Birthday = card.Value(vcard.FieldBirthday)
 
 	for _, f := range card[vcard.FieldEmail] {
-		c.Emails = append(c.Emails, contacts.ContactValue{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
+		c.Emails = appendCappedValue(c.Emails, contacts.ContactValue{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
 	}
 	for _, f := range card[vcard.FieldTelephone] {
-		c.Phones = append(c.Phones, contacts.ContactValue{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
+		c.Phones = appendCappedValue(c.Phones, contacts.ContactValue{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
 	}
 	for _, a := range card.Addresses() {
 		label := ""
 		if a.Field != nil {
 			label = a.Params.Get(vcard.ParamType)
 		}
-		c.Addresses = append(c.Addresses, contacts.ContactAddress{
+		c.Addresses = appendCappedValue(c.Addresses, contacts.ContactAddress{
 			Label:      label,
 			Street:     a.StreetAddress,
 			City:       a.Locality,
@@ -533,16 +589,16 @@ func contactFromVCard(uid string, card vcard.Card) parsedVCardContact {
 				label = f.Params.Get(vcard.ParamType)
 			}
 		}
-		c.IMs = append(c.IMs, contacts.ContactIM{Service: service, Label: label, Value: f.Value})
+		c.IMs = appendCappedValue(c.IMs, contacts.ContactIM{Service: service, Label: label, Value: f.Value})
 	}
 	for _, f := range card["X-SOCIALPROFILE"] {
-		c.IMs = append(c.IMs, contacts.ContactIM{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
+		c.IMs = appendCappedValue(c.IMs, contacts.ContactIM{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
 	}
 	for _, f := range card[vcard.FieldURL] {
-		c.Websites = append(c.Websites, contacts.ContactURL{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
+		c.Websites = appendCappedValue(c.Websites, contacts.ContactURL{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
 	}
 	for _, f := range card[vcard.FieldRelated] {
-		c.Relations = append(c.Relations, contacts.ContactRelation{Label: f.Params.Get(vcard.ParamType), Name: f.Value})
+		c.Relations = appendCappedValue(c.Relations, contacts.ContactRelation{Label: f.Params.Get(vcard.ParamType), Name: f.Value})
 	}
 	if anniv := card.Value(vcard.FieldAnniversary); anniv != "" {
 		c.Events = append(c.Events, contacts.ContactEvent{Label: "anniversary", Date: anniv})
@@ -552,7 +608,7 @@ func contactFromVCard(uid string, card vcard.Card) parsedVCardContact {
 		if label == "" {
 			label = "other"
 		}
-		c.Events = append(c.Events, contacts.ContactEvent{Label: label, Date: f.Value})
+		c.Events = appendCappedValue(c.Events, contacts.ContactEvent{Label: label, Date: f.Value})
 	}
 	c.PhoneticGivenName = card.Value("X-PHONETIC-FIRST-NAME")
 	c.PhoneticFamilyName = card.Value("X-PHONETIC-LAST-NAME")
