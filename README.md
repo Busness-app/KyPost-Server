@@ -76,10 +76,15 @@ Optional for local development (outside Docker):
    > cookie is sent in the clear on every request. `http://` on localhost, for one
    > machine, is fine.
    >
-   > The shipped compose file publishes port 5866 on `127.0.0.1` only. Behind a
-   > proxy, **leave it that way** — the proxy reaches it over loopback, and
-   > anything else leaves an unproxied plain-HTTP port listening beside your TLS
-   > one.
+   > The compose file publishes port 5866 on all interfaces. If your proxy runs
+   > on the same host and reaches `127.0.0.1:5866`, set `KYPOST_BIND=127.0.0.1`
+   > to close that off — an unproxied 5866 is plain HTTP, and with
+   > `TRUSTED_PROXY_CIDRS` set, anything that reaches it directly can forge
+   > `X-Forwarded-For` and bypass the lockouts. **Check first that your proxy
+   > does not reach this container by the host's LAN address**, because loopback
+   > publishing severs that; a proxy on another machine needs the default.
+   > Better still, put the proxy on the same Docker network and address the
+   > container by name — that path ignores published ports entirely.
    >
    > Three ways to get TLS, and they are not equivalent:
    >
