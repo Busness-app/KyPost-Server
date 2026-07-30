@@ -30,13 +30,15 @@ func deviceCredentialsFromRequest(r *http.Request) (deviceID, deviceSecret strin
 // from an unrelated address. handleLogin keys on username+clientIP likewise.
 //
 // Per-IP scoping bounds guessing, not CPU: an attacker with many addresses
-// gets a fresh budget at each. That is only acceptable because verification is
-// a SHA-256 compare (users.VerifyDeviceSecret). Never make it expensive again
-// without re-keying this.
+// gets a fresh budget at each — across distinct prefixes, at least, since the
+// address is folded to a /64 for IPv6 (see lockoutKeyForIP). That is only
+// acceptable because verification is a SHA-256 compare
+// (users.VerifyDeviceSecret). Never make it expensive again without re-keying
+// this.
 //
 // One definition, shared with the tests that inspect the lockout map.
 func (s *Server) deviceLockoutKey(deviceID string, r *http.Request) string {
-	return deviceID + "\x00" + clientIP(r)
+	return deviceID + "\x00" + lockoutKeyForIP(clientIP(r))
 }
 
 // deviceAuthFromRequest resolves and authenticates the paired device calling

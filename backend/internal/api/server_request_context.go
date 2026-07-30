@@ -167,6 +167,10 @@ func externalBaseURL(r *http.Request) string {
 //
 // Untrusted peers, and anything that does not parse as an IP, fall through to the
 // connection's own address.
+//
+// This returns the caller's ACTUAL address. Callers using it as a lockout or
+// rate-limit key must pass it through lockoutKeyForIP first, which folds IPv6 to
+// a /64 so a budget cannot be reset by rotating inside one prefix.
 func clientIP(r *http.Request) string {
 	if proxyHeadersTrusted(r) {
 		// Single-valued, so read it whole rather than through
@@ -185,6 +189,54 @@ func clientIP(r *http.Request) string {
 		return strings.TrimSpace(r.RemoteAddr)
 	}
 	return host
+}
+
+// lockoutKeyForIP normalizes an address for use as a lockout or rate-limit map
+// key, collapsing IPv6 onto its /64 prefix and passing IPv4 through unchanged.
+//
+// Every key in this package is a budget: N attempts per key per window. That
+// bounds an attacker only if acquiring the next key costs something. For IPv4 it
+// does — another address means another host or another rented VPS. For IPv6 it
+// costs nothing: the smallest allocation a residential ISP hands out is a /64, so
+// one visitor holds 2^64 addresses, and SLAAC privacy extensions already rotate
+// through them unprompted. Keyed on the full address, every control here — the
+// login, CardDAV and device lockouts, the WKD limiter, the proof-of-work
+// escalation — is defeated by one `ip -6 addr add`.
+//
+// /64 and not /56 or /48: a /64 is the one length guaranteed to belong to a
+// single subscriber, being the smallest SLAAC-capable unit and the minimum
+// assignment RFC 6177 tells ISPs to make. Residential delegations of /56 and /48
+// are common, so masking further would be closer to one budget per subscriber —
+// but those sizes are not guaranteed, and on a provider handing /64s to distinct
+// customers a /48 key would put unrelated people in one bucket, where a
+// stranger's failures lock you out. /64 is the largest aggregate that cannot do
+// that.
+//
+// Deliberately NOT applied to four things that want the caller's real address:
+// logging, the MFA push's ipAddress, /api/status's clientIp, and the address
+// handed to a CAPTCHA provider (Turnstile's siteverify wants a real remoteip; a
+// prefix in a security notification tells the reader nothing). Nor to the
+// proof-of-work challenge binding, which compares the exact address a challenge
+// was issued to — captcha.PoWVerifier.Verify's comment depends on both sides
+// being the same textual form, and handleLogin already refunds the strike when a
+// client's address changes mid-solve.
+func lockoutKeyForIP(ip string) string {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		// Not an address at all: an empty RemoteAddr from a synthetic request, or
+		// a value some future caller passed in. Pass it through rather than
+		// collapsing every unparseable value onto one shared key.
+		return ip
+	}
+	if v4 := parsed.To4(); v4 != nil {
+		// Canonical 4-byte form, so ::ffff:203.0.113.7 and 203.0.113.7 are one
+		// key rather than two budgets for one host.
+		return v4.String()
+	}
+	// Suffixed because this is a prefix and not an address. Without it a log line
+	// or a test failure reads as though a caller connected from 2001:db8:1:2::,
+	// and the value would be indistinguishable from a client that really did.
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 // parseClientAddr normalizes a proxy-supplied address, returning "" if it is not

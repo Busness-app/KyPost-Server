@@ -62,9 +62,11 @@ func (e *powEscalationEntry) total() int {
 // It does not reuse loginLockout: that is keyed username+IP, and the challenge
 // is issued before the user has typed a username.
 //
-// ponytail: the outer key is still the client IP. Ceiling: an attacker
-// rotating source addresses gets base difficulty at each, and everyone behind
-// one shared address shares one budget. Upgrade path: none planned — narrowing
+// ponytail: the outer key is still the client IP, as a /64 for IPv6 (see
+// lockoutKeyForIP). Ceiling: an attacker rotating across DIFFERENT prefixes gets
+// base difficulty at each, and everyone behind one shared address shares one
+// budget. Rotation inside a single IPv6 prefix no longer buys anything, which is
+// the case that was free. Upgrade path: none planned — narrowing
 // it needs an identifier that exists before the login form is filled in, and
 // there isn't one. (Failures ARE now split per targeted account within an
 // address, so a success no longer forgives guesses at other accounts — see

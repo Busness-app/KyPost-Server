@@ -162,7 +162,7 @@ func (l *ipRateLimiter) sweepLocked(now time.Time) {
 func (s *Server) withWKDRateLimit(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.wkdLimiter != nil {
-			if ok, retryAfter := s.wkdLimiter.allow(clientIP(r)); !ok {
+			if ok, retryAfter := s.wkdLimiter.allow(lockoutKeyForIP(clientIP(r))); !ok {
 				seconds := int(math.Ceil(retryAfter.Seconds()))
 				if seconds < 1 {
 					seconds = 1

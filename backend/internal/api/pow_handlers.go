@@ -90,19 +90,27 @@ func (s *Server) handlePoWChallenge(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "proof-of-work is not enabled", http.StatusNotFound)
 		return
 	}
+	// The exact address for the challenge binding below, and its /64 for the two
+	// budgets — an IPv6 client can otherwise mint a fresh budget per request by
+	// rotating inside its own prefix. The binding stays on the full address on
+	// purpose: it is what stops a cheap challenge fetched from one address being
+	// spent from an escalated one, and a client whose address moves mid-solve is
+	// refunded by handleLogin rather than penalised.
 	ip := clientIP(r)
-	if !s.powChallenges.allow(ip, time.Now()) {
+	budgetKey := lockoutKeyForIP(ip)
+	if !s.powChallenges.allow(budgetKey, time.Now()) {
 		w.Header().Set("Retry-After", "60")
 		http.Error(w, "too many challenge requests, try again shortly", http.StatusTooManyRequests)
 		return
 	}
-	// Difficulty rises with this address's recent failed logins, so an
-	// honest first login stays nearly free. The challenge is bound to ip as
-	// well as priced for it: otherwise an attacker whose address had been
-	// escalated would just fetch base-difficulty challenges from a clean one
-	// and submit them here, and escalation would price nobody but the honest
-	// user who mistyped.
-	maxNumber := s.powDifficulty.maxNumberFor(ip, s.powVerifier.BaseMaxNumber(), time.Now())
+	// Difficulty rises with this client's recent failed logins, so an honest
+	// first login stays nearly free. Priced per budgetKey but bound to the exact
+	// address: otherwise an attacker whose address had been escalated would just
+	// fetch base-difficulty challenges from a clean one and submit them here, and
+	// escalation would price nobody but the honest user who mistyped. Pricing on
+	// the /64 is what keeps that true for IPv6, where "a clean address" is one
+	// `ip -6 addr add` away.
+	maxNumber := s.powDifficulty.maxNumberFor(budgetKey, s.powVerifier.BaseMaxNumber(), time.Now())
 	ch, err := s.powVerifier.IssueAt(ip, maxNumber)
 	if err != nil {
 		s.logger.Error("could not issue a proof-of-work challenge", "error", err.Error())

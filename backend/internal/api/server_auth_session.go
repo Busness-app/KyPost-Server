@@ -150,7 +150,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Login is where a constant clientIP does the most damage and the first place
 	// an operator notices it, so it is where the misconfiguration announces itself.
 	s.warnOnUnusedProxyHeaders(r)
-	ipLockoutKey := clientIP(r)
+	ipLockoutKey := lockoutKeyForIP(clientIP(r))
 	if allowed, retryAfter := s.loginIPLockout.tryAttempt(ipLockoutKey); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
 		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
@@ -170,7 +170,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// fold GetByUsername resolves the account with. On the raw string,
 	// "victim", "Victim" and " victim " are one account to the lookup but
 	// three strike budgets here, and padding makes that key space unbounded.
-	lockoutKey := users.NormalizeUsername(req.Username) + "\x00" + clientIP(r)
+	lockoutKey := users.NormalizeUsername(req.Username) + "\x00" + lockoutKeyForIP(clientIP(r))
 	if allowed, retryAfter := s.loginLockout.tryAttempt(lockoutKey); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
 		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
@@ -245,7 +245,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// Make the next challenge from this address more expensive. Recorded
 		// for the unknown-username case too: spraying a list of guessed
 		// usernames is exactly the pattern this is here to price.
-		s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
+		s.powDifficulty.recordFailure(lockoutKeyForIP(clientIP(r)), powAccount, time.Now())
 		// No recordFailure on the lockout: tryAttempt already spent the strike.
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
@@ -258,13 +258,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// value they can compute from the salt alone.
 	if u.UsesDerivedAuth() {
 		if !s.chargeLoginKDF(func() bool { return users.VerifyAuthSecret(u, req.AuthSecret) }) {
-			s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
+			s.powDifficulty.recordFailure(lockoutKeyForIP(clientIP(r)), powAccount, time.Now())
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
 	} else {
 		if !s.chargeLoginKDF(func() bool { return users.VerifyPassword(u, req.Password) }) {
-			s.powDifficulty.recordFailure(clientIP(r), powAccount, time.Now())
+			s.powDifficulty.recordFailure(lockoutKeyForIP(clientIP(r)), powAccount, time.Now())
 			http.Error(w, "invalid credentials", http.StatusUnauthorized)
 			return
 		}
@@ -321,7 +321,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// account's credential — and nothing about any other account they have
 	// been guessing at from the same address. Forgive only this one; see
 	// powEscalation.clearAccount.
-	s.powDifficulty.clearAccount(clientIP(r), powAccount)
+	s.powDifficulty.clearAccount(lockoutKeyForIP(clientIP(r)), powAccount)
 
 	// Second-factor users must clear a challenge before a session exists. No
 	// cookie is set here; the client receives a challenge id plus the methods it

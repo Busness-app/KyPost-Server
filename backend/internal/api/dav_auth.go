@@ -95,8 +95,8 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		// vector even though guessing the server-generated password is
 		// hopeless. Checked before the credential cache so a locked-out IP is
 		// refused outright.
-		ip := clientIP(r)
-		if allowed, retryAfter := s.davLockout.tryAttempt(ip); !allowed {
+		lockKey := lockoutKeyForIP(clientIP(r))
+		if allowed, retryAfter := s.davLockout.tryAttempt(lockKey); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 			http.Error(w, "too many failed attempts, try again later", http.StatusTooManyRequests)
 			return
@@ -107,7 +107,7 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// strike tryAttempt just reserved. Without this, a CardDAV client
 			// polling with correct credentials would spend a strike per
 			// request and lock itself out within seconds.
-			s.davLockout.recordSuccess(ip)
+			s.davLockout.recordSuccess(lockKey)
 			// Re-check the account live even on a hit. revokeAllUserCredentials
 			// clears this cache on deactivate/reset, but a request that read
 			// Active==true just before the deactivation can still `put` just
@@ -152,7 +152,7 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		s.davLockout.recordSuccess(ip)
+		s.davLockout.recordSuccess(lockKey)
 		ac := AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}
 		s.davCredentials.put(username, password, ac)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
