@@ -293,8 +293,21 @@ func (l *failureLockout) recordSuccess(username string) {
 // A constant that has to be kept in step with another constant by hand will not
 // be. Pinned by TestLoginTimingDoesNotRevealUnknownUsernames.
 //
-// The one-off derivation cost is paid once at process start, not per request.
-var timingDummyHash = func() string {
+// Computed once, on demand, and warmed eagerly by NewServer.
+//
+// It was a plain package-level var, which meant the 128 MiB / ~200 ms scrypt
+// derivation ran at package init in EVERY binary importing this package. Both
+// processes supervisord starts are the same binary, so the daemon paid for a
+// value it can never use.
+//
+// sync.OnceValue rather than a lazy nil-check because the alternative is a
+// first-call penalty on exactly the path whose job is to have no timing
+// signal: the very first unknown-username login after a restart would pay
+// derivation PLUS verification while a real account paid only verification,
+// and a SLOWER response discloses "no such account" just as well as a faster
+// one. warmLoginTimingHash closes that window by forcing it during
+// construction, off any request path.
+var timingDummyHash = sync.OnceValue(func() string {
 	h, err := users.HashPassword("kypost-timing-equalization-dummy")
 	if err != nil {
 		// HashPassword only fails on a crypto/rand failure or invalid cost
@@ -304,13 +317,23 @@ var timingDummyHash = func() string {
 		panic("users.HashPassword failed while deriving the login timing hash: " + err.Error())
 	}
 	return h
-}()
+})
+
+// warmLoginTimingHash forces the derivation during server construction, so the
+// api process pays it before it can serve and the daemon process never does.
+//
+// Synchronous on purpose. A goroutine would leave a race in which a login
+// arriving during the warm-up blocks on the OnceValue and reintroduces the
+// first-call skew this exists to prevent; 200 ms in NewServer costs nothing.
+func warmLoginTimingHash() {
+	_ = timingDummyHash()
+}
 
 // equalizeLoginTiming verifies candidate against a throwaway scrypt hash so
 // the unknown-username (and inactive-account) login path costs the same as a
 // real wrong-password check.
 func equalizeLoginTiming(candidate string) {
-	users.VerifySecretHash(timingDummyHash, candidate)
+	users.VerifySecretHash(timingDummyHash(), candidate)
 }
 
 // Instance-wide login throttle and the per-IP lockout, both added because the

@@ -199,6 +199,10 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 
 	warnOnRetiredProxyEnv(logger)
 
+	// Pay the login timing-equalization derivation here, in the api process,
+	// before anything can serve — see warmLoginTimingHash.
+	warmLoginTimingHash()
+
 	captchaProvider := resolveCaptchaProvider(os.Getenv("CAPTCHA_PROVIDER"))
 	warnIfPoWDefaultMayLockOutPlainHTTP(logger, captchaProvider, os.Getenv("CAPTCHA_PROVIDER"))
 	captchaSiteKey := strings.TrimSpace(os.Getenv("CAPTCHA_SITE_KEY"))
