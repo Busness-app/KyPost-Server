@@ -28,7 +28,12 @@ type inboxEmail struct {
 	BCC       string `json:"bcc,omitempty"`
 	Subject   string `json:"subject"`
 	Body      string `json:"body,omitempty"`
-	Label     string `json:"label,omitempty"`
+	// BodyMode is "html" or "plain": which MIME part Body was taken from.
+	// Absent means the server does not know (a cache entry written before this
+	// field existed, or a body only the client can decrypt), and the client
+	// falls back to a conservative sniff. See imapadapter.clientBody.
+	BodyMode string `json:"bodyMode,omitempty"`
+	Label    string `json:"label,omitempty"`
 	// Keywords is every raw IMAP keyword flag on the message (unlike Label,
 	// which is just the first one matching an allowlisted tab). Stamped in
 	// bucket() alongside Label so every code path that builds an inboxEmail
@@ -198,6 +203,7 @@ func mailCacheEntryFromUnreadMessage(msg imapadapter.UnreadMessage, status strin
 		Status:               status,
 		AtUTC:                msg.AtUTC,
 		Body:                 msg.Body,
+		BodyMode:             msg.BodyMode,
 		HasAttachments:       msg.HasAttachments,
 		PGPEncrypted:         msg.PGPEncrypted,
 		PGPSigned:            msg.PGPSigned,
@@ -343,6 +349,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 					BCC:                  e.BCC,
 					Subject:              inboxSubject(e.Subject, e.PGPProtectedSubject),
 					Body:                 e.Body,
+					BodyMode:             e.BodyMode,
 					Status:               e.Status,
 					AtUTC:                e.AtUTC,
 					HasAttachments:       e.HasAttachments,
@@ -389,6 +396,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 				BCC:                  msg.BCC,
 				Subject:              inboxSubject(msg.Subject, msg.PGPProtectedSubject),
 				Body:                 msg.Body,
+				BodyMode:             msg.BodyMode,
 				Status:               status,
 				AtUTC:                msg.AtUTC,
 				HasAttachments:       msg.HasAttachments,
@@ -458,6 +466,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 		for i, e := range result.New {
 			if c, ok := contents[e.UID]; ok && c.Body != "" {
 				e.Body = c.Body
+				e.BodyMode = c.BodyMode
 				e.HasAttachments = c.HasAttachments
 				e.PGPEncrypted = c.PGPEncrypted
 				e.PGPSigned = c.PGPSigned
@@ -477,6 +486,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 
 	for _, e := range result.New {
 		body := e.Body
+		bodyMode := e.BodyMode
 		hasAttachments := e.HasAttachments
 		pgpEncrypted, pgpSigned, pgpVerified := e.PGPEncrypted, e.PGPSigned, e.PGPVerified
 		pgpSignerFingerprint := e.PGPSignerFingerprint
@@ -485,6 +495,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 		if body == "" {
 			if c, ok := contents[e.UID]; ok {
 				body = c.Body
+				bodyMode = c.BodyMode
 				hasAttachments = c.HasAttachments
 				pgpEncrypted = c.PGPEncrypted
 				pgpSigned = c.PGPSigned
@@ -502,6 +513,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			BCC:                  e.BCC,
 			Subject:              inboxSubject(e.Subject, pgpProtectedSubject),
 			Body:                 body,
+			BodyMode:             bodyMode,
 			Status:               e.Status,
 			AtUTC:                e.AtUTC,
 			HasAttachments:       hasAttachments,

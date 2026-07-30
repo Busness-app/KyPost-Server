@@ -12,7 +12,13 @@ import (
 // shapes are structurally identical here, so the decrypt logic lives once
 // and each caller copies fields in and out.
 type pgpDecryptResult struct {
-	Body              string
+	Body string
+	// BodyMode is the decrypted display part's render mode ("html"/"plain"),
+	// from pgpmail.ParseContent. The outer message's mode says nothing about
+	// it — a multipart/encrypted envelope carries no readable text part at
+	// all, so without this the plaintext inside would inherit "plain" and an
+	// HTML message would render as escaped source.
+	BodyMode          string
 	HasAttachments    bool
 	Signed            bool
 	Verified          bool
@@ -63,13 +69,14 @@ func (s *Server) decryptPGPPayload(userID, payload string) pgpDecryptResult {
 	if err != nil {
 		return pgpDecryptResult{DecryptError: "failed to decrypt message"}
 	}
-	body, attachments, err := pgpmail.ParseContent(result.Content)
+	body, mode, attachments, err := pgpmail.ParseContent(result.Content)
 	if err != nil {
 		return pgpDecryptResult{DecryptError: "failed to parse decrypted message"}
 	}
 
 	out := pgpDecryptResult{
 		Body:              body,
+		BodyMode:          mode,
 		HasAttachments:    len(attachments) > 0,
 		Signed:            result.Signed,
 		Verified:          result.Verified,
@@ -97,6 +104,7 @@ func (s *Server) decryptPGPMessageContent(userID string, c imapadapter.MessageCo
 		return c
 	}
 	c.Body = r.Body
+	c.BodyMode = r.BodyMode
 	c.HasAttachments = r.HasAttachments
 	c.PGPSigned = r.Signed
 	c.PGPVerified = r.Verified
@@ -122,6 +130,7 @@ func (s *Server) decryptPGPUnreadMessage(userID string, msg imapadapter.UnreadMe
 		return msg
 	}
 	msg.Body = r.Body
+	msg.BodyMode = r.BodyMode
 	msg.HasAttachments = r.HasAttachments
 	msg.PGPSigned = r.Signed
 	msg.PGPVerified = r.Verified

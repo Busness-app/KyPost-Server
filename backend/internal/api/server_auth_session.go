@@ -34,11 +34,12 @@ import (
 // back an annoyance. A stolen token cannot outlive the process and revocation
 // is a map delete that cannot fail halfway.
 //
-// The cost is that a restart logs everyone out. Restarts are NOT routine: the
-// only in-process trigger is scheduleContainerRestart, called from exactly one
-// place — handleRepair, behind an explicit admin action on
-// POST /api/health/repair. Saving config does not restart anything. Do not
-// re-argue this without checking that caller list first.
+// The cost is that any restart logs everyone out, and the process does not
+// decide when it restarts. `restart: unless-stopped`, a host reboot, a
+// `docker compose pull`, and supervisord giving up on the API all end every
+// session; the one in-process trigger (scheduleContainerRestart, from
+// handleRepair) is the rare case, not the whole set. Saving config does not
+// restart anything.
 //
 // Only the API process has sessions at all; a second API replica would not
 // share them.
@@ -238,10 +239,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// sends only AuthSecret, so equalizing on the empty Password would make
 		// the unknown-account path cheap again for exactly the callers that
 		// matter.
-		s.chargeLoginKDF(func() bool {
+		if _, err := s.chargeLoginKDF(r.Context(), func() bool {
 			equalizeLoginTiming(cmp.Or(req.AuthSecret, req.Password))
 			return false
-		})
+		}); err != nil {
+			// Shed before the equalization ran. Refunding here is not just
+			// courtesy: answering 401 instantly on the unknown-username path
+			// while a real account still waits for a slot is the exact timing
+			// disclosure equalizeLoginTiming exists to erase.
+			s.loginLockout.cancelAttempt(lockoutKey)
+			s.loginIPLockout.cancelAttempt(ipLockoutKey)
+			writeKDFBusy(w)
+			return
+		}
 		// Make the next challenge from this address more expensive. Recorded
 		// for the unknown-username case too: spraying a list of guessed
 		// usernames is exactly the pattern this is here to price.
@@ -256,18 +266,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// reverse) and have the server try both — and since the derivation salt is
 	// public (login_params.go), "try both" would let anyone authenticate with a
 	// value they can compute from the salt alone.
+	verify := func() bool { return users.VerifyPassword(u, req.Password) }
 	if u.UsesDerivedAuth() {
-		if !s.chargeLoginKDF(func() bool { return users.VerifyAuthSecret(u, req.AuthSecret) }) {
-			s.powDifficulty.recordFailure(lockoutKeyForIP(clientIP(r)), powAccount, time.Now())
-			http.Error(w, "invalid credentials", http.StatusUnauthorized)
-			return
-		}
-	} else {
-		if !s.chargeLoginKDF(func() bool { return users.VerifyPassword(u, req.Password) }) {
-			s.powDifficulty.recordFailure(lockoutKeyForIP(clientIP(r)), powAccount, time.Now())
-			http.Error(w, "invalid credentials", http.StatusUnauthorized)
-			return
-		}
+		verify = func() bool { return users.VerifyAuthSecret(u, req.AuthSecret) }
+	}
+	verified, err := s.chargeLoginKDF(r.Context(), verify)
+	if err != nil {
+		// Saturated slots, not a wrong password. Refund both strikes and say
+		// so: a 401 here would spend a third of this account's budget for a
+		// credential nobody looked at, and three unlucky arrivals during a
+		// burst would lock out a user who typed everything correctly.
+		// recordFailure is skipped for the same reason — proof-of-work
+		// escalation must price guessing, not queueing.
+		s.loginLockout.cancelAttempt(lockoutKey)
+		s.loginIPLockout.cancelAttempt(ipLockoutKey)
+		writeKDFBusy(w)
+		return
+	}
+	if !verified {
+		s.powDifficulty.recordFailure(lockoutKeyForIP(clientIP(r)), powAccount, time.Now())
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
 	}
 	s.loginLockout.recordSuccess(lockoutKey)
 	// A correct credential clears this address's accumulated failures too. The
@@ -582,8 +601,27 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, matched, err := s.users.ConsumeRecoveryCode(u.ID, strings.TrimSpace(req.Code))
-	if err != nil {
+	// Under a KDF slot PER COMPARISON, not one slot around the whole call.
+	// ConsumeRecoveryCode compares the candidate against every stored hash
+	// until one matches, so a WRONG code is up to ten scrypt derivations at
+	// 128 MiB each — and this endpoint takes no session, a challenge id is the
+	// whole credential. Holding a single slot across all ten would park a
+	// quarter of the instance's derivation capacity for ~2 s per request, so
+	// four concurrent wrong codes would stall every login on the server.
+	// Guarding each comparison keeps peak memory per caller at one derivation
+	// and lets logins interleave between them.
+	var matched bool
+	_, matched, err = s.users.ConsumeRecoveryCode(u.ID, strings.TrimSpace(req.Code),
+		func(compare func()) error { return s.withKDFSlot(r.Context(), compare) })
+	switch {
+	case errors.Is(err, errKDFBusy), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// Shed mid-check. No verdict was reached on this code, so refund the
+		// strike — the alternative is that a load spike burns an MFA budget the
+		// user needs to get back into their account.
+		s.mfaLockout.cancelAttempt(ch.UserID)
+		writeKDFBusy(w)
+		return
+	case err != nil:
 		s.mfaLockout.cancelAttempt(ch.UserID)
 		http.Error(w, "failed to verify recovery code", http.StatusInternalServerError)
 		return
@@ -724,23 +762,64 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	// Verify the CURRENT credential in whichever form this account stores, for
 	// the same reason handleLogin does: the account decides, not the request.
-	verifyCurrent := func() bool {
-		if u.UsesDerivedAuth() {
-			return users.VerifyAuthSecret(u, req.OldAuthSecret)
-		}
-		return users.VerifyPassword(u, req.OldPassword)
+	//
+	// Under a KDF slot, and behind a lockout. Having a session is not a licence
+	// to spend the box's memory: this is three 128 MiB derivations per request
+	// (the check here, plus the hash and any rewrap below), on an endpoint any
+	// authenticated account — including a compromised low-privilege one — can
+	// call in a loop. The lockout also stops the old-credential check being an
+	// unlimited offline-quality oracle for a stolen session: without it, a
+	// thief who has the cookie but not the password can guess at it forever.
+	verifyCurrent := func() (bool, error) {
+		var ok bool
+		err := s.withKDFSlot(r.Context(), func() {
+			if u.UsesDerivedAuth() {
+				ok = users.VerifyAuthSecret(u, req.OldAuthSecret)
+				return
+			}
+			ok = users.VerifyPassword(u, req.OldPassword)
+		})
+		return ok, err
 	}
 	offeredCurrent := req.OldAuthSecret
 	if !u.UsesDerivedAuth() {
 		offeredCurrent = req.OldPassword
 	}
-	if !u.MustChangePassword && !verifyCurrent() {
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
-		return
-	}
-	if u.MustChangePassword && strings.TrimSpace(offeredCurrent) != "" && !verifyCurrent() {
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
-		return
+	// Whether this request verifies anything at all. A first-login change with
+	// no old credential offered is the one case that does not, and it must not
+	// spend a strike — the whole point of MustChangePassword is that the user
+	// may not have a password to prove.
+	mustVerify := !u.MustChangePassword || strings.TrimSpace(offeredCurrent) != ""
+	if mustVerify {
+		// Keyed on user AND client IP, like the login lockout and for the same
+		// reason: on the user alone, an attacker holding a stolen cookie can
+		// burn the whole budget from their own machine and lock the real owner
+		// out of changing their password — during precisely the incident where
+		// changing it is the remedy. Keyed on the pair, a thief locks out only
+		// themselves while the owner's own address keeps a full budget.
+		lockKey := ac.UserID + "\x00" + lockoutKeyForIP(clientIP(r))
+		if allowed, retryAfter := s.passwordChangeLockout.tryAttempt(lockKey); !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"error":             "too many failed attempts, try again later",
+				"retryAfterSeconds": int(retryAfter.Seconds()) + 1,
+			})
+			return
+		}
+		ok, err := verifyCurrent()
+		if err != nil {
+			// Shed before the derivation ran. Refund: no credential was
+			// examined, so this attempt must not count against the budget.
+			s.passwordChangeLockout.cancelAttempt(lockKey)
+			writeKDFBusy(w)
+			return
+		}
+		if !ok {
+			// tryAttempt already spent the strike.
+			http.Error(w, "invalid credentials", http.StatusUnauthorized)
+			return
+		}
+		s.passwordChangeLockout.recordSuccess(lockKey)
 	}
 
 	// Prefer the derived form when the client supplied it. The plaintext branch

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router";
 import { processEmailHtml } from "../lib/emailHtml";
+import { EmailBodyFrame } from "./read/EmailBodyFrame";
+import { displayBody } from "./read/body";
 import { firstAddressFromText, listAddressesFromText } from "../lib/addressText";
 import { isFlaggedPhishing } from "../lib/phishing";
 import { decryptMessage } from "../lib/pgpClient";
@@ -141,6 +143,10 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
           ...prev,
           [message.messageId]: {
             body: result.body,
+            // Read off the decrypted entity's own Content-Type by pgpClient.
+            // The server's bodyMode describes the outer envelope and must not
+            // be used for this body — see read/body.ts.
+            bodyMode: result.bodyMode,
             signed: result.signed,
             verified: result.verified,
             signerFingerprint: result.signerFingerprint,
@@ -795,7 +801,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
 
   async function openEmailDetails(item: InboxEmail) {
     if (isDraftMailbox && onOpenDraft) {
-      const body = item.body ?? "";
+      const draft = displayBody(item, decrypted[item.messageId]);
       onOpenDraft({
         sentTo: item.sentTo,
         cc: item.cc,
@@ -807,7 +813,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         // untrusted HTML entering the compose editor. Same pipeline too, so a
         // draft quoting a hostile message doesn't fetch remote content that the
         // read view refused to fetch.
-        body: /<[^>]+>/.test(body) ? processEmailHtml(body, false) : body
+        body: draft.mode === "html" ? processEmailHtml(draft.body, false) : draft.body
       });
       return;
     }
@@ -855,7 +861,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     onOpenDraft({
       sentTo: firstAddressFromText(selected.sender || ""),
       subject: ensureSubjectPrefix(selected.subject, "Re:"),
-      body: buildReplyBody(selected)
+      body: buildReplyBody(selected, decrypted[selected.messageId])
     });
     setSelected(null);
   }
@@ -865,7 +871,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     onOpenDraft({
       sentTo: "",
       subject: ensureSubjectPrefix(selected.subject, "Fwd:"),
-      body: buildForwardBody(selected)
+      body: buildForwardBody(selected, decrypted[selected.messageId])
     });
     setSelected(null);
   }
@@ -877,7 +883,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       sentTo: recipients.to,
       cc: recipients.cc,
       subject: ensureSubjectPrefix(selected.subject, "Re:"),
-      body: buildReplyBody(selected)
+      body: buildReplyBody(selected, decrypted[selected.messageId])
     });
     setSelected(null);
   }
@@ -886,8 +892,11 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     if (items.length === 0) return;
     const sections = items
       .map((item) => {
-        const body = item.body || "No message body available.";
-        const isHtml = /<[^>]+>/.test(body);
+        // displayBody, so printing a client-protected account's mail prints the
+        // decrypted text at its own render mode rather than the envelope's.
+        const resolved = displayBody(item, decrypted[item.messageId]);
+        const body = resolved.body || "No message body available.";
+        const isHtml = resolved.mode === "html" && Boolean(resolved.body);
         // Sender-controlled HTML must pass through the sanitizer here just like
         // every other render path (see sanitizeEmailHtml's invariant): the
         // print document is a same-origin window that inherits the app CSP, so
@@ -1556,23 +1565,21 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                     key="raw"
                     className="email-reader-body-block"
                   >
-                    {decrypted[selected.messageId]?.body || selected.body || "No message body available."}
+                    {displayBody(selected, decrypted[selected.messageId]).body || "No message body available."}
                   </pre>
                 ) : null}
                 {!showRawEmail ? (() => {
-                  // A locally decrypted body wins over whatever the server
-                  // sent: for a client-protected account the server sends no
-                  // body at all for encrypted mail.
-                  const body =
-                    decrypted[selected.messageId]?.body || selected.body || "No message body available.";
-                  const isHtml = /<[^>]+>/.test(body);
-                  
-                  if (isHtml) {
+                  // Body and mode come from one place, together. See
+                  // read/body.ts for why picking them separately is the bug.
+                  const { body, mode } = displayBody(selected, decrypted[selected.messageId]);
+                  const shown = body || "No message body available.";
+
+                  if (mode === "html" && body) {
                     return (
-                      <div
+                      <EmailBodyFrame
                         key="html"
-                        className="email-reader-body-block"
-                        dangerouslySetInnerHTML={{ __html: processEmailHtml(body, showImages) }}
+                        className="email-reader-body-frame"
+                        html={processEmailHtml(body, showImages)}
                       />
                     );
                   } else {
@@ -1581,7 +1588,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                         key="text"
                         className="email-reader-body-block"
                       >
-                        {body}
+                        {shown}
                       </pre>
                     );
                   }

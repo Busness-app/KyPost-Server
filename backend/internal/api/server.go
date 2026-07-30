@@ -93,8 +93,11 @@ type Server struct {
 	loginLockout         *failureLockout
 	davLockout           *failureLockout
 	mfaLockout           *failureLockout
-	deviceLockout        *failureLockout
-	wkdLimiter           *ipRateLimiter
+	// passwordChangeLockout bounds current-credential guessing on
+	// POST /api/auth/password, keyed on the acting user's ID.
+	passwordChangeLockout *failureLockout
+	deviceLockout         *failureLockout
+	wkdLimiter            *ipRateLimiter
 	// loginParamsLimiter meters GET /api/auth/login-params PER IP. It used to
 	// draw a full attempt's reservation from the instance-wide derivation
 	// budget below, which priced a ~5us HMAC at 0.2 core-seconds: sixteen free
@@ -285,6 +288,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		loginLockout:           newLoginLockout(),
 		davLockout:             newFailureLockout(davMaxFailures, davLockoutFor),
 		mfaLockout:             newFailureLockout(mfaMaxFailures, mfaLockoutFor),
+		passwordChangeLockout:  newFailureLockout(passwordChangeMaxFailures, passwordChangeLockoutFor),
 		deviceLockout:          newFailureLockout(deviceMaxFailures, deviceLockoutFor),
 		wkdLimiter:             newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
 		loginParamsLimiter:     newIPRateLimiter(loginParamsBurst, loginParamsRefillPerSec),
@@ -370,26 +374,26 @@ func (s *Server) routes() http.Handler {
 // config, the proof-of-work challenge) are deliberately unwrapped: they run
 // before a session exists.
 func (s *Server) routesAuth(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
-	mux.HandleFunc("GET /api/auth/captcha-config", s.handleCaptchaConfig)
+	mux.HandleFunc("POST /api/auth/login", withPublicRoute(s.handleLogin))
+	mux.HandleFunc("GET /api/auth/captcha-config", withPublicRoute(s.handleCaptchaConfig))
 	// Pre-login, unauthenticated: tells the browser how to derive its auth
 	// secret so the password never has to be transmitted. See login_params.go
 	// for why the response cannot reveal whether the account exists.
-	mux.HandleFunc("GET /api/auth/login-params", s.handleLoginParams)
-	mux.HandleFunc("GET /api/auth/pow-challenge", s.handlePoWChallenge)
-	mux.HandleFunc("POST /api/auth/mfa/totp", s.handleMFATOTP)
-	mux.HandleFunc("POST /api/auth/mfa/recovery-code", s.handleMFARecoveryCode)
-	mux.HandleFunc("POST /api/auth/mfa/push/poll", s.handlePushPoll)
-	mux.HandleFunc("POST /api/auth/mfa/push/finish", s.handlePushFinish)
-	mux.HandleFunc("POST /api/mfa/push/respond", s.handlePushRespond)
+	mux.HandleFunc("GET /api/auth/login-params", withPublicRoute(s.handleLoginParams))
+	mux.HandleFunc("GET /api/auth/pow-challenge", withPublicRoute(s.handlePoWChallenge))
+	mux.HandleFunc("POST /api/auth/mfa/totp", withPublicRoute(s.handleMFATOTP))
+	mux.HandleFunc("POST /api/auth/mfa/recovery-code", withPublicRoute(s.handleMFARecoveryCode))
+	mux.HandleFunc("POST /api/auth/mfa/push/poll", withPublicRoute(s.handlePushPoll))
+	mux.HandleFunc("POST /api/auth/mfa/push/finish", withPublicRoute(s.handlePushFinish))
+	mux.HandleFunc("POST /api/mfa/push/respond", withPublicRoute(s.handlePushRespond))
 	mux.HandleFunc("GET /api/mfa/status", s.withAuth(s.handleMFAStatus))
 	mux.HandleFunc("POST /api/mfa/totp/setup", s.withAuth(s.handleMFASetup))
 	mux.HandleFunc("POST /api/mfa/totp/confirm", s.withAuth(s.handleMFAConfirm))
 	mux.HandleFunc("POST /api/mfa/totp/disable", s.withAuth(s.handleMFADisable))
 	mux.HandleFunc("POST /api/mfa/recovery-codes/regenerate", s.withAuth(s.handleMFARecoveryCodesRegenerate))
 	mux.HandleFunc("PUT /api/mfa/push/enabled", s.withAuth(s.handleMFAPushEnabled))
-	mux.HandleFunc("GET /api/auth/me", s.handleMe)
-	mux.HandleFunc("GET /api/auth/csrf", s.handleCSRFToken)
+	mux.HandleFunc("GET /api/auth/me", withSelfAuth(s.handleMe))
+	mux.HandleFunc("GET /api/auth/csrf", withSelfAuth(s.handleCSRFToken))
 	mux.HandleFunc("POST /api/auth/logout", s.withAuth(s.handleLogout))
 	mux.HandleFunc("POST /api/auth/password", s.withAuth(s.handleChangePassword))
 }
@@ -398,7 +402,7 @@ func (s *Server) routesAuth(mux *http.ServeMux) {
 // health, users, config, logs, tuning, the classifier/Ollama controls, and
 // the pre-login setup hint.
 func (s *Server) routesAdmin(mux *http.ServeMux) {
-	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/health", withPublicRoute(s.handleHealth))
 	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
 	mux.HandleFunc("POST /api/admin/mail/poll-now", s.withAdmin(s.handlePollNow))
 	mux.HandleFunc("/api/status", s.withAuth(s.handleStatus))
@@ -421,7 +425,7 @@ func (s *Server) routesAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("GET /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
 	mux.HandleFunc("PUT /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
-	mux.HandleFunc("GET /api/setup", s.handleSetup)
+	mux.HandleFunc("GET /api/setup", withPublicRoute(s.handleSetup))
 }
 
 // routesMail registers mailbox reading and sending, plus IMAP/SMTP
@@ -475,8 +479,8 @@ func (s *Server) routesContacts(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/contacts/{id}", s.withAuth(s.handleContactByID))
 	mux.HandleFunc("PUT /api/contacts/{id}", s.withAuth(s.handleContactByID))
 	mux.HandleFunc("DELETE /api/contacts/{id}", s.withAuth(s.handleContactByID))
-	mux.HandleFunc("GET /api/contacts/sync", s.handleContactsSync)
-	mux.HandleFunc("POST /api/contacts/sync", s.handleContactsSync)
+	mux.HandleFunc("GET /api/contacts/sync", withDeviceAuth(s.handleContactsSync))
+	mux.HandleFunc("POST /api/contacts/sync", withDeviceAuth(s.handleContactsSync))
 	mux.HandleFunc("POST /api/contacts/{id}/photo", withUploadDeadline(s.withAuth(s.handleContactPhoto)))
 	mux.HandleFunc("GET /api/contacts/{id}/photo", s.withMailAuth(s.handleContactPhoto))
 	mux.HandleFunc("DELETE /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
@@ -545,14 +549,17 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/pgp/wkd/domains/{domain}/verify", s.withAdmin(s.handleWKDDomainVerify))
 	mux.HandleFunc("DELETE /api/pgp/wkd/domains/{domain}", s.withAdmin(s.handleWKDDomainDelete))
 	mux.HandleFunc("GET /api/pgp/qr/token", s.withMailAuth(s.handlePGPQRToken))
-	mux.HandleFunc("GET /api/pgp/qr/key", s.handlePGPQRKey)
-	mux.HandleFunc("GET /.well-known/openpgpkey/", s.withWKDRateLimit(s.handleWKD))
-	mux.HandleFunc("GET /pickup/{id}", s.handlePickup)
+	mux.HandleFunc("GET /api/pgp/qr/key", withTokenAuth(s.handlePGPQRKey))
+	// Public by protocol: Web Key Directory exists so any sender's client can
+	// fetch a published key without credentials. withWKDRateLimit bounds it,
+	// but a rate limit is not an auth model, which is why the marker is here.
+	mux.HandleFunc("GET /.well-known/openpgpkey/", withPublicRoute(s.withWKDRateLimit(s.handleWKD)))
+	mux.HandleFunc("GET /pickup/{id}", withTokenAuth(s.handlePickup))
 	// Client-sealed pickup: the browser encrypts, the server stores an opaque
 	// blob, and the key travels in the link fragment it never receives.
 	// See pickup_client_sealed.go.
-	mux.HandleFunc("POST /pickup/{id}/open", s.handlePickupOpen)
-	mux.HandleFunc("GET /pickup/{id}/blob", s.handlePickupBlob)
+	mux.HandleFunc("POST /pickup/{id}/open", withTokenAuth(s.handlePickupOpen))
+	mux.HandleFunc("GET /pickup/{id}/blob", withTokenAuth(s.handlePickupBlob))
 	mux.HandleFunc("POST /api/pgp/pickup", withUploadDeadline(s.withMailAuth(s.handlePickupCreate)))
 }
 
@@ -569,13 +576,17 @@ func (s *Server) routesNotifications(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/notifications/subscriptions", s.withAuth(s.handleNotificationSubscriptions))
 	mux.HandleFunc("POST /api/notifications/test", s.withAuth(s.handleNotificationTest))
 	mux.HandleFunc("GET /api/notifications/pairing", s.withAuth(s.handleNotificationPairing))
-	mux.HandleFunc("POST /api/notifications/native/register", s.handleNotificationNativeRegister)
+	// withTokenAuth, not withDeviceAuth: registration is what CREATES the
+	// device, so there is no device secret to authenticate with yet. The
+	// credential is the single-use signed pairing token from the QR the user
+	// scanned, verified by decodeAndVerifyPairingToken.
+	mux.HandleFunc("POST /api/notifications/native/register", withTokenAuth(s.handleNotificationNativeRegister))
 	mux.HandleFunc("GET /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
 	mux.HandleFunc("DELETE /api/notifications/native/devices", s.withAuth(s.handleNotificationNativeDevices))
 	mux.HandleFunc("POST /api/notifications/native/unpair", s.withAuth(s.handleNotificationNativeUnpair))
-	mux.HandleFunc("POST /api/notifications/native/deregister", s.handleNotificationNativeDeregister)
+	mux.HandleFunc("POST /api/notifications/native/deregister", withDeviceAuth(s.handleNotificationNativeDeregister))
 	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
-	mux.HandleFunc("GET /api/notifications/native/pull", s.handleNotificationNativePull)
+	mux.HandleFunc("GET /api/notifications/native/pull", withDeviceAuth(s.handleNotificationNativePull))
 	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
 }
 
@@ -594,7 +605,7 @@ func (s *Server) routesRules(mux *http.ServeMux) {
 // routesFrontend registers the SPA fallback. "/" is the least specific
 // pattern, so Go's mux only reaches it when nothing else matches.
 func (s *Server) routesFrontend(mux *http.ServeMux) {
-	mux.HandleFunc("/", s.handleFrontend)
+	mux.HandleFunc("/", withPublicRoute(s.handleFrontend))
 }
 
 // Prepare constructs the underlying *http.Server (Addr + Handler) without

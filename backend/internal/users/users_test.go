@@ -180,7 +180,7 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 	}
 
 	// Consume a recovery code removes exactly one matching hash.
-	_, matched, err := store.ConsumeRecoveryCode(u.ID, "aaaa-bbbb-cccc")
+	_, matched, err := store.ConsumeRecoveryCode(u.ID, "aaaa-bbbb-cccc", nil)
 	if err != nil || !matched {
 		t.Fatalf("ConsumeRecoveryCode good = (%v, %v)", matched, err)
 	}
@@ -189,7 +189,7 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 		t.Fatalf("after consume: %d hashes left, want 1", len(got.RecoveryCodesHash))
 	}
 	// A non-matching / already-used code does not match and does not write.
-	_, matched, err = store.ConsumeRecoveryCode(u.ID, "aaaa-bbbb-cccc")
+	_, matched, err = store.ConsumeRecoveryCode(u.ID, "aaaa-bbbb-cccc", nil)
 	if err != nil || matched {
 		t.Fatalf("ConsumeRecoveryCode reused = (%v, %v), want (false, nil)", matched, err)
 	}

@@ -12,12 +12,10 @@
 //      PBKDF2 under another, so the value the server holds cannot produce the
 //      wrapping key.
 //
-// Point 1 is new, and this comment used to assert the conclusion without it:
-// "it holds only a scrypt hash of that password, not the password". That was
-// false. The plaintext password was POSTed to /api/auth/login on every sign-in,
-// so the server was handed this module's key material repeatedly and merely
-// chose not to keep it — four lines in the login handler would have opened every
-// client-protected key on the instance.
+// Point 1 is not optional. A build that reverts to POSTing the plaintext
+// password hands the server this module's key material on every sign-in, and
+// four lines in the login handler would then open every client-protected key on
+// the instance. Point 2 alone does not save it.
 //
 // DO NOT CHANGE THE DERIVATION IN THIS FILE. Every stored envelope was sealed
 // with it; redefining it makes them all unopenable, which loses every message

@@ -95,11 +95,18 @@ function renderReadPage() {
   );
 }
 
-/** The rendered message body element of the open reader. */
-function readerBody(): HTMLElement {
-  const block = document.querySelector(".email-reader-body-block");
+/**
+ * The markup the open reader is showing for the message body.
+ *
+ * An HTML body renders inside a sandboxed iframe (read/EmailBodyFrame.tsx), so
+ * the content lives in the frame's srcdoc rather than in the app's own DOM.
+ * That is the isolation working; asserting through it keeps these tests about
+ * what the user sees rather than about which element holds it.
+ */
+function readerBodyHtml(): string {
+  const block = document.querySelector(".email-reader-body-frame, .email-reader-body-block");
   if (!block) throw new Error("no message body is rendered");
-  return block as HTMLElement;
+  return block instanceof HTMLIFrameElement ? (block.getAttribute("srcdoc") ?? "") : block.innerHTML;
 }
 
 describe("remote-content opt-in is per message (run-4 M7)", () => {
@@ -115,10 +122,10 @@ describe("remote-content opt-in is per message (run-4 M7)", () => {
     // 1. Open the newsletter from the inbox and unblock its images, exactly as
     //    a user reasonably would.
     await user.click(await screen.findByText("Weekly Digest"));
-    await waitFor(() => expect(readerBody().innerHTML).toContain("[Image Blocked]"));
+    await waitFor(() => expect(readerBodyHtml()).toContain("[Image Blocked]"));
 
     await user.click(screen.getByRole("button", { name: "Show Remote Content" }));
-    await waitFor(() => expect(readerBody().innerHTML).toContain(TRACKER));
+    await waitFor(() => expect(readerBodyHtml()).toContain(TRACKER));
 
     await user.click(screen.getByRole("button", { name: "Close" }));
 
@@ -128,9 +135,9 @@ describe("remote-content opt-in is per message (run-4 M7)", () => {
     await user.click(await screen.findByText("Invoice attached"));
 
     // 3. It must render blocked. The user never opted in for THIS message.
-    await waitFor(() => expect(screen.getByText("Pay now")).toBeDefined());
-    expect(readerBody().innerHTML).not.toContain(TRACKER);
-    expect(readerBody().innerHTML).toContain("[Image Blocked]");
+    await waitFor(() => expect(readerBodyHtml()).toContain("Pay now"));
+    expect(readerBodyHtml()).not.toContain(TRACKER);
+    expect(readerBodyHtml()).toContain("[Image Blocked]");
     expect(screen.getByRole("button", { name: "Show Remote Content" })).toBeDefined();
   });
 
@@ -140,14 +147,14 @@ describe("remote-content opt-in is per message (run-4 M7)", () => {
 
     await user.click(await screen.findByText("Weekly Digest"));
     await user.click(screen.getByRole("button", { name: "Show Remote Content" }));
-    await waitFor(() => expect(readerBody().innerHTML).toContain(TRACKER));
+    await waitFor(() => expect(readerBodyHtml()).toContain(TRACKER));
     await user.click(screen.getByRole("button", { name: "Close" }));
 
     // Reopening costs another deliberate click — the grant does not persist
     // across opens, even for the same message.
     await user.click(await screen.findByText("Weekly Digest"));
-    await waitFor(() => expect(readerBody().innerHTML).toContain("[Image Blocked]"));
-    expect(readerBody().innerHTML).not.toContain(TRACKER);
+    await waitFor(() => expect(readerBodyHtml()).toContain("[Image Blocked]"));
+    expect(readerBodyHtml()).not.toContain(TRACKER);
   });
 
   it("still lets the user unblock the message opened from search", async () => {
@@ -158,9 +165,9 @@ describe("remote-content opt-in is per message (run-4 M7)", () => {
     await user.click(screen.getByRole("button", { name: "Search" }));
     await user.click(await screen.findByText("Invoice attached"));
 
-    await waitFor(() => expect(readerBody().innerHTML).toContain("[Image Blocked]"));
+    await waitFor(() => expect(readerBodyHtml()).toContain("[Image Blocked]"));
     await user.click(screen.getByRole("button", { name: "Show Remote Content" }));
-    await waitFor(() => expect(readerBody().innerHTML).toContain(TRACKER));
+    await waitFor(() => expect(readerBodyHtml()).toContain(TRACKER));
   });
 });
 

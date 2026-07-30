@@ -625,6 +625,8 @@ body {
   -webkit-overflow-scrolling: touch;
 }
 
+/* The PLAIN-TEXT body. Text properties belong here and only here — this is a
+   real element holding real text nodes. */
 .email-reader-body-block {
   margin: 0;
   max-height: none;
@@ -642,6 +644,28 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: var(--mono);
+}
+
+/* The HTML body, which is an <iframe> (read/EmailBodyFrame.tsx).
+
+   Separate from the class above because most of that class does nothing to a
+   replaced element: color, white-space, word-break and font-family never reach
+   a frame's document, and padding moves the frame's border box rather than its
+   content. Sharing one class made half those declarations dead code that read
+   as if it were styling the message.
+
+   Typography and colour for the frame's content are injected into its own
+   document instead — the frame inherits no stylesheet at all, deliberately.
+   Only geometry belongs out here. */
+.email-reader-body-frame {
+  margin: 0;
+  display: block;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  /* No `contain` here: a frame is already its own layout and paint boundary,
+     and nothing inside it can reach the parent document. */
 }
 
 h1, h2, h3, h4 {
@@ -4299,7 +4323,8 @@ pre {
     -webkit-overflow-scrolling: touch;
   }
 
-  .email-reader-body-block {
+  .email-reader-body-block,
+  .email-reader-body-frame {
     max-height: none;
     min-height: auto;
   }

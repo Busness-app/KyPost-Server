@@ -11,7 +11,7 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 - Single-container Docker runtime. supervisord manages the processes.
 - Multi-user with two roles. Admins manage users and system settings. Each user connects their own IMAP mailbox.
 - IMAP inbox reader with folder management and drag-and-drop move actions
-- Automatic keyword labels for unread mail. KyPost polls each active user's mailbox separately.
+- Automatic keyword labels for unread mail. KyPost polls each active user's mailbox separately. Labels are a sorting hint a determined sender can influence — see [Classification flow](#architecture).
 - Filter Rules: a GUI condition and action builder plus a raw Sieve script editor. A run-now panel applies the rules on demand.
 - Compose flow with SMTP send and IMAP draft save
 - PGP mail encryption. Generate or import a key, search for recipient keys on keys.openpgp.org, and check recipient key status before you send. KyPost has two key-protection modes. Read [Where your PGP private key lives](#where-your-pgp-private-key-lives) before you rely on this.
@@ -41,6 +41,28 @@ Classification flow:
 5. Match the output against the allowed labels.
 6. Apply the IMAP keywords.
 7. Save the checkpoint and the decision history.
+
+> **Labels are a hint, not a security boundary.** The classifier reads
+> attacker-supplied text, so a sender can write instructions into their message
+> and influence which keyword it gets. No small local model resists this
+> reliably. Running `backend/cmd/modeleval` against the injection bucket of its
+> corpus puts the shipped default at roughly 50–87% resistance depending on
+> prompt config, and every model measured let some through. Treat it as a known
+> property of the feature rather than a bug with a fix pending.
+>
+> What that buys an attacker is small and bounded: they can steer the label on
+> **their own message** — typically into `Primary` instead of `Promotions`. The
+> keyword allowlist is enforced in Go after the model answers (step 5), so
+> output that is not an allowed label is discarded; a message cannot be labelled
+> as something you never configured, cannot be moved, deleted, or marked read,
+> and cannot affect any other message. The worst case is a promotional email
+> that sorts itself into your main tab — the same thing a sender achieves by
+> writing a more convincing subject line.
+>
+> Do not build a security control on top of these keywords: no filter rule that
+> grants trust based on a label, and no "auto-archive anything labelled X."
+> Every decision is recorded, so you can audit what the model actually did on
+> the Decisions page.
 
 ## Requirements
 
@@ -87,8 +109,9 @@ Optional for local development (outside Docker):
    > compose file defines for exactly this — and point it at
    > `http://KyPost-Server:5866`. That network has DNS, so the name keeps working
    > across rebuilds, and the path ignores published ports entirely so nothing
-   > needs publishing. The snippet for joining it from another compose project is
-   > at the bottom of `docker-compose.yml`.
+   > needs publishing. The snippet for joining it from another compose project,
+   > and how to recover from the two Docker errors this setup produces, are in
+   > [docs/Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md).
    >
    > **This is what makes the client IP correct, not a nicety.** A proxy on a
    > *separate* Docker network — or one that reaches this container through the

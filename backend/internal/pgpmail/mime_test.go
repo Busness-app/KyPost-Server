@@ -41,7 +41,7 @@ func extractOctetStreamPart(t *testing.T, raw []byte) (string, bool) {
 	if err != nil {
 		t.Fatalf("splitMessage: %v", err)
 	}
-	_, attachments, err := ParseContent(content)
+	_, _, attachments, err := ParseContent(content)
 	if err != nil {
 		t.Fatalf("ParseContent: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestEncryptDecryptMIMERoundTrip(t *testing.T) {
 	if !ok || subject != "Secret" {
 		t.Fatalf("ExtractProtectedSubject: got (%q, %v), want (\"Secret\", true)", subject, ok)
 	}
-	body, attachments, err := ParseContent(result.Content)
+	body, _, attachments, err := ParseContent(result.Content)
 	if err != nil {
 		t.Fatalf("ParseContent: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestEncryptDecryptMIMEWithAttachment(t *testing.T) {
 	if result.Signed {
 		t.Fatal("expected unsigned result when EncryptMIME was called with a nil signer")
 	}
-	body, attachments, err := ParseContent(result.Content)
+	body, _, attachments, err := ParseContent(result.Content)
 	if err != nil {
 		t.Fatalf("ParseContent: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestDecryptMIMEAcceptsWithinCapDecompressionBomb(t *testing.T) {
 func TestParseContentRejectsOversizedContent(t *testing.T) {
 	withLoweredMaxInboundMessageBytes(t, 10)
 	content := []byte("Content-Type: text/plain\r\n\r\n" + strings.Repeat("a", 20))
-	_, _, err := ParseContent(content)
+	_, _, _, err := ParseContent(content)
 	if !errors.Is(err, mailmsg.ErrMessageTooLarge) {
 		t.Fatalf("got %v, want ErrMessageTooLarge", err)
 	}
@@ -444,7 +444,7 @@ func TestParseContentAcceptsAtCapBoundary(t *testing.T) {
 	content := []byte("Content-Type: text/plain\r\n\r\n" + body)
 	withLoweredMaxInboundMessageBytes(t, int64(len(content)))
 
-	got, attachments, err := ParseContent(content)
+	got, _, attachments, err := ParseContent(content)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -490,7 +490,7 @@ func TestParseContentMultipartRejectsWhenOversized(t *testing.T) {
 		t.Fatalf("test setup invalid: expected overall content (%d bytes) to exceed the lowered cap (%d)", content.Len(), mailmsg.MaxInboundMessageBytes)
 	}
 
-	_, _, err = ParseContent(content.Bytes())
+	_, _, _, err = ParseContent(content.Bytes())
 	if !errors.Is(err, mailmsg.ErrMessageTooLarge) {
 		t.Fatalf("got %v, want ErrMessageTooLarge", err)
 	}
@@ -528,7 +528,7 @@ func TestParseContentMultipartAcceptsWithinCap(t *testing.T) {
 
 	withLoweredMaxInboundMessageBytes(t, int64(content.Len())+1)
 
-	body, attachments, err := ParseContent(content.Bytes())
+	body, _, attachments, err := ParseContent(content.Bytes())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestExtractProtectedSubjectThunderbirdStyle(t *testing.T) {
 	}
 
 	// And it still renders as a plain body, not swallowed.
-	body, attachments, err := ParseContent(content)
+	body, _, attachments, err := ParseContent(content)
 	if err != nil {
 		t.Fatalf("ParseContent: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestParseContentNestedMultipartAlternative(t *testing.T) {
 	content.WriteString(`Content-Type: multipart/mixed; boundary=` + ow.Boundary() + "\r\n\r\n")
 	content.Write(outer.Bytes())
 
-	body, attachments, err := ParseContent(content.Bytes())
+	body, _, attachments, err := ParseContent(content.Bytes())
 	if err != nil {
 		t.Fatalf("ParseContent: %v", err)
 	}
@@ -691,7 +691,7 @@ func TestEncryptMIMENoSubject(t *testing.T) {
 	if subject, ok := ExtractProtectedSubject(result.Content); ok {
 		t.Fatalf("expected no protected subject for a subjectless message, got %q", subject)
 	}
-	body, _, err := ParseContent(result.Content)
+	body, _, _, err := ParseContent(result.Content)
 	if err != nil {
 		t.Fatalf("ParseContent: %v", err)
 	}

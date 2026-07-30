@@ -19,6 +19,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	// testing, in a non-test file, solely for testing.Testing() in
+	// SetHashCostForTest. It pulls no test framework into the binary — the
+	// function reports whether this build is `go test` — and it is the only
+	// thing that makes "never call this in production" checkable rather than
+	// advisory.
+	"testing"
 	"time"
 
 	"kypost-server/backend/internal/fsutil"
@@ -572,8 +578,8 @@ func readLegacyAdminEnv(path string) (map[string]string, bool) {
 // readFileUnlocked reads and parses the file from disk, bypassing the read
 // cache entirely.
 //
-// The name says "Unlocked" because it takes no lock of its own — it was called
-// readLocked, which read as "this holds the lock" and meant the opposite.
+// "Unlocked" means it takes no lock of its own; the caller must already hold
+// both mu and the file lock.
 //
 // Every mutator uses this rather than load(): a read-modify-write cycle must
 // start from what is actually on disk, inside the inter-process file lock, or
@@ -1103,6 +1109,21 @@ func (s *Store) ReplaceRecoveryCodes(id string, recoveryHashes []string) (User, 
 // code fails to match, so a wrong attempt never bumps UpdatedAt.
 var errRecoveryCodeNoMatch = errors.New("recovery code no match")
 
+// KDFGuard wraps ONE memory-hard comparison so a caller can meter it.
+//
+// It exists because a recovery-code check is not one derivation, it is up to
+// ten, and the natural implementation — take a concurrency slot, then run all
+// ten inside it — holds that slot for seconds. With four slots process-wide,
+// four such checks own the entire derivation capacity of the instance and no
+// login can proceed until they finish. Guarding each comparison instead lets
+// other work interleave between them while still never exceeding one
+// derivation's memory per caller.
+//
+// Returning an error abandons the remaining comparisons and surfaces from
+// ConsumeRecoveryCode unchanged, so an overloaded server can shed rather than
+// queue. A nil guard runs the comparisons directly.
+type KDFGuard func(compare func()) error
+
 // ConsumeRecoveryCode verifies candidate against the user's stored recovery
 // hashes; on the first match it removes that hash (one-time use) and persists.
 // It returns matched=false with a nil error and no write when nothing matches.
@@ -1112,14 +1133,27 @@ var errRecoveryCodeNoMatch = errors.New("recovery code no match")
 // takes s.mu.RLock via currentUser -> Get, so one wrong code stalled the whole
 // API. Matching on the hash string rather than an index keeps the removal
 // correct even if the list changed while we were deriving.
-func (s *Store) ConsumeRecoveryCode(id, candidate string) (User, bool, error) {
+//
+// guard meters each comparison individually; see KDFGuard for why that is not
+// the same as metering the call. Pass nil to run unmetered.
+func (s *Store) ConsumeRecoveryCode(id, candidate string, guard KDFGuard) (User, bool, error) {
 	snapshot, err := s.Get(id)
 	if err != nil {
 		return User{}, false, err
 	}
 	matched := ""
 	for _, h := range snapshot.RecoveryCodesHash {
-		if verifyScryptHash(h, candidate) {
+		hit := false
+		compare := func() { hit = verifyScryptHash(h, candidate) }
+		if guard == nil {
+			compare()
+		} else if err := guard(compare); err != nil {
+			return User{}, false, err
+		}
+		// Short-circuit on the first match: the remaining hashes cannot also
+		// match a one-time code, and deriving against them anyway would make a
+		// CORRECT code the most expensive request on the endpoint.
+		if hit {
 			matched = h
 			break
 		}
@@ -1239,11 +1273,82 @@ const (
 	scryptKeyLen = 32
 )
 
+// hashCostN is the N that NEW hashes are written with, and the floor
+// NeedsRehash measures stored hashes against. It is scryptN everywhere except
+// under SetHashCostForTest.
+//
+// Verification never reads this: verifyScryptHash takes the parameters from the
+// stored hash, so lowering it cannot make an existing strong hash verify any
+// more cheaply, and cannot weaken anything already on disk.
+var hashCostN = scryptN
+
+// HashCostN reports the N new hashes are currently written with. Callers that
+// cache a derived value whose cost has to match a real account's — see
+// api.timingDummyHash — key that cache on this.
+func HashCostN() int { return hashCostN }
+
+// MinVerifiableScryptN is the weakest N verifyScryptHash will accept. A hash
+// written below it can never be verified again, so nothing may mint one —
+// including tests. Exported so SetHashCostForTest can refuse to create hashes
+// that would silently fail every comparison.
+const MinVerifiableScryptN = 1 << 14
+
+// ProductionScryptN is the cost real password hashes are written at.
+//
+// Exported so the handful of tests whose SUBJECT is the cost can restore it by
+// name instead of repeating the literal. api.withProductionHashCost hardcoded
+// 1<<17, which is the same number until someone raises scryptN — at which point
+// the helper claims to restore production strength while quietly setting
+// something else, and the login-budget tests it exists for start measuring a
+// cost the server does not use.
+const ProductionScryptN = scryptN
+
+// SetHashCostForTest lowers the write-side scrypt cost and returns a function
+// that restores it.
+//
+// 128 MiB and ~200 ms per derivation is right for a login and ruinous for a
+// test suite: internal/api alone spent over four minutes on it, twice in CI
+// once -race is counted, which is how a suite stops being run locally.
+//
+// REFUSES TO RUN OUTSIDE A TEST BINARY. This function's whole purpose is to
+// weaken password hashing, and it is exported from a package that production
+// code imports, so the only thing that kept it honest was a comment asking
+// nicely. A dev-only flag, a benchmark harness, or a fixture loader calling it
+// would drop every credential written afterwards to 16 MiB — and because
+// NeedsRehash measures against hashCostN too, nothing would ever flag them for
+// upgrade. testing.Testing() is the guard that makes the comment enforceable.
+//
+// It panics below MinVerifiableScryptN rather than accepting the value. That
+// floor is not advisory: verifyScryptHash rejects anything under it outright,
+// so a lower setting mints hashes that cannot verify, and the failure surfaces
+// as a pile of unrelated "invalid credentials" assertions rather than as
+// "your test cost is invalid."
+//
+// CALL IT FROM TestMain, BEFORE ANY TEST STARTS. It writes a package-level
+// variable with no synchronization, so changing it while tests are running is
+// a data race -race will (correctly) fail on. Tests that assert production
+// strength, or that measure the CPU the login budget meters, must run in a
+// package that does not apply the override.
+func SetHashCostForTest(n int) (restore func()) {
+	if !testing.Testing() {
+		panic("users.SetHashCostForTest called outside a test binary: this weakens password hashing and must never run in production")
+	}
+	if n < MinVerifiableScryptN || n&(n-1) != 0 {
+		panic(fmt.Sprintf(
+			"users.SetHashCostForTest(%d): must be a power of two >= %d, or the hashes it writes can never verify",
+			n, MinVerifiableScryptN,
+		))
+	}
+	previous := hashCostN
+	hashCostN = n
+	return func() { hashCostN = previous }
+}
+
 // HashPassword produces a scrypt-encoded hash string in the same format
 // used historically by admin.env's ADMIN_PASS_HASH field.
 func HashPassword(password string) (string, error) {
-	const (
-		n      = scryptN
+	var (
+		n      = hashCostN
 		r      = scryptR
 		p      = scryptP
 		keyLen = scryptKeyLen
@@ -1288,9 +1393,11 @@ func verifyScryptHash(encoded, candidate string) bool {
 	// and supervisord restarts it straight back into the same crash.
 	// x/crypto's own check only rejects values far above this.
 	//
-	// Floor is HashPassword's current cost — never accept a hash weaker than
-	// we mint. Ceiling is ~1 GB, above any plausible tuning.
-	if n < 1<<14 || n > 1<<20 || n&(n-1) != 0 || r < 1 || r > 32 || p < 1 || p > 16 {
+	// Floor is MinVerifiableScryptN: low enough to keep verifying hashes
+	// written before the cost was raised, high enough that nothing this
+	// package would mint today falls under it. Ceiling is ~1 GB, above any
+	// plausible tuning.
+	if n < MinVerifiableScryptN || n > 1<<20 || n&(n-1) != 0 || r < 1 || r > 32 || p < 1 || p > 16 {
 		return false
 	}
 	salt, err := base64.StdEncoding.DecodeString(parts[4])
@@ -1343,7 +1450,7 @@ func NeedsRehash(encoded string) bool {
 	// Only ever upgrade. A hash stored with a HIGHER cost than the current
 	// default must be left alone — an operator may have deliberately raised it,
 	// and "rehashing" it would silently weaken the account.
-	return n < scryptN || r < scryptR || p < scryptP
+	return n < hashCostN || r < scryptR || p < scryptP
 }
 
 // RehashPassword re-derives id's password hash at the current cost parameters,

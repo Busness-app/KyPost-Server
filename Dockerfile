@@ -81,16 +81,13 @@ EXPOSE 5866
 # health service reports unhealthy, so this tracks the application's own view of
 # itself rather than just TCP liveness.
 #
-# BE CLEAR ABOUT WHAT THIS DOES: it makes an unhealthy container VISIBLE (in
-# `docker compose ps`, and to any orchestrator that polls it). It does NOT restart
-# anything. Docker Engine's restart policies react to a container EXITING; health
-# status only drives replacement under Swarm. An earlier version of this comment
-# claimed the healthcheck was what made `restart: unless-stopped` fire, which is
-# not how Docker works.
+# This makes an unhealthy container VISIBLE (in `docker compose ps`, and to any
+# orchestrator that polls it). It does NOT restart anything: Docker Engine's
+# restart policies react to a container EXITING, and health status only drives
+# replacement under Swarm.
 #
 # Self-healing comes from supervisord's startretries instead — see
-# supervisord.conf, where the default of 3 was what actually caused a dead API to
-# be abandoned while PID 1 stayed healthy.
+# supervisord.conf.
 #
 # start-period is generous because first boot pulls the Ollama model.
 #

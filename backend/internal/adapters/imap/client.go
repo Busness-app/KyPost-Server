@@ -75,7 +75,10 @@ type UnreadMessage struct {
 	Keywords  []string
 	AtUTC     string
 	Body      string
-	Status    string
+	// BodyMode is BodyModeHTML or BodyModePlain — which MIME part Body was
+	// taken from. See clientBody for why the client must not re-derive this.
+	BodyMode string
+	Status   string
 	// HasAttachments comes from the same GetEmails parse as Body.
 	HasAttachments bool
 	// PGPEncryptedPayload holds the armored OpenPGP message when the
@@ -112,7 +115,9 @@ type UnreadMessage struct {
 // MessageContent is the per-UID result of GetMessageBodies: the rendered body
 // plus whether the message carries attachments, both from one GetEmails parse.
 type MessageContent struct {
-	Body           string
+	Body string
+	// BodyMode is BodyModeHTML or BodyModePlain — see clientBody.
+	BodyMode       string
 	HasAttachments bool
 	// TooLarge is set instead of Body/HasAttachments being populated when
 	// this UID was identified as oversized by GetMessageBodies's server-side
@@ -706,12 +711,10 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 
 		// Prefer HTML for inbox preview so the UI can render rich email content.
 		// Fall back to plain text for text-only messages.
-		body := strings.TrimSpace(e.HTML)
-		if body == "" {
-			body = strings.TrimSpace(e.Text)
-		}
+		body, bodyMode := clientBody(e)
 
 		msg := UnreadMessage{
+			BodyMode:       bodyMode,
 			MessageID:      ov.MessageID,
 			Subject:        ov.Subject,
 			Sender:         ov.Sender,
@@ -941,11 +944,8 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 			out[uid] = MessageContent{TooLarge: true}
 			continue
 		}
-		body := strings.TrimSpace(e.HTML)
-		if body == "" {
-			body = strings.TrimSpace(e.Text)
-		}
-		content := MessageContent{Body: body, HasAttachments: len(e.Attachments) > 0}
+		body, bodyMode := clientBody(e)
+		content := MessageContent{Body: body, BodyMode: bodyMode, HasAttachments: len(e.Attachments) > 0}
 		if body == "" {
 			if payload := pgpDetectPayload(e.Attachments); payload != "" {
 				content.PGPEncryptedPayload = payload
@@ -1096,6 +1096,38 @@ func inboxBodies(e *goimap.Email) (body, bodyHTML string) {
 		body = bodyHTML
 	}
 	return body, bodyHTML
+}
+
+// Body render modes. These say which MIME part Body was taken from, so the
+// client never has to guess from the bytes.
+const (
+	BodyModeHTML  = "html"
+	BodyModePlain = "plain"
+)
+
+// clientBody picks the body every client-facing path reports, and says which
+// part it came from.
+//
+// The mode is the point. Sniffing "does this look like HTML?" at the render
+// site cannot distinguish markup from a plain-text message that merely
+// contains angle brackets, and "<user@example.com>" — RFC 5322's own address
+// form — is the common case it gets wrong: routed through the HTML pipeline it
+// parses as an unknown tag and is dropped, silently deleting an address out of
+// the message. The parse already knows the answer here; carry it.
+// An empty body reports an EMPTY mode, not BodyModePlain. "" is the wire
+// contract's "the server does not know" — and a message with no readable text
+// part (a PGP envelope, an attachment-only mail) is precisely a case where it
+// does not. Returning "plain" there stamped a confident answer on a body that
+// was never parsed, mailcache.Store.Sync then preserved it forever, and the
+// client trusted it over the fallback it would otherwise have used.
+func clientBody(e *goimap.Email) (body, mode string) {
+	if body = strings.TrimSpace(e.HTML); body != "" {
+		return body, BodyModeHTML
+	}
+	if body = strings.TrimSpace(e.Text); body != "" {
+		return body, BodyModePlain
+	}
+	return "", ""
 }
 
 // goimapDefaults sets the vendored library's package-level tunables exactly
