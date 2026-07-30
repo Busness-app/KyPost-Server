@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"kypost-server/backend/internal/logging"
@@ -278,4 +279,53 @@ func warnOnRetiredProxyEnv(logger *logging.Logger) {
 		"forwarded headers are NOT being trusted. Session cookies will not be marked Secure and the login, " +
 		"CardDAV and device lockouts are keying off your proxy's address instead of the caller's. " +
 		"Set TRUSTED_PROXY_CIDRS to your reverse proxy's address (e.g. 127.0.0.1/32) to restore the previous behaviour.")
+}
+
+// unusedProxyHeaderWarning fires warnOnUnusedProxyHeaders' message at most once
+// per process. This is a standing misconfiguration, not an event: repeating it on
+// every request would bury the log it is trying to be found in.
+var unusedProxyHeaderWarning sync.Once
+
+// warnOnUnusedProxyHeaders complains, once, when requests demonstrably arrive
+// through a proxy whose forwarding headers this server is discarding.
+//
+// warnOnRetiredProxyEnv above covers the operator who upgraded from
+// TRUST_PROXY_HEADERS. It says nothing to the far more common case: a fresh
+// deployment that puts Cloudflare or nginx in front and never sets
+// TRUSTED_PROXY_CIDRS at all, because nothing asks them to. Failing closed is
+// right — the alternative is letting any caller name their own IP — but failing
+// closed *silently* is what let this run in production unnoticed: clientIP then
+// returns the proxy's address for every caller, so it is not merely wrong, it is
+// CONSTANT, and every control keyed on it collapses into a single shared bucket.
+// The comment on clientIP names that as the failure mode to avoid; this is the
+// part that notices it has happened.
+//
+// The trigger is a forwarding header being present while trust is unconfigured,
+// which is unambiguous: something upstream is telling us who the caller is and we
+// are throwing it away. A directly-exposed server sees no such header and stays
+// quiet.
+func (s *Server) warnOnUnusedProxyHeaders(r *http.Request) {
+	if s.logger == nil || len(trustedProxyNets) != 0 {
+		return
+	}
+	header := "CF-Connecting-IP"
+	forwarded := parseClientAddr(r.Header.Get(header))
+	if forwarded == "" {
+		header = "X-Forwarded-For"
+		forwarded = parseClientAddr(lastForwardedValue(r, header))
+	}
+	if forwarded == "" {
+		return
+	}
+	unusedProxyHeaderWarning.Do(func() {
+		s.logger.Error("TRUSTED_PROXY_CIDRS is empty but requests are arriving with forwarding headers, so they "+
+			"are being ignored: every caller is being keyed as the proxy's own address. The login, CardDAV, "+
+			"device and proof-of-work lockouts and the WKD rate limit therefore share ONE bucket for all "+
+			"callers (enough failures from anyone locks out everyone), and the MFA sign-in approval push "+
+			"reports the proxy's address rather than the person signing in. Set TRUSTED_PROXY_CIDRS to your "+
+			"proxy's address, and narrow KYPOST_BIND so the port cannot be reached around it.",
+			"peer", clientIP(r),
+			"header", header,
+			"header_reports", forwarded)
+	})
 }
