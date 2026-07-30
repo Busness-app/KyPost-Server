@@ -136,7 +136,11 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// mirrors equalizeLoginTiming's use on the login endpoint. Under
 			// the shared KDF slot: this is unauthenticated, and 128 MiB per
 			// concurrent attempt is otherwise an OOM primitive.
-			s.withKDFSlot(func() { equalizeLoginTiming(password) })
+			if err := s.withKDFSlot(r.Context(), func() { equalizeLoginTiming(password) }); err != nil {
+				s.davLockout.cancelAttempt(lockKey)
+				writeKDFBusy(w)
+				return
+			}
 			s.requireDAVAuth(w)
 			return
 		}
@@ -145,12 +149,25 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// No CardDAV app-password configured for this account: still pay
 			// the scrypt cost so this path isn't distinguishable by timing
 			// from a wrong-password attempt against a configured account.
-			s.withKDFSlot(func() { equalizeLoginTiming(password) })
+			if err := s.withKDFSlot(r.Context(), func() { equalizeLoginTiming(password) }); err != nil {
+				s.davLockout.cancelAttempt(lockKey)
+				writeKDFBusy(w)
+				return
+			}
 			s.requireDAVAuth(w)
 			return
 		}
 		verified := false
-		s.withKDFSlot(func() { verified = users.VerifySecretHash(passFile.Hash, password) })
+		// Shedding answers 503 rather than the 401 requireDAVAuth would send.
+		// That distinction matters more here than anywhere else: a CardDAV
+		// client that receives 401 for a CORRECT password commonly discards its
+		// stored credential and prompts the user, so treating overload as a
+		// rejection would log every synced device out during a load spike.
+		if err := s.withKDFSlot(r.Context(), func() { verified = users.VerifySecretHash(passFile.Hash, password) }); err != nil {
+			s.davLockout.cancelAttempt(lockKey)
+			writeKDFBusy(w)
+			return
+		}
 		if !verified {
 			s.requireDAVAuth(w)
 			return

@@ -7,8 +7,9 @@
 // unblock would fire its tracking pixels the moment they pressed Reply.
 
 import { processEmailHtml } from "../../lib/emailHtml";
+import { displayBody } from "./body";
 import { firstAddressFromText, listAddressesFromText } from "../../lib/addressText";
-import type { InboxEmail } from "./types";
+import type { DecryptedView, InboxEmail } from "./types";
 import { formatTimestamp } from "./format";
 
 export function ensureSubjectPrefix(subject: string | undefined, prefix: "Re:" | "Fwd:"): string {
@@ -32,12 +33,17 @@ export function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-export function buildReplyBody(email: InboxEmail): string {
+// decrypted is the locally-decrypted view when there is one. Quoting a
+// client-protected account's mail without it quoted the ENVELOPE — an armored
+// blob or nothing at all — and paired the plaintext with the envelope's render
+// mode. See read/body.ts.
+export function buildReplyBody(email: InboxEmail, decrypted?: DecryptedView): string {
   const time = formatTimestamp(email.atUtc);
   const sender = email.sender || "-";
   const subject = email.subject || "(no subject)";
-  const body = email.body || "";
-  const isHtml = /<[^>]+>/.test(body);
+  const quoted = displayBody(email, decrypted);
+  const body = quoted.body;
+  const isHtml = quoted.mode === "html" && Boolean(body);
   // processEmailHtml, not sanitizeEmailHtml: quoting must go through the same
   // pipeline the read view uses (link blocking + img -> "[Image Blocked]" +
   // remote-content-blocking sanitize). sanitizeEmailHtml alone does not strip
@@ -54,13 +60,14 @@ export function buildReplyBody(email: InboxEmail): string {
   ].join("");
 }
 
-export function buildForwardBody(email: InboxEmail): string {
+export function buildForwardBody(email: InboxEmail, decrypted?: DecryptedView): string {
   const time = formatTimestamp(email.atUtc);
   const sender = email.sender || "-";
   const sentTo = email.sentTo || "-";
   const subject = email.subject || "(no subject)";
-  const body = email.body || "";
-  const isHtml = /<[^>]+>/.test(body);
+  const quoted = displayBody(email, decrypted);
+  const body = quoted.body;
+  const isHtml = quoted.mode === "html" && Boolean(body);
   // processEmailHtml, not sanitizeEmailHtml: quoting must go through the same
   // pipeline the read view uses (link blocking + img -> "[Image Blocked]" +
   // remote-content-blocking sanitize). sanitizeEmailHtml alone does not strip

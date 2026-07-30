@@ -56,6 +56,13 @@ type Entry struct {
 	// warmed yet, fetch live if needed," never "empty message."
 	Body string `json:"body,omitempty"`
 
+	// BodyMode says which MIME part Body came from ("html" or "plain"), and
+	// follows the same warm-path-only rule as Body itself. Empty means "not
+	// warmed yet, or written by a build from before this field existed" — the
+	// client falls back to a conservative sniff for that case rather than
+	// mis-rendering an entry it inherited from an older cache file.
+	BodyMode string `json:"bodyMode,omitempty"`
+
 	// HasAttachments follows the same warm-path-only rule as Body: the poller
 	// sets it from the full GetEmails parse it already performs, while the
 	// overview-sync path leaves it false (overviews carry no attachment

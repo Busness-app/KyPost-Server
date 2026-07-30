@@ -189,6 +189,9 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 			e.PGPVerified = prev.PGPVerified
 			e.PGPSignerFingerprint = prev.PGPSignerFingerprint
 			e.PGPProtectedSubject = prev.PGPProtectedSubject
+			// Same rule, and it has to be preserved alongside Body or a flag
+			// flip would strip the render mode off a body that is still there.
+			e.BodyMode = prev.BodyMode
 			next = append(next, e)
 		default:
 			next = append(next, prev)
@@ -387,6 +390,7 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 			updated.PGPVerified = in.PGPVerified
 			updated.PGPSignerFingerprint = in.PGPSignerFingerprint
 			updated.PGPProtectedSubject = in.PGPProtectedSubject
+			updated.BodyMode = in.BodyMode
 		}
 		// Only the warm path (poller) calls Upsert, and it always carries an
 		// authoritative attachment flag from the same GetEmails parse — so

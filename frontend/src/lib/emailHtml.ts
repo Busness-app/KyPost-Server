@@ -90,17 +90,85 @@ export function sanitizeEmailHtml(html: string, blockRemoteContent = true): stri
   );
 }
 
-export function processEmailHtml(html: string, showImages: boolean): string {
-  // Extract body content if it's a full HTML document
-  const bodyMatch = html.match(/<body[^>]*>([\s\S]*)<\/body>/i);
-  const content = bodyMatch ? bodyMatch[1] : html;
-
-  const parser = new DOMParser();
-  const document = parser.parseFromString(`<div>${content}</div>`, "text/html");
-  const root = document.body.firstElementChild;
-  if (!root) {
-    return sanitizeEmailHtml(content, !showImages);
+// looksLikeHtml is the LAST-RESORT check for a body whose MIME type is genuinely
+// unavailable. After pgpClient started reading the mode off the decrypted
+// entity's own Content-Type (lib/mimeContent.ts), that is ONE case: a mail-cache
+// entry written by a build from before the server reported `bodyMode`. Those age
+// out. Prefer the reported answer always; see resolveBodyMode.
+//
+// It asks the HTML parser instead of matching tag names, because both previous
+// attempts were wrong in one direction or the other and a name list can only
+// rot:
+//
+//   /<[^>]+>/                  matched "<user@example.com>" — RFC 5322's own
+//                              address form, and the most common angle-bracket
+//                              construct in plain-text mail.
+//   a 34-tag allowlist         missed <center>, <o:p>, <dl>, <code>, <small>,
+//                              <figure>, <article> — so HTML mail rendered as
+//                              escaped source — while still claiming "the <p>
+//                              tag" was markup.
+//
+// Two signals, both required:
+//
+//   1. Something parsed as a REAL element. HTMLUnknownElement is what both
+//      "<user@example.com>" and "<o:p>" become, so element presence alone
+//      cannot separate them — but <center> and <figure> are real elements, and
+//      that is the half the allowlist kept missing.
+//   2. The parse CHANGED the text. If stripping markup leaves the input
+//      byte-for-byte intact there was no markup: "a < b and b > c" survives
+//      untouched, "<p>hi</p>" does not.
+//
+// WHICH WAY IT ERRS, and why that is the safe side. Prose that mentions a real
+// tag ("use <br> to break a line") is genuinely indistinguishable from markup
+// without a Content-Type, and this calls it markup. The cost is bounded: a
+// KNOWN element renders as itself and the surrounding words survive, so the
+// reader loses the four literal characters "<br>" and nothing else. The
+// expensive direction is the opposite one — an UNKNOWN element swallows its
+// content, which is how "<user@example.com>" used to vanish entirely — and
+// signal 1 is what rules that out. Do not "improve" this by relaxing signal 1.
+export function looksLikeHtml(body: string): boolean {
+  // Cheap reject before touching the parser: no angle bracket, no markup.
+  if (!body.includes("<")) {
+    return false;
   }
+  const doc = new DOMParser().parseFromString(body, "text/html");
+  const hasRealElement = Array.from(doc.body.querySelectorAll("*")).some(
+    (el) => !(el instanceof HTMLUnknownElement)
+  );
+  return hasRealElement && doc.body.textContent !== body;
+}
+
+/**
+ * Decides how to render a body, preferring what the server said over any
+ * inspection of the bytes.
+ *
+ * `mode` comes from imapadapter.clientBody / pgpmail.ParseContent, which read
+ * it off the part's own Content-Type. It is absent only where the server
+ * genuinely cannot know: a client-protected account's mail, which the browser
+ * decrypts itself, and cache entries predating the field.
+ */
+export function resolveBodyMode(body: string, mode?: string): "html" | "plain" {
+  if (mode === "html" || mode === "plain") {
+    return mode;
+  }
+  return looksLikeHtml(body) ? "html" : "plain";
+}
+
+export function processEmailHtml(html: string, showImages: boolean): string {
+  // Parse the whole thing as a document and work on its <body>. Never wrap in
+  // an element and read that element's innerHTML back: the HTML parser closes
+  // the wrapper on the first stray "</div>" in the message, so everything
+  // after it becomes a sibling of the wrapper and is silently dropped —
+  // truncating the mail, and skipping the anchor pass below for every link
+  // that landed outside. Unbalanced div nesting is routine in real email.
+  //
+  // DOMParser also replaces the regex that used to pull content out of
+  // <body>...</body>: a "</body>" inside a comment or an attribute value
+  // re-cut the document. document.body always exists here, full document or
+  // fragment, and nothing can escape it.
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+  const root = doc.body;
 
   root.querySelectorAll("a[href]").forEach((anchor) => {
     // Sanitizing alone strips the href and leaves the anchor: styled like a
@@ -111,7 +179,7 @@ export function processEmailHtml(html: string, showImages: boolean): string {
     const href = anchor.getAttribute("href") ?? "";
     if (!isAllowedUri(href)) {
       const scheme = href.replace(attrWhitespace, "").match(leadingScheme)?.[1]?.toLowerCase();
-      anchor.replaceWith(document.createTextNode(`[Blocked link: ${scheme ? `${scheme}:` : "unrecognized address"}]`));
+      anchor.replaceWith(doc.createTextNode(`[Blocked link: ${scheme ? `${scheme}:` : "unrecognized address"}]`));
       return;
     }
     anchor.setAttribute("target", "_blank");
@@ -120,7 +188,7 @@ export function processEmailHtml(html: string, showImages: boolean): string {
 
   if (!showImages) {
     root.querySelectorAll("img").forEach((image) => {
-      image.replaceWith(document.createTextNode("[Image Blocked]"));
+      image.replaceWith(doc.createTextNode("[Image Blocked]"));
     });
   }
 

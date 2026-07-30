@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildReplyBody, buildForwardBody, buildReplyAllRecipients, ensureSubjectPrefix, escapeHtml } from "./compose";
-import type { InboxEmail } from "./types";
+import type { DecryptedView, InboxEmail } from "./types";
 
 function email(over: Partial<InboxEmail> = {}): InboxEmail {
   return {
@@ -73,5 +73,52 @@ describe("ensureSubjectPrefix", () => {
 describe("escapeHtml", () => {
   it("escapes every character that could break out of an attribute or element", () => {
     expect(escapeHtml(`<>&"'`)).toBe("&lt;&gt;&amp;&quot;&#39;");
+  });
+});
+
+// Quoting a client-protected account's mail. The server sends the ENVELOPE for
+// these — an armored blob or nothing — and an envelope's bodyMode says nothing
+// about the plaintext inside it. Reply/forward read email.bodyMode
+// unconditionally and never looked at the decrypted view at all, so quoting an
+// encrypted message quoted the ciphertext, and an HTML one would have been
+// paired with the envelope's "plain".
+describe("quoting a locally decrypted message", () => {
+  function decryptedView(over: Partial<DecryptedView> = {}): DecryptedView {
+    return { body: "", signed: false, verified: false, signerFingerprint: "", error: "", ...over };
+  }
+
+  it("quotes the decrypted body rather than the envelope", () => {
+    const encrypted = email({ body: "-----BEGIN PGP MESSAGE-----\nwcBMA...\n-----END PGP MESSAGE-----", bodyMode: "plain" });
+    const out = buildReplyBody(encrypted, decryptedView({ body: "the real plaintext", bodyMode: "plain" }));
+    expect(out).toContain("the real plaintext");
+    expect(out).not.toContain("BEGIN PGP MESSAGE");
+  });
+
+  it("uses the decrypted body's own render mode, not the envelope's", () => {
+    // The envelope says "plain"; the decrypted part's Content-Type says html.
+    // Taking the envelope's answer renders the markup as escaped source.
+    const encrypted = email({ body: "-----BEGIN PGP MESSAGE-----", bodyMode: "plain" });
+    const out = buildReplyBody(encrypted, decryptedView({ body: "<p>rich text</p>", bodyMode: "html" }));
+    expect(out).toContain("<p>rich text</p>");
+    expect(out).not.toContain("&lt;p&gt;");
+  });
+
+  it("still blocks remote content in a decrypted quote", () => {
+    const out = buildForwardBody(
+      email({ body: "-----BEGIN PGP MESSAGE-----" }),
+      decryptedView({ body: `<p>hi</p><img src="https://tracker.example/pixel.png">`, bodyMode: "html" })
+    );
+    expect(out).not.toContain("tracker.example");
+    expect(out).toContain("[Image Blocked]");
+  });
+
+  it("falls back to the server body when there is no decrypted view", () => {
+    const out = buildReplyBody(email({ body: "plain server body" }), undefined);
+    expect(out).toContain("plain server body");
+  });
+
+  it("ignores a decrypted view that only carries an error", () => {
+    const out = buildReplyBody(email({ body: "server body" }), decryptedView({ error: "could not decrypt" }));
+    expect(out).toContain("server body");
   });
 });

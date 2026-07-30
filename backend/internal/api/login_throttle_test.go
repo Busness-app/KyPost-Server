@@ -127,6 +127,7 @@ func TestLoginRequiresProofOfWorkByDefault(t *testing.T) {
 // per-IP one is defeated by more IPs and the resource being spent (CPU) is
 // shared.
 func TestLoginRateLimitIsInstanceWide(t *testing.T) {
+	withProductionHashCost(t)
 	srv := newTestServer(t)
 
 	// Distinct usernames AND distinct source IPs: neither the per-account nor

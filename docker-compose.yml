@@ -10,93 +10,54 @@ services:
     build: .
     container_name: KyPost-Server
 
-    # Join `kypost-net` (defined at the bottom of this file) at a fixed address.
+    # Join `kypost-net` (defined at the bottom) at a fixed address.
     #
-    # THE PROXY IN FRONT OF THIS SERVER MUST BE ON THIS NETWORK TOO. That is not
-    # a tidiness preference, it is what makes the client IP correct. Traffic that
-    # crosses from one Docker network to another — or leaves and comes back
-    # through the published port below — is source-NATed on the way in, so the
-    # peer address this server sees is a bridge gateway (172.x.0.1) that is the
-    # SAME for every caller. That address is the lockout key: the login, CardDAV,
-    # device and proof-of-work lockouts and the WKD rate limit all collapse into
-    # one bucket shared by every user (enough failures from anyone locks out
-    # everyone), and the MFA sign-in push reports the gateway instead of the
-    # address of whoever is signing in. Sharing one network is what keeps the peer
-    # address the proxy's own.
-    #
-    # See the `networks:` block at the bottom for how a proxy in another Compose
-    # project joins this, and for why this is a named network rather than Docker's
-    # default bridge.
+    # THE PROXY IN FRONT OF THIS SERVER MUST BE ON THIS NETWORK TOO, or every
+    # caller arrives source-NATed as the same gateway address and every IP-keyed
+    # lockout collapses into one shared bucket.
+    # See docs/Reverse_Proxy_Networking.md.
     networks:
       kypost-net:
-        # Pinned so the address a proxy is configured with survives a rebuild.
-        # Docker otherwise allocates from the subnet in start order, so a
-        # recreate can move this container and silently break a tunnel or an
-        # nginx upstream that names an IP.
-        #
-        # A pinned address requires a network with a user-configured subnet;
-        # Docker refuses `ipv4_address` on the default bridge outright ("user
-        # specified IP address is supported on user-defined networks only").
+        # Pinned so the address a proxy is configured with survives a rebuild;
+        # Docker otherwise allocates in start order and a recreate can move this
+        # container out from under a tunnel or an nginx upstream.
         #
         # Prefer addressing this container by NAME where you can — this network
-        # has DNS, so `http://KyPost-Server:5866` is rebuild-proof too and stays
-        # right even if the subnet or this pin changes. The pin is for proxies
-        # that will only take an IP.
+        # has DNS, so `http://KyPost-Server:5866` is rebuild-proof and stays
+        # right even if the subnet changes. The pin is for proxies that will
+        # only take an IP.
         ipv4_address: ${KYPOST_IP:-10.89.0.5}
 
-    # Published on all interfaces by default; KYPOST_BIND narrows it.
-    #
-    # Loopback is the better posture and it is one line away
-    # (KYPOST_BIND=127.0.0.1): this service speaks plain HTTP unless
+    # Published on all interfaces by default. This speaks plain HTTP unless
     # TLS_CERT_FILE is set, so an unproxied 5866 on a LAN is cleartext — and
-    # with TRUSTED_PROXY_CIDRS configured, anything that can reach 5866 directly
-    # can forge X-Forwarded-For and defeat every IP-keyed lockout.
+    # with TRUSTED_PROXY_CIDRS set, anything that can reach 5866 directly can
+    # forge X-Forwarded-For and defeat every IP-keyed lockout.
     #
-    # It is NOT the default, because it cannot be. This defaulted to 127.0.0.1
-    # for exactly one release and took a working Cloudflare Tunnel install
-    # offline: the tunnel reached the origin at the host's LAN address, which
-    # loopback-only publishing severs. A default that breaks a running
-    # deployment the moment someone pulls is not a security improvement, it is
-    # an outage. Narrowing this is a decision only the operator can make,
-    # because only they know how their proxy reaches this container.
-    #
-    # Narrow it when you can:
+    # All-interfaces is NOT the better posture, it is the only default that does
+    # not break existing installs: 127.0.0.1 shipped for one release and took
+    # working Cloudflare Tunnel setups offline, because the tunnel reached the
+    # origin at the host's LAN address. Only the operator knows how their proxy
+    # gets here, so narrowing it is their call:
     #   KYPOST_BIND=127.0.0.1     # proxy on this host, reaching 127.0.0.1:5866
     #   KYPOST_BIND=192.168.1.5   # only the interface the proxy talks to
     #
-    # Better still: put the proxy on kypost-net (see `networks:` above and at the
-    # bottom) and point it at http://KyPost-Server:5866. Container-to-container
-    # traffic ignores published ports entirely, so nothing needs publishing at
-    # all — and the peer address this server sees is then the proxy's own rather
-    # than a NAT gateway shared by every caller. Reaching this container through
-    # the published port instead defeats that even if both are on kypost-net,
-    # because the round trip out to the host and back in is NATed.
+    # Better still, publish nothing: put the proxy on kypost-net and point it at
+    # http://KyPost-Server:5866. See docs/Reverse_Proxy_Networking.md.
     ports:
       - "${KYPOST_BIND:-0.0.0.0}:5866:5866"
     #  - "127.0.0.1:11434:11434"  #Uncomment to expose Ollama API
     environment:
       WEB_PORT: 5866
-      # Peers whose X-Forwarded-For/Proto/Host may be believed, as a
-      # comma-separated list of CIDRs or bare IPs. Empty (the default) trusts
-      # nothing and uses the connection's own address.
+      # Peers whose X-Forwarded-For/Proto/Host may be believed: a comma-separated
+      # list of CIDRs or bare IPs (not hostnames). Empty trusts nothing and uses
+      # the connection's own address.
       #
-      # This replaced a TRUST_PROXY_HEADERS=true boolean, which trusted those
-      # headers on every connection from any peer — so it only did the right
-      # thing when nothing but the proxy could reach the port, and silently did
-      # the wrong thing otherwise. Set this to your proxy's address, not to a
-      # wide range.
+      # Set it to your proxy's address specifically, not a wide range — a
+      # container on kypost-net is the address pinned for it there
+      # (e.g. 10.89.0.10/32); a proxy on this host is 127.0.0.1/32.
       #
-      # For a proxy container on kypost-net, that is the address you pinned for it
-      # there (see the `networks:` block at the bottom), e.g. 10.89.0.10/32. For
-      # a proxy on this host reaching a published port, it is 127.0.0.1/32.
-      #
-      # This takes an address, not a hostname — the server parses CIDRs and bare
-      # IPs — so it cannot be pointed at a container name the way the proxy's own
-      # upstream URL can. Pin the proxy's address and name it here.
-      #
-      # Do not leave this empty behind a proxy. Failing closed is correct — the
-      # alternative lets any caller name their own IP — but the closed state keys
-      # every caller as the proxy or gateway address, which is one shared lockout
+      # Do not leave it empty behind a proxy. Failing closed is right, but the
+      # closed state keys every caller as the gateway — one shared lockout
       # bucket. Verify with GET /api/status: `clientIp` must be your own public
       # address and `proxyHeadersTrusted` must be true.
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
@@ -159,6 +120,39 @@ services:
     mem_limit: ${KYPOST_MEM_LIMIT:-8g}
     cpus: ${KYPOST_CPUS:-4.0}
 
+    # Kernel-level limits, because this process parses hostile input for a
+    # living: MIME from strangers, vCards from a CardDAV peer, OpenPGP packets,
+    # and an LLM's output. mem_limit and cpus bound what a bug can consume;
+    # these bound what it can reach.
+    #
+    # no-new-privileges stops any setuid binary in the image from raising
+    # privilege — entrypoint.sh drops root via setpriv before exec'ing
+    # supervisord, and nothing afterwards has any business climbing back.
+    security_opt:
+      - no-new-privileges:true
+
+    # Drop every capability, then add back only what the entrypoint needs
+    # before it drops to the kypost user:
+    #   CHOWN, FOWNER  — chown the mounted volumes on first start
+    #   SETUID, SETGID — the setpriv drop itself
+    #   DAC_OVERRIDE   — write into a volume whose host ownership does not
+    #                    match, which is the normal case for a bind mount
+    # Notably absent: NET_RAW, NET_ADMIN, SYS_ADMIN, SYS_PTRACE, MKNOD.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+
+    # A fork bomb in any of the four supervised processes otherwise takes the
+    # host's PID table with it, not just this container. The steady state is
+    # well under a hundred threads across supervisord, the API, the daemon and
+    # Ollama; this is loose enough that a model load will not brush it.
+    pids_limit: ${KYPOST_PIDS_LIMIT:-512}
+
     # Docker only knows the container is unhealthy if something asks. The image
     # defines the HEALTHCHECK; this is what makes an unhealthy container
     # visible in `docker compose ps` rather than a process that is technically
@@ -179,78 +173,16 @@ volumes:
 
 # The network this server and the proxy in front of it share.
 #
-# Named (rather than Compose's per-project default) and given an explicit subnet,
-# for two reasons: a proxy in a DIFFERENT Compose project can join it by a name
-# that does not depend on this checkout's directory, and a user-configured subnet
-# is the prerequisite for the pinned ipv4_address above — Docker rejects pinned
-# addresses on any network it auto-configured, including the default bridge.
+# Named and given an explicit subnet so a proxy in another Compose project can
+# join it by a stable name, and because Docker only accepts the pinned
+# ipv4_address above on a user-configured network.
 #
-# TO PUT YOUR PROXY ON IT, in the proxy's own compose file:
+# PUTTING A PROXY ON IT, recovering from "incorrect label" or "Pool overlaps",
+# and why the peer address is wrong without this:
+#   docs/Reverse_Proxy_Networking.md
 #
-#   services:
-#     cloudflared:
-#       networks:
-#         kypost-net:
-#           ipv4_address: 10.89.0.10    # pin it: TRUSTED_PROXY_CIDRS names this
-#   networks:
-#     kypost-net:
-#       external: true
-#
-# Then point the proxy at http://KyPost-Server:5866 (this network has DNS, so the
-# name is stable across rebuilds) and set TRUSTED_PROXY_CIDRS=10.89.0.10/32.
-#
-# `external: true` on the PROXY side, and only there: this Compose project is what
-# creates and owns the network, so bring KyPost up first. The proxy fails with
-# "network kypost-net declared as external, but could not be found" if it starts
-# first — start it again once KyPost is up.
-#
-# DO NOT create this network with `docker network create`. Compose only manages
-# networks carrying its own labels, so a hand-made one is refused with:
-#
-#   network kypost-net was found but has incorrect label
-#   com.docker.compose.network set to "" (expected: "kypost-net")
-#
-# To recover, hand the network back to Compose — detach whatever is on it, remove
-# it, and let `up` recreate it:
-#
-#   docker compose down                                  # in this directory
-#   docker network inspect kypost-net \
-#     -f '{{range .Containers}}{{.Name}} {{end}}'         # what is still attached
-#   docker network disconnect -f kypost-net <each>        # or stop those containers
-#   docker network rm kypost-net
-#   docker compose up -d                                 # recreates it, labelled
-#
-# Then start the proxy again so it rejoins. Nothing is lost: the network holds no
-# state, and the addresses are pinned here and in the proxy's compose file, so
-# both containers come back at the same addresses.
-#
-# Keep this network to just those containers, or pin addresses high (.200, .201).
-# Docker allocates dynamic addresses from the low end of the subnet, so a third
-# container joining can be handed the address you pinned for something else.
-#
-# IF STARTUP FAILS WITH "Pool overlaps with other one on this address space", the
-# subnet below is already taken on your host. Change it, along with KYPOST_IP:
-#
-#   KYPOST_SUBNET=10.90.0.0/24
-#   KYPOST_IP=10.90.0.5
-#
-# List what is taken with:
-#   docker network ls -q | xargs docker network inspect \
-#     -f '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}'
-#
-# The default is 10.89.0.0/24 rather than a 172.x one deliberately. Docker
-# auto-allocates project networks as /16s out of 172.17.0.0/12 — 172.17, 172.18,
-# 172.19 and up — so any 172.x default here collides the moment a host has enough
-# Compose projects to reach it, and the collision surfaces as the error above
-# rather than as anything mentioning this file. 10.89.0.0/24 is outside that pool.
-# Change it if it clashes with your own LAN or VPN routes.
-#
-# A proxy started with a plain `docker run` and no --network lands on Docker's
-# default bridge, NOT here, and will reach this server only through the published
-# port — which NATs the source and gives every caller the same gateway address.
-# That is the failure this file works to prevent, so if you are wiring up a proxy
-# and the addresses stay identical for every visitor, this is the first thing to
-# check. Verify with GET /api/status, do not assume.
+# Do NOT create this network with `docker network create` — Compose only manages
+# networks carrying its own labels. See the doc above to recover if you have.
 networks:
   kypost-net:
     name: ${KYPOST_NETWORK:-kypost-net}

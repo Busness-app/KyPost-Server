@@ -456,30 +456,49 @@ const maxContentDepth = 8
 // (the protected-headers legacy-display part) are skipped. Anything
 // unrecognized degrades gracefully to an attachment rather than erroring, so
 // the message still renders.
-func ParseContent(content []byte) (body string, attachments []mailmsg.Attachment, err error) {
+// bodyMode reports which render mode a part's Content-Type asks for. The
+// caller carries it to the client so nothing downstream has to sniff the
+// bytes and guess.
+func bodyMode(contentType string) string {
+	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil &&
+		strings.EqualFold(mediaType, "text/html") {
+		return BodyModeHTML
+	}
+	return BodyModePlain
+}
+
+// Body render modes, matching imapadapter's. A decrypted message's display
+// part is markup or it is not, and only the parse knows which.
+const (
+	BodyModeHTML  = "html"
+	BodyModePlain = "plain"
+)
+
+func ParseContent(content []byte) (body, mode string, attachments []mailmsg.Attachment, err error) {
 	if int64(len(content)) > mailmsg.MaxInboundMessageBytes {
-		return "", nil, mailmsg.ErrMessageTooLarge
+		return "", "", nil, mailmsg.ErrMessageTooLarge
 	}
 	reader := textproto.NewReader(bufio.NewReader(bytes.NewReader(content)))
 	header, err := reader.ReadMIMEHeader()
 	if err != nil && header == nil {
-		return "", nil, fmt.Errorf("pgpmail: read content headers: %w", err)
+		return "", "", nil, fmt.Errorf("pgpmail: read content headers: %w", err)
 	}
 	rest, err := mailmsg.BoundedRead(reader.R, mailmsg.MaxInboundMessageBytes)
 	if err != nil {
 		if errors.Is(err, mailmsg.ErrMessageTooLarge) {
-			return "", nil, err
+			return "", "", nil, err
 		}
-		return "", nil, fmt.Errorf("pgpmail: read content body: %w", err)
+		return "", "", nil, fmt.Errorf("pgpmail: read content body: %w", err)
 	}
 
 	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") || params["boundary"] == "" {
-		return string(rest), nil, nil
+		return string(rest), bodyMode(header.Get("Content-Type")), nil, nil
 	}
 
-	err = parseMultipart(bytes.NewReader(rest), params["boundary"], 0, &body, &attachments)
-	return body, attachments, err
+	mode = BodyModePlain
+	err = parseMultipart(bytes.NewReader(rest), params["boundary"], 0, &body, &mode, &attachments)
+	return body, mode, attachments, err
 }
 
 // parseMultipart walks the parts of a multipart body, recursing into nested
@@ -487,7 +506,7 @@ func ParseContent(content []byte) (body string, attachments []mailmsg.Attachment
 // untyped part found (in document order, across nesting) wins as the display
 // body; other recognized parts become attachments; text/rfc822-headers parts
 // are skipped.
-func parseMultipart(r io.Reader, boundary string, depth int, body *string, attachments *[]mailmsg.Attachment) error {
+func parseMultipart(r io.Reader, boundary string, depth int, body, mode *string, attachments *[]mailmsg.Attachment) error {
 	if depth >= maxContentDepth {
 		return nil
 	}
@@ -504,7 +523,7 @@ func parseMultipart(r io.Reader, boundary string, depth int, body *string, attac
 		partType := part.Header.Get("Content-Type")
 		if mediaType, params, mtErr := mime.ParseMediaType(partType); mtErr == nil &&
 			strings.HasPrefix(mediaType, "multipart/") && params["boundary"] != "" {
-			if err := parseMultipart(part, params["boundary"], depth+1, body, attachments); err != nil {
+			if err := parseMultipart(part, params["boundary"], depth+1, body, mode, attachments); err != nil {
 				return err
 			}
 			continue
@@ -538,6 +557,11 @@ func parseMultipart(r io.Reader, boundary string, depth int, body *string, attac
 		if filename == "" && (strings.HasPrefix(partType, "text/plain") || strings.HasPrefix(partType, "text/html") || partType == "") {
 			if *body == "" {
 				*body = string(partBody)
+				// The winning part's own type decides the render mode. Taken
+				// here rather than sniffed later: a text/plain part that
+				// mentions "<user@example.com>" is not markup, and treating it
+				// as markup deletes the address.
+				*mode = bodyMode(partType)
 			}
 			continue
 		}

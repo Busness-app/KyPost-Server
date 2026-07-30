@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { processEmailHtml, sanitizeEmailHtml } from "./emailHtml";
+import { processEmailHtml, resolveBodyMode, sanitizeEmailHtml } from "./emailHtml";
 
 // This is the function standing between a hostile email and the user's
 // session. It had a careful doc comment explaining why it matters and zero
@@ -299,5 +299,127 @@ describe("run-5 audit regressions", () => {
       const out = processEmailHtml(`<a href="${uri}">click</a>`, false);
       expect(out).toContain(uri);
     }
+  });
+});
+
+// The pipeline AROUND the sanitizer, which is where the message actually got
+// eaten. Every case below was reproduced against the previous implementation.
+describe("processEmailHtml does not lose message content", () => {
+  it("keeps everything after a stray closing div", () => {
+    // The old code wrapped content in a <div> and returned that element's
+    // innerHTML. The parser closed the wrapper here, so the rest of the
+    // message became a sibling and was dropped — silently truncating any mail
+    // with unbalanced div nesting, which marketing templates produce routinely.
+    const out = processEmailHtml("<p>First half</p></div><p>Second half</p>", false);
+    expect(out).toContain("First half");
+    expect(out).toContain("Second half");
+  });
+
+  it("hardens links that follow a stray closing div", () => {
+    // Same root cause, worse consequence: an anchor outside the wrapper never
+    // reached the rel/target pass, and a disallowed scheme there never got its
+    // [Blocked link] marker.
+    const out = processEmailHtml('<p>hi</p></div><a href="https://ok.example">click</a>', false);
+    expect(out).toContain("https://ok.example");
+    expect(out).toContain('rel="noopener noreferrer"');
+  });
+
+  it("blocks a disallowed scheme that follows a stray closing div", () => {
+    const out = processEmailHtml('<p>hi</p></div><a href="kypost://native-pair?srv=x">click</a>', false);
+    expect(out).not.toContain("kypost://");
+    expect(out).toContain("[Blocked link: kypost:]");
+  });
+
+  it("is not re-cut by a </body> inside an attribute", () => {
+    // The old <body>...</body> regex could pick the wrong closing tag.
+    const out = processEmailHtml('<body><p title="&lt;/body&gt;">Kept</p><p>Also kept</p></body>', false);
+    expect(out).toContain("Kept");
+    expect(out).toContain("Also kept");
+  });
+
+  it("extracts the body of a full HTML document", () => {
+    const out = processEmailHtml("<html><head><title>t</title></head><body><p>Body text</p></body></html>", false);
+    expect(out).toContain("Body text");
+    expect(out).not.toContain("<title>");
+  });
+});
+
+describe("resolveBodyMode", () => {
+  it("trusts the server's answer over the shape of the bytes", () => {
+    // The whole point. This body is plain text that happens to contain an
+    // angle-bracketed address; the server said so, and that has to win.
+    expect(resolveBodyMode("Contact <admin@example.com> today", "plain")).toBe("plain");
+    // And markup the server called markup stays markup even if the fallback
+    // heuristic would have been unsure.
+    expect(resolveBodyMode("plain looking", "html")).toBe("html");
+  });
+
+  it("does not treat an angle-bracketed address as markup when it must guess", () => {
+    // Regression: /<[^>]+>/ matched "<admin@example.com>", so a plain-text
+    // body went through the markup pipeline, the parser read the address as an
+    // unknown element, and it was deleted from the message with no marker.
+    const body = "Please contact <admin@example.com> about the invoice.";
+    expect(resolveBodyMode(body, undefined)).toBe("plain");
+    // Prove the consequence the old path had, so nobody reintroduces it.
+    expect(processEmailHtml(body, false)).not.toContain("admin@example.com");
+  });
+
+  it("does not treat comparison operators as markup when it must guess", () => {
+    expect(resolveBodyMode("ship it if a < b and b > c", undefined)).toBe("plain");
+  });
+
+  it("still recognizes real markup when it must guess", () => {
+    for (const body of ["<p>hi</p>", "<DIV>hi</DIV>", '<a href="https://x">x</a>', "<br>", "<table><tr><td>x"]) {
+      expect(resolveBodyMode(body, undefined)).toBe("html");
+    }
+  });
+
+  // The tag allowlist that replaced /<[^>]+>/ traded one set of false answers
+  // for another. Both sets are pinned here so neither can come back.
+  it("recognizes markup outside any hand-written tag list", () => {
+    // Every one of these was classified "plain" by the 34-tag allowlist, so a
+    // real HTML message rendered as escaped source.
+    for (const body of [
+      "<center>Hello</center>",
+      "<dl><dt>term</dt><dd>definition</dd></dl>",
+      "<code>x = 1</code>",
+      "<small>fine print</small>",
+      "<figure><figcaption>caption</figcaption></figure>",
+      "<article>story</article>",
+      "<sub>2</sub> and <sup>3</sup>",
+      "<section><header>hi</header></section>"
+    ]) {
+      expect(resolveBodyMode(body, undefined), `expected html for ${body}`).toBe("html");
+    }
+  });
+
+  // The residual ambiguity, pinned deliberately rather than left to be
+  // rediscovered. Prose mentioning a real tag cannot be told from markup
+  // without a Content-Type, so this errs toward "html" — and the point of the
+  // test is that erring that way is CHEAP: a known element renders as itself
+  // and the words around it survive.
+  it("errs toward markup for prose mentioning a real tag, without eating the words", () => {
+    const body = "Use <br> to break a line in HTML.";
+    expect(resolveBodyMode(body, undefined)).toBe("html");
+    const out = processEmailHtml(body, false);
+    expect(out).toContain("Use");
+    expect(out).toContain("to break a line in HTML.");
+  });
+
+  // The expensive direction, which must never happen: an UNKNOWN element
+  // swallows its content, so misreading these deletes text outright.
+  it("never routes an unknown-element body through the markup pipeline", () => {
+    for (const body of [
+      "Please contact <admin@example.com> about the invoice.",
+      "ship it if a < b and b > c",
+      "the tag <o:p> is Word-specific"
+    ]) {
+      expect(resolveBodyMode(body, undefined), `expected plain for ${body}`).toBe("plain");
+    }
+  });
+
+  it("handles an empty or bracket-free body without calling it markup", () => {
+    expect(resolveBodyMode("", undefined)).toBe("plain");
+    expect(resolveBodyMode("just some ordinary text", undefined)).toBe("plain");
   });
 });
