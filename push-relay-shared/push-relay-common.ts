@@ -80,6 +80,10 @@ export interface ApiKeyRecord {
 
 export const KEY_PREFIX = "key:"; // key:<sha256(key)>      -> ApiKeyRecord (durable)
 export const KEY_INDEX_PREFIX = "keyid:"; // keyid:<id>     -> <sha256(key)> for revoke-by-id
+// The two ownership indexes below are no longer authoritative — RelayCoordinator
+// is (KV cannot make check-then-write atomic). They are kept as the one-time
+// seed for a coordinator instance that has never been touched, so claims made
+// before that change survive it, plus a little operator-facing bookkeeping.
 export const IP_INDEX_PREFIX = "ipkey:"; // ipkey:<ip>      -> keyId (one active key per IP)
 export const BOUND_TOKEN_PREFIX = "boundtoken:"; // boundtoken:<sha256(deviceToken)> -> keyId (first sender owns it)
 
@@ -201,6 +205,11 @@ export function isExpired(record: ApiKeyRecord, now: number): boolean {
 // claims it, and every later /send to that token must come from the same key. A
 // claim is released for reclaiming once the owning key is revoked/expired/
 // deleted, so key rotation never permanently orphans a legitimate device.
+//
+// The claim itself lives in RelayCoordinator, a Durable Object, because "is this
+// token free?" followed by "take it" against eventually consistent KV is not one
+// decision — two keys racing the first send to a token both read "free" and both
+// were let through, which is the spoofing this section exists to prevent.
 
 /**
  * Resolves the coordinator instance that owns one claim. Naming the instance
@@ -573,7 +582,15 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   if (registeredIp && ipStub) {
     // Swap first, then revoke what the swap displaced. The other order is the
     // race: two registrations can both read the same prior key and both believe
-    // they superseded it, leaving both of their own keys active.
+    // they superseded it, leaving both of their own keys active. Here each
+    // registration is handed its own immediate predecessor, so N racers form a
+    // chain of N-1 revocations and exactly one key is left standing.
+    //
+    // The KV index is no longer the authority — it only seeds a coordinator
+    // instance that has never been touched, and gives revokeKeyById something to
+    // tidy up. It is written after the swap and may lose a race with
+    // revokeKeyById's cleanup below; that costs nothing, because the coordinator
+    // holds the real answer and ignores the seed once set.
     const legacyKeyId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
     const priorId = await ipStub.claimRegistrationIp(record.id, legacyKeyId);
     await env.API_KEYS.put(IP_INDEX_PREFIX + registeredIp, record.id);
