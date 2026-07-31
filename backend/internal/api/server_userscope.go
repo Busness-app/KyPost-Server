@@ -44,14 +44,13 @@ func getOrCreateUserStore[T any](mu *sync.Mutex, cache map[string]T, lastSeen ma
 }
 
 // userStoreIdleTTL is how long a user's cached stores survive with no requests
-// before sweepIdleUserStores reclaims them. Without a bound, every user who
-// ever authenticates pins their full processed-message set and decision history
-// in RAM for the process lifetime.
+// before sweepIdleUserStores reclaims them. Without a bound, every user who ever
+// authenticates pins their full processed-message set and decision history in
+// RAM for the process lifetime.
 //
-// Eviction is safe because these stores hold no state a reopen cannot rebuild:
-// state.Store owns a SQLite handle, the rest are file-backed JSON. A dropped
-// store costs one reopen. Anything added here that holds a live resource MUST
-// release it on becoming unreachable (state.New's runtime cleanup is the
+// Eviction is safe because these stores hold no state a reopen cannot rebuild: a
+// dropped store costs one reopen. Anything added here that holds a live resource
+// MUST release it on becoming unreachable (state.New's runtime cleanup is the
 // pattern) — never by closing it in sweepIdleUserStores, which cannot tell
 // whether a caller is still using it.
 const userStoreIdleTTL = 2 * time.Hour
@@ -60,9 +59,12 @@ const userStoreIdleTTL = 2 * time.Hour
 // var so tests can drive it.
 var userStoreSweepInterval = 30 * time.Minute
 
-// StartUserStoreSweeper reclaims per-user stores idle past userStoreIdleTTL.
-// Follows StartSessionSweeper's ticker/select pattern; call once after
-// NewServer.
+// StartUserStoreSweeper reclaims per-user stores idle past userStoreIdleTTL and
+// prunes deviceIndex residue. Call once after NewServer.
+//
+// The device-index prune rides this ticker because it needs the same walk over
+// every account's store. Order matters: prune first, while the stores are about
+// to be opened anyway, then evict.
 func (s *Server) StartUserStoreSweeper(ctx context.Context) {
 	ticker := time.NewTicker(userStoreSweepInterval)
 	defer ticker.Stop()
@@ -71,6 +73,7 @@ func (s *Server) StartUserStoreSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.sweepDeviceIndex()
 			s.sweepIdleUserStores(time.Now())
 		}
 	}
@@ -88,22 +91,20 @@ func (s *Server) sweepIdleUserStores(now time.Time) int {
 		if now.Sub(seen) < userStoreIdleTTL {
 			continue
 		}
-		// Dropping the map entry is the whole eviction. It deliberately does NOT
-		// Close the state.Store's SQLite handle.
+		// Dropping the map entry is the whole eviction. It deliberately does NOT Close
+		// the state.Store's SQLite handle.
 		//
-		// The caches hand out bare pointers and release userMu before the caller
-		// has finished with them, and userLastSeen records when a store was
-		// ACQUIRED, not when it was released — so "idle for two hours" does not
-		// mean "nobody is holding it". Closing here severed the handle under any
-		// caller that outlived the TTL (a stalled IMAP fetch inside the 10-minute
-		// WriteTimeout, a large attachment stream, a goroutine outliving its
-		// request) and turned their next query into "database is closed".
+		// The caches hand out bare pointers and release userMu before the caller has
+		// finished, and userLastSeen records when a store was ACQUIRED, not released —
+		// so "idle for two hours" does not mean "nobody is holding it". Closing here
+		// severs the handle under any caller that outlived the TTL (a stalled IMAP fetch
+		// inside the 10-minute WriteTimeout, a large attachment stream) and turns their
+		// next query into "database is closed".
 		//
-		// state.New registers a runtime cleanup instead, so the fd and WAL are
-		// released once the Store is genuinely unreachable. Reachability is the
-		// reference count this cache never kept. Anything added here that holds a
-		// live resource must arrange the same, NOT a close on eviction.
-		// Pinned by TestEvictedStoreStaysUsableForItsHolder.
+		// state.New registers a runtime cleanup instead, so the fd and WAL are released
+		// once the Store is genuinely unreachable. Anything added here that holds a live
+		// resource must arrange the same. Pinned by
+		// TestEvictedStoreStaysUsableForItsHolder.
 		delete(s.userStores, userID)
 		delete(s.userContacts, userID)
 		delete(s.userSendAs, userID)
@@ -125,12 +126,10 @@ var errIMAPNotConfigured = errors.New("imap configuration is required")
 var errMailUnauthorized = errors.New("unauthorized")
 
 // mailLockedOutError is returned by resolveMailAuthContext instead of
-// errMailUnauthorized when device-secret auth failed specifically because
-// the deviceID is currently locked out (see s.deviceLockout), rather than
-// because the presented credentials were wrong. resolveMailAuthContext
-// doesn't hold a http.ResponseWriter to answer 429 itself, so it hands its
-// one caller (withMailAuth) this typed sentinel to distinguish the two cases
-// and set Retry-After accordingly.
+// errMailUnauthorized when device-secret auth failed because the deviceID is
+// locked out (see s.deviceLockout) rather than because the credentials were
+// wrong. resolveMailAuthContext holds no ResponseWriter, so it hands its one
+// caller (withMailAuth) this typed sentinel to answer 429 with Retry-After.
 type mailLockedOutError struct {
 	retryAfter time.Duration
 }
@@ -333,16 +332,14 @@ func (s *Server) userMailClient(userID string) (imapadapter.Client, error) {
 
 // closeMailClient hangs up a mail client that is being dropped from a cache.
 //
-// An imapadapter.APIClient holds a live authenticated IMAP session for its
-// whole life; nothing reclaims that when the value becomes unreachable, so an
-// evicted client leaks one connection per eviction, in each of the two
-// processes that keep such a cache. IMAP providers cap concurrent sessions per
-// account, so the leak ends as "too many simultaneous connections" and mail
-// simply stops syncing.
+// An imapadapter.APIClient holds a live authenticated IMAP session for its whole
+// life and nothing reclaims that when the value becomes unreachable, so an
+// evicted client leaks one connection per eviction in each of the two processes
+// that keep such a cache. IMAP providers cap concurrent sessions per account, so
+// the leak ends as "too many simultaneous connections" and mail stops syncing.
 //
 // io.Closer rather than a Close method on imapadapter.Client: the interface has
-// six test fakes with nothing to close, and widening it for their sake buys
-// nothing. A client that isn't a Closer is a no-op here.
+// six test fakes with nothing to close. A client that isn't a Closer is a no-op.
 func closeMailClient(client imapadapter.Client) {
 	if c, ok := client.(io.Closer); ok {
 		_ = c.Close()
@@ -357,13 +354,12 @@ func (s *Server) mailFor(r *http.Request) (imapadapter.Client, error) {
 	return s.userMailClient(ac.UserID)
 }
 
-// resolveMailAuthContext authenticates a mail request either by session
-// cookie (web) or by per-device pairing credentials (mobile/native, reusing
-// the same device trust boundary as native push and contacts sync — see
-// contacts_handlers.go's handleContactsSync). Device credentials are read
-// from the X-Kypost-Device-Id/X-Kypost-Device-Secret headers (see
-// device_auth.go). Mobile never sees or sets raw IMAP/SMTP credentials; it
-// only acts on an account already configured through the web UI.
+// resolveMailAuthContext authenticates a mail request either by session cookie
+// (web) or by per-device pairing credentials (mobile/native, the same device
+// trust boundary as native push and contacts sync). Device credentials come from
+// the X-Kypost-Device-Id/X-Kypost-Device-Secret headers (see device_auth.go).
+// Mobile never sees or sets raw IMAP/SMTP credentials; it only acts on an
+// account already configured through the web UI.
 func (s *Server) resolveMailAuthContext(r *http.Request) (AuthContext, error) {
 	if ac, ok := s.currentUser(r); ok {
 		return ac, nil
@@ -430,11 +426,9 @@ func (s *Server) knownUserIDs() []string {
 // rescanSubscriberIndex rebuilds subscriberID -> userID across every per-user
 // store. Cheap at this scale (a handful of accounts).
 //
-// It goes through state.Store rather than reading the underlying file. Parsing
-// storage directly from here is how this broke once already: it hard-coded
-// state.json, so the move to SQLite left it silently finding nothing and every
-// device registration answering "unknown subscriber". The store is the only
-// thing that knows how state is stored.
+// It goes through state.Store rather than reading the underlying file: parsing
+// storage directly hard-coded state.json, so the move to SQLite left it silently
+// finding nothing and every device registration answering "unknown subscriber".
 func (s *Server) rescanSubscriberIndex() {
 	next := map[string]string{}
 	// userStore takes s.userMu, so resolve every store BEFORE taking it below.
@@ -473,11 +467,14 @@ func (s *Server) lookupUserByDevice(deviceID string) (string, bool) {
 	}
 	s.userMu.Unlock()
 
-	// Throttled. The index is a resolution hint with no startup warm, so a miss
-	// must still be able to rebuild it — but deviceID is caller-supplied with
-	// unbounded cardinality, and the device lockout is keyed on it, so rotating
-	// the id meant every unauthenticated request forced a full rescan that
-	// opens SQLite for every account on the instance.
+	// Throttled. The index is a resolution hint with no startup warm, so a miss must
+	// still be able to rebuild it — but deviceID is caller-supplied with unbounded
+	// cardinality, so rotating the id meant every unauthenticated request forced a
+	// full rescan that opens SQLite for every account on the instance.
+	//
+	// The rescan MERGES; sweepDeviceIndex is what removes. A rescan can be triggered
+	// by an unauthenticated caller and must never delete anything, least of all a
+	// reservation another registration is holding but has not yet persisted.
 	if s.deviceRescan.allow() {
 		s.rescanDeviceIndex()
 	}
@@ -489,57 +486,190 @@ func (s *Server) lookupUserByDevice(deviceID string) (string, bool) {
 }
 
 // reserveDeviceID atomically reserves deviceID for ownerID in the shared
-// deviceIndex, refusing if it's already reserved by a different owner. The
-// check and the reservation happen in the same critical section, so two
-// concurrent registrations for the same client-chosen deviceId from two
-// different owners can't both succeed — the second call returns false
-// instead of both callers proceeding and leaving deviceIndex pointing at
-// only one of them (silently orphaning the other's device). An empty
-// deviceID is a no-op (true, nothing to reserve) since the server mints a
-// fresh random UUID for those.
-func (s *Server) reserveDeviceID(ownerID, deviceID string) bool {
+// deviceIndex, refusing if it is already reserved by a different owner. Check
+// and reservation share one critical section, so two concurrent registrations
+// for the same client-chosen deviceId from different owners cannot both succeed
+// and silently orphan one of them.
+//
+// The returned release MUST be deferred by the caller. A reservation is a
+// promise to write a NativeDevice row under this ID, and a registration that
+// returns without keeping it — a failed secret mint, a failed
+// UpsertNativeDevice, a merge into an existing row — leaves a permanent index
+// entry with nothing behind it. That entry makes the ID unregisterable by
+// anyone, and every auth attempt against it burns a deviceLockout strike,
+// because deviceAuthFromRequest resolves the owner and only THEN finds no
+// device. One transient SQLite error during re-pairing bricks that phone against
+// this server until the process restarts.
+//
+// Release and Commit are idempotent and mutually exclusive — whichever runs
+// first wins — so the defer is safe on every return path, including the success
+// path that has already committed.
+//
+// An empty deviceID is a no-op (ok=true); the server mints a fresh random UUID.
+func (s *Server) reserveDeviceID(ownerID, deviceID string) (*deviceReservation, bool) {
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" {
-		return true
+		return &deviceReservation{srv: s, ownerID: ownerID}, true
 	}
-	// Warm the index from disk on a miss, so a device registered before this
-	// process started, or by a prior request, is still honored by the check
-	// below. This runs outside the critical section because it does disk I/O
-	// and takes userMu itself — which is precisely why rescanDeviceIndex
-	// must merge rather than replace: a rescan triggered here by one
-	// in-flight registration must not wipe the reservation another one has
-	// already made but not yet persisted.
+	// Warm the index from disk on a miss, so a device registered before this process
+	// started is still honored by the check below. Outside the critical section
+	// because it does disk I/O and takes userMu itself — which is why
+	// rescanDeviceIndex must merge rather than replace: a rescan triggered here must
+	// not wipe a reservation another in-flight registration has not yet persisted.
 	s.lookupUserByDevice(deviceID)
 
 	s.userMu.Lock()
 	defer s.userMu.Unlock()
-	if existing, ok := s.deviceIndex[deviceID]; ok && existing != ownerID {
-		return false
+	if existing, exists := s.deviceIndex[deviceID]; exists && existing != ownerID {
+		return nil, false
 	}
 	s.deviceIndex[deviceID] = ownerID
-	return true
+	// Mark it in-flight so sweepDeviceIndex, which decides what is residue by
+	// looking at DISK, does not mistake a reservation that has not reached disk
+	// yet for an orphan and delete it.
+	s.deviceReserving[deviceID]++
+	return &deviceReservation{srv: s, ownerID: ownerID, deviceID: deviceID}, true
+}
+
+// deviceReservation is one outstanding claim on a device ID, held from
+// reserveDeviceID until Commit or Release settles it.
+//
+// Release and Commit share the `done` flag rather than being independent,
+// because the handler arms Release with defer and then calls Commit on success:
+// as separate operations the deferred Release fires afterwards and deletes the
+// entry the commit just wrote. One object, one settled flag, first call wins.
+type deviceReservation struct {
+	srv      *Server
+	ownerID  string
+	deviceID string
+	done     bool
+}
+
+// Release drops the reservation, for a registration that never wrote a device
+// row. Safe to defer unconditionally; a no-op once Commit has run.
+func (res *deviceReservation) Release() {
+	if res == nil || res.deviceID == "" {
+		return
+	}
+	res.srv.userMu.Lock()
+	defer res.srv.userMu.Unlock()
+	if res.done {
+		return
+	}
+	res.done = true
+	res.srv.endReservationLocked(res.deviceID)
+	// Only drop an entry this owner still holds: a rescan between the
+	// reservation and the failure may legitimately have re-pointed the ID at
+	// whoever actually has the device on disk, and clobbering that would be the
+	// hijack reserveDeviceID exists to prevent.
+	if owner, exists := res.srv.deviceIndex[res.deviceID]; exists && owner == res.ownerID {
+		delete(res.srv.deviceIndex, res.deviceID)
+	}
+}
+
+// Commit points the index at the ID the device was actually persisted under and
+// settles the reservation on the ID the request asked for. The two differ when
+// UpsertNativeDevice merged this registration into an existing row (same push
+// token and platform), whose ID wins; the requested ID then never got a
+// NativeDevice record, so leaving its entry behind is the orphan described on
+// reserveDeviceID.
+func (res *deviceReservation) Commit(registeredID string) {
+	if res == nil {
+		return
+	}
+	registeredID = strings.TrimSpace(registeredID)
+
+	res.srv.userMu.Lock()
+	defer res.srv.userMu.Unlock()
+	if !res.done && res.deviceID != "" {
+		res.done = true
+		res.srv.endReservationLocked(res.deviceID)
+		if res.deviceID != registeredID {
+			if owner, exists := res.srv.deviceIndex[res.deviceID]; exists && owner == res.ownerID {
+				delete(res.srv.deviceIndex, res.deviceID)
+			}
+		}
+	}
+	if registeredID != "" {
+		res.srv.deviceIndex[registeredID] = res.ownerID
+	}
+}
+
+// endReservationLocked decrements the in-flight count for deviceID. Callers must
+// hold userMu. Counted rather than a plain set because two registrations for the
+// same ID from the same owner can legitimately overlap.
+func (s *Server) endReservationLocked(deviceID string) {
+	if n := s.deviceReserving[deviceID]; n > 1 {
+		s.deviceReserving[deviceID] = n - 1
+	} else {
+		delete(s.deviceReserving, deviceID)
+	}
+}
+
+// sweepDeviceIndex drops index entries with no device behind them, and reports
+// how many went.
+//
+// The index is a resolution hint rebuilt from disk, so an entry matching no
+// NativeDevice row is residue — from a registration that failed after reserving,
+// from a device the DAEMON removed as stale in the other process, or from an
+// unpair. Residue is not inert: it makes the ID unregisterable and turns every
+// attempt against it into a deviceLockout strike.
+//
+// In-flight reservations are exempt: they legitimately have no disk row yet, and
+// deleting one re-opens the concurrent-registration hijack reserveDeviceID
+// closes.
+//
+// Driven by StartUserStoreSweeper, which already walks the user list on a timer.
+func (s *Server) sweepDeviceIndex() int {
+	live := map[string]bool{}
+	unreadable := map[string]bool{}
+	for _, userID := range s.knownUserIDs() {
+		store, err := s.userStore(userID)
+		if err != nil {
+			// Cannot prove this user's devices are gone. Keep their entries:
+			// dropping them on a transient open error would unpair working
+			// devices and cost each one a lockout strike on its next request.
+			unreadable[userID] = true
+			continue
+		}
+		for _, d := range store.ListNativeDevices() {
+			if id := strings.TrimSpace(d.DeviceID); id != "" {
+				live[id] = true
+			}
+		}
+	}
+
+	s.userMu.Lock()
+	defer s.userMu.Unlock()
+	removed := 0
+	for id, owner := range s.deviceIndex {
+		if live[id] || unreadable[owner] || s.deviceReserving[id] > 0 {
+			continue
+		}
+		delete(s.deviceIndex, id)
+		removed++
+	}
+	return removed
 }
 
 // revokeAllUserCredentials cuts off every way this account can currently
 // authenticate. There are three, not two:
 //
-//  1. web sessions      (revokeUserSessions)
-//  2. paired devices    (revokeUserDevices)
+//  1. web sessions       (revokeUserSessions)
+//  2. paired devices     (revokeUserDevices)
 //  3. CardDAV Basic Auth (davCredentials)
 //
-// The third one used to be missed by every admin revocation path, because
-// withDAVBasicAuth consults its verified-credential cache *before* it looks the
-// account up and checks u.Active. A deactivated account therefore kept full
-// read/write on its contacts, over CardDAV, for up to davCredentialTTL after an
-// admin cut it off — bounded at 90s, but silently, and the handlers claimed to
-// have revoked everything.
+// The third was missed by every admin revocation path, because withDAVBasicAuth
+// consults its verified-credential cache BEFORE it looks the account up and
+// checks u.Active. A deactivated account therefore kept full read/write on its
+// contacts over CardDAV for up to davCredentialTTL — bounded at 90s, but
+// silently.
 //
-// Exists as one function rather than three lines repeated in
-// deactivate/reset-password/clear-MFA so that a fourth credential type only has
-// to be added here. The DAV cache has no per-user index (its keys are salted
-// hashes of username+password), so invalidation clears the whole map; that is
-// cheap at this project's scale and costs other users at most one extra scrypt
-// verification on their next sync.
+// One function rather than three lines repeated in
+// deactivate/reset-password/clear-MFA, so a fourth credential type is added only
+// here. The DAV cache has no per-user index (its keys are salted hashes of
+// username+password), so invalidation clears the whole map; that costs other
+// users at most one extra scrypt verification on their next sync.
 func (s *Server) revokeAllUserCredentials(u users.User) {
 	s.revokeAllUserCredentialsExcept(u, "")
 }
@@ -553,12 +683,10 @@ func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken s
 	s.revokeUserSessions(u.ID, keepSessionToken)
 	s.revokeUserDevices(u.ID)
 	// Delete the credential, not just the cache entry. invalidateUser clears an
-	// in-memory verification cache; the scrypt hash lives in carddav-auth.json,
-	// so on the next request readDAVPassword loaded it again and minted a fresh
-	// AuthContext. A stolen app password therefore survived admin
-	// reset-password, admin clear-MFA and the self-service password change —
-	// every path whose whole contract is to cut off access. Deactivate was the
-	// only one that held, and only because Active is re-checked live.
+	// in-memory verification cache, but the scrypt hash lives in carddav-auth.json,
+	// so readDAVPassword loaded it again on the next request and minted a fresh
+	// AuthContext. A stolen app password therefore survived admin reset-password,
+	// admin clear-MFA and the self-service password change.
 	if err := os.Remove(s.userCardDAVAuthPath(u.ID)); err != nil && !os.IsNotExist(err) {
 		s.logger.Error("failed to revoke carddav credential", "user_id", u.ID, "error", err.Error())
 	}
@@ -605,19 +733,17 @@ func (s *Server) rescanDeviceIndex() {
 		}
 	}
 	s.userMu.Lock()
-	// Merge into the live index rather than replacing it. A reservation made
-	// by reserveDeviceID for an in-flight registration has not reached disk
-	// yet, so replacing the map would silently drop it — and two concurrent
-	// registrations racing the same client-chosen deviceId would then BOTH
-	// see a free slot and both succeed, which is exactly the device-ID
-	// hijack reserveDeviceID exists to prevent.
+	// Merge into the live index rather than replacing it. A reservation made by
+	// reserveDeviceID for an in-flight registration has not reached disk yet, so
+	// replacing the map would drop it — and two concurrent registrations racing the
+	// same client-chosen deviceId would then both see a free slot, which is the
+	// device-ID hijack reserveDeviceID exists to prevent.
 	//
-	// Merging can leave an entry for a device that was since unpaired by the
-	// other process. That is safe: the index only resolves deviceId -> owner
-	// so the owner's store can be opened; authorization is decided by
-	// state.Store.GetNativeDevice + the secret-hash check in
-	// deviceAuthFromRequest, both of which read through to disk and fail
-	// closed on a device that is no longer there.
+	// Merging can leave an entry for a device the other process since unpaired. That
+	// is safe: the index only resolves deviceId -> owner so the owner's store can be
+	// opened; authorization is decided by state.Store.GetNativeDevice and the
+	// secret-hash check in deviceAuthFromRequest, which read through to disk and
+	// fail closed.
 	for id, owner := range next {
 		s.deviceIndex[id] = owner
 	}

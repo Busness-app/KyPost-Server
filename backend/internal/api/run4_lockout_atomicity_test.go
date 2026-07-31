@@ -136,7 +136,7 @@ func TestTryAttemptResetsAfterTheLockoutExpires(t *testing.T) {
 // The same TOCTOU, in the send-as cooldown. Two concurrent verification
 // requests for one address both saw "allowed" and both mailed the third party.
 func TestSendAsCooldownTryConsumeAdmitsOnlyOne(t *testing.T) {
-	cooldown := newSendAsVerificationCooldown()
+	cooldown := newCooldown(sendAsVerificationCooldownFor)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -160,7 +160,7 @@ func TestSendAsCooldownTryConsumeAdmitsOnlyOne(t *testing.T) {
 }
 
 func TestSendAsCooldownTryConsumeIsPerKey(t *testing.T) {
-	cooldown := newSendAsVerificationCooldown()
+	cooldown := newCooldown(sendAsVerificationCooldownFor)
 
 	if ok, _ := cooldown.tryConsume("user|a@example.com"); !ok {
 		t.Fatal("first address refused")

@@ -143,7 +143,6 @@ var publicRoutes = map[string]string{
 	"POST /api/auth/mfa/recovery-code": "as above, for the recovery-code branch",
 	"POST /api/auth/mfa/push/poll":     "as above; polls the pending push approval by challenge id",
 	"POST /api/auth/mfa/push/finish":   "as above; redeems an approved push challenge for a session",
-	"POST /api/mfa/push/respond":       "answered by the paired device, which authenticates with the signed push nonce, not a session",
 	"/api/health":                      "liveness for orchestrators; health.Status carries no per-user data",
 	"GET /api/setup":                   "pre-login hint for a fresh install with no accounts to authenticate against",
 	"GET /.well-known/openpgpkey/":     "Web Key Directory is public by protocol; any sender's client must fetch published keys uncredentialed",
@@ -207,6 +206,63 @@ func TestAuthMarkersMatchTheirHandlers(t *testing.T) {
 
 	if checked < 15 {
 		t.Fatalf("only %d marked routes found; this test is no longer reading the route table", checked)
+	}
+}
+
+// authPrimitives are the calls that constitute authenticating a caller. A
+// handler that makes one of them is, by definition, not public.
+var authPrimitives = map[string][]string{
+	"deviceAuthFromRequest":       {"withDeviceAuth"},
+	"validatePairingToken":        {"withTokenAuth"},
+	"decodeAndVerifyPairingToken": {"withTokenAuth"},
+	"consumeQRToken":              {"withTokenAuth"},
+}
+
+// TestPublicRoutesDoNotAuthenticate is the check publicRoutes could not make for
+// itself.
+//
+// The other three markers are verified against their handlers by
+// markerRequiresCall. withPublicRoute has no such anchor — "authenticates
+// nothing" has no call to look for — so its allowlist accepts a free-text
+// reason and takes it at face value. POST /api/mfa/push/respond sat in it for
+// exactly that reason, justified as authenticating "with the signed push nonce",
+// a mechanism that does not exist anywhere in this codebase; the handler's first
+// act is deviceAuthFromRequest. Nothing failed, because prose is not checkable.
+//
+// The negative IS checkable. A public handler must not call an auth primitive,
+// and if it does, the route has a real auth model that the marker is hiding.
+func TestPublicRoutesDoNotAuthenticate(t *testing.T) {
+	handlers := packageFuncDecls(t)
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "server.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse server.go: %v", err)
+	}
+
+	checked := 0
+	forEachRoute(file, func(pattern string, handlerExpr ast.Expr) {
+		if inertMarkerUsed(handlerExpr) != "withPublicRoute" {
+			return
+		}
+		name := handlerFuncName(handlerExpr)
+		decl, ok := handlers[name]
+		if !ok {
+			return // handleFrontend and friends; the marker check above covers naming
+		}
+		checked++
+		for primitive, markers := range authPrimitives {
+			if bodyCallsAny(decl, []string{primitive}) {
+				t.Errorf("route %q is marked withPublicRoute, but %s calls %s.\n"+
+					"A handler that authenticates its caller is not public, whatever the "+
+					"publicRoutes reason says. Mark it %v instead and delete the publicRoutes entry.",
+					pattern, name, primitive, markers)
+			}
+		}
+	})
+
+	if checked < 8 {
+		t.Fatalf("only %d public handlers resolved; this test is no longer reading the route table", checked)
 	}
 }
 

@@ -229,15 +229,21 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
           setMfaChallengeId("");
           setMfaMatchDigits("");
           finishSignIn(Boolean(fin.mustChangePassword));
-        } else if (res.status === "denied" || res.status === "expired") {
+        } else if (res.status === "denied" || res.status === "expired" || res.status === "locked") {
           clearInterval(interval);
           if (cancelled) {
             return;
           }
+          // "locked" is a wrong number tapped on the device: push is finished
+          // for this sign-in but the challenge is still good for TOTP, which is
+          // why it shares this branch rather than restarting the flow. See
+          // mfa.maxMatchAttempts.
           setStatus(
             res.status === "denied"
               ? "Sign-in was denied on your device."
-              : "The approval request expired."
+              : res.status === "locked"
+                ? "That was not the number shown here. Approval on your device is locked for this sign-in — enter a code from your authenticator app instead."
+                : "The approval request expired."
           );
           if (mfaMethods.includes("totp")) {
             setMfaMode("totp");

@@ -11,7 +11,7 @@ import (
 // cancelable context.Context — the kind runServer/runAll thread into all
 // three background sweepers (Task 20) instead of context.Background() —
 // genuinely stops every one of them: StartPickupSweeper,
-// StartSendAsCooldownSweeper, and StartVersionMonitor all return
+// StartCooldownSweeper, and StartVersionMonitor all return
 // promptly once that one shared context is canceled.
 //
 // Before the fix, each sweeper ran on context.Background(), which never
@@ -30,7 +30,7 @@ func TestAllSweepersExitOnSharedContextCancel(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); srv.StartPickupSweeper(ctx) }()
-	go func() { defer wg.Done(); srv.StartSendAsCooldownSweeper(ctx) }()
+	go func() { defer wg.Done(); srv.StartCooldownSweeper(ctx) }()
 	go func() { defer wg.Done(); srv.StartVersionMonitor(ctx) }()
 
 	// Give the goroutines a moment to actually start running (enter their

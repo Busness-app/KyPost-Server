@@ -6,7 +6,7 @@ import (
 )
 
 func TestClassifierTestCooldownBlocksWithinWindow(t *testing.T) {
-	c := newClassifierTestCooldown()
+	c := newCooldown(classifierTestCooldownFor)
 	const key = "admin-1"
 
 	ok, retryAfter := c.tryConsume(key)
@@ -27,7 +27,7 @@ func TestClassifierTestCooldownBlocksWithinWindow(t *testing.T) {
 }
 
 func TestClassifierTestCooldownIsPerKey(t *testing.T) {
-	c := newClassifierTestCooldown()
+	c := newCooldown(classifierTestCooldownFor)
 	c.tryConsume("admin-a")
 
 	if ok, _ := c.tryConsume("admin-a"); ok {
@@ -39,7 +39,7 @@ func TestClassifierTestCooldownIsPerKey(t *testing.T) {
 }
 
 func TestClassifierTestCooldownExpiresAfterWindow(t *testing.T) {
-	c := newClassifierTestCooldown()
+	c := newCooldown(classifierTestCooldownFor)
 	const key = "admin-2"
 	c.tryConsume(key)
 	// Simulate the window having already elapsed.

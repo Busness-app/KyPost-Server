@@ -75,8 +75,10 @@ func TestResolvePushWithMatchAcceptsTheCorrectDigits(t *testing.T) {
 	}
 }
 
-// The whole point: approving with the wrong number must fail, server-side.
-func TestResolvePushWithMatchRejectsWrongDigits(t *testing.T) {
+// The whole point: approving with the wrong number must fail, server-side — and
+// it must fail terminally, on the FIRST wrong number. See maxMatchAttempts for
+// why a retry budget on a three-option choice is not a control.
+func TestResolvePushWithMatchLocksOnFirstWrongDigits(t *testing.T) {
 	store := NewStore()
 	ch, err := store.Create("user-1")
 	if err != nil {
@@ -87,18 +89,27 @@ func TestResolvePushWithMatchRejectsWrongDigits(t *testing.T) {
 		wrong = "11"
 	}
 
-	if _, err := store.ResolvePushWithMatch(ch.ID, "device-1", true, wrong); !errors.Is(err, ErrMatchDigitsMismatch) {
-		t.Fatalf("err = %v, want ErrMatchDigitsMismatch", err)
+	status, err := store.ResolvePushWithMatch(ch.ID, "device-1", true, wrong)
+	if !errors.Is(err, ErrMatchAttemptsExhausted) {
+		t.Fatalf("err = %v, want ErrMatchAttemptsExhausted on the first wrong number", err)
+	}
+	if status != PushLocked {
+		t.Fatalf("status = %q, want %q", status, PushLocked)
 	}
 
-	// And the challenge must still be pending, not burned — the legitimate user
-	// tapping the wrong tile should be able to try again within the window.
+	// The challenge must SURVIVE, so the browser can finish on TOTP. Locking
+	// push is a failover, not a failed sign-in.
 	got, ok := store.Get(ch.ID)
 	if !ok {
-		t.Fatal("challenge disappeared after a wrong-digit approval")
+		t.Fatal("challenge disappeared after a wrong-digit approval; the TOTP fallback needs it")
 	}
-	if got.PushStatus == "approved" {
-		t.Fatal("a wrong-digit approval was recorded as approved")
+	if got.PushStatus != PushLocked {
+		t.Fatalf("stored status = %q, want %q", got.PushStatus, PushLocked)
+	}
+
+	// Locked is not approved: no session may be minted from it.
+	if _, err := store.ConsumePushApproval(ch.ID); !errors.Is(err, ErrPushNotApproved) {
+		t.Fatalf("ConsumePushApproval on locked = %v, want ErrPushNotApproved", err)
 	}
 }
 
@@ -131,13 +142,31 @@ func TestResolvePushWithMatchRejectsMissingDigitsOnApprove(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if _, err := store.ResolvePushWithMatch(ch.ID, "device-1", true, ""); !errors.Is(err, ErrMatchDigitsMismatch) {
-		t.Fatalf("err = %v, want ErrMatchDigitsMismatch", err)
+	if _, err := store.ResolvePushWithMatch(ch.ID, "device-1", true, ""); !errors.Is(err, ErrMatchAttemptsExhausted) {
+		t.Fatalf("err = %v, want ErrMatchAttemptsExhausted", err)
 	}
 }
 
-// Repeated wrong guesses must not turn into an oracle for a two-digit space.
-func TestResolvePushWithMatchLocksOutAfterRepeatedWrongDigits(t *testing.T) {
+// The blind-approval rate is what this control is for, so pin the arithmetic
+// that sets it. A tap picks from decoyCount+1 options; maxMatchAttempts draws
+// from that set give 1-((n-1)/n)^k. Anything above a coin flip means an
+// MFA-fatigued user gets in by mashing the screen.
+func TestBlindApprovalOddsStayBelowAcceptable(t *testing.T) {
+	options := decoyCount + 1
+	miss := 1.0
+	for i := 0; i < maxMatchAttempts; i++ {
+		miss *= float64(options-1) / float64(options)
+	}
+	if blind := 1 - miss; blind > 0.34 {
+		t.Fatalf("blind approval rate = %.0f%% with %d options and %d attempts; "+
+			"this is the MFA-fatigue path the number match exists to close. "+
+			"Lower maxMatchAttempts or raise decoyCount (the latter needs a client release).",
+			blind*100, options, maxMatchAttempts)
+	}
+}
+
+// Once push is locked, not even the CORRECT number reopens it.
+func TestLockedChallengeRefusesTheCorrectNumber(t *testing.T) {
 	store := NewStore()
 	ch, err := store.Create("user-1")
 	if err != nil {
@@ -148,21 +177,41 @@ func TestResolvePushWithMatchLocksOutAfterRepeatedWrongDigits(t *testing.T) {
 		wrong = "11"
 	}
 
-	// Every wrong attempt but the last reports a plain mismatch, so a
-	// legitimate mis-tap can be retried.
-	for i := 0; i < maxMatchAttempts-1; i++ {
-		if _, err := store.ResolvePushWithMatch(ch.ID, "device-1", true, wrong); !errors.Is(err, ErrMatchDigitsMismatch) {
-			t.Fatalf("attempt %d: err = %v, want ErrMatchDigitsMismatch", i, err)
-		}
-	}
-	// The one that spends the budget says so, rather than inviting another try.
 	if _, err := store.ResolvePushWithMatch(ch.ID, "device-1", true, wrong); !errors.Is(err, ErrMatchAttemptsExhausted) {
-		t.Fatalf("final attempt: err = %v, want ErrMatchAttemptsExhausted", err)
+		t.Fatalf("first wrong attempt: err = %v, want ErrMatchAttemptsExhausted", err)
+	}
+	if _, err := store.ResolvePushWithMatch(ch.ID, "device-1", true, ch.MatchDigits); !errors.Is(err, ErrMatchAttemptsExhausted) {
+		t.Fatalf("err = %v, want push to stay locked", err)
+	}
+	// A deny cannot reopen it either — the status is terminal.
+	if _, err := store.ResolvePushWithMatch(ch.ID, "device-1", false, ""); !errors.Is(err, ErrMatchAttemptsExhausted) {
+		t.Fatalf("err = %v, want push to stay locked", err)
+	}
+}
+
+// A locked challenge must survive SupersedeUnansweredPush: the browser is still
+// holding that id to finish on TOTP.
+func TestSupersedeKeepsLockedChallenges(t *testing.T) {
+	store := NewStore()
+	locked, err := store.Create("user-1")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	wrong := "00"
+	if locked.MatchDigits == wrong {
+		wrong = "11"
+	}
+	if _, err := store.ResolvePushWithMatch(locked.ID, "device-1", true, wrong); !errors.Is(err, ErrMatchAttemptsExhausted) {
+		t.Fatalf("lock: %v", err)
+	}
+	fresh, err := store.Create("user-1")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
 	}
 
-	// Even the CORRECT answer is refused now: the challenge is spent.
-	if _, err := store.ResolvePushWithMatch(ch.ID, "device-1", true, ch.MatchDigits); !errors.Is(err, ErrMatchAttemptsExhausted) {
-		t.Fatalf("err = %v, want the challenge to stay spent", err)
+	store.SupersedeUnansweredPush("user-1", fresh.ID)
+	if _, ok := store.Get(locked.ID); !ok {
+		t.Fatal("the locked challenge was superseded; its TOTP fallback is now unreachable")
 	}
 }
 

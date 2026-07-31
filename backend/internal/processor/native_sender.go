@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -318,11 +319,56 @@ func (s *UnifiedPushSender) Send(ctx context.Context, device state.NativeDevice,
 
 	// Treat 404/410 as stale: the endpoint is no longer valid.
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
-		return fmt.Errorf("%w: status=%d response=%s", ErrNativeDeviceStale, resp.StatusCode, trimmed)
+		return &relayStatusError{Code: resp.StatusCode, Body: trimmed, RetryAfter: parseRetryAfter(resp.Header), err: fmt.Errorf("%w: status=%d response=%s", ErrNativeDeviceStale, resp.StatusCode, trimmed)}
 	}
 
-	return fmt.Errorf("UnifiedPush endpoint failed: status=%d response=%s", resp.StatusCode, trimmed)
+	return &relayStatusError{Code: resp.StatusCode, Body: trimmed, RetryAfter: parseRetryAfter(resp.Header), err: fmt.Errorf("UnifiedPush endpoint failed: status=%d response=%s", resp.StatusCode, trimmed)}
 }
+
+// relayStatusError carries the far end's HTTP status as a FIELD, so
+// classification never has to go looking for it in text.
+//
+// push_failure_reason.go used to recover the code with a regex over
+// err.Error(). The comment there claimed that matching "status=NNN" meant
+// matching only this package's own formatting — but FindStringSubmatch scans the
+// whole string, and these errors carry up to 8 KiB of the remote server's
+// response body, from a host the device's owner chose. A body containing
+// "status=401" steered the published health field. The impact was bounded (the
+// output is drawn from a closed vocabulary either way), but a parser reading
+// attacker-supplied text to decide anything is the wrong shape.
+type relayStatusError struct {
+	Code int
+	Body string
+	// RetryAfter is the far end's Retry-After header, parsed, or zero when it
+	// sent none. Honoured by sendWithRetry: a relay that says when to come back
+	// knows better than any backoff curve we could pick.
+	RetryAfter time.Duration
+	err        error
+}
+
+// parseRetryAfter reads the delay form of Retry-After. The HTTP-date form is
+// ignored on purpose: it needs a trusted clock at both ends, and every relay
+// this talks to sends seconds.
+//
+// Bounded, because the value comes from the far end. An unbounded parse lets a
+// hostile or broken relay park a goroutine for as long as it likes.
+func parseRetryAfter(h http.Header) time.Duration {
+	raw := strings.TrimSpace(h.Get("Retry-After"))
+	if raw == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return 0
+	}
+	if d := time.Duration(seconds) * time.Second; d <= maxRelayRetryAfter {
+		return d
+	}
+	return maxRelayRetryAfter
+}
+
+func (e *relayStatusError) Error() string { return e.err.Error() }
+func (e *relayStatusError) Unwrap() error { return e.err }
 
 // NativePushDispatcher routes native push notifications to the appropriate transport:
 // UnifiedPush (direct HTTPS POST), FCM relay, or APNs relay.
@@ -428,9 +474,9 @@ func (s *RelaySender) Send(ctx context.Context, device state.NativeDevice, messa
 		return nil
 	}
 	if isRelayStaleResponse(resp.StatusCode, trimmed) {
-		return fmt.Errorf("%w: status=%d response=%s", ErrNativeDeviceStale, resp.StatusCode, trimmed)
+		return &relayStatusError{Code: resp.StatusCode, Body: trimmed, RetryAfter: parseRetryAfter(resp.Header), err: fmt.Errorf("%w: status=%d response=%s", ErrNativeDeviceStale, resp.StatusCode, trimmed)}
 	}
-	return fmt.Errorf("push relay send failed: status=%d response=%s", resp.StatusCode, trimmed)
+	return &relayStatusError{Code: resp.StatusCode, Body: trimmed, RetryAfter: parseRetryAfter(resp.Header), err: fmt.Errorf("push relay send failed: status=%d response=%s", resp.StatusCode, trimmed)}
 }
 
 // isRelayStaleResponse reports whether the relay signalled that the device

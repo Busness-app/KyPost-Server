@@ -19,11 +19,8 @@ import (
 // Store is one account's state, backed by SQLite.
 //
 // There is no in-memory copy of the data and no mutex: every method reads or
-// writes the database directly, so two Stores over the same directory — which
-// is the normal case, since the api and daemon are separate processes — always
-// agree. That removes the whole class of "this accessor forgot to re-read from
-// disk" bug the JSON version had, along with the dirty flags and the advisory
-// file lock that tried to paper over it.
+// writes the database directly, so two Stores over the same directory — the
+// normal case, since the api and daemon are separate processes — always agree.
 type Store struct {
 	baseDir string
 	db      *sql.DB
@@ -147,33 +144,30 @@ func New(baseDir string) (*Store, error) {
 	// Close the handle when the last reference to this Store goes away.
 	//
 	// A Store is cached and handed out as a bare pointer (api.Server's per-user
-	// store cache), and the cache evicts on an idle timer. Closing at eviction
-	// meant closing a live *sql.DB out from under whoever was still holding it —
-	// a long attachment stream, a slow IMAP-backed handler, a goroutine that
-	// outlived its request — and every query they made afterwards failed with
-	// "database is closed". The evictor cannot know; it has a timestamp, not a
-	// reference count.
+	// store cache) and the cache evicts on an idle timer. Closing at eviction closes
+	// a live *sql.DB out from under whoever is still holding it — a long attachment
+	// stream, a slow IMAP-backed handler, a goroutine that outlived its request —
+	// and every query they make afterwards fails with "database is closed". The
+	// evictor has a timestamp, not a reference count.
 	//
-	// Reachability is the reference count, and the runtime already tracks it.
-	// The eviction now just drops the map entry; the fd and its WAL are released
-	// once nothing can reach the Store any more. Close stays for callers that
-	// know they are the last owner (tests, shutdown) and is idempotent, so the
-	// two cannot conflict.
+	// Reachability IS the reference count, and the runtime already tracks it.
+	// Eviction now just drops the map entry; the fd and its WAL are released once
+	// nothing can reach the Store. Close stays for callers that know they are the
+	// last owner (tests, shutdown) and is idempotent, so the two cannot conflict.
 	//
-	// The cleanup captures db, never s: capturing the Store would keep it
-	// reachable forever and the cleanup would never run.
+	// The cleanup captures db, never s: capturing the Store would keep it reachable
+	// forever and the cleanup would never run.
 	runtime.AddCleanup(s, func(db *sql.DB) { _ = db.Close() }, db)
 	return s, nil
 }
 
 // Close releases the database handle.
 //
-// Optional. New registers a runtime cleanup that closes the handle once the
+// Optional: New registers a runtime cleanup that closes the handle once the
 // Store becomes unreachable, so a cache that simply forgets a Store leaks
-// nothing. Call this only where the caller genuinely owns the last reference
-// and wants the fd back now rather than at the next GC. Safe to call twice, and
-// safe to call while another goroutine still holds the Store — which is exactly
-// why the idle-store eviction does NOT call it.
+// nothing. Call this only where the caller genuinely owns the last reference and
+// wants the fd back now. Safe to call twice, and safe while another goroutine
+// still holds the Store — which is why the idle-store eviction does NOT call it.
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
@@ -186,13 +180,10 @@ func (s *Store) Close() error {
 func (s *Store) path() string          { return filepath.Join(s.baseDir, "state.json") }
 func (s *Store) decisionsPath() string { return filepath.Join(s.baseDir, "decisions.json") }
 
-// tx runs fn inside a single write transaction, rolling back on error.
-//
-// This is what the file lock plus read-refresh-mutate-write dance was
-// approximating. Here it is the storage engine's own guarantee: a
+// tx runs fn inside a single write transaction, rolling back on error. A
 // read-modify-write inside one transaction cannot interleave with another
-// process's, so the lost updates that dance narrowed but never closed are
-// gone.
+// process's, which is what the old file lock plus read-refresh-mutate-write
+// dance only approximated.
 func (s *Store) tx(fn func(tx *sql.Tx) error) error {
 	t, err := s.db.Begin()
 	if err != nil {
@@ -209,12 +200,11 @@ func (s *Store) tx(fn func(tx *sql.Tx) error) error {
 
 // Checkpoint returns the last recorded poll checkpoint.
 //
-// The error is returned rather than logged-and-swallowed. Returning "" on a read
-// failure made a broken database indistinguishable from a fresh one, and the
-// caller's "no checkpoint yet" branch is "start from the beginning of the
-// mailbox" — so a transient SQLITE_BUSY turned into a full re-scan, and a
-// corrupt database turned into a full re-scan on every single tick, forever,
-// burning the model each time.
+// The error is returned rather than logged-and-swallowed: returning "" on a read
+// failure makes a broken database indistinguishable from a fresh one, and the
+// caller's "no checkpoint yet" branch means "start from the beginning of the
+// mailbox" — so a transient SQLITE_BUSY becomes a full re-scan, and a corrupt
+// database a full re-scan on every single tick, forever.
 func (s *Store) Checkpoint() (string, error) {
 	v, err := metaString(s.db, metaCheckpoint)
 	if err != nil {
@@ -230,12 +220,12 @@ func (s *Store) SetCheckpoint(value string) error {
 // Seen reports whether a message has already been classified.
 //
 // The error is returned rather than swallowed into false, because false means
-// "not yet processed" and the caller acts on it by processing the message. A
-// read failure — SQLITE_BUSY past the busy_timeout is reachable here, since the
-// api and daemon processes contend on this file — therefore meant reclassifying
-// mail that was already done: duplicate IMAP keyword writes, duplicate Decision
-// rows, and a push notification per already-read message on every paired
-// device. "I don't know" is not "no".
+// "not yet processed" and the caller acts on it by processing the message.
+// SQLITE_BUSY past the busy_timeout is reachable here, since the api and daemon
+// processes contend on this file, so swallowing it means reclassifying mail that
+// was already done: duplicate IMAP keyword writes, duplicate Decision rows, and
+// a push notification per already-read message on every paired device. "I don't
+// know" is not "no".
 func (s *Store) Seen(id string) (bool, error) {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM processed WHERE message_id = ?`, id).Scan(&n); err != nil {
@@ -572,15 +562,14 @@ func (s *Store) GetNativeDevice(deviceID string) (NativeDevice, bool) {
 	return d, true
 }
 
-// UpsertNativeDevice registers or refreshes a device.
-//
-// Two matching rules, in order, both preserved from the JSON version:
+// UpsertNativeDevice registers or refreshes a device. Two matching rules, in
+// order:
 //
 //   - by device id: a re-registration must NOT undo an explicit MFAApprover
 //     choice made through SetNativeDeviceMFAApprover, so the stored value wins
 //     over whatever the caller passed.
-//   - by push token + platform: the same physical device re-pairing without
-//     its device id is one device, not two, so that row is updated in place.
+//   - by push token + platform: the same physical device re-pairing without its
+//     device id is one device, not two, so that row is updated in place.
 func (s *Store) UpsertNativeDevice(device NativeDevice) error {
 	return s.tx(func(tx *sql.Tx) error { return s.upsertNativeDeviceTx(tx, device) })
 }

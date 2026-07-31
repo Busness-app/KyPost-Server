@@ -38,29 +38,27 @@ import (
 
 // Server holds the HTTP surface and its process-wide state.
 //
-// LOCK ORDER: cfgMu before sessMu before userMu. Never the reverse.
+// LOCK ORDER: cfgMu before sessMu before userMu before ollamaMu. Never the
+// reverse. Enforced by TestLockOrderIsRespected, which reads this package's
+// source and fails on a function that takes one while holding a higher-ranked
+// one — directly, or through any call chain inside this package. Adding a mutex
+// here means adding it to lockRank in lock_order_test.go; one that is missing
+// from that map is not checked.
 //
-// These are independent mutexes guarding independent groups of fields.
-// Nothing currently takes more than one, which is the only reason there is no
-// deadlock to find today. The moment one handler reads s.cfg inside a userMu
-// critical section while another does the reverse, that becomes an ABBA
-// deadlock that only shows up under concurrent load in production. Stating the
-// order here is cheaper than discovering it there.
+// The rule used to be stated here and enforced nowhere, with the note that
+// "nothing currently takes more than one, which is the only reason there is no
+// deadlock to find today". The failure it warns about — one handler reading
+// s.cfg inside a userMu critical section while another does the reverse — is an
+// ABBA deadlock that appears only under concurrent load, in production, and that
+// no unit test would provoke. It needed a checker, not a paragraph.
 //
-// cfgMu and sessMu were one mutex named mu, and that was a real bottleneck
-// rather than a tidiness problem: currentUser slides a session's idle expiry,
-// which is a WRITE, so every authenticated request took the single lock
-// exclusively and every s.cfg reader in the process queued behind it. The
-// RWMutex degenerated into a plain Mutex across the whole request path. They
-// guard unrelated state with opposite access patterns — cfg is written once
-// per admin action and read constantly; sessions are written on every request
-// — so one lock could not serve both.
+// cfgMu and sessMu are separate because currentUser slides a session's idle
+// expiry, which is a WRITE: as one mutex, every authenticated request took it
+// exclusively and every s.cfg reader queued behind it.
 //
-// The old comment also claimed mu covered httpServer. It did not: Prepare,
-// Serve, Run and Shutdown all touch s.httpServer with no lock held. That is
-// safe only because Prepare is called synchronously before any goroutine can
-// reach the others — see Prepare's doc comment — and it is documented here as
-// unguarded rather than left looking protected.
+// httpServer is unguarded. Prepare, Serve, Run and Shutdown all touch it with no
+// lock held, which is safe only because Prepare is called synchronously before
+// any goroutine can reach the others — see Prepare's doc comment.
 type Server struct {
 	cfgMu           sync.RWMutex
 	cfg             config.Config
@@ -85,8 +83,9 @@ type Server struct {
 	serverBaseURL       string
 	baseURLFallbackWarn sync.Once
 	pairingSecretWarn   sync.Once
-	// qrTokens makes each PGP QR key-exchange token redeemable exactly once.
-	qrTokens             *qrTokenGuard
+	// singleUse makes each one-shot token — PGP QR key exchange, native device
+	// pairing nonces — redeemable exactly once. See singleUseTokens.
+	singleUse            *singleUseTokens
 	nativePushDispatcher *processor.NativePushDispatcher
 	pickupStore          *pgpmail.PickupStore
 	poller               *processor.Poller
@@ -98,11 +97,15 @@ type Server struct {
 	passwordChangeLockout *failureLockout
 	deviceLockout         *failureLockout
 	wkdLimiter            *ipRateLimiter
-	// loginParamsLimiter meters GET /api/auth/login-params PER IP. It used to
-	// draw a full attempt's reservation from the instance-wide derivation
-	// budget below, which priced a ~5us HMAC at 0.2 core-seconds: sixteen free
-	// requests emptied the bucket and denied sign-in to the whole instance, and
-	// because the bucket is global no per-IP proxy rule could restore it.
+	// pushPollLimiter meters the two unauthenticated push-MFA endpoints per IP.
+	// They were the only public routes with no meter, and both take mfa.Store's
+	// process-wide lock. See withPushPollRateLimit.
+	pushPollLimiter *ipRateLimiter
+	// loginParamsLimiter meters GET /api/auth/login-params PER IP. Drawing a full
+	// attempt's reservation from the instance-wide derivation budget below priced a
+	// ~5us HMAC at 0.2 core-seconds: sixteen free requests emptied the bucket and
+	// denied sign-in to the whole instance, with no per-IP proxy rule able to
+	// restore it.
 	loginParamsLimiter *ipRateLimiter
 	// kdfSem bounds how many memory-hard derivations may run at once, process
 	// wide. Each scrypt at N=1<<17 allocates 128 MiB, and the per-IP lockouts
@@ -111,9 +114,8 @@ type Server struct {
 	// the process OOM-killed. Sessions are in-memory, so that logs out everyone.
 	kdfSem                 chan struct{}
 	mfaPushLimiter         *mfaPushLimiter
-	sendAsCooldown         *sendAsVerificationCooldown
-	classifierTestCooldown *classifierTestCooldown
-	nativePairingNonces    *consumedNativePairingNonces
+	sendAsCooldown         *cooldown
+	classifierTestCooldown *cooldown
 	captchaVerifier        captcha.Verifier
 	captchaProvider        captcha.Provider
 	captchaSiteKey         string
@@ -130,28 +132,24 @@ type Server struct {
 	// not a per-IP one.
 	//
 	// loginLockout below is keyed on username+IP, and the username is
-	// attacker-chosen with unbounded cardinality — so it bounds guessing at any
-	// one account and bounds nothing about total work. Every attempt with an
-	// unknown username deliberately runs scrypt (equalizeLoginTiming, to keep
-	// response timing from revealing whether an account exists), which is 16 MB
-	// and tens of milliseconds of CPU for a 200-byte request. That made login an
-	// unauthenticated amplifier on a box that also runs an LLM on the same
-	// cores: a rotating username never trips the lockout, so a handful of
-	// connections could peg every CPU and starve mail classification.
+	// attacker-chosen with unbounded cardinality, so it bounds guessing at any one
+	// account and nothing about total work. Every attempt with an unknown username
+	// deliberately runs scrypt (equalizeLoginTiming), tens of milliseconds of CPU
+	// for a 200-byte request, so a rotating username could peg every CPU on a box
+	// that also runs an LLM.
 	//
-	// Instance-wide is the point: a per-IP limit is defeated by more IPs, and
-	// the resource being protected (this server's CPU) is shared.
+	// Instance-wide is the point: a per-IP limit is defeated by more IPs, and the
+	// CPU being protected is shared.
 	loginRateLimiter *ipRateLimiter
 	// loginIPLockout is a second, coarser lockout keyed on the client IP ALONE,
 	// so a caller cycling through usernames from one address runs out of budget.
 	loginIPLockout *failureLockout
 
-	// classifier and globalStore back the Ollama version/update-check block on
-	// the Prompt Tuning page and its admin-notification email. classifier is
-	// nil until SetClassifier is called (see app.go); globalStore is the
-	// install-wide (not per-user) state.Store rooted at stateDir itself, used
-	// only to dedupe the upgrade-available email to one per newly-seen
-	// upstream release.
+	// classifier and globalStore back the Ollama version/update-check block on the
+	// Prompt Tuning page and its admin-notification email. classifier is nil until
+	// SetClassifier is called (see app.go); globalStore is the install-wide (not
+	// per-user) state.Store rooted at stateDir itself, used only to dedupe the
+	// upgrade-available email to one per newly-seen upstream release.
 	classifier   *classifier.HTTPClient
 	globalStore  *state.Store
 	ollamaMu     sync.Mutex
@@ -174,6 +172,11 @@ type Server struct {
 	userMail     map[string]*serverMailEntry
 	subIndex     map[string]string
 	deviceIndex  map[string]string
+	// deviceReserving counts registrations that have reserved a device ID but
+	// not yet written its row, so sweepDeviceIndex — which decides what is
+	// residue by looking at disk — does not delete a reservation that simply
+	// has not reached disk yet. Guarded by userMu, like deviceIndex.
+	deviceReserving map[string]int
 	// deviceRescan throttles full device-index rebuilds. A rebuild opens every
 	// account's SQLite store, and an unauthenticated caller can force a cache
 	// miss on every request just by varying the device id.
@@ -270,7 +273,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		sessions:               map[string]Session{},
 		mfaChallenges:          mfa.NewStore(),
 		pairingSecret:          pairingSecret,
-		qrTokens:               newQRTokenGuard(),
+		singleUse:              newSingleUseTokens(),
 		serverBaseURL:          strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
 		nativePushDispatcher:   processor.NewNativePushDispatcher(logger),
 		pickupStore:            pgpmail.NewPickupStore(filepath.Join(stateDir, "pickup"), pickupStoreKeyPath),
@@ -284,6 +287,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		userMail:               map[string]*serverMailEntry{},
 		subIndex:               map[string]string{},
 		deviceIndex:            map[string]string{},
+		deviceReserving:        map[string]int{},
 		davCredentials:         newDAVCredentialCache(),
 		loginLockout:           newLoginLockout(),
 		davLockout:             newFailureLockout(davMaxFailures, davLockoutFor),
@@ -291,13 +295,13 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		passwordChangeLockout:  newFailureLockout(passwordChangeMaxFailures, passwordChangeLockoutFor),
 		deviceLockout:          newFailureLockout(deviceMaxFailures, deviceLockoutFor),
 		wkdLimiter:             newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
+		pushPollLimiter:        newIPRateLimiter(pushPollBurst, pushPollRefillPerSec),
 		loginParamsLimiter:     newIPRateLimiter(loginParamsBurst, loginParamsRefillPerSec),
 		kdfSem:                 make(chan struct{}, maxConcurrentKDF),
 		deviceRescan:           newIntervalGate(deviceRescanInterval),
 		mfaPushLimiter:         newMfaPushLimiter(),
-		sendAsCooldown:         newSendAsVerificationCooldown(),
-		classifierTestCooldown: newClassifierTestCooldown(),
-		nativePairingNonces:    newConsumedNativePairingNonces(),
+		sendAsCooldown:         newCooldown(sendAsVerificationCooldownFor),
+		classifierTestCooldown: newCooldown(classifierTestCooldownFor),
 		captchaVerifier:        captchaVerifier,
 		captchaProvider:        captchaProvider,
 		captchaSiteKey:         captchaSiteKey,
@@ -329,18 +333,13 @@ func (s *Server) SetPoller(p *processor.Poller) {
 }
 
 // wkdPublishStore returns the instance-level WKD domain-claim store. Domain
-// ownership is a property of the domain, not of a user, so there is exactly
-// one store (and one TXT record) per domain for the whole instance, rooted
-// at the state directory itself rather than under stateDir/users/<id>/.
-// s.wkdStore is set once at construction (NewServer) to the SAME
-// *wkdpublish.Store instance the poller process uses (both are built once in
-// app.go and injected) — not a second Store independently opened over the
-// same file — so wkdpublish.Store's own internal mutex actually serializes
-// every read-modify-write call across both the API and the poller, rather
-// than each process only ever serializing against itself. An error return
-// here only means "not wired" (e.g. a test server built without a wkdStore);
-// it does not indicate an I/O failure, since construction already happened
-// up front.
+// ownership is a property of the domain, not of a user, so there is exactly one
+// store (and one TXT record) per domain for the whole instance, rooted at the
+// state directory itself. s.wkdStore is set once at construction to the SAME
+// *wkdpublish.Store instance the poller process uses — both built once in
+// app.go and injected — so the store's own mutex serializes every
+// read-modify-write across both processes. An error here only means "not wired"
+// (e.g. a test server built without a wkdStore), not an I/O failure.
 func (s *Server) wkdPublishStore() (*wkdpublish.Store, error) {
 	if s.wkdStore == nil {
 		return nil, fmt.Errorf("wkd publish store not configured")
@@ -348,13 +347,11 @@ func (s *Server) wkdPublishStore() (*wkdpublish.Store, error) {
 	return s.wkdStore, nil
 }
 
-// routes builds the API's route table. Split out from Run so tests can
-// dispatch through the exact same registration (middleware included)
-// instead of calling handlers directly and assuming the wiring matches.
-// routes builds the full HTTP surface. It is split into one function per
-// area rather than one 130-line block so the auth posture of a given
-// group -- which middleware wraps it, and which endpoints deliberately
-// have none -- can be read at a glance instead of scanned for.
+// routes builds the API's full HTTP surface, split into one function per area
+// rather than one 130-line block so the auth posture of a group — which
+// middleware wraps it, and which endpoints deliberately have none — can be read
+// at a glance. Tests dispatch through this same registration, middleware
+// included, instead of calling handlers directly.
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	s.routesAuth(mux)
@@ -383,9 +380,9 @@ func (s *Server) routesAuth(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/pow-challenge", withPublicRoute(s.handlePoWChallenge))
 	mux.HandleFunc("POST /api/auth/mfa/totp", withPublicRoute(s.handleMFATOTP))
 	mux.HandleFunc("POST /api/auth/mfa/recovery-code", withPublicRoute(s.handleMFARecoveryCode))
-	mux.HandleFunc("POST /api/auth/mfa/push/poll", withPublicRoute(s.handlePushPoll))
-	mux.HandleFunc("POST /api/auth/mfa/push/finish", withPublicRoute(s.handlePushFinish))
-	mux.HandleFunc("POST /api/mfa/push/respond", withPublicRoute(s.handlePushRespond))
+	mux.HandleFunc("POST /api/auth/mfa/push/poll", withPublicRoute(s.withPushPollRateLimit(s.handlePushPoll)))
+	mux.HandleFunc("POST /api/auth/mfa/push/finish", withPublicRoute(s.withPushPollRateLimit(s.handlePushFinish)))
+	mux.HandleFunc("POST /api/mfa/push/respond", withDeviceAuth(s.handlePushRespond))
 	mux.HandleFunc("GET /api/mfa/status", s.withAuth(s.handleMFAStatus))
 	mux.HandleFunc("POST /api/mfa/totp/setup", s.withAuth(s.handleMFASetup))
 	mux.HandleFunc("POST /api/mfa/totp/confirm", s.withAuth(s.handleMFAConfirm))
@@ -500,24 +497,21 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/pgp/identity/generate", s.withAuth(s.handlePGPIdentityGenerate))
 	mux.HandleFunc("POST /api/pgp/identity/import", s.withAuth(s.handlePGPIdentityImport))
 	mux.HandleFunc("GET /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
-	// End-to-end key handling: the browser wraps and unwraps the private
-	// half, the server only stores an opaque envelope. See pgp_client_keys.go.
+	// End-to-end key handling: the browser wraps and unwraps the private half, the
+	// server only stores an opaque envelope. See pgp_client_keys.go.
 	//
-	// These are withMailAuth, not withAuth: a paired mobile device
-	// authenticates with per-device credentials and no session cookie, and it
-	// needs to unwrap its own key exactly as much as the browser does. They
-	// were session-only when first added, which locked every native client
-	// out of the feature built for it.
+	// These are withMailAuth, not withAuth: a paired mobile device authenticates
+	// with per-device credentials and no session cookie, and it needs to unwrap its
+	// own key exactly as much as the browser does. Session-only gating here locked
+	// every native client out of the feature built for it.
 	mux.HandleFunc("GET /api/pgp/bootstrap", s.withMailAuth(s.handlePGPBootstrap))
 	mux.HandleFunc("GET /api/pgp/identity/wrapped", s.withMailAuth(s.handlePGPWrappedKey))
-	// These two WRITE key material: identity/client replaces the account's
-	// public key (and clears the server-sealed private half), and rewrap
-	// replaces the wrapped envelope. They are session-only for the same reason
-	// export-legacy below is — a device secret is not a re-verified password —
-	// and the asymmetry of gating the endpoint that *reads* a key while
-	// leaving the two that *destroy* one open to a device secret was a real
-	// hole: a stolen device secret could substitute the key all future mail is
-	// encrypted to, or wipe the private half irrecoverably.
+	// These two WRITE key material: identity/client replaces the account's public
+	// key (and clears the server-sealed private half), and rewrap replaces the
+	// wrapped envelope. They are session-only for the same reason export-legacy
+	// below is — a device secret is not a re-verified password — and a stolen
+	// device secret could otherwise substitute the key all future mail is encrypted
+	// to, or wipe the private half irrecoverably.
 	mux.HandleFunc("POST /api/pgp/identity/client", s.withAuth(s.handlePGPIdentityClient))
 	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withAuth(s.handlePGPRewrapKey))
 	// export-legacy stays session-only on purpose. It is the one endpoint
@@ -528,10 +522,10 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/pgp/identity", s.withAuth(s.handlePGPIdentity))
 	mux.HandleFunc("GET /api/pgp/keyserver/lookup", s.withAuth(s.handlePGPKeyserverLookup))
 	// withMailAuth: mobile compose calls this to warn about keyless recipients
-	// before sending. It is a read of the caller's own contacts answering the
-	// same question the send path answers by refusing, only asked earlier.
-	// (recipients/resolve below stays unusable here — it 409s for anything but
-	// a client-protected account.)
+	// before sending. It reads the caller's own contacts to answer the same
+	// question the send path answers by refusing, only asked earlier.
+	// (recipients/resolve below stays unusable here — it 409s for anything but a
+	// client-protected account.)
 	mux.HandleFunc("POST /api/pgp/recipients/check", s.withMailAuth(s.handlePGPRecipientsCheck))
 	// Returns the recipients' actual public keys, for client-protected
 	// accounts whose browser does the encrypting. See pgp_resolve_handler.go.
@@ -609,32 +603,27 @@ func (s *Server) routesFrontend(mux *http.ServeMux) {
 }
 
 // Prepare constructs the underlying *http.Server (Addr + Handler) without
-// starting it. Callers that need to coordinate a graceful Shutdown with a
-// signal handler (see runServer/runAll in internal/app/app.go) MUST call
-// Prepare synchronously — before launching any goroutine that calls Serve —
-// so that a shutdown signal arriving essentially immediately after startup
-// always has a non-nil *http.Server to call Shutdown on. Constructing the
-// *http.Server lazily inside the goroutine that calls Serve would instead
-// race: Shutdown could run before that goroutine is even scheduled, either
-// panicking on a nil server or silently doing nothing.
+// starting it. Callers that coordinate a graceful Shutdown with a signal
+// handler (see runServer/runAll in internal/app/app.go) MUST call Prepare
+// synchronously — before launching any goroutine that calls Serve — so a
+// shutdown signal arriving immediately after startup always has a non-nil
+// *http.Server to call Shutdown on. Constructing it lazily inside the Serve
+// goroutine races instead: Shutdown could run first and either panic on a nil
+// server or silently do nothing.
 //
-// Serve and Run call Prepare automatically if it wasn't already called, so
-// simple callers that don't need external shutdown coordination can still
-// just call Run.
+// Serve and Run call Prepare automatically if it wasn't already called.
 func (s *Server) Prepare() {
 	port := config.EnvInt("WEB_PORT", 5866)
-	// Timeouts are set explicitly because net/http's zero values mean "no
-	// limit": without them a connection that dribbles one header line every
-	// few seconds is held open indefinitely, and the shipped compose file
-	// publishes this port directly with no reverse proxy in front to absorb
-	// it. WriteTimeout is deliberately generous rather than absent — large
-	// attachment downloads stream through this same server.
+	// Timeouts are set explicitly because net/http's zero values mean "no limit":
+	// without them a connection that dribbles one header line every few seconds is
+	// held open indefinitely, and the shipped compose file publishes this port
+	// directly with no reverse proxy in front to absorb it. WriteTimeout is
+	// deliberately generous rather than absent — large attachment downloads stream
+	// through this same server.
 	//
 	// ReadTimeout stays tight because it covers the whole request INCLUDING the
-	// body, and almost every route here reads at most a few KB. The handful
-	// that accept a multi-megabyte upload extend it per-request via
-	// withUploadDeadline — see its doc comment for why the global value cannot
-	// simply be raised to suit them.
+	// body, and almost every route reads at most a few KB. The handful that accept
+	// a multi-megabyte upload extend it per-request via withUploadDeadline.
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
 		Handler:           s.routes(),
@@ -644,11 +633,11 @@ func (s *Server) Prepare() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Optional inbound TLS — see tls.go. The error is stashed rather than
-	// returned because Prepare has no error return and several callers rely on
-	// that; Serve surfaces it and refuses to start. It must NOT degrade to plain
-	// HTTP: an operator who configured a certificate believes this port is
-	// encrypted, and quietly serving cleartext on it is worse than not starting.
+	// Optional inbound TLS — see tls.go. The error is stashed rather than returned
+	// because Prepare has no error return; Serve surfaces it and refuses to start.
+	// It must NOT degrade to plain HTTP: an operator who configured a certificate
+	// believes this port is encrypted, and quietly serving cleartext is worse than
+	// not starting.
 	certFile, keyFile, err := tlsFilesFromEnv()
 	if err == nil {
 		s.tlsConfig, err = newTLSConfig(certFile, keyFile)
@@ -664,12 +653,10 @@ func (s *Server) Prepare() {
 }
 
 // Serve binds the address configured on the prepared *http.Server and blocks
-// serving requests until Shutdown (or Close) stops it, at which point it
-// returns nil (the underlying http.ErrServerClosed is not an error from the
-// caller's point of view — it's the expected result of a graceful stop).
-// Prepare is called automatically if it hasn't been already, but callers
-// that need race-free Shutdown coordination should call Prepare themselves
-// first (see Prepare's doc comment).
+// until Shutdown (or Close) stops it, at which point it returns nil —
+// http.ErrServerClosed is the expected result of a graceful stop. Prepare is
+// called automatically if it hasn't been already, but callers that need
+// race-free Shutdown coordination should call Prepare themselves first.
 func (s *Server) Serve() error {
 	if s.httpServer == nil {
 		s.Prepare()
@@ -702,13 +689,11 @@ func (s *Server) Run() error {
 	return s.Serve()
 }
 
-// Shutdown gracefully stops the HTTP server: it stops accepting new
-// connections immediately and waits for active requests to finish on their
-// own, up to ctx's deadline, before returning. Safe to call even if Prepare
-// was never invoked (a no-op then, since there is nothing to shut down) or
-// before Serve's goroutine has started (the eventual Serve call will observe
-// the server is already shutting down and return promptly instead of ever
-// blocking on Accept — see net/http.Server's shuttingDown/trackListener).
+// Shutdown gracefully stops the HTTP server: it stops accepting new connections
+// immediately and waits for active requests to finish, up to ctx's deadline.
+// Safe to call even if Prepare was never invoked (a no-op) or before Serve's
+// goroutine has started — the eventual Serve call observes the server is
+// already shutting down and returns promptly instead of blocking on Accept.
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpServer == nil {
 		return nil
@@ -717,10 +702,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // StartPickupSweeper runs PickupStore.Sweep on an interval for the process
-// lifetime, mirroring processor.Poller's ticker/cancel pattern
-// (backend/internal/processor/poller.go). Call once after NewServer, e.g.
-// `go srv.StartPickupSweeper(context.Background())` alongside wherever the
-// existing background poller is started.
+// lifetime, mirroring processor.Poller's ticker/cancel pattern. Call once after
+// NewServer, e.g. `go srv.StartPickupSweeper(context.Background())`.
 func (s *Server) StartPickupSweeper(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
@@ -729,12 +712,11 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// pickupLinkTTL, not a separate longer number. The notification
-			// email tells the recipient the link "expires in 7 days or as soon
-			// as it's opened", and a record is unusable past its ExpiresAt
-			// anyway — so a 30-day sweep only meant the message sat on disk for
-			// 23 days after the last moment anyone could read it, contradicting
-			// what the recipient was told.
+			// pickupLinkTTL, not a separate longer number. The notification email tells the
+			// recipient the link "expires in 7 days or as soon as it's opened", and a
+			// record is unusable past its ExpiresAt anyway — so a 30-day sweep only meant
+			// the message sat on disk for 23 days after the last moment anyone could read
+			// it.
 			if err := s.pickupStore.Sweep(pickupLinkTTL); err != nil {
 				s.logger.Error("pickup sweep failed", "error", err.Error())
 			}
@@ -747,9 +729,8 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 //
 // Photo filenames are content hashes, so two contacts with the same picture
 // share one file and no handler can safely delete on unlink — clearing one
-// contact's photo would blank the other's. That is why DELETE .../photo only
-// clears the reference, and why the bytes need a reference-based sweep to come
-// back at all. Without this they never did.
+// contact's photo would blank the other's. DELETE .../photo therefore only
+// clears the reference, and the bytes come back only through this sweep.
 //
 // One user's failure is logged and skipped rather than aborting the pass, so a
 // single corrupt contacts file cannot stop every other account being reclaimed.
@@ -777,14 +758,13 @@ func (s *Server) StartContactPhotoSweeper(ctx context.Context) {
 }
 
 // StartSessionSweeper reclaims sessions that passed their idle timeout or
-// absolute lifetime without anyone presenting them again, mirroring
-// StartPickupSweeper's ticker/select pattern. Call once after NewServer.
+// absolute lifetime without anyone presenting them again. Call once after
+// NewServer.
 //
 // Without it, s.sessions only ever shrinks when a token is presented again
-// (currentUser), logged out, or revoked — so every session belonging to a
-// user who simply closed the tab is pinned for the process lifetime. Every
-// other bounded map in this package already has a sweep (loginLockout,
-// nativePairingNonces, sendAsCooldown, pickupStore); the one holding live
+// (currentUser), logged out, or revoked — so every session belonging to a user
+// who simply closed the tab is pinned for the process lifetime. Every other
+// bounded map in this package already has a sweep; the one holding live
 // credentials was the exception.
 func (s *Server) StartSessionSweeper(ctx context.Context) {
 	ticker := time.NewTicker(sessionSweepInterval)
@@ -795,6 +775,37 @@ func (s *Server) StartSessionSweeper(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.sweepSessions(time.Now())
+			s.logSaturatedLockouts()
+		}
+	}
+}
+
+// logSaturatedLockouts reports any lockout table that has hit
+// loginLockoutHardCap and started shedding new keys.
+//
+// A saturated table refuses to track keys it has not seen before, which the
+// caller experiences as a 429 on a perfectly good credential. That is the
+// deliberate trade — shedding rather than evicting live lockouts, see
+// loginLockoutHardCap — but it must not be silent: from the outside it is
+// indistinguishable from "login is broken", and it means tens of thousands of
+// distinct keys are locked out at once, which is an attack in progress.
+func (s *Server) logSaturatedLockouts() {
+	if s.logger == nil {
+		return
+	}
+	for name, lockout := range map[string]*failureLockout{
+		"login":           s.loginLockout,
+		"login_ip":        s.loginIPLockout,
+		"dav":             s.davLockout,
+		"mfa":             s.mfaLockout,
+		"password_change": s.passwordChangeLockout,
+		"device":          s.deviceLockout,
+	} {
+		if lockout != nil && lockout.Saturated() {
+			s.logger.Error("lockout table saturated; new keys are being shed",
+				"table", name,
+				"hard_cap", strconv.Itoa(loginLockoutHardCap),
+				"effect", "callers not already tracked receive 429; lockouts already in force are preserved")
 		}
 	}
 }
@@ -821,13 +832,11 @@ func (s *Server) sweepSessions(now time.Time) int {
 var mfaChallengeSweepInterval = time.Minute
 
 // StartMFAChallengeSweeper reclaims login challenges that expired without
-// anyone completing (or abandoning through) them, mirroring
-// StartSessionSweeper's ticker/select pattern. Call once after NewServer.
+// anyone completing (or abandoning through) them. Call once after NewServer.
 //
 // Without it, mfa.Store only ever shrank when a challenge was presented again,
-// consumed, or explicitly purged — so every login that reached the second-factor
-// prompt and stopped there was pinned for the process lifetime. See mfa.Store's
-// doc comment for why "swept lazily on access" was not the same as swept.
+// consumed, or explicitly purged — so every login that reached the
+// second-factor prompt and stopped there was pinned for the process lifetime.
 func (s *Server) StartMFAChallengeSweeper(ctx context.Context) {
 	ticker := time.NewTicker(mfaChallengeSweepInterval)
 	defer ticker.Stop()
@@ -845,22 +854,25 @@ func (s *Server) StartMFAChallengeSweeper(ctx context.Context) {
 // StartPickupSweeper's ticker) solely so tests can shrink it to observe a
 // real tick without waiting out the production interval; production always
 // runs with the 1-hour default below.
-var sendAsCooldownSweepInterval = 1 * time.Hour
+var cooldownSweepInterval = 1 * time.Hour
 
-// StartSendAsCooldownSweeper runs sendAsCooldown.sweep on an interval for the
-// process lifetime, mirroring StartPickupSweeper's ticker/select pattern
-// exactly. Call once after NewServer, e.g.
-// `go srv.StartSendAsCooldownSweeper(context.Background())` alongside
-// StartPickupSweeper.
-func (s *Server) StartSendAsCooldownSweeper(ctx context.Context) {
-	ticker := time.NewTicker(sendAsCooldownSweepInterval)
+// StartCooldownSweeper runs sweep on every cooldown map for the process
+// lifetime, mirroring StartPickupSweeper. Call once after NewServer.
+//
+// Both instances, from one ticker. It used to sweep only sendAsCooldown, because
+// that was the instance whose bug prompted the sweep; classifierTestCooldown was
+// a copy of the same type made before the sweep existed and never got one.
+func (s *Server) StartCooldownSweeper(ctx context.Context) {
+	ticker := time.NewTicker(cooldownSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.sendAsCooldown.sweep(sendAsCooldownSweepMaxAge)
+			for _, c := range []*cooldown{s.sendAsCooldown, s.classifierTestCooldown} {
+				c.sweep(cooldownSweepMaxAge)
+			}
 		}
 	}
 }
@@ -925,30 +937,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// How this server resolved the caller's address, and whether it believed the
 	// forwarded headers to do it.
 	//
-	// This is here because there was no way to check it. Nothing logs the client
-	// IP (deliberately — see log_privacy_test.go), so an operator standing up a
-	// reverse proxy had no way to confirm the lockouts were keying off real
-	// callers rather than off the proxy. Getting that wrong is silent and it cuts
-	// both ways: a forgeable value defeats every rate limit, and a CONSTANT value
-	// makes the per-IP lockout one shared bucket, where 50 failures from anyone
-	// locks out sign-in for everyone.
+	// Nothing logs the client IP (deliberately — see log_privacy_test.go), so an
+	// operator standing up a reverse proxy has no other way to confirm the lockouts
+	// key off real callers. Getting it wrong is silent and cuts both ways: a
+	// forgeable value defeats every rate limit, and a CONSTANT value makes the
+	// per-IP lockout one shared bucket where 50 failures from anyone locks out
+	// sign-in for everyone.
 	//
-	// Safe to return: it is the caller's own address, which they already know, and
-	// the trust flag is a property of the deployment rather than a secret. Behind
-	// a correctly configured proxy, clientIp should be YOUR public address and
-	// proxyHeadersTrusted should be true. If clientIp is a loopback or bridge
-	// address, every user is sharing one lockout key.
+	// Safe to return: the caller's own address, plus a deployment property. Behind a
+	// correct proxy clientIp is YOUR public address and proxyHeadersTrusted is true;
+	// a loopback or bridge address means every user shares one lockout key.
 	resp["clientIp"] = clientIP(r)
 	resp["proxyHeadersTrusted"] = proxyHeadersTrusted(r)
 
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// imapConfigPayload is an alias for mailmsg.IMAPConfigPayload: the type
-// moved to package mailmsg (Task 16) so the mail poller can read stored IMAP/
-// SMTP credentials without an api->processor->api import cycle. Kept as an
-// alias here (rather than rewriting every reference in this package) since
-// it's the identical type, just relocated.
+// imapConfigPayload aliases mailmsg.IMAPConfigPayload, which moved to package
+// mailmsg so the mail poller can read stored IMAP/SMTP credentials without an
+// api->processor->api import cycle.
 type imapConfigPayload = mailmsg.IMAPConfigPayload
 
 type mailRequest struct {
@@ -971,24 +978,18 @@ type mailRequest struct {
 
 // Size limits for one outgoing message.
 //
-// maxMailRequestBytes is the hard cap on the request body — the number a user
-// experiences as "how big an upload is allowed" — and it is the one fixed by
-// hand. maxMailAttachmentBytes is DERIVED from it rather than picked
-// separately, because the two are not independent: attachments travel
-// base64-encoded inside the JSON body, so a decoded budget larger than
-// (request cap × 3/4) is a limit that can never be reached and only exists to
-// produce a confusing error at the wrong layer. That is what a hand-picked
-// 25 MiB attachment budget under a 40 MiB request cap was.
-//
-// mailRequestOverheadBytes reserves room for everything in the body that is
-// not attachment payload: the JSON scaffolding, recipient lists, subject, and
-// message body. 1 MiB is far more than those need.
+// maxMailRequestBytes is the hard cap on the request body — what a user
+// experiences as "how big an upload is allowed" — and is the one fixed by hand.
+// maxMailAttachmentBytes is DERIVED from it: attachments travel base64-encoded
+// inside the JSON body, so a decoded budget above (request cap × 3/4) can never
+// be reached and only produces a confusing error at the wrong layer.
+// mailRequestOverheadBytes reserves 1 MiB for JSON scaffolding, recipients,
+// subject and body, far more than those need.
 //
 // The client-side-encrypted paths (maxClientCiphertextBytes,
-// maxSealedPickupBytes) deliberately track the INBOUND message cap instead of
-// this one: they carry an already-armored ciphertext whose size is set by what
-// the browser produced, and they are bounded so a send cannot exceed what a
-// receive can handle. See their own doc comments.
+// maxSealedPickupBytes) deliberately track the INBOUND message cap instead: they
+// carry an already-armored ciphertext sized by what the browser produced, and
+// are bounded so a send cannot exceed what a receive can handle.
 const (
 	maxMailRequestBytes      = 25 << 20
 	mailRequestOverheadBytes = 1 << 20
@@ -1007,15 +1008,14 @@ var (
 		"attachments too large (max %d MB total)", maxMailAttachmentBytes>>20)
 )
 
-// pgpRecipientPlan splits an encrypted send's To/CC/BCC recipients by PGP
-// key availability and status. To/CC recipients with a usable key share one
-// ciphertext, matching how a normal email is visible to every To/CC
-// recipient. BCC recipients are kept separate so each can be encrypted
-// individually in buildPGPDeliveries — sharing a ciphertext (and its
-// embedded recipient key IDs) with anyone else would deanonymize them.
-// Recipients with no key on file, or whose key is revoked or expired, land
-// in withoutKeyEmails and fall back to the existing plaintext pickup-link
-// notification.
+// pgpRecipientPlan splits an encrypted send's To/CC/BCC recipients by PGP key
+// availability and status. To/CC recipients with a usable key share one
+// ciphertext, matching how a normal email is visible to every To/CC recipient.
+// BCC recipients are kept separate so each can be encrypted individually in
+// buildPGPDeliveries — sharing a ciphertext, and its embedded recipient key IDs,
+// would deanonymize them. Recipients with no key on file, or whose key is
+// revoked or expired, land in withoutKeyEmails and fall back to the plaintext
+// pickup-link notification.
 type pgpRecipientPlan struct {
 	toCCEmails       []string
 	toCCKeys         []string
@@ -1086,11 +1086,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // scheduleContainerRestart exits this process after delay so supervisord's
-// autorestart brings it back with fresh state.
-//
-// It restarts THIS PROCESS, not the container. Signalling PID 1 is not an
-// option: this process is unprivileged and PID 1 is not ours, so the kill
-// only ever returns EPERM.
+// autorestart brings it back with fresh state. It restarts THIS PROCESS, not
+// the container: this process is unprivileged and PID 1 is not ours, so
+// signalling PID 1 only ever returns EPERM.
 func scheduleContainerRestart(logger *logging.Logger, reason string, delay time.Duration) {
 	go func() {
 		time.Sleep(delay)

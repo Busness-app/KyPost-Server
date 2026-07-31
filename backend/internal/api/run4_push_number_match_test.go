@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"kypost-server/backend/internal/mfa"
 	"kypost-server/backend/internal/users"
 )
 
@@ -90,20 +91,22 @@ func TestPushNumberMatchAtTheHTTPLayer(t *testing.T) {
 			}
 		}},
 
-		// The core of M14: valid device credentials are no longer enough to approve.
-		{"approval without the number is refused", func(t *testing.T) {
+		// The core of M14: valid device credentials are no longer enough to
+		// approve. An omitted number is a wrong number, and a wrong number is
+		// terminal for push (see mfa.maxMatchAttempts).
+		{"approval without the number locks push", func(t *testing.T) {
 			challengeID, _ := loginChallenge(t, srv, username, password)
 
 			rec := respondPushWithDigits(srv, challengeID, deviceID, deviceSecret, true, "")
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusTooManyRequests, rec.Body.String())
 			}
-			if pollPush(srv, challengeID) != "pending" {
-				t.Fatal("an approval with no number resolved the challenge")
+			if got := pollPush(srv, challengeID); got != mfa.PushLocked {
+				t.Fatalf("push status = %q, want %q", got, mfa.PushLocked)
 			}
 		}},
 
-		{"approval with the wrong number is refused", func(t *testing.T) {
+		{"approval with the wrong number locks push and leaves TOTP", func(t *testing.T) {
 			challengeID, _ := loginChallenge(t, srv, username, password)
 			ch, ok := srv.mfaChallenges.Get(challengeID)
 			if !ok {
@@ -115,11 +118,23 @@ func TestPushNumberMatchAtTheHTTPLayer(t *testing.T) {
 			}
 
 			rec := respondPushWithDigits(srv, challengeID, deviceID, deviceSecret, true, wrong)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusTooManyRequests, rec.Body.String())
 			}
-			if pollPush(srv, challengeID) != "pending" {
-				t.Fatal("a wrong-number approval resolved the challenge")
+			if got := pollPush(srv, challengeID); got != mfa.PushLocked {
+				t.Fatalf("push status = %q, want %q", got, mfa.PushLocked)
+			}
+
+			// Locked, not approved: no session may be minted, and the correct
+			// number does not reopen it.
+			rec = respondPushWithDigits(srv, challengeID, deviceID, deviceSecret, true, ch.MatchDigits)
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("retry with the right number: status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+			}
+
+			// But the challenge survives, so TOTP can still finish the sign-in.
+			if _, ok := srv.mfaChallenges.Get(challengeID); !ok {
+				t.Fatal("the challenge was destroyed; the TOTP fallback is unreachable")
 			}
 		}},
 

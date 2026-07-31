@@ -188,15 +188,15 @@ func TestPushChallengeLifecycle(t *testing.T) {
 		t.Fatalf("initial status = %q ok=%v, want pending", status, ok)
 	}
 
-	status, err := st.ResolvePush(ch.ID, "dev-1", true)
+	status, err := st.ResolvePushWithMatch(ch.ID, "dev-1", true, ch.MatchDigits)
 	if err != nil || status != PushApproved {
-		t.Fatalf("ResolvePush = %q err=%v, want approved", status, err)
+		t.Fatalf("ResolvePushWithMatch = %q err=%v, want approved", status, err)
 	}
 
 	// First response wins: a second resolve is rejected with the prior status.
-	status2, err := st.ResolvePush(ch.ID, "dev-2", false)
+	status2, err := st.ResolvePushWithMatch(ch.ID, "dev-2", false, "")
 	if !errors.Is(err, ErrChallengeAlreadyResolved) || status2 != PushApproved {
-		t.Fatalf("second ResolvePush = %q err=%v, want approved+ErrChallengeAlreadyResolved", status2, err)
+		t.Fatalf("second ResolvePushWithMatch = %q err=%v, want approved+ErrChallengeAlreadyResolved", status2, err)
 	}
 
 	userID, err := st.ConsumePushApproval(ch.ID)
@@ -212,8 +212,8 @@ func TestPushChallengeLifecycle(t *testing.T) {
 func TestPushConsumeRequiresApproval(t *testing.T) {
 	st := NewStore()
 	ch, _ := st.Create("user-2")
-	if _, err := st.ResolvePush(ch.ID, "dev-1", false); err != nil {
-		t.Fatalf("ResolvePush deny: %v", err)
+	if _, err := st.ResolvePushWithMatch(ch.ID, "dev-1", false, ""); err != nil {
+		t.Fatalf("ResolvePushWithMatch deny: %v", err)
 	}
 	if status, ok := st.PushStatus(ch.ID); !ok || status != PushDenied {
 		t.Fatalf("status = %q ok=%v, want denied", status, ok)
@@ -298,11 +298,11 @@ func TestSupersedeUnansweredPushKeepsAnswersAndTheNewChallenge(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if _, err := s.ResolvePush(approved.ID, "dev-a", true); err != nil {
-		t.Fatalf("ResolvePush approve: %v", err)
+	if _, err := s.ResolvePushWithMatch(approved.ID, "dev-a", true, approved.MatchDigits); err != nil {
+		t.Fatalf("ResolvePushWithMatch approve: %v", err)
 	}
-	if _, err := s.ResolvePush(denied.ID, "dev-b", false); err != nil {
-		t.Fatalf("ResolvePush deny: %v", err)
+	if _, err := s.ResolvePushWithMatch(denied.ID, "dev-b", false, ""); err != nil {
+		t.Fatalf("ResolvePushWithMatch deny: %v", err)
 	}
 
 	if got := s.SupersedeUnansweredPush("user-1", current.ID); got != 1 {

@@ -121,14 +121,12 @@ func Run(args []string) error {
 		wkdStore:   wkdStore,
 	}
 
-	// Signal handling is installed exactly once, here at the real entrypoint,
-	// and the run functions below observe it only as a context. That ordering
-	// matters: os/signal registration is process-global, so doing it inside
-	// runServer/runAll (as this used to) left a window between process start
-	// and signal.Notify in which SIGTERM kept its default disposition and
-	// killed the process outright. Registering before any server is built
-	// closes that window, and passing a context instead of a channel means
-	// tests can drive shutdown without signalling the whole process.
+	// Signal handling is installed exactly once, here at the real entrypoint, and
+	// the run functions below observe it only as a context. os/signal registration
+	// is process-global, so doing it inside runServer/runAll left a window between
+	// process start and signal.Notify in which SIGTERM kept its default disposition
+	// and killed the process outright. Passing a context instead of a channel also
+	// lets tests drive shutdown without signalling the whole process.
 	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
@@ -178,6 +176,27 @@ func runDaemon(ctx context.Context, d runDeps) error {
 	return nil
 }
 
+// startBackgroundSweepers launches every periodic reclaim the API process needs.
+//
+// One list, called from both runServer and runAll. As nine duplicated
+// `go srv.StartXSweeper(ctx)` lines, a tenth added to one list and not the other
+// is a leak that only appears in the run mode nobody is testing when they add it.
+func startBackgroundSweepers(ctx context.Context, srv *api.Server) {
+	for _, sweep := range []func(context.Context){
+		srv.StartPickupSweeper,
+		srv.StartContactPhotoSweeper,
+		srv.StartCooldownSweeper,
+		srv.StartMfaPushLimiterSweeper,
+		srv.StartSessionSweeper,
+		srv.StartMFAChallengeSweeper,
+		srv.StartPoWSweeper,
+		srv.StartUserStoreSweeper,
+		srv.StartVersionMonitor,
+	} {
+		go sweep(ctx)
+	}
+}
+
 func runServer(ctx context.Context, d runDeps) error {
 	srv := api.NewServer(d.cfg, d.logger, d.health, d.users, nil, d.wkdStore)
 	srv.SetClassifier(newClassifierClient(d.cfg))
@@ -190,15 +209,7 @@ func runServer(ctx context.Context, d runDeps) error {
 
 	sweeperCtx, cancelSweepers := context.WithCancel(ctx)
 	defer cancelSweepers()
-	go srv.StartPickupSweeper(sweeperCtx)
-	go srv.StartContactPhotoSweeper(sweeperCtx)
-	go srv.StartSendAsCooldownSweeper(sweeperCtx)
-	go srv.StartMfaPushLimiterSweeper(sweeperCtx)
-	go srv.StartSessionSweeper(sweeperCtx)
-	go srv.StartMFAChallengeSweeper(sweeperCtx)
-	go srv.StartPoWSweeper(sweeperCtx)
-	go srv.StartUserStoreSweeper(sweeperCtx)
-	go srv.StartVersionMonitor(sweeperCtx)
+	startBackgroundSweepers(sweeperCtx, srv)
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -255,15 +266,7 @@ func runAll(ctx context.Context, d runDeps) error {
 
 	poller.Start()
 	d.logger.Info("poller goroutine started")
-	go srv.StartPickupSweeper(sweeperCtx)
-	go srv.StartContactPhotoSweeper(sweeperCtx)
-	go srv.StartSendAsCooldownSweeper(sweeperCtx)
-	go srv.StartMfaPushLimiterSweeper(sweeperCtx)
-	go srv.StartSessionSweeper(sweeperCtx)
-	go srv.StartMFAChallengeSweeper(sweeperCtx)
-	go srv.StartPoWSweeper(sweeperCtx)
-	go srv.StartUserStoreSweeper(sweeperCtx)
-	go srv.StartVersionMonitor(sweeperCtx)
+	startBackgroundSweepers(sweeperCtx, srv)
 	go monitorHealth(ctx, d.logger, d.health)
 	serveDone := make(chan struct{})
 	go func() {
@@ -274,16 +277,12 @@ func runAll(ctx context.Context, d runDeps) error {
 	}()
 
 	<-ctx.Done()
-	// Cancel the sweepers right away. Draining the HTTP server before
-	// stopping the poller is an arbitrary-but-reasonable convention, not a
-	// correctness requirement: poller.Stop() only cancels the background
-	// ticker loop in Poller.Run (via p.cancel), which an in-flight admin
-	// "poll now" request never observes — TriggerNow's tick() (and the
-	// tickUser/handleMessage calls it makes) derive their own fresh
-	// context.Background()-based contexts, not p.cancel. So poller.Stop()
-	// is non-blocking and fire-and-forget, and its position relative to
-	// Shutdown doesn't affect correctness; this order is just kept for
-	// readability (network-facing shutdown first, background work last).
+	// Cancel the sweepers right away. Draining the HTTP server before stopping the
+	// poller is convention, not a correctness requirement: poller.Stop() only
+	// cancels the background ticker loop in Poller.Run, which an in-flight admin
+	// "poll now" request never observes — TriggerNow's tick() derives its own
+	// context.Background()-based contexts. Stop is non-blocking, so its position
+	// relative to Shutdown does not affect correctness.
 	cancelSweepers()
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancelShutdown()
@@ -314,18 +313,15 @@ func runAll(ctx context.Context, d runDeps) error {
 const mfaClearAllMarkerFile = "mfa-clear-all.done"
 
 // mfaClearAllProgressFile persists, per user ID, which users MFA_CLEAR_ALL has
-// already successfully cleared during an in-progress break-glass campaign —
-// one that has not yet fully succeeded and written mfaClearAllMarkerFile.
+// already cleared during a campaign that has not yet fully succeeded and written
+// mfaClearAllMarkerFile.
 //
-// Without this, a boot that clears users A and B but fails on C would have no
-// marker at all (since the campaign as a whole didn't finish), so the next
-// boot would rerun the ENTIRE user list, including A and B. If either of them
-// re-enrolled MFA in the meantime (exactly what the break-glass procedure
-// expects an admin to do), that retry would silently wipe it out again — and
-// forever, if C's failure is permanent. Tracking per-user completion means a
-// retry only ever touches users still outstanding: once a user is recorded
-// here, no later boot (with the env var still set) will clear their MFA again,
-// even if they've since re-enrolled.
+// Without it, a boot that clears users A and B but fails on C writes no marker,
+// so the next boot reruns the ENTIRE user list. If A or B re-enrolled MFA in the
+// meantime — exactly what the break-glass procedure expects an admin to do — the
+// retry silently wipes it out again, and forever if C's failure is permanent.
+// Tracking per-user completion means a retry only touches users still
+// outstanding.
 const mfaClearAllProgressFile = "mfa-clear-all.progress"
 
 // mfaClearAllProgress is the on-disk schema for mfaClearAllProgressFile.
@@ -371,17 +367,15 @@ func saveMFAClearAllCleared(path string, cleared map[string]struct{}) error {
 	return fsutil.AtomicWriteFile(path, data, 0o600)
 }
 
-// clearAllMFAIfRequested is a break-glass recovery path for self-hosters
-// locked out by MFA with no other admin able to reach the Manage Users page.
-// Setting MFA_CLEAR_ALL wipes TOTP/recovery codes/push-MFA for every user,
-// but only once: a successful clear writes a marker file in stateDir that
-// permanently disarms this path, so an operator who forgets to unset the env
-// var afterward does not keep re-clearing MFA on every future boot.
+// clearAllMFAIfRequested is a break-glass recovery path for self-hosters locked
+// out by MFA with no other admin able to reach the Manage Users page. Setting
+// MFA_CLEAR_ALL wipes TOTP/recovery codes/push-MFA for every user, but only
+// once: a successful clear writes a marker file in stateDir that permanently
+// disarms this path, so an operator who forgets to unset the env var does not
+// keep re-clearing MFA on every future boot.
 //
-// If the clear fails partway (any single user's write errors), the marker is
-// deliberately not written so the operator's next boot retries it — but the
-// retry only reprocesses users not yet recorded in mfaClearAllProgressFile, so
-// users already cleared (and possibly re-enrolled since) are left alone.
+// If the clear fails partway, the marker is deliberately not written so the next
+// boot retries — but only for users not yet recorded in mfaClearAllProgressFile.
 func clearAllMFAIfRequested(logger *logging.Logger, usersStore *users.Store, stateDir string) {
 	if raw := strings.TrimSpace(os.Getenv("MFA_CLEAR_ALL")); raw == "" {
 		return
@@ -533,15 +527,15 @@ func newClassifierClient(cfg config.Config) *classifier.HTTPClient {
 }
 
 // warmupClassifierOnStartup kicks off the model warmup and the post-warmup
-// unread sweep in the background, returning a channel closed once that work
-// has finished unwinding.
+// unread sweep in the background, returning a channel closed once that work has
+// finished unwinding.
 //
-// The context is the caller's shutdown context, not context.Background(). It
-// used to be Background with a bare 5-minute timeout, which left the warmup
-// goroutine running — issuing IMAP calls and writing per-user state — for up
-// to five minutes after the process had been told to shut down, with no way
-// to stop it. Worse, TriggerUnreadSweep resets every active user's checkpoint
-// before it re-scans; starting that during shutdown risks tearing the write.
+// The context is the caller's shutdown context, not context.Background(). As
+// Background with a bare 5-minute timeout, the warmup goroutine kept issuing
+// IMAP calls and writing per-user state for up to five minutes after the process
+// had been told to shut down — and TriggerUnreadSweep resets every active user's
+// checkpoint before it re-scans, so starting that during shutdown risks tearing
+// the write.
 func warmupClassifierOnStartup(ctx context.Context, logger *logging.Logger, client *classifier.HTTPClient, poller *processor.Poller) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {

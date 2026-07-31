@@ -15,7 +15,7 @@ import (
 )
 
 // powSweepInterval is a var rather than an inline literal (like
-// sendAsCooldownSweepInterval) solely so tests can shrink it; production
+// cooldownSweepInterval) solely so tests can shrink it; production
 // always runs the 10-minute default. Challenges live 5 minutes, so this
 // reclaims an entry within two of its expiry at worst.
 var powSweepInterval = 10 * time.Minute

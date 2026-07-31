@@ -78,11 +78,16 @@ Optional for local development (outside Docker):
 ## Quick Start
 
 1. Clone the repository.
-2. Optional: copy the environment defaults.
+2. Copy the environment defaults and set `KYPOST_BIND`.
 
    ```bash
    cp .env.example .env
    ```
+
+   `.env.example` ships with `KYPOST_BIND=127.0.0.1`, which is right when your
+   reverse proxy runs on this same host. It is **required** — compose refuses to
+   start without it — because the alternative is a silent default, and this port
+   serves plain HTTP unless `TLS_CERT_FILE` is set. See step 4.
 
 3. Build and start the container.
 
@@ -98,13 +103,15 @@ Optional for local development (outside Docker):
    > cookie is sent in the clear on every request. `http://` on localhost, for one
    > machine, is fine.
    >
-   > The compose file publishes port 5866 on all interfaces. If your proxy runs
-   > on the same host and reaches `127.0.0.1:5866`, set `KYPOST_BIND=127.0.0.1`
-   > to close that off — an unproxied 5866 is plain HTTP, and with
-   > `TRUSTED_PROXY_CIDRS` set, anything that reaches it directly can forge
-   > `X-Forwarded-For` and bypass the lockouts. **Check first that your proxy
-   > does not reach this container by the host's LAN address**, because loopback
-   > publishing severs that; a proxy on another machine needs the default.
+   > `KYPOST_BIND` decides which interface port 5866 is published on, and it has
+   > no default — compose will not start until you set it. An unproxied 5866 is
+   > plain HTTP, and with `TRUSTED_PROXY_CIDRS` set, anything that reaches it
+   > directly can forge `X-Forwarded-For` and bypass the lockouts. Use
+   > `127.0.0.1` for a proxy on this host, your LAN IP for a proxy elsewhere, or
+   > `0.0.0.0` to publish everywhere deliberately. **Check where your proxy
+   > actually reaches this container from before choosing**: loopback publishing
+   > severs a proxy that arrives by the host's LAN address, which is the usual
+   > shape for cloudflared or an nginx on another machine.
    > Better still, run the proxy as a container on `kypost-net` — the network the
    > compose file defines for exactly this — and point it at
    > `http://KyPost-Server:5866`. That network has DNS, so the name keeps working
