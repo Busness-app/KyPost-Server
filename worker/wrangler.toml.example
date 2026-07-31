@@ -15,11 +15,15 @@ enabled = true
 # writes (free-tier friendly). Restore them via Durable Objects on Workers Paid.
 RATE_LIMIT_PER_MINUTE = "10"  # display only; keep equal to PUSH_RATE_LIMITER.simple.limit
 
-# Public self-registration (POST /register). Self-hosted servers mint their own
-# key with no maintainer involvement. Set to "false" to close registration if
-# abused. Per-IP request rate is capped by the REGISTER_RATE_LIMITER binding
-# below (independent of PUSH_RATE_LIMITER, which only governs /send).
-REGISTRATION_ENABLED = "true"
+# Public self-registration (POST /register). Set to "true" ONLY if you intend to
+# run an unauthenticated key-minting endpoint on the public internet: anyone who
+# can reach this Worker can then mint a key and spend your FCM quota. Left "false"
+# here so a copied-unchanged config is closed; mint keys via POST /admin/keys
+# instead, or flip this on deliberately. When open, self-hosted servers mint their
+# own key with no maintainer involvement, and per-IP request rate is capped by the
+# REGISTER_RATE_LIMITER binding below (independent of PUSH_RATE_LIMITER, which
+# only governs /send).
+REGISTRATION_ENABLED = "false"
 
 # KV namespaces. Create these with:
 #   npx wrangler kv namespace create API_KEYS

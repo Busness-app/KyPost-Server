@@ -76,6 +76,13 @@ export const BOUND_TOKEN_PREFIX = "boundtoken:"; // boundtoken:<sha256(deviceTok
 
 export const DEFAULT_LIMIT_PER_MINUTE = 10;
 
+/**
+ * Max stored label length. A label is an operator-facing name for one server,
+ * not a payload; without a bound, public /register lets anyone persist
+ * megabyte-sized strings into KV and into every /admin/keys listing.
+ */
+export const MAX_LABEL_LENGTH = 64;
+
 // ---- small helpers ---------------------------------------------------------
 
 export interface RequestContext<TEnv extends CommonEnv = CommonEnv> {
@@ -394,7 +401,9 @@ export async function mintKey(
   const id = crypto.randomUUID();
   const record: ApiKeyRecord = {
     id,
-    label: opts.label,
+    // Clamped here rather than at each call site so no minting path can store an
+    // unbounded label (see MAX_LABEL_LENGTH).
+    label: opts.label.slice(0, MAX_LABEL_LENGTH),
     enabled: true,
     createdAt: new Date().toISOString(),
     expiresAt: opts.expiresAt,
@@ -408,14 +417,24 @@ export async function mintKey(
   return { record, key };
 }
 
+/**
+ * Parse a JSON object body, tolerating anything else. `request.json()` accepts
+ * valid-but-non-object JSON (`null`, arrays, scalars), and reading a property off
+ * `null` throws — a body of literal `null` turned these handlers into a 500.
+ */
+async function jsonObjectBody<T extends object>(request: Request): Promise<Partial<T>> {
+  let parsed: unknown;
+  try {
+    parsed = await request.json();
+  } catch {
+    return {};
+  }
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Partial<T>) : {};
+}
+
 export async function handleAdminCreate(request: Request, rc: RequestContext): Promise<Response> {
   const { env } = rc;
-  let body: { label?: string; ttlDays?: unknown; expiresAt?: unknown };
-  try {
-    body = (await request.json()) as typeof body;
-  } catch {
-    body = {};
-  }
+  const body = await jsonObjectBody<{ label?: string; ttlDays?: unknown; expiresAt?: unknown }>(request);
   const label = (body.label ?? "").trim() || "unnamed";
 
   const expiry = resolveExpiry(body);
@@ -471,12 +490,7 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
     response.headers.set("Retry-After", "60");
     return response;
   }
-  let body: { label?: string };
-  try {
-    body = (await request.json()) as { label?: string };
-  } catch {
-    body = {};
-  }
+  const body = await jsonObjectBody<{ label?: string }>(request);
   const label = (body.label ?? "").trim() || "self-registered";
 
   // Enforce one active key per IP: invalidate any prior key for this IP first.
@@ -498,25 +512,32 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
 export async function handleAdminList(rc: RequestContext): Promise<Response> {
   const { env } = rc;
   const now = Date.now();
-  const listed = await env.API_KEYS.list({ prefix: KEY_PREFIX });
   const keys = [];
-  for (const entry of listed.keys) {
-    const record = await env.API_KEYS.get<ApiKeyRecord>(entry.name, "json");
-    if (!record) {
-      continue;
+  // KV list() returns one page (1,000 keys); follow the cursor to completion.
+  // Stopping at the first page silently hid active credentials from the operator
+  // doing the revoking, which is the one listing that has to be complete.
+  let cursor: string | undefined;
+  do {
+    const listed = await env.API_KEYS.list({ prefix: KEY_PREFIX, cursor });
+    cursor = listed.list_complete ? undefined : listed.cursor;
+    for (const entry of listed.keys) {
+      const record = await env.API_KEYS.get<ApiKeyRecord>(entry.name, "json");
+      if (!record) {
+        continue;
+      }
+      keys.push({
+        id: record.id,
+        label: record.label,
+        enabled: record.enabled,
+        createdAt: record.createdAt,
+        expiresAt: record.expiresAt ?? null,
+        expired: isExpired(record, now),
+        source: record.source ?? "admin",
+        registeredIp: record.registeredIp ?? null,
+        // Usage (send counts + last-seen) lives in Analytics Engine, not KV.
+      });
     }
-    keys.push({
-      id: record.id,
-      label: record.label,
-      enabled: record.enabled,
-      createdAt: record.createdAt,
-      expiresAt: record.expiresAt ?? null,
-      expired: isExpired(record, now),
-      source: record.source ?? "admin",
-      registeredIp: record.registeredIp ?? null,
-      // Usage (send counts + last-seen) lives in Analytics Engine, not KV.
-    });
-  }
+  } while (cursor);
   return json({ keys });
 }
 

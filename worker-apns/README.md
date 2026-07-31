@@ -51,7 +51,9 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(APNs provid
 
 ## Self-registration (no maintainer involvement)
 
-Same as the FCM worker: self-hosted servers get a key on their own. The Go backend does this automatically: on first start with `APNS_RELAY_URL` set and no `APNS_RELAY_KEY`, it calls `/register`, persists the key, and reuses it on every restart.
+**Off by default.** `/register` is an unauthenticated key-minting endpoint, so it stays closed until you set `REGISTRATION_ENABLED = "true"` in `wrangler.toml` and redeploy; the shipped `wrangler.toml.example` leaves it `"false"`. Until you flip it, issue keys with [`POST /admin/keys`](#issuing-a-key-manually-optional).
+
+Once open, same as the FCM worker: self-hosted servers get a key on their own. The Go backend does this automatically: on first start with `APNS_RELAY_URL` set and no `APNS_RELAY_KEY`, it calls `/register`, persists the key, and reuses it on every restart.
 
 ```sh
 curl -X POST https://<your-worker>.workers.dev/register \
