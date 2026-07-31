@@ -56,22 +56,7 @@ func TestRejectedLoginRefundsTheInstanceBudget(t *testing.T) {
 	srv := newTestServer(t)
 
 	const attacker = "203.0.113.99"
-
-	// Burn the per-IP lockout budget so every subsequent attempt from this
-	// address is refused at the lockout, before any derivation.
-	for range loginIPMaxFailures {
-		loginFrom(t, srv, attacker, "nosuchuser", "wrong-password-here")
-	}
-	if code := loginFrom(t, srv, attacker, "nosuchuser", "wrong-password-here"); code != http.StatusTooManyRequests {
-		t.Fatalf("attacker is not locked out yet (got %d); the test is not exercising the refund path", code)
-	}
-
-	// Refill the bucket before measuring. Burning the lockout above already
-	// spent real budget, and admitCost floors the debt at -burst — so measuring
-	// from an already-floored balance would report "no drain" no matter what the
-	// handler does. The floor bounds the damage; this test is about the drain
-	// itself, so it has to start with room to drain.
-	resetInstanceBudget(t, srv)
+	lockOutAddress(t, srv, attacker)
 
 	// Fewer requests than the burst holds (3.0 token-seconds at 0.2 each), so an
 	// unrefunded reservation shows up as a balance drop rather than being
@@ -103,6 +88,43 @@ func resetInstanceBudget(t *testing.T, srv *Server) {
 	l.entries[loginRateLimitKey] = &rateBucket{tokens: l.burst, last: l.now()}
 }
 
+// lockOutAddress leaves ip refused by the per-IP lockout — before any derivation
+// — with the instance budget back at full, so what a caller measures afterwards
+// is the rejected-request path and nothing else.
+//
+// Two adjustments, both about isolating that path rather than about the values.
+//
+// The threshold is shrunk first, for the reason
+// TestLoginIPLockoutCatchesRotatingUsernames shrinks it: every attempt against an
+// unknown username runs a full scrypt on purpose (equalizeLoginTiming, so timing
+// cannot reveal whether an account exists), so burning the production 50 costs
+// fifty derivations in a test that is not about the threshold's value.
+//
+// And the budget comes out for the burn, which is load bearing. The burst is
+// worth loginRateBurst sign-ins and a shed attempt returns BEFORE tryAttempt, so
+// with the budget in place a burn longer than the burst never reaches the
+// lockout: the address ends up merely rate-limited, not locked, and the caller
+// measures the budget a second time instead of the lockout. It is restored, and
+// the bucket refilled, before the helper returns.
+func lockOutAddress(t *testing.T, srv *Server, ip string) {
+	t.Helper()
+	const maxFailures = 4
+	srv.loginIPLockout = newFailureLockout(maxFailures, loginIPLockoutFor)
+
+	budget := srv.loginRateLimiter
+	srv.loginRateLimiter = nil
+	for range maxFailures {
+		loginFrom(t, srv, ip, "nosuchuser", "wrong-password-here")
+	}
+	srv.loginRateLimiter = budget
+	resetInstanceBudget(t, srv)
+
+	if code := loginFrom(t, srv, ip, "nosuchuser", "wrong-password-here"); code != http.StatusTooManyRequests {
+		t.Fatalf("%s is not locked out (got %d); every request the caller makes next would run "+
+			"a derivation, so it would not be exercising the rejected-request path at all", ip, code)
+	}
+}
+
 // TestLockedOutFloodDoesNotDenySignInToEveryoneElse is the same defect stated as
 // the outage it caused, rather than as an accounting identity.
 //
@@ -112,9 +134,7 @@ func TestLockedOutFloodDoesNotDenySignInToEveryoneElse(t *testing.T) {
 	srv := newTestServer(t)
 
 	const attacker = "203.0.113.99"
-	for range loginIPMaxFailures {
-		loginFrom(t, srv, attacker, "nosuchuser", "wrong-password-here")
-	}
+	lockOutAddress(t, srv, attacker)
 	for range 500 {
 		loginFrom(t, srv, attacker, "nosuchuser", "wrong-password-here")
 	}

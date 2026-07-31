@@ -127,8 +127,15 @@ func TestLoginRequiresProofOfWorkByDefault(t *testing.T) {
 // per-IP one is defeated by more IPs and the resource being spent (CPU) is
 // shared.
 func TestLoginRateLimitIsInstanceWide(t *testing.T) {
-	withProductionHashCost(t)
 	srv := newTestServer(t)
+
+	// No withProductionHashCost here, deliberately. It used to be required
+	// because the budget billed measured time, so a cheap hash bought far more
+	// attempts than the burst nominally holds and counting them measured the
+	// scrypt cost instead of the throttle. The test binary now bills a flat
+	// loginKDFReserveSeconds per derivation (see loginKDFBilledSeconds), so the
+	// burst is worth loginRateBurst attempts whatever the hash costs, and paying
+	// for real 128 MiB derivations here buys nothing but wall-clock.
 
 	// Distinct usernames AND distinct source IPs: neither the per-account nor
 	// the per-IP lockout can catch this pattern.
