@@ -58,11 +58,52 @@ func logNativeSenderError(log *logging.Logger, reason, detail string) {
 	log.Error("native push relay not configured", "reason", reason, "detail", detail)
 }
 
+// ValidateRelayURL refuses a relay base URL that would put the per-server relay
+// key on the wire in cleartext. Every request this sender makes — /register and
+// every /send — carries that key as a bearer token, alongside the notification
+// title and body, so an http:// relay URL is not a weaker transport, it is a
+// credential disclosure to anyone on the path.
+//
+// Checked at construction rather than at send time so a typo in PUSH_RELAY_URL
+// fails loudly at startup, before auto-registration has already handed the
+// freshly minted key to a plaintext endpoint.
+//
+// Loopback over http is allowed: it never leaves the host, and it is how the
+// relay is exercised locally and in tests.
+func ValidateRelayURL(rawURL string) error {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("invalid relay URL: %w", err)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("relay URL missing host")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if host == "localhost" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return errors.New("relay URL must use https (http is allowed only for loopback)")
+	default:
+		return fmt.Errorf("relay URL must use https, got scheme %q", u.Scheme)
+	}
+}
+
 // newRelaySenderFromEnvWithPrefix builds a relay sender for the given prefix
 // (e.g. "PUSH_RELAY" or "APNS_RELAY"), or returns nil if not configured.
 func newRelaySenderFromEnvWithPrefix(log *logging.Logger, prefix string) *RelaySender {
 	relayURL := strings.TrimRight(strings.TrimSpace(os.Getenv(prefix+"_URL")), "/")
 	if relayURL == "" {
+		return nil
+	}
+	if err := ValidateRelayURL(relayURL); err != nil {
+		logNativeSenderError(log, prefix+"_URL is not usable", err.Error())
 		return nil
 	}
 	client := &http.Client{Timeout: 15 * time.Second}

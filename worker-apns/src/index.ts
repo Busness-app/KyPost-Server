@@ -128,10 +128,10 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return response;
   }
 
-  const binding = await claimTokenForSend(env, token, record.id);
+  const binding = await claimTokenForSend(rc, token, record.id);
   if (!binding.allowed) {
-    rc.log({ level: "warn", event: "send.denied", reason: "token_bound_to_other_key", keyId: record.id });
-    return fail(rc, 403, binding.reason);
+    rc.log({ level: "warn", event: "send.denied", reason: binding.logReason, keyId: record.id });
+    return fail(rc, binding.status, binding.reason);
   }
 
   // Count the accepted send in Analytics Engine (off the KV write path).
@@ -153,7 +153,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     // a claim we made this request so it doesn't stay permanently bound to a key
     // that never delivered.
     if (binding.newlyClaimed) {
-      rc.ctx.waitUntil(releaseToken(env, token));
+      rc.ctx.waitUntil(releaseToken(rc, token, record.id));
     }
     rc.log({ level: "error", event: "send.error", keyId: record.id, error: String((err as Error).message ?? err) });
     return fail(rc, 502, `relay send failed: ${(err as Error).message}`);
@@ -167,13 +167,13 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   if (result.stale) {
     // Dead token: roll back a claim we made this request so it doesn't linger.
     if (binding.newlyClaimed) {
-      rc.ctx.waitUntil(releaseToken(env, token));
+      rc.ctx.waitUntil(releaseToken(rc, token, record.id));
     }
     rc.log({ level: "info", event: "send.stale", keyId: record.id, apnsStatus: result.status });
     return json({ stale: true, requestId: rc.requestId }, 410);
   }
   if (binding.newlyClaimed) {
-    rc.ctx.waitUntil(releaseToken(env, token));
+    rc.ctx.waitUntil(releaseToken(rc, token, record.id));
   }
   rc.log({ level: "error", event: "send.apns_failed", keyId: record.id, apnsStatus: result.status });
   return fail(rc, 502, `apns send failed: status=${result.status} response=${result.detail}`);
@@ -184,6 +184,11 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
 // Route dispatch and the fetch() wrapper (request-id, access logging,
 // unhandled-error catch) are identical across both relay workers — see
 // createRelayFetchHandler in push-relay-common.ts.
+
+// Re-exported so the runtime can find the class named by the RELAY_COORDINATOR
+// binding in wrangler.toml. It holds device-token ownership and the one-active-
+// key-per-IP rule, which KV cannot hold atomically — see relay-coordinator.ts.
+export { RelayCoordinator } from "../../push-relay-shared/relay-coordinator";
 
 export default {
   fetch: createRelayFetchHandler<Env>({

@@ -433,7 +433,7 @@ func TestDAVCachedCredentialRejectedAfterDeactivation(t *testing.T) {
 
 	// Simulate the race's outcome directly: a live cache entry for an account
 	// that has since been deactivated.
-	srv.davCredentials.put(u.Username, "app-password", AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role})
+	srv.davCredentials.put(srv.davCredentials.currentGeneration(), u.Username, "app-password", AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role})
 	if _, err := srv.users.Deactivate(u.ID); err != nil {
 		t.Fatalf("Deactivate: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestDAVCachedCredentialStillWorksForActiveAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	srv.davCredentials.put(u.Username, "app-password", AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role})
+	srv.davCredentials.put(srv.davCredentials.currentGeneration(), u.Username, "app-password", AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role})
 
 	var gotCtx context.Context
 	handler := srv.withDAVBasicAuth(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { gotCtx = r.Context() }))
