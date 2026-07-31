@@ -64,14 +64,6 @@ func (c *cooldown) sweep(maxAge time.Duration) {
 	}
 }
 
-// len reports the number of tracked keys. Test-facing, so a sweep can be
-// asserted on.
-func (c *cooldown) len() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.lastSent)
-}
-
 // sendAsVerificationCooldownFor bounds how often a send-as verification probe
 // email may be dispatched for a given (user, candidate address) pair: without
 // this, an authenticated user could repeatedly trigger probe emails at any

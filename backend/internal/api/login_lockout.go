@@ -355,7 +355,7 @@ func (s *Server) chargeLoginKDF(ctx context.Context, held *loginBudget, work fun
 	err := s.withKDFSlot(ctx, func() {
 		start := time.Now()
 		ok = work()
-		held.settle(time.Since(start).Seconds() - loginKDFReserveSeconds)
+		held.settle(loginKDFBilledSeconds(time.Since(start)) - loginKDFReserveSeconds)
 	})
 	if err != nil {
 		// The reservation handleLogin took up front bought derivation work that
@@ -366,6 +366,38 @@ func (s *Server) chargeLoginKDF(ctx context.Context, held *loginBudget, work fun
 	}
 	return ok, nil
 }
+
+// billMeasuredTime is what a derivation costs the instance-wide budget: the
+// wall-clock time it actually took. Metering the work rather than counting the
+// requests is the whole point of the budget — see loginKDFReserve — so this is
+// the production answer and the only one that should ever ship.
+func billMeasuredTime(d time.Duration) float64 { return d.Seconds() }
+
+// loginKDFBilledSeconds is the cost oracle chargeLoginKDF settles against. A var
+// for one reason: the internal/api TEST BINARY cannot use the real one and stay
+// deterministic.
+//
+// The budget is denominated in measured seconds, and a measured second in that
+// binary means nothing. TestMain drops scrypt from N=2^17 to 2^14 so the suite
+// finishes at all, and -race then inflates what the cheap derivation costs on
+// the wall — by a factor that belongs to the machine, not to the code. The two
+// do not cancel: a sign-in billed ~0.17 s against the 3.0 s burst on a
+// developer's laptop and enough more than that on a CI runner that three of them
+// emptied it. Tests about MFA replay, lockout scoping and push approval sign in
+// several times each and failed there, and only there, on a 429 about CPU
+// capacity that no part of their subject concerns.
+//
+// So the test binary bills a FIXED loginKDFReserveSeconds per derivation, which
+// makes the burst worth exactly loginRateBurst sign-ins on every machine —
+// precisely what loginRateBurst already claims to be. The budget is otherwise
+// completely live in tests: real sizing, real refill, real shedding, and a test
+// that drains it gets the same 429 a caller would. Only the stopwatch is
+// stubbed, because the stopwatch is the one part that cannot be honest there.
+//
+// Assigned in exactly one place, internal/api's TestMain. Nothing in production
+// may reassign it; billMeasuredTime is pinned directly by
+// TestProductionBillsTheMeasuredTime so weakening it cannot pass unnoticed.
+var loginKDFBilledSeconds = billMeasuredTime
 
 // loginBudget is one outstanding reservation against the instance-wide login
 // bucket, held from the admitCost at the top of handleLogin until something

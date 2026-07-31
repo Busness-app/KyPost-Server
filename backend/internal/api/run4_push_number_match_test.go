@@ -48,15 +48,6 @@ func TestPushNumberMatchAtTheHTTPLayer(t *testing.T) {
 	const username, password = "rowan", "pw-rowan-testpassword"
 	userID, deviceID, deviceSecret := pushMFAUser(t, srv, username, password, "dev-rowan")
 
-	// Take the instance-wide login budget out of the picture, as
-	// TestLoginIPLockoutCatchesRotatingUsernames does and for the same reason:
-	// none of these cases is about it. It matters here because that budget is
-	// denominated in wall-clock seconds of KDF work rather than in attempts, so
-	// under -race -- where scrypt costs ~2.4x more real time -- a burst nominally
-	// worth loginRateBurst attempts is spent after about three logins, and the
-	// fourth case got a 429 instead of a challenge.
-	srv.loginRateLimiter = nil
-
 	cases := []struct {
 		name string
 		run  func(t *testing.T)

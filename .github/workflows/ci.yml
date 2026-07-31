@@ -34,9 +34,10 @@ concurrency:
 jobs:
   backend:
     runs-on: ubuntu-latest
-    # The api package alone takes ~4 minutes under -race. 25 leaves headroom
-    # without inheriting GitHub's 6-hour default, which is what a genuinely
-    # hung test would otherwise burn before anyone noticed.
+    # The api package alone takes 7-8 minutes under -race, and users another 4.
+    # 25 leaves headroom without inheriting GitHub's 6-hour default, which is
+    # what a genuinely hung test would otherwise burn before anyone noticed. It
+    # is also the outer bound the -timeout below sits inside.
     timeout-minutes: 25
     defaults:
       run:
@@ -101,8 +102,21 @@ jobs:
       # -count=1 is not optional. Without it `go test` serves cached results
       # for unchanged packages, which is exactly how internal/app stayed
       # locally green for days while failing here on every push.
+      #
+      # -timeout is set because go test's default is 10 minutes PER TEST BINARY
+      # and internal/api honestly needs more than that here: it is dominated by
+      # scrypt, and -race on a shared runner has had it at 7-9 minutes with the
+      # figure moving with whatever else the host is doing. Twice that put it
+      # over, and the run died with `panic: test timed out after 10m0s` while
+      # the named running test was one second old — nothing hung, the budget
+      # was simply wrong.
+      #
+      # 20m, not "off" and not the job's 25: a hung test must still hit a Go
+      # timeout, because that panic dumps every goroutine's stack and is the
+      # only artifact that says WHERE it hung. Letting timeout-minutes kill the
+      # job instead trades that for a truncated log.
       - name: go test -race
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -timeout=20m ./...
 
   frontend:
     runs-on: ubuntu-latest

@@ -192,12 +192,6 @@ func TestPushApprovalLifecycle(t *testing.T) {
 	const username, password = "quinn", "pw-quinn-testpassword"
 	userID, deviceID, deviceSecret := pushMFAUser(t, srv, username, password, "dev-quinn")
 
-	// Same reason as TestPushNumberMatchAtTheHTTPLayer: the instance-wide login
-	// budget is denominated in wall-clock seconds of KDF work, so under -race it
-	// is spent well before loginRateBurst attempts. None of these cases is about
-	// it.
-	srv.loginRateLimiter = nil
-
 	cases := []struct {
 		name string
 		run  func(t *testing.T)

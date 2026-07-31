@@ -39,6 +39,16 @@ func totpCodeForTest(t *testing.T, base32Secret string, at time.Time) string {
 	return fmt.Sprintf("%06d", bin%1_000_000)
 }
 
+// totpStep mirrors internal/totp's unexported `period`. A TOTP code names a
+// step, not an instant, so a test that mints one and a server that checks it
+// agree only while both read the same step.
+const totpStep = 30 * time.Second
+
+// totpStepAt reports the step counter an instant falls in — the same
+// t.Unix()/period totp.Validate computes. Tests use it to tell "the code was
+// wrong" apart from "the code aged out between minting and checking".
+func totpStepAt(at time.Time) int64 { return at.Unix() / int64(totpStep/time.Second) }
+
 // testPasswordFor reconstructs a test account's password from the
 // pw-<username>-testpassword convention every test in this package uses.
 func testPasswordFor(t *testing.T, srv *Server, userID string) string {
@@ -73,24 +83,52 @@ func enrollTOTP(t *testing.T, srv *Server, userID string) (secret string, recove
 		t.Fatalf("setup response missing fields: %s", setupRec.Body.String())
 	}
 
-	// Deliberately the *previous* time-step, not the current one: since
-	// handleMFAConfirm now records LastUsedTOTPStep (see
-	// TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge), consuming the
-	// current step here would make it unusable for whatever code a test
-	// computes immediately afterward via time.Now() for its first login MFA
-	// challenge -- a same-instant test artifact, not a real user scenario
-	// (a real user confirming enrollment isn't simultaneously mid-login).
-	// One step earlier is still within totp.Validate's +/-1 skew window
-	// against the real current time, so confirmation itself still succeeds.
-	code := totpCodeForTest(t, setupResp.Secret, time.Now().Add(-30*time.Second))
-	// Confirming now re-authenticates: enrolling a factor is gated the same way
+	// Confirming re-authenticates: enrolling a factor is gated the same way
 	// removing one is. Test accounts all use the pw-<username>-testpassword
-	// convention, so the helper can derive it rather than every caller passing it.
-	confirmRec := doJSONAuth(srv, srv.withAuth(srv.handleMFAConfirm), http.MethodPost,
-		"/api/mfa/totp/confirm", map[string]string{
-			"code":     code,
-			"password": testPasswordFor(t, srv, userID),
-		}, userID)
+	// convention, so the helper derives it rather than every caller passing it.
+	// Resolved before the loop so no user lookup sits inside the window below.
+	password := testPasswordFor(t, srv, userID)
+
+	// The code is deliberately the PREVIOUS step's, and this retries once if the
+	// clock rolls into a new step underneath the request.
+	//
+	// Previous rather than current because handleMFAConfirm records
+	// LastUsedTOTPStep (see TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge)
+	// and the per-account replay guard refuses any step at or below it.
+	// Consuming the current step would make whatever code a test computes
+	// immediately afterwards via time.Now() unusable -- a same-instant test
+	// artifact, not a real user scenario, since a real user confirming
+	// enrolment is not simultaneously mid-login. The NEXT step is not an option
+	// for the mirror-image reason: it would consume a step above the one the
+	// test is about to use.
+	//
+	// So exactly one step is usable, and it carries no forward margin.
+	// totp.Validate accepts t-1, t and t+1, so a code minted for step S-1 is
+	// accepted only while the server's own clock still reads step S. Confirm
+	// re-authenticates the password, which puts a full scrypt between minting
+	// the code and validating it -- hundreds of milliseconds in CI under -race.
+	// Mint in the tail of a step and the server reads S+1, the code is two steps
+	// back, and confirm answers "invalid code". It did, intermittently, in CI.
+	//
+	// Retrying is the correct response rather than a papering-over: the server
+	// was right, the code really had expired. That path consumes nothing -- the
+	// 401 returns before SetLastUsedTOTPStep, TOTPSecretEnc is untouched and
+	// TOTPEnabled stays false -- and the password verified, so loginLockout
+	// recorded a success rather than a strike. One retry is provably enough: it
+	// starts immediately after a boundary, so it has a full step to run in.
+	var confirmRec *httptest.ResponseRecorder
+	for range 2 {
+		mintedIn := totpStepAt(time.Now())
+		confirmRec = doJSONAuth(srv, srv.withAuth(srv.handleMFAConfirm), http.MethodPost,
+			"/api/mfa/totp/confirm", map[string]string{
+				"code":     totpCodeForTest(t, setupResp.Secret, time.Now().Add(-totpStep)),
+				"password": password,
+			}, userID)
+		// Anything but a step rollover is the real answer, pass or fail.
+		if confirmRec.Code == http.StatusOK || totpStepAt(time.Now()) == mintedIn {
+			break
+		}
+	}
 	if confirmRec.Code != http.StatusOK {
 		t.Fatalf("confirm: status=%d body=%s", confirmRec.Code, confirmRec.Body.String())
 	}
