@@ -43,11 +43,11 @@ func TestLoginLockoutScopedToClientIP(t *testing.T) {
 func TestFailureLockoutCustomThreshold(t *testing.T) {
 	l := newFailureLockout(2, time.Minute)
 	_, _ = l.tryAttempt("key")
-	if ok, _ := l.allowed("key"); !ok {
+	if ok, _ := l.lockedNow("key"); !ok {
 		t.Fatal("one failure below a threshold of two must not lock")
 	}
 	_, _ = l.tryAttempt("key")
-	ok, retryAfter := l.allowed("key")
+	ok, retryAfter := l.lockedNow("key")
 	if ok {
 		t.Fatal("expected lockout after reaching the custom threshold")
 	}
@@ -115,37 +115,71 @@ func TestDAVAuthSuccessClearsLockoutHistory(t *testing.T) {
 	}
 }
 
-// TestFailureLockoutIsHardBounded is the regression test for a "bound" that
-// bounded nothing.
+// TestFailureLockoutIsHardBounded pins the bound AND what it must never trade
+// for it.
 //
-// The old sweep deleted entries that were NOT currently locked out. A locked
-// entry is what an attacker manufactures deliberately — maxFailures requests
-// buys one that survives every subsequent sweep — so the threshold only limited
-// the unlocked portion while its comment claimed it bounded the whole map. The
-// only real limit was the scrypt cost per attempt, in a different file,
-// undocumented.
+// The table is capped, but a live cooldown is never evicted to make room. The
+// previous version made room exactly that way, taking locked entries first — so
+// an attacker who wanted more guesses at one account pushed the table past the
+// cap with rotating keys and their target's lockout was in the first tranche
+// deleted. Fifteen minutes became zero, repeatably. Saturation now sheds new
+// keys instead: an outage for callers the table has not seen, never an amnesty
+// for one it has.
 func TestFailureLockoutIsHardBounded(t *testing.T) {
 	l := newFailureLockout(1, 15*time.Minute) // 1 strike => instantly locked
+
+	// A victim, locked out before the flood starts.
+	const victim = "victim\x00203.0.113.9"
+	l.tryAttempt(victim)
+	if ok, _ := l.lockedNow(victim); ok {
+		t.Fatal("setup: the victim should be locked out")
+	}
 
 	// Every key here goes straight to locked, which is the adversarial case.
 	total := loginLockoutHardCap + 25_000
 	for i := range total {
-		l.tryAttempt(fmt.Sprintf("victim-%d\x00203.0.113.%d", i, i%256))
+		l.tryAttempt(fmt.Sprintf("filler-%d\x00203.0.113.%d", i, i%256))
 	}
 
 	l.mu.Lock()
 	size := len(l.entries)
 	l.mu.Unlock()
-
-	// The insert in tryAttempt happens after the sweep, so the steady state sits
-	// between the low-water mark and the cap.
 	if size > loginLockoutHardCap {
 		t.Errorf("lockout table holds %d entries after %d all-locking attempts, want at most %d",
 			size, total, loginLockoutHardCap)
 	}
-	if size < loginLockoutLowWater {
-		t.Errorf("lockout table trimmed to %d, below the %d low-water mark: it is discarding "+
-			"more cooldowns than it needs to", size, loginLockoutLowWater)
+
+	// THE POINT: the flood must not have bought the attacker their victim back.
+	if ok, _ := l.lockedNow(victim); ok {
+		t.Error("flooding the table past the hard cap forgave a live lockout. " +
+			"That is a lockout bypass with a price tag, not a memory bound: an " +
+			"attacker who wants more guesses at one account only has to fill the table.")
+	}
+	if !l.Saturated() {
+		t.Error("the table shed keys without recording it; an operator sees 429s on good " +
+			"credentials with nothing in the log to explain them")
+	}
+}
+
+// A saturated table must still serve the keys it already knows. Shedding is for
+// keys it has never seen; refusing an existing one would let a flood lock out
+// every user who was mid-accumulation.
+func TestSaturatedTableStillServesKnownKeys(t *testing.T) {
+	l := newFailureLockout(3, 15*time.Minute)
+
+	const known = "known\x00203.0.113.1"
+	l.tryAttempt(known) // 1 of 3: known to the table, not locked
+
+	for i := range loginLockoutHardCap + 1_000 {
+		l.tryAttempt(fmt.Sprintf("filler-%d", i))
+	}
+
+	if ok, _ := l.tryAttempt(known); !ok {
+		t.Error("a saturated table refused a key it was already tracking; a flood would " +
+			"lock out every user mid-accumulation")
+	}
+	if ok, _ := l.tryAttempt("brand-new-key"); ok {
+		t.Error("a saturated table admitted a brand-new key, so the cap does not hold")
 	}
 }
 

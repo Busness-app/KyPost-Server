@@ -50,12 +50,11 @@ type clientEncryptedSendRequest struct {
 	// SentCopy is the complete PGP/MIME message to store in the Sent folder,
 	// encrypted by the browser to the sender's own key.
 	//
-	// It used to be the plaintext body, mirroring the server-side path's habit
-	// of saving Sent unencrypted. On a client-custody account that quietly
-	// undid the whole arrangement: the deliveries were ciphertext the server
-	// could not read, and then the same message arrived beside them in the
-	// clear, with its real subject, on every send. docs/E2E_PGP.md says
-	// "Server can decrypt mail: No"; this field was the counterexample.
+	// Storing the plaintext body here instead — mirroring the server-side path's
+	// habit of saving Sent unencrypted — quietly undoes the whole arrangement on a
+	// client-custody account: the deliveries are ciphertext the server cannot read,
+	// and then the same message arrives beside them in the clear, with its real
+	// subject, on every send.
 	SentCopy string `json:"sentCopy"`
 	// SentCopyEncrypted asserts that SentCopy is that ciphertext rather than a
 	// plaintext body. A copy that does not claim it is not stored — see
@@ -69,14 +68,13 @@ type clientEncryptedDelivery struct {
 	Ciphertext string   `json:"ciphertext"`
 }
 
-// handleMailSendPGP delivers messages the browser encrypted and signed
-// itself, for accounts whose PGP key is end-to-end protected.
+// handleMailSendPGP delivers messages the browser encrypted and signed itself,
+// for accounts whose PGP key is end-to-end protected.
 //
-// The server's role here is deliberately reduced to an SMTP relay for its
-// own user: it holds the mailbox credentials the browser must not, and it
-// has none of the key material it would need to produce or inspect these
-// ciphertexts. That asymmetry is the whole design — see
-// users.User's PGP block.
+// The server's role here is deliberately reduced to an SMTP relay for its own
+// user: it holds the mailbox credentials the browser must not, and none of the
+// key material it would need to produce or inspect these ciphertexts. That
+// asymmetry is the whole design — see users.User's PGP block.
 func (s *Server) handleMailSendPGP(w http.ResponseWriter, r *http.Request) {
 	ac, ok := authFromContext(r)
 	if !ok {
@@ -252,29 +250,17 @@ var requiredDeliveryHeaders = []string{"From:", "To:", "Subject:", "Date:"}
 var forbiddenDeliveryHeaders = []string{"Received", "Authentication-Results", "Return-Path", "Bcc"}
 
 // validatePGPMimeDelivery rejects a client-supplied delivery that is not a
-// complete RFC 5322 message.
+// complete RFC 5322 message from an address this caller may send as.
 //
-// The previous check was `HasPrefix("Content-Type:") || contains armor`,
-// which accepted a body carrying only Content-Type and MIME-Version — no
-// From, To, Subject, or Date. The browser's own wrapAsPGPMime emitted
-// exactly that, so this endpoint would have relayed header-less messages
-// that receiving MTAs reject or render blank, and the validation that was
-// supposed to catch it instead certified it as fine.
-//
-// Only the header block is inspected. Everything past the blank line is
-// ciphertext the server cannot read and has no business parsing.
 // authorizedFrom is the header-From resolveMailFrom approved for this caller —
-// their own account address, or a verified send-as alias. The delivery's own
-// From must equal it.
-//
-// That binding is the point. This endpoint relays the caller's bytes verbatim,
-// and the previous version of this function checked only that a few header
-// *names* appeared as substrings and that the armor marker appeared anywhere
-// in the delivery — so the From the recipient saw was entirely caller-chosen,
-// the body did not have to be encrypted (an HTML comment satisfied the armor
-// check), and the whole send-as authorization subsystem was bypassable by
-// anyone with a session or a paired device secret. On a shared organizational
-// smarthost, mail spoofed this way is DKIM-aligned.
+// their own account address, or a verified send-as alias — and the delivery's
+// own From must equal it. That binding is the point: this endpoint relays the
+// caller's bytes verbatim, and checking only that a few header *names* appeared
+// as substrings and that the armor marker appeared anywhere left the From
+// entirely caller-chosen, let an HTML comment satisfy the armor check, and made
+// the whole send-as authorization subsystem bypassable by anyone with a session
+// or a paired device secret. On a shared organizational smarthost, mail spoofed
+// this way is DKIM-aligned.
 func validatePGPMimeDelivery(delivery, authorizedFrom string) error {
 	if err := validatePGPMimeDeliveryShape(delivery); err != nil {
 		return err
@@ -362,13 +348,13 @@ func parseDeliveryHeaders(headerBlock string) (textproto.MIMEHeader, error) {
 // resolveMailFrom authorized for this caller — their account address, or a
 // verified send-as alias.
 //
-// This is the check whose absence made the endpoint a sender-spoofing relay:
-// handleMailSendPGP called resolveMailFrom and discarded its headerFrom
-// return, so the From the recipient saw was whatever the caller wrote, relayed
-// verbatim over the account's authenticated SMTP session. On a shared
-// organizational smarthost that mail is DKIM-aligned and indistinguishable
-// from genuine internal mail — and a paired device, which the route table
-// deliberately denies send-as management, could produce it.
+// Its absence made the endpoint a sender-spoofing relay: handleMailSendPGP
+// called resolveMailFrom and discarded its headerFrom return, so the From the
+// recipient saw was whatever the caller wrote, relayed verbatim over the
+// account's authenticated SMTP session. On a shared organizational smarthost
+// that mail is DKIM-aligned and indistinguishable from genuine internal mail —
+// and a paired device, which the route table deliberately denies send-as
+// management, could produce it.
 //
 // Shape is assumed already checked by validatePGPMimeDeliveryShape.
 func validateDeliveryFrom(delivery, authorizedFrom string) error {
@@ -405,15 +391,14 @@ func validateDeliveryFrom(delivery, authorizedFrom string) error {
 //
 // The copy is appended verbatim as Raw. Rebuilding it from Subject/Body would
 // wrap an already-complete multipart/encrypted message in a fresh envelope
-// (nothing would decrypt it) and would need the real Subject to write a header
-// — the very value the encryption is hiding. The draft therefore carries the
-// placeholder subject, matching what the browser already put in the ciphertext's
-// outer headers and what the server-side path mails for pickup notices.
+// (nothing would decrypt it) and would need the real Subject — the very value
+// the encryption is hiding. The draft therefore carries the placeholder subject,
+// matching what the browser already put in the ciphertext's outer headers.
 //
-// A copy that does not claim to be encrypted is refused. This server has no key
-// for a client-custody account by construction, so accepting cleartext here
-// would mean the one thing the mode promises not to do, on every send. Dropping
-// the copy is the lesser harm: the message itself is already delivered, and a
+// A copy that does not claim to be encrypted is refused: this server has no key
+// for a client-custody account by construction, so accepting cleartext would
+// mean doing the one thing the mode promises not to do, on every send. Dropping
+// the copy is the lesser harm — the message itself is already delivered, and a
 // client that is behind fixes itself on reload.
 //
 // Recipient lists stay in the clear. SMTP needs them, they are already in the

@@ -1,15 +1,12 @@
 /**
  * Shared push-relay logic used by both Cloudflare Workers: the FCM relay
- * (worker/) and the APNs relay (worker-apns/). The two workers are ~90%
- * identical — everything below is byte-identical (or functionally identical
- * modulo comments) between them: API-key admin/registration endpoints,
- * per-minute rate limiting, usage analytics, and small crypto/HTTP helpers.
+ * (worker/) and the APNs relay (worker-apns/). Everything below is identical
+ * between them — API-key admin/registration endpoints, per-minute rate limiting,
+ * usage analytics, and small crypto/HTTP helpers.
  *
- * Each worker keeps its own `Env` interface (extending CommonEnv with its
- * provider-specific secrets) and its own `handleSend()` / provider config
- * helpers; the route dispatch and `fetch()` wrapper around it are identical
- * between the two workers, so createRelayFetchHandler below builds both from
- * each worker's `handleSend`/`configured` pieces.
+ * Each worker keeps its own `Env` (extending CommonEnv with its
+ * provider-specific secrets) and its own `handleSend()`/`configured` pieces,
+ * which createRelayFetchHandler below assembles into each worker's `fetch`.
  */
 
 /** Cloudflare native rate-limiting binding (configured in wrangler.toml). */
@@ -32,11 +29,11 @@ export interface CommonEnv {
   ADMIN_SECRET: string;
   /**
    * Minute limit is ENFORCED by the PUSH_RATE_LIMITER binding (simple.limit in
-   * wrangler.toml). This var is display-only (/health + 429 body) and should be
-   * kept equal to that binding's limit.
+   * wrangler.toml). This var is display-only (/health + 429 body) and must be kept
+   * equal to that binding's limit.
    *
    * Hour/day rolling tiers are deliberately absent — see the single-tier note
-   * above checkMinuteLimit, which its fail-closed behaviour depends on.
+   * above checkMinuteLimit, whose fail-closed behaviour depends on it.
    */
   RATE_LIMIT_PER_MINUTE?: string; // display only; default 10
   /** Public self-registration (`POST /register`). "true" opens it; default closed. */
@@ -49,12 +46,10 @@ export interface CommonEnv {
   /** Minute-tier rate limiter (native binding, no KV writes). */
   PUSH_RATE_LIMITER?: RateLimitBinding;
   /**
-   * Per-IP minute-tier limiter for POST /register (native binding, no KV
-   * writes). Bounds how fast a single IP can mint self-registered keys —
-   * the "one active key per IP" dedup in handleRegister only limits
-   * *concurrent* keys per IP, not how often an IP can churn through new
-   * ones, so this closes the gap that lets an attacker mint many
-   * short-lived permanent keys from one address before rotating IPs.
+   * Per-IP minute-tier limiter for POST /register (native binding, no KV writes).
+   * The "one active key per IP" dedup in handleRegister limits only *concurrent*
+   * keys per IP, not how fast an IP can churn through new ones, so this bounds
+   * minting many short-lived permanent keys from one address before rotating IPs.
    */
   REGISTER_RATE_LIMITER?: RateLimitBinding;
   /** Per-key usage counters, offloaded off the KV write path. */
@@ -131,12 +126,10 @@ export function timingSafeEqual(a: string, b: string): boolean {
 }
 
 /**
- * Buckets a client IP for anti-abuse keying. IPv4 addresses are returned
- * unchanged; IPv6 addresses collapse to their /64 prefix. A single IPv6
- * allocation is typically a /64 (2^64 addresses), so keying registration
- * limits on the full 128-bit address let an attacker mint unlimited keys by
- * sourcing each request from a fresh address in their own /64. Bucketing on
- * the /64 makes one allocation count as one source.
+ * Buckets a client IP for anti-abuse keying: IPv4 unchanged, IPv6 collapsed to
+ * its /64 prefix. A single IPv6 allocation is typically a /64 (2^64 addresses),
+ * so keying on the full 128-bit address lets an attacker mint unlimited keys by
+ * sourcing each request from a fresh address in their own allocation.
  */
 export function ipBucket(ip: string): string {
   const trimmed = ip.trim();
@@ -187,12 +180,11 @@ export function isExpired(record: ApiKeyRecord, now: number): boolean {
 // ---- device-token pinning ---------------------------------------------------
 //
 // Closes the open-relay gap left by public self-registration (handleRegister):
-// without this, any key holder could /send to any device token, including one
-// they don't own — spoofing push notifications at strangers. The first key to
-// successfully deliver to a given token "claims" it; every later /send to that
-// token must come from the same key. A claim is released for reclaiming if the
-// owning key was since revoked/expired/deleted, so key rotation never
-// permanently orphans a legitimate device.
+// without it, any key holder could /send to any device token, spoofing push
+// notifications at strangers. The first key to successfully deliver to a token
+// claims it, and every later /send to that token must come from the same key. A
+// claim is released for reclaiming once the owning key is revoked/expired/
+// deleted, so key rotation never permanently orphans a legitimate device.
 
 export type TokenBindingResult = { allowed: true } | { allowed: false; reason: string };
 
@@ -234,14 +226,12 @@ export type ClaimResult =
   | { allowed: false; reason: string };
 
 /**
- * Checks the token binding and, when the token is unclaimed, claims it for
- * keyId BEFORE delivery. Claiming before the send (rather than after, in a
- * post-delivery waitUntil) prevents a first-sender from delivering a spoofed
- * push to an unclaimed token ahead of the legitimate owner's claim. KV is
- * eventually consistent, so this narrows but cannot fully eliminate a
- * simultaneous-first-send race; a strongly-consistent store (Durable Object)
- * would be needed for that. `newlyClaimed` lets the caller release the claim
- * if delivery then reveals the token is dead (stale/invalid).
+ * Checks the token binding and, when the token is unclaimed, claims it for keyId
+ * BEFORE delivery — claiming afterwards would let a first-sender deliver a
+ * spoofed push ahead of the legitimate owner's claim. KV is eventually
+ * consistent, so this narrows but cannot eliminate a simultaneous-first-send
+ * race; that needs a strongly-consistent store (Durable Object). `newlyClaimed`
+ * lets the caller release the claim if delivery reveals the token is dead.
  */
 export async function claimTokenForSend(env: CommonEnv, token: string, keyId: string): Promise<ClaimResult> {
   const result = await checkTokenBinding(env, token, keyId);
@@ -262,15 +252,13 @@ export async function claimTokenForSend(env: CommonEnv, token: string, keyId: st
 /**
  * Resolve a limit var:
  *
- *   unset / blank  -> fallback
+ *   unset / blank   -> fallback
  *   "0" or negative -> 0 (negatives clamp up, they are not a smaller limit)
- *   unparseable    -> fallback
+ *   unparseable     -> fallback
  *
- * Unparseable resolves to the FALLBACK, not to 0. A typo in a deployment
- * variable must not read as "no limit configured" — that is the same
- * fail-open-on-misconfiguration the whole of checkMinuteLimit below exists to
- * refuse, and the old doc comment claimed this function did exactly that while
- * the code (correctly) did not.
+ * Unparseable resolves to the FALLBACK, not to 0: a typo in a deployment
+ * variable must not read as "no limit configured", which is the
+ * fail-open-on-misconfiguration checkMinuteLimit below exists to refuse.
  */
 export function resolveLimit(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim() === "") {
@@ -280,11 +268,11 @@ export function resolveLimit(raw: string | undefined, fallback: number): number 
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
 }
 
-// Single-tier rate limiting: a decision, not a gap. It is stated here rather
-// than as a TODO because checkMinuteLimit's fail-closed behaviour depends on the
-// minute tier being the only tier.
+// Single-tier rate limiting: a decision, not a gap. Stated here rather than as a
+// TODO because checkMinuteLimit's fail-closed behaviour depends on the minute
+// tier being the only tier.
 //
-// Enforced: a per-minute cap, via the native rate-limiting bindings
+// Enforced: a per-minute cap via the native rate-limiting bindings
 // (PUSH_RATE_LIMITER per key, REGISTER_RATE_LIMITER per IP). No KV writes on an
 // accepted send.
 //
@@ -294,9 +282,8 @@ export function resolveLimit(raw: string | undefined, fallback: number): number 
 //
 // The cost: a caller who stays under the per-minute cap can sustain it
 // indefinitely, so the minute limit bounds burst rate but not daily volume
-// against someone else's FCM quota. That residual is accepted, and it is why the
-// fail-closed behaviour below is not negotiable — with one tier, a limiter
-// outage is the difference between a rate-limited relay and an unmetered one.
+// against someone else's FCM quota. That residual is why the fail-closed
+// behaviour below is not negotiable.
 //
 // To restore the upper tiers, use Durable Objects (exact atomic counters, no KV
 // write pressure, Workers Paid) and revisit the fail-closed reasoning at both
@@ -304,14 +291,10 @@ export function resolveLimit(raw: string | undefined, fallback: number): number 
 
 /**
  * Minute-tier check via a native rate-limiting binding (no KV writes). Returns
- * true when allowed.
- *
- * Fails closed on both a missing binding and a throwing one. Shared by the
- * per-key send limiter (PUSH_RATE_LIMITER) and the per-IP registration limiter
- * (REGISTER_RATE_LIMITER) — key is whatever the caller wants to bucket on (a
- * key hash or a client IP).
- *
- * Local dev without binding support opts out explicitly via
+ * true when allowed, and fails closed on both a missing binding and a throwing
+ * one. Shared by the per-key send limiter (PUSH_RATE_LIMITER) and the per-IP
+ * registration limiter (REGISTER_RATE_LIMITER); key is whatever the caller wants
+ * to bucket on. Local dev without binding support opts out explicitly via
  * RATELIMIT_FAIL_OPEN.
  */
 export async function checkMinuteLimit(
@@ -336,13 +319,11 @@ export async function checkMinuteLimit(
     const { success } = await limiter.limit({ key });
     return success;
   } catch (err) {
-    // Fail closed, same as a missing binding.
-    //
-    // Returning true here treats a throwing binding as an outage that should not
-    // take delivery down with it, but the minute tier is the only tier enforced
-    // (see the note above), so this branch is the difference between a
-    // rate-limited relay and one with no limits at all — an unbounded send
-    // primitive against someone else's FCM quota, traced only by this log line.
+    // Fail closed, same as a missing binding. Returning true would treat a throwing
+    // binding as an outage that should not take delivery down with it, but the
+    // minute tier is the only tier enforced (see the note above), so this branch is
+    // the difference between a rate-limited relay and an unbounded send primitive
+    // against someone else's FCM quota, traced only by this log line.
     //
     // Callers surface it as 429 with a Retry-After: the request is refused not
     // because the caller misbehaved but because the relay cannot currently tell
@@ -452,13 +433,11 @@ export async function handleAdminCreate(request: Request, rc: RequestContext): P
 /**
  * Whether public self-registration is open. Closed unless explicitly opened.
  *
- * This defaulted to OPEN, which meant every deployment of this Worker that had
- * not read the docs was running an unauthenticated key-minting endpoint on the
- * public internet. The failure is asymmetric: an operator who wants open
- * registration flips one var and finds out immediately when they try to
- * register; an operator who did not want it finds out when someone else is
- * using their relay. A default that is wrong in the dangerous direction is not
- * a default, it is a trap.
+ * Defaulting to OPEN meant every deployment of this Worker that had not read the
+ * docs ran an unauthenticated key-minting endpoint on the public internet. The
+ * failure is asymmetric: an operator who wants open registration flips one var
+ * and finds out immediately when they try to register; one who did not want it
+ * finds out when someone else is using their relay.
  */
 export function registrationEnabled(env: CommonEnv): boolean {
   return (env.REGISTRATION_ENABLED ?? "").trim().toLowerCase() === "true";
@@ -469,11 +448,10 @@ export function registrationEnabled(env: CommonEnv): boolean {
  * own per-server key with no maintainer involvement.
  *
  * One active key per IP: registering from an IP that already holds a key
- * invalidates the previous one (so a server that loses its key file can simply
- * re-register). That alone only bounds *concurrent* keys per IP, not how fast
- * an IP can churn through new ones (mint, use once, re-register, repeat), so
- * it's paired with a per-IP minute-tier rate limit (REGISTER_RATE_LIMITER) on
- * top of the per-key rolling limits and the REGISTRATION_ENABLED kill-switch.
+ * invalidates the previous one, so a server that loses its key file can simply
+ * re-register. That bounds only *concurrent* keys per IP, so it is paired with a
+ * per-IP minute-tier rate limit (REGISTER_RATE_LIMITER) on top of the per-key
+ * rolling limits and the REGISTRATION_ENABLED kill-switch.
  */
 export async function handleRegister(request: Request, rc: RequestContext): Promise<Response> {
   const { env } = rc;
@@ -576,12 +554,12 @@ export async function handleAdminRevoke(id: string, rc: RequestContext): Promise
 
 // ---- router / fetch wrapper -------------------------------------------------
 //
-// The two workers' routing (health/send/register/admin-keys dispatch) and
-// their `export default { fetch(...) }` wrapper (request-id minting,
-// structured access logging, unhandled-error catch) are identical; only
-// `/health`'s `configured` flag and `/send`'s delivery logic are
-// provider-specific. createRelayFetchHandler takes those two pieces and
-// returns a ready-to-export `fetch` for each worker.
+// The two workers' routing (health/send/register/admin-keys dispatch) and their
+// `export default { fetch(...) }` wrapper (request-id minting, structured access
+// logging, unhandled-error catch) are identical; only `/health`'s `configured`
+// flag and `/send`'s delivery logic are provider-specific.
+// createRelayFetchHandler takes those two pieces and returns each worker's
+// `fetch`.
 
 export interface RelayRouterOptions<TEnv extends CommonEnv> {
   /** Whether the provider (FCM/APNs) credentials are fully configured, surfaced on /health. */

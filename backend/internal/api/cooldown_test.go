@@ -7,7 +7,7 @@ import (
 )
 
 func TestSendAsVerificationCooldownBlocksWithinWindow(t *testing.T) {
-	c := newSendAsVerificationCooldown()
+	c := newCooldown(sendAsVerificationCooldownFor)
 	const key = "user-1|alice@example.com"
 
 	ok, retryAfter := c.tryConsume(key)
@@ -32,7 +32,7 @@ func TestSendAsVerificationCooldownBlocksWithinWindow(t *testing.T) {
 // same user verifying a second alias must not be blocked by the cooldown
 // already in effect for their first alias.
 func TestSendAsVerificationCooldownIsPerKey(t *testing.T) {
-	c := newSendAsVerificationCooldown()
+	c := newCooldown(sendAsVerificationCooldownFor)
 	const aliceKey = "user-a|alice@example.com"
 	const bobKey = "user-a|bob@example.com"
 
@@ -47,7 +47,7 @@ func TestSendAsVerificationCooldownIsPerKey(t *testing.T) {
 }
 
 func TestSendAsVerificationCooldownExpiresAfterWindow(t *testing.T) {
-	c := newSendAsVerificationCooldown()
+	c := newCooldown(sendAsVerificationCooldownFor)
 	const key = "user-2|carol@example.com"
 	_, _ = c.tryConsume(key)
 	// Simulate the window having already elapsed.
@@ -66,7 +66,7 @@ func TestSendAsVerificationCooldownExpiresAfterWindow(t *testing.T) {
 // on attacker-influenced (userID, candidate-email) pairs that anyone can
 // mint by attempting to verify an arbitrary address.
 func TestSendAsVerificationCooldownSweepRemovesStaleEntries(t *testing.T) {
-	c := newSendAsVerificationCooldown()
+	c := newCooldown(sendAsVerificationCooldownFor)
 	const staleKey = "user-1|stale@example.com"
 	const freshKey = "user-1|fresh@example.com"
 
@@ -94,11 +94,11 @@ func TestSendAsVerificationCooldownSweepRemovesStaleEntries(t *testing.T) {
 	}
 }
 
-// TestStartSendAsCooldownSweeperRunsOnTickerAndStopsOnCancel proves the
+// TestStartCooldownSweeperRunsOnTickerAndStopsOnCancel proves the
 // background sweeper actually fires sweep() on its ticker and returns
 // promptly once its context is canceled, mirroring StartPickupSweeper's
 // ticker/select shape (server.go).
-func TestStartSendAsCooldownSweeperRunsOnTickerAndStopsOnCancel(t *testing.T) {
+func TestStartCooldownSweeperRunsOnTickerAndStopsOnCancel(t *testing.T) {
 	srv := newTestServer(t)
 
 	const staleKey = "user-1|stale@example.com"
@@ -107,14 +107,14 @@ func TestStartSendAsCooldownSweeperRunsOnTickerAndStopsOnCancel(t *testing.T) {
 	srv.sendAsCooldown.lastSent[staleKey] = time.Now().Add(-2 * time.Hour)
 	srv.sendAsCooldown.mu.Unlock()
 
-	old := sendAsCooldownSweepInterval
-	sendAsCooldownSweepInterval = 10 * time.Millisecond
-	t.Cleanup(func() { sendAsCooldownSweepInterval = old })
+	old := cooldownSweepInterval
+	cooldownSweepInterval = 10 * time.Millisecond
+	t.Cleanup(func() { cooldownSweepInterval = old })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		srv.StartSendAsCooldownSweeper(ctx)
+		srv.StartCooldownSweeper(ctx)
 		close(done)
 	}()
 
@@ -128,7 +128,7 @@ func TestStartSendAsCooldownSweeperRunsOnTickerAndStopsOnCancel(t *testing.T) {
 		}
 		select {
 		case <-deadline:
-			t.Fatal("expected StartSendAsCooldownSweeper to have swept the stale entry via its ticker")
+			t.Fatal("expected StartCooldownSweeper to have swept the stale entry via its ticker")
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
@@ -137,6 +137,6 @@ func TestStartSendAsCooldownSweeperRunsOnTickerAndStopsOnCancel(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected StartSendAsCooldownSweeper to return promptly after context cancellation")
+		t.Fatal("expected StartCooldownSweeper to return promptly after context cancellation")
 	}
 }

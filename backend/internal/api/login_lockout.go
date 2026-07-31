@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -12,48 +11,43 @@ import (
 	"kypost-server/backend/internal/users"
 )
 
-// loginMaxFailures/loginLockoutFor implement a three-strikes, 15-minute
-// cooldown on password login: after loginMaxFailures failed attempts for a
-// given username+client IP pair, further attempts for that pair are rejected
-// until loginLockoutFor has elapsed. This is independent of whether the
-// username actually exists — see failureLockout.allowed — so it can't be
-// used to distinguish valid from invalid usernames by lockout behavior; and
-// it is scoped to the client IP so failures manufactured by an attacker
-// can't lock the account's real owner out from their own machine.
+// loginMaxFailures/loginLockoutFor implement a three-strikes, 15-minute cooldown
+// on password login: after loginMaxFailures failed attempts for a given
+// username+client IP pair, further attempts for that pair are rejected until
+// loginLockoutFor has elapsed. Independent of whether the username exists (see
+// failureLockout.allowed) so lockout behavior cannot distinguish valid
+// usernames, and scoped to the client IP so failures manufactured by an attacker
+// cannot lock the account's real owner out from their own machine.
 const (
 	loginMaxFailures = 3
 	loginLockoutFor  = 15 * time.Minute
 
-	// davMaxFailures/davLockoutFor guard the CardDAV Basic Auth surface,
-	// keyed by client IP (usernames there are fixed account names, and the
-	// password is server-generated — the realistic abuse is one host burning
-	// CPU with scrypt verifications, not a credible guessing campaign). The
-	// threshold is looser than login's because sync clients legitimately
-	// retry a stale password several times before surfacing an error.
+	// davMaxFailures/davLockoutFor guard the CardDAV Basic Auth surface, keyed by
+	// client IP: usernames there are fixed account names and the password is
+	// server-generated, so the realistic abuse is one host burning CPU with scrypt
+	// verifications. Looser than login's because sync clients legitimately retry a
+	// stale password several times before surfacing an error.
 	davMaxFailures = 10
 	davLockoutFor  = 15 * time.Minute
 
-	// mfaMaxFailures/mfaLockoutFor throttle second-factor verification per
-	// account across challenges. The per-challenge attempt cap (mfa.Store) is
-	// not enough on its own: a password-holding attacker can mint an unlimited
-	// number of fresh challenges (each valid-password login clears the login
-	// lockout), so without an account-scoped counter the TOTP code is brute
-	// forceable online. Keyed on the challenge's UserID.
+	// mfaMaxFailures/mfaLockoutFor throttle second-factor verification per account
+	// across challenges, keyed on the challenge's UserID. The per-challenge attempt
+	// cap (mfa.Store) is not enough on its own: a password-holding attacker can mint
+	// unlimited fresh challenges, so without an account-scoped counter the TOTP code
+	// is brute forceable online.
 	mfaMaxFailures = 10
 	mfaLockoutFor  = 15 * time.Minute
 
 	// passwordChangeMaxFailures/passwordChangeLockoutFor throttle the
 	// current-credential check on POST /api/auth/password — see
 	// handleChangePassword. A session is not proof of the password, so a stolen
-	// cookie must not buy unlimited guesses at an endpoint that answers
-	// definitively and pays a full scrypt per attempt. Looser than login's three
-	// strikes because mistyping the current password while changing it is
-	// ordinary.
+	// cookie must not buy unlimited guesses at an endpoint that answers definitively
+	// and pays a full scrypt per attempt. Looser than login's three strikes because
+	// mistyping the current password while changing it is ordinary.
 	//
-	// Keyed on the acting account AND the client IP. Keyed on the user ID alone,
-	// a thief holding the cookie burns the budget from their own machine and
-	// locks the real owner out of changing their password — the control becomes
-	// the attack.
+	// Keyed on the acting account AND the client IP: on the user ID alone, a thief
+	// holding the cookie burns the budget from their own machine and locks the real
+	// owner out of changing their password — the control becomes the attack.
 	passwordChangeMaxFailures = 10
 	passwordChangeLockoutFor  = 15 * time.Minute
 
@@ -69,63 +63,59 @@ const (
 	// never reaches the lockout threshold and is otherwise never removed. Past
 	// this size, not-currently-locked entries are swept.
 	loginLockoutSweepThreshold = 10_000
-	// loginLockoutHardCap is the size past which even currently-locked entries
-	// are evicted, oldest-expiry first.
+	// loginLockoutHardCap is the size past which NEW keys are shed rather than
+	// admitted. Live lockouts are never evicted to make room.
 	//
-	// The sweep above keeps locked entries, which are precisely the ones an
-	// attacker creates on purpose — maxFailures requests buys one that survives
-	// every subsequent sweep for lockoutFor. So the threshold alone bounded only
-	// the unlocked portion, and the real limit on the table was the scrypt cost
-	// per login attempt in an entirely different file.
+	// Evicting them is a lockout bypass, not a memory trade: with locked entries
+	// swept first, an attacker wanting more guesses at one account only has to push
+	// the table past this cap with rotating keys and their target's cooldown goes in
+	// the first tranche.
 	//
-	// Sized above the threshold so a normal instance never reaches it: crossing
-	// this means tens of thousands of distinct keys are simultaneously locked
-	// out, which is an attack, not a busy Monday morning.
+	// Shedding is fail-CLOSED. A saturated table refuses to track new keys — a 429
+	// outage for new sign-ins — but every lockout already in force stays in force.
+	// An outage is visible and ends when the flood does; silently unlocking accounts
+	// under load is invisible and is what the flood is for.
+	//
+	// Reaching this takes an attack: the login path is metered instance-wide in
+	// seconds of derivation work (loginKDFDutyCycle), roughly one attempt a second,
+	// so lockoutFor buys an attacker on the order of a thousand keys.
 	loginLockoutHardCap = 50_000
-	// loginLockoutLowWater is how far stage 2 trims below the hard cap, so a
-	// table parked at the cap does not re-scan on every subsequent attempt.
-	loginLockoutLowWater = loginLockoutHardCap * 3 / 4
 )
 
 type loginLockoutEntry struct {
 	failures    int
 	lockedUntil time.Time
-	// lastSeen is when this key last attempted, so the sweep can tell an entry
-	// whose strikes have gone stale from one mid-accumulation.
-	//
-	// Without it the sweep had only "is it locked right now?" to go on, and so
-	// deleted every PARTIAL strike record whenever the table was crowded. That
-	// is a lockout bypass, not a memory optimization: flood the table past the
-	// threshold and every subsequent attempt wipes the 1-of-3 and 2-of-3
-	// progress of every real key, so no key ever reaches the third strike and
-	// the lockout never engages for anyone.
+	// lastSeen is when this key last attempted, so the sweep can tell an entry whose
+	// strikes have gone stale from one mid-accumulation. With only "is it locked
+	// right now?" to go on, the sweep deleted every PARTIAL strike record whenever
+	// the table was crowded — flood it past the threshold and no key ever reaches
+	// the third strike, so the lockout never engages for anyone.
 	lastSeen time.Time
 }
 
 // failureLockout is small in-memory, keyed strike/cooldown state: after
 // maxFailures failed attempts for a key, further attempts for that key are
-// rejected until lockoutFor has elapsed. handleLogin keys it by
-// username+client IP; withDAVBasicAuth keys it by client IP alone. It
-// intentionally lives outside Server.sessions/mu — it's unrelated state with
-// its own, much smaller lock scope.
+// rejected until lockoutFor has elapsed. handleLogin keys it by username+client
+// IP; withDAVBasicAuth keys it by client IP alone.
 type failureLockout struct {
 	mu          sync.Mutex
 	maxFailures int
 	lockoutFor  time.Duration
 	entries     map[string]*loginLockoutEntry
-	// lastSweep throttles sweepIfCrowdedLocked. Both of its stages are O(n) (the
-	// second O(n log n)), and it is called from tryAttempt — so once the table
-	// sat above the threshold, every single attempt paid a full scan. Under the
-	// flood that makes the table big, that is the attacker choosing how much
-	// work each of their requests costs the server.
+	// lastSweep throttles sweepIfCrowdedLocked. It is O(n) and is called from
+	// tryAttempt, so once the table sat above the threshold every single attempt
+	// paid a full scan — the attacker choosing how much work each of their requests
+	// costs the server.
 	lastSweep time.Time
+	// saturated records that the table hit loginLockoutHardCap and shed a new
+	// key. Cleared when a sweep gets it back under the cap. Read via Saturated.
+	saturated bool
 }
 
-// sweepMinInterval is the shortest gap between two crowded-table sweeps.
-//
-// Hysteresis, so a table parked above the threshold does not scan itself on
-// every attempt. The hard cap is still enforced immediately regardless (see
-// sweepIfCrowdedLocked) — that one is a memory bound and cannot wait.
+// sweepMinInterval is the shortest gap between two crowded-table sweeps, so a
+// table parked above the threshold does not scan itself on every attempt. The
+// hard cap is still enforced immediately regardless (see sweepIfCrowdedLocked)
+// — that one is a memory bound and cannot wait.
 const sweepMinInterval = time.Second
 
 func newFailureLockout(maxFailures int, lockoutFor time.Duration) *failureLockout {
@@ -151,8 +141,7 @@ func newLoginLockout() *failureLockout {
 // The caller settles the reservation:
 //
 //   - recordSuccess on a correct credential, clearing the whole entry
-//   - cancelAttempt on a path that never became a credential check (see its
-//     doc), returning the strike
+//   - cancelAttempt on a path that never became a credential check
 //   - nothing at all on a failure — the strike is already counted
 func (l *failureLockout) tryAttempt(username string) (ok bool, retryAfter time.Duration) {
 	l.mu.Lock()
@@ -163,6 +152,14 @@ func (l *failureLockout) tryAttempt(username string) (ok bool, retryAfter time.D
 
 	e, exists := l.entries[username]
 	if !exists {
+		// Saturated: sweeping could not get the table under the cap, so every remaining
+		// entry is either locked or mid-accumulation. Shed this new key rather than
+		// making room by forgiving one of them — see loginLockoutHardCap. Keys already
+		// known to the table proceed normally.
+		if len(l.entries) >= loginLockoutHardCap {
+			l.saturated = true
+			return false, l.lockoutFor
+		}
 		e = &loginLockoutEntry{}
 		l.entries[username] = e
 	} else if remaining := e.lockedUntil.Sub(now); remaining > 0 {
@@ -214,50 +211,26 @@ func (l *failureLockout) cancelAttempt(username string) {
 	}
 }
 
-// allowed reports whether username may attempt right now WITHOUT spending a
-// strike. Read-only; use tryAttempt on any path that is about to make an
-// attempt.
-func (l *failureLockout) allowed(username string) (ok bool, retryAfter time.Duration) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	e, exists := l.entries[username]
-	if !exists {
-		return true, 0
-	}
-	if remaining := time.Until(e.lockedUntil); remaining > 0 {
-		return false, remaining
-	}
-	return true, 0
-}
-
 // sweepIfCrowdedLocked bounds the map without a background goroutine. Callers
 // must hold l.mu.
 //
-// Two stages, because the original single stage was neither a bound nor safe.
+// It reclaims entries that are neither locked nor mid-accumulation, keying off
+// lastSeen and NOT off "is this locked right now" — the latter deleted partial
+// strike records, so flooding the table past the threshold erased every real
+// key's 1-of-3 and 2-of-3 progress and the lockout stopped engaging at all. An
+// entry idle for longer than lockoutFor is safe to drop because its strikes
+// would be reset on the next attempt anyway.
 //
-// Stage 1 reclaims entries that are neither locked nor mid-accumulation. It
-// keys off lastSeen, NOT off "is this locked right now" — the latter deleted
-// partial strike records, so flooding the table past the threshold erased every
-// real key's 1-of-3 and 2-of-3 progress and the lockout stopped engaging at all.
-// An entry idle for longer than lockoutFor is safe to drop because its strikes
-// would be reset on the next attempt anyway (see tryAttempt).
-//
-// Stage 2 evicts currently-locked entries, soonest-expiry first, once even they
-// exceed the hard cap. The old sweep exempted locked entries — which are exactly
-// what an attacker manufactures, maxFailures requests each — so the threshold
-// bounded only the unlocked portion while its comment claimed it bounded the
-// map. What actually limited the table was the scrypt cost per attempt in
-// handleLogin: a load-bearing dependency on a different file that nothing wrote
-// down. Evicting a locked entry forgives that key's cooldown early, which is the
-// right thing to trade for a real memory bound.
+// Nothing here evicts a LIVE entry. The hard cap is enforced in tryAttempt by
+// refusing new keys, so a saturated table denies service instead of forgiving
+// lockouts. See loginLockoutHardCap.
 func (l *failureLockout) sweepIfCrowdedLocked(now time.Time) {
-	overHardCap := len(l.entries) > loginLockoutHardCap
 	if len(l.entries) < loginLockoutSweepThreshold {
 		return
 	}
-	// Throttled unless we are over the hard cap, in which case the scan is not
-	// optional.
-	if !overHardCap && now.Sub(l.lastSweep) < sweepMinInterval {
+	// Throttled unless we are at the hard cap, where the scan is what stands
+	// between a transient flood and shedding every new key.
+	if len(l.entries) < loginLockoutHardCap && now.Sub(l.lastSweep) < sweepMinInterval {
 		return
 	}
 	l.lastSweep = now
@@ -271,49 +244,20 @@ func (l *failureLockout) sweepIfCrowdedLocked(now time.Time) {
 			delete(l.entries, k)
 		}
 	}
+	if len(l.entries) < loginLockoutHardCap {
+		l.saturated = false
+	}
+}
 
-	if len(l.entries) <= loginLockoutHardCap {
-		return
-	}
-	// Everything left is either locked or recently active. Evict down to a
-	// low-water mark rather than exactly to the cap, so the next attempt does
-	// not immediately trigger another full scan.
-	//
-	// LOCKED ENTRIES GO FIRST. An unlocked entry has a zero lockedUntil, and
-	// time.Time's zero value sorts before every real timestamp — so ordering on
-	// lockedUntil alone put the mid-accumulation entries at the front of the
-	// eviction list and deleted every real user's 1-of-3 and 2-of-3 progress
-	// before touching a single attacker-manufactured lockout. That is the exact
-	// bypass lastSeen was added to close in stage 1, reintroduced thirty lines
-	// below it: flood past the hard cap and no key ever reaches its third
-	// strike, so the lockout stops engaging for anybody.
-	//
-	// Locked entries are also the right thing to drop on the merits. They are
-	// what an attacker manufactures on purpose (maxFailures requests buys one),
-	// and losing one only forgives a cooldown early — whereas losing a partial
-	// strike record disables the control itself.
-	type keyed struct {
-		key    string
-		locked bool
-		until  time.Time
-	}
-	remaining := make([]keyed, 0, len(l.entries))
-	for k, e := range l.entries {
-		remaining = append(remaining, keyed{
-			key:    k,
-			locked: !e.lockedUntil.IsZero() && now.Before(e.lockedUntil),
-			until:  e.lockedUntil,
-		})
-	}
-	sort.Slice(remaining, func(i, j int) bool {
-		if remaining[i].locked != remaining[j].locked {
-			return remaining[i].locked
-		}
-		return remaining[i].until.Before(remaining[j].until)
-	})
-	for i := 0; i < len(remaining)-loginLockoutLowWater; i++ {
-		delete(l.entries, remaining[i].key)
-	}
+// Saturated reports whether the table has had to shed a new key since the last
+// time it drained below the hard cap. Surfaced rather than handled silently:
+// shedding is a denial of service to every caller the table has not seen before,
+// and an operator needs to know the difference between that and their login
+// being broken. Read by logSaturatedLockouts.
+func (l *failureLockout) Saturated() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.saturated
 }
 
 // recordSuccess clears any strike history for username, so a successful
@@ -324,30 +268,23 @@ func (l *failureLockout) recordSuccess(username string) {
 	delete(l.entries, username)
 }
 
-// timingDummyHash is a scrypt hash used only to equalize login timing,
-// regardless of whether the account exists. Its plaintext is irrelevant: the
-// verification is only ever expected to fail, and only its COST matters.
+// timingDummyHash is a scrypt hash used only to equalize login timing, whether
+// or not the account exists. Its plaintext is irrelevant — the verification is
+// only ever expected to fail, and only its COST matters.
 //
-// Derived at init from the CURRENT cost parameters rather than hardcoded. It was
-// a hardcoded scrypt$16384$... literal, and the instant HashPassword's N was
-// raised to 2^17 that literal became a cheaper hash than a real account's — so
-// the unknown-username path returned in ~22 ms against ~224 ms for a real user,
-// reopening the exact account-enumeration oracle this function exists to close.
-// A constant that has to be kept in step with another constant by hand will not
-// be. Pinned by TestLoginTimingDoesNotRevealUnknownUsernames.
+// Derived at run time from the CURRENT cost parameters. As a hardcoded
+// scrypt$16384$... literal it became cheaper than a real account's hash the
+// instant N was raised to 2^17, returning in ~22 ms against ~224 ms and
+// reopening the account-enumeration oracle it exists to close. Pinned by
+// TestLoginTimingDoesNotRevealUnknownUsernames.
 //
-// Computed on demand, not at package init: a plain package-level var would run
-// the 128 MiB / ~200 ms derivation in every binary importing this package, and
-// both processes supervisord starts are the same binary, so the daemon would pay
-// for a value it can never use. warmLoginTimingHash forces it during server
-// construction so no request pays the first-call penalty — a slower first
-// response on the unknown-username path discloses "no such account" just as well
-// as a faster one.
-//
-// Cached against the cost it was derived at, not derived once and kept forever:
-// a value memoized across a cost change equalizes against the wrong figure and
-// silently reopens the oracle. The cost never changes in production, so this
-// still derives exactly once there.
+// Computed on demand rather than at package init, so the daemon process — the
+// same binary — does not pay a 128 MiB / ~200 ms derivation for a value it never
+// uses. warmLoginTimingHash forces it during server construction so no request
+// pays the first-call penalty; a slower first response discloses "no such
+// account" just as well as a faster one. Cached against the cost it was derived
+// at, since a value memoized across a cost change equalizes against the wrong
+// figure.
 var (
 	timingHashMu   sync.RWMutex
 	timingHashVal  string
@@ -382,44 +319,37 @@ func timingDummyHash() string {
 
 // warmLoginTimingHash forces the derivation during server construction, so the
 // api process pays it before it can serve and the daemon process never does.
-//
-// Synchronous on purpose. A goroutine would leave a race in which a login
+// Synchronous on purpose: a goroutine would leave a race in which a login
 // arriving during the warm-up derives the hash itself and reintroduces the
-// first-call skew this exists to prevent; 200 ms in NewServer costs nothing.
+// first-call skew this exists to prevent.
 func warmLoginTimingHash() {
 	_ = timingDummyHash()
 }
 
-// chargeLoginKDF runs a password-derivation step under a KDF slot and bills
-// what it actually cost to the instance-wide login budget, reconciling against
-// the reservation handleLogin took up front.
+// chargeLoginKDF runs a password-derivation step under a KDF slot and bills what
+// it actually cost to the instance-wide login budget, reconciling against the
+// reservation handleLogin took up front.
 //
 // Every derivation on the login path goes through here, including the
-// equalization one on the unknown-username path — that path is the cheap one to
-// abuse (no account needed, never trips the per-account lockout) and the one
-// that must therefore be paid for.
+// equalization one on the unknown-username path — the cheap one to abuse (no
+// account needed, never trips the per-account lockout) and so the one that must
+// be paid for.
 //
 // The slot and the budget bound different things and both are required. The
-// budget is a rate limit: it admits before the work runs, so it caps sustained
-// CPU but not how many derivations are in flight at one instant — loginRateBurst
-// is 15, and fifteen concurrent scrypts at N=1<<17 is ~1.9 GiB of simultaneous
-// allocation from an anonymous caller. withKDFSlot is the concurrency limit that
-// bounds that memory.
-//
-// The measurement is taken inside the slot: a time.Since spanning the wait for a
-// slot would bill this attempt for other callers' queueing.
+// budget admits before the work runs, so it caps sustained CPU but not how many
+// derivations are in flight at once: loginRateBurst is 15, and fifteen
+// concurrent scrypts at N=1<<17 is ~1.9 GiB. withKDFSlot bounds that memory. The
+// measurement is taken inside the slot, so queueing is not billed to this
+// attempt.
 //
 // Returns errKDFBusy when the slots were saturated. handleLogin must refund both
-// lockout strikes and answer 503 on that — no credential was examined, so
-// spending a strike would turn a load spike into an account lockout, the same
-// reasoning that refunds ErrChallengeExpired.
+// lockout strikes and answer 503: no credential was examined, so spending a
+// strike would turn a load spike into an account lockout.
 //
-// held is the reservation handleLogin is carrying (see loginBudget). This
-// function settles it on BOTH paths — billing the true cost when the derivation
-// ran, refunding it when the slot was shed — and clears the flag either way, so
-// the caller's deferred refund becomes a no-op. Taking the flag as a parameter
-// rather than leaving the caller to clear it is what keeps a future call site
-// from double-refunding, which would mint budget out of nothing.
+// held is the reservation handleLogin carries (see loginBudget). This settles it
+// on BOTH paths and clears the flag either way, so the caller's deferred refund
+// becomes a no-op — taking the flag as a parameter is what stops a future call
+// site double-refunding and minting budget out of nothing.
 func (s *Server) chargeLoginKDF(ctx context.Context, held *loginBudget, work func() bool) (bool, error) {
 	var ok bool
 	err := s.withKDFSlot(ctx, func() {
@@ -441,21 +371,17 @@ func (s *Server) chargeLoginKDF(ctx context.Context, held *loginBudget, work fun
 // bucket, held from the admitCost at the top of handleLogin until something
 // settles it.
 //
-// It exists because handleLogin reserves BEFORE the per-IP lockout, the
-// per-account lockout and the CAPTCHA check — deliberately, so that an outbound
-// CAPTCHA verification is inside the budget too — and every one of those can
-// return without ever reaching a derivation. Those early returns each used to
-// walk away holding 200 ms of a bucket that refills at 0.2 s/s, which made an
-// already-locked-out caller a free, CPU-free drain on the ONE control standing
-// between an anonymous client and every user's ability to sign in. Ten empty
-// POSTs a second held the bucket permanently at zero and answered every
+// handleLogin reserves BEFORE the per-IP lockout, the per-account lockout and
+// the CAPTCHA check — deliberately, so an outbound CAPTCHA verification is
+// inside the budget too — and any of those can return without reaching a
+// derivation. Walking away still holding 200 ms of a bucket that refills at
+// 0.2 s/s lets ten empty POSTs a second hold it at zero and answer every
 // legitimate login with 429.
 //
-// A reservation is therefore settled exactly once, by whichever comes first:
+// A reservation is settled exactly once, by whichever comes first:
 //
-//   - chargeLoginKDF, which bills what the derivation really cost, or refunds
-//     in full when the KDF slot was shed
-//   - the deferred refund in handleLogin, for every path that never got that far
+//   - chargeLoginKDF, billing the real cost or refunding a shed KDF slot
+//   - the deferred refund in handleLogin, for paths that never got that far
 //
 // The zero value (no limiter configured, or no reservation taken) is inert.
 type loginBudget struct {
@@ -484,30 +410,25 @@ func equalizeLoginTiming(candidate string) {
 }
 
 // Instance-wide login throttle and the per-IP lockout, both added because the
-// username+IP lockout above bounds the wrong thing.
-//
-// loginMaxFailures is a budget per (username, IP) pair, and the username comes
-// from the request body — so a caller who never repeats a username never trips
-// it. Meanwhile every attempt against an unknown account runs scrypt on purpose
-// (equalizeLoginTiming, so timing does not reveal whether the account exists):
-// 16 MB and tens of milliseconds for a 200-byte request, on a host whose other
-// job is running an LLM.
+// username+IP lockout above bounds the wrong thing: the username comes from the
+// request body, so a caller who never repeats one never trips it, while every
+// attempt against an unknown account runs scrypt on purpose
+// (equalizeLoginTiming, so timing does not reveal whether the account exists) —
+// tens of milliseconds for a 200-byte request, on a host whose other job is
+// running an LLM.
 const (
 	// The instance-wide login budget is denominated in SECONDS OF KEY-DERIVATION
 	// WORK, not in requests.
 	//
-	// Counting requests requires assuming a cost per request, and that
-	// assumption fails exactly when it matters. The same one-per-second that is
-	// a fifth of a core here is two full cores on a box where a derivation costs
-	// ten times as much — a slower machine, one contending with the LLM, or a
-	// future raise to scryptN — and a request counter cannot tell the difference,
-	// so it keeps admitting at the same rate while the CPU it exists to protect
-	// disappears. Metering the work itself needs no assumption: a derivation that
-	// costs twice as much draws twice as much budget, and the ceiling holds.
+	// Counting requests requires assuming a cost per request, and that assumption
+	// fails exactly when it matters: the same one-per-second that is a fifth of a
+	// core here is two full cores where a derivation costs ten times as much — a
+	// slower machine, contention with the LLM, or a raise to scryptN — while the
+	// counter keeps admitting at the same rate. Metering the work needs no
+	// assumption.
 	//
-	// Instance-wide rather than per-IP because the resource being protected is
-	// this server's CPU, which is shared, and because a per-IP limit is defeated
-	// by using more IPs.
+	// Instance-wide rather than per-IP because the CPU being protected is shared,
+	// and a per-IP limit is defeated by using more IPs.
 
 	// loginKDFReserve is what one attempt is assumed to cost when it starts:
 	// one scrypt at HashPassword's parameters, roughly 200 ms of a core at
@@ -530,18 +451,18 @@ const (
 
 	// loginIPMaxFailures/loginIPLockoutFor cut off one address that is cycling
 	// through usernames. Deliberately much looser than the 3-strike per-account
-	// budget: a shared NAT egress, a family, or an office all legitimately
-	// produce several failures from one address, and this must not become an
-	// easier way to lock out a building than to lock out an account.
+	// budget: a shared NAT egress, a family, or an office all legitimately produce
+	// several failures from one address, and this must not become an easier way to
+	// lock out a building than an account.
 	loginIPMaxFailures = 50
 	loginIPLockoutFor  = 15 * time.Minute
 
-	// loginParamsBurst/loginParamsRefillPerSec meter the pre-login handshake
-	// PER IP, in requests. It does no derivation — one cached lookup and one
-	// HMAC — so pricing it in derivation seconds against the instance bucket
-	// was a ~40,000x overcharge that let one address deny sign-in globally.
-	// Generous, because a browser legitimately calls this once per sign-in and
-	// the re-authentication flows call it again.
+	// loginParamsBurst/loginParamsRefillPerSec meter the pre-login handshake PER IP,
+	// in requests. It does no derivation — one cached lookup and one HMAC — so
+	// pricing it in derivation seconds against the instance bucket was a ~40,000x
+	// overcharge that let one address deny sign-in globally. Generous, because a
+	// browser calls this once per sign-in and the re-authentication flows call it
+	// again.
 	loginParamsBurst        = 30
 	loginParamsRefillPerSec = 1
 )
@@ -569,18 +490,15 @@ var errKDFBusy = errors.New("api: no derivation slot available")
 // tests can shrink it; production always uses the value below.
 //
 // Capping concurrent derivations caps scrypt's memory, but an unbounded queue
-// replaces that with an unbounded backlog of goroutines — each holding a parsed
-// request — and a drain time set by the attacker. With four slots at ~200 ms a
-// derivation, two thousand queued logins are a hundred seconds during which
-// nobody can sign in, change a password, or reach CardDAV, because all four
-// paths share these slots. Neither http.Server's ReadTimeout nor a client
-// hanging up unblocks a goroutine parked on a channel send, so the work still
-// runs afterwards for callers that are long gone.
+// replaces that with a backlog of goroutines and a drain time set by the
+// attacker: four slots at ~200 ms makes two thousand queued logins a hundred
+// seconds in which nobody can sign in, change a password, or reach CardDAV,
+// since all four paths share these slots. Neither ReadTimeout nor a client
+// hanging up unblocks a goroutine parked on a channel send.
 //
-// Shedding is the honest answer there: the server cannot currently afford to
-// check this credential, which is a 503, not a 401. Sized at roughly ten
-// derivations' worth of queue — long enough that a legitimate burst waits rather
-// than fails, short enough that the backlog cannot become the denial.
+// Shedding is the honest answer — the server cannot currently afford to check
+// this credential, which is a 503, not a 401. Sized at roughly ten derivations'
+// worth of queue.
 var kdfMaxQueueWait = 2 * time.Second
 
 // withKDFSlot runs fn holding one of the process-wide derivation slots,
@@ -588,16 +506,14 @@ var kdfMaxQueueWait = 2 * time.Second
 // caller's context is cancelled first.
 //
 // Every path that performs scrypt in response to a request must use it,
-// including authenticated ones: a session bounds who can ask, not how much
-// memory the asking costs, and 128 MiB per concurrent caller is an OOM primitive
-// either way. Current callers: chargeLoginKDF (login), the recovery code check,
-// the password change, and DAV basic auth.
+// including authenticated ones: a session bounds who can ask, not how much memory
+// the asking costs. Current callers: chargeLoginKDF (login), the recovery code
+// check, the password change, and DAV basic auth.
 //
 // Returns errKDFBusy or ctx.Err() without running fn. A caller that ignores the
 // error reports "the server is overloaded" as "your password is wrong", which is
-// both a lie and a lockout.
-//
-// A nil semaphore (zero-value Server in tests) degrades to running fn directly.
+// both a lie and a lockout. A nil semaphore (zero-value Server in tests) runs fn
+// directly.
 func (s *Server) withKDFSlot(ctx context.Context, fn func()) error {
 	if s.kdfSem == nil {
 		fn()

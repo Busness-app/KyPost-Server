@@ -55,16 +55,14 @@ type Poller struct {
 	classifier           *classifier.HTTPClient
 	redaction            *redaction.Engine
 	nativePushDispatcher *NativePushDispatcher
-	// ctx/cancel bound the background tick loop. They are established exactly
-	// once, via ctxOnce, and never reassigned afterwards. Previously cancel
-	// was assigned inside Run — which executes in its own goroutine — and
-	// read by Stop, which raced; when Stop won the read, cancel was still nil
-	// and Stop silently did nothing, leaving the poller running through a
-	// shutdown that believed it had stopped.
+	// ctx/cancel bound the background tick loop. They are established exactly once,
+	// via ctxOnce, and never reassigned. Assigning cancel inside Run — which runs in
+	// its own goroutine — raced with Stop, which could read a nil cancel and
+	// silently do nothing, leaving the poller running through a shutdown that
+	// believed it had stopped.
 	//
-	// New primes them, but Run and Stop prime them too: several tests build a
-	// Poller as a struct literal rather than through New, and the zero value
-	// has to stay usable.
+	// New primes them, but Run and Stop prime them too: several tests build a Poller
+	// as a struct literal, and the zero value has to stay usable.
 	ctxOnce sync.Once
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -201,13 +199,11 @@ func (p *Poller) userStore(userID string) (*state.Store, error) {
 	return st, nil
 }
 
-// userMailClient returns the cached IMAP client for a user, rebuilding it
-// when their encrypted credential file changed on disk.
-// The evicted client is closed rather than dropped: it holds a live,
-// authenticated IMAP session that nothing else reclaims, and the api process
-// keeps its own identical cache — so a credential change leaked one connection
-// per process until the far end timed it out. See api.closeMailClient for why
-// this is an io.Closer assertion and not a Client interface method.
+// userMailClient returns the cached IMAP client for a user, rebuilding it when
+// their encrypted credential file changed on disk. The evicted client is closed
+// rather than dropped: it holds a live, authenticated IMAP session that nothing
+// else reclaims, and the api process keeps its own identical cache. See
+// api.closeMailClient for why this is an io.Closer assertion.
 func (p *Poller) userMailClient(userID string, configModTime time.Time) imapadapter.Client {
 	p.userMu.Lock()
 	defer p.userMu.Unlock()
@@ -301,14 +297,12 @@ func (p *Poller) Run() {
 	wkdTicker := time.NewTicker(recheckWKDInterval)
 	defer wkdTicker.Stop()
 
-	// time.NewTicker only fires after the first full interval elapses, so
-	// without this, a host that restarts more often than every
-	// recheckWKDInterval (12h) would never actually run recheckWKDDomains —
-	// silently disabling the revocation half of the WKD DNS-proof control.
-	// recheckWKDDomains is idempotent and cheap (its per-claim LastCheckedAt
-	// due-guard skips anything checked recently), so running it once eagerly
-	// here is safe. Backgrounded so it never delays the tick/select loop
-	// below from starting.
+	// time.NewTicker only fires after the first full interval, so a host that
+	// restarts more often than recheckWKDInterval (12h) would never run
+	// recheckWKDDomains — silently disabling the revocation half of the WKD
+	// DNS-proof control. It is idempotent and cheap (its per-claim LastCheckedAt
+	// guard skips anything checked recently), so one eager run is safe. Backgrounded
+	// so it never delays the tick loop from starting.
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
@@ -555,13 +549,10 @@ func (p *Poller) tick() {
 	p.health.MarkHealthy()
 }
 
-// tickUser polls one user's mailbox. Errors are logged with the user id and
-// reported to the caller for the all-users-failed health check; they never
-// affect other users.
 // mailCacheEntriesFromMessages converts freshly fetched UNSEEN messages into
-// mail-cache entries. Status is always "unread": ListUnreadInbox only ever
-// returns messages matching an IMAP UNSEEN search, so there's nothing to
-// infer from flags here (unlike the live overview-sync path).
+// mail-cache entries. Status is always "unread": ListUnreadInbox only returns
+// messages matching an IMAP UNSEEN search, so there is nothing to infer from
+// flags here (unlike the live overview-sync path).
 func mailCacheEntriesFromMessages(messages []imapadapter.Message) []mailcache.Entry {
 	entries := make([]mailcache.Entry, 0, len(messages))
 	for _, msg := range messages {
@@ -646,15 +637,14 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	}
 
 	// Opportunistically warm the mail cache with what was just fetched for
-	// classification below — reuses the same IMAP round trip and bodies, no
-	// extra IMAP calls. Done before classification, and independent of its
-	// outcome, so a slow or rate-limited classification run never delays
-	// cache freshness. INBOX only, matching ListUnreadInbox's scope — see
-	// mailcache/AGENTS.md for why other folders are warmed lazily instead.
-	// Hoisted out of the block below so the per-message loop can also mirror an
-	// anti-phishing flag into the cache — the warm here runs before that loop,
-	// so a message flagged inside it would otherwise carry stale keywords in
-	// the cache until the next tick. Stays nil when the store won't open, which
+	// classification below — same IMAP round trip and bodies, no extra calls. Run
+	// before classification and independent of its outcome, so a slow or
+	// rate-limited classification never delays cache freshness. INBOX only, matching
+	// ListUnreadInbox's scope; see mailcache/AGENTS.md for why other folders are
+	// warmed lazily.
+	//
+	// Hoisted above the per-message loop so that loop can mirror an anti-phishing
+	// flag into the cache. Stays nil when the store won't open, which
 	// mirrorPhishKeyword tolerates.
 	var mailCache *mailcache.Store
 	if len(messages) > 0 {
@@ -693,17 +683,14 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 			skippedSeenCount++
 			continue
 		}
-		// Anti-phishing runs here, ahead of everything below, and the ordering
-		// is the point:
-		//   - before allowByRate, which breaks this loop once the classifier
-		//     budget is spent. A security verdict must not be rationed by an
-		//     LLM quota.
-		//   - before handleMessage, whose rules engine can move or delete the
-		//     message and whose "stop" action returns early, and whose
-		//     classifier failure returns before any keyword is applied. Any of
-		//     those would silently suppress the flag.
-		// Flagging first also means the keyword travels with the message if a
-		// user rule subsequently moves it.
+		// Anti-phishing runs ahead of everything below, and the ordering is the point:
+		//   - before allowByRate, which breaks this loop once the classifier budget is
+		//     spent. A security verdict must not be rationed by an LLM quota.
+		//   - before handleMessage, whose rules engine can move or delete the message,
+		//     whose "stop" action returns early, and whose classifier failure returns
+		//     before any keyword is applied.
+		// Flagging first also means the keyword travels with the message if a user rule
+		// subsequently moves it.
 		if p.flagAppImpersonation(ctx, uc, msg, ownAddress) {
 			p.mirrorPhishKeyword(mailCache, msg)
 		}
@@ -767,12 +754,10 @@ func (e *classifierErr) Unwrap() error { return e.err }
 
 // shouldMarkProcessedOnError reports whether tickUser should mark a message
 // processed after handleMessage returned err. A classifier error only marks
-// processed when the underlying failure is permanent (bad input / AI
-// credits exhausted, per isPermanentClassifierError) — a transient
-// classifier outage leaves the message unmarked so it is retried on the
-// next poll tick, instead of being silently and permanently skipped. Any
-// non-classifier error (rule-matching, IMAP) always marks processed,
-// unchanged from prior behavior.
+// processed when the failure is permanent (bad input / AI credits exhausted, per
+// isPermanentClassifierError); a transient outage leaves the message unmarked so
+// the next tick retries it instead of skipping it forever. Any non-classifier
+// error (rule-matching, IMAP) always marks processed.
 func shouldMarkProcessedOnError(err error) bool {
 	var cerr *classifierErr
 	if errors.As(err, &cerr) {
@@ -783,11 +768,10 @@ func shouldMarkProcessedOnError(err error) bool {
 
 // maxLoggedLabelBytes bounds a raw model output before it reaches the log.
 //
-// A well-behaved model answers with one label from the allowlist — a few bytes.
-// A misbehaving one can echo back whatever it was fed, which is attacker-
-// controlled email content, and app.log is served to any admin by
-// GET /api/logs. Truncating means a diagnostic stays a diagnostic instead of
-// becoming a channel for message content to escape the owning user's state.db.
+// A well-behaved model answers with one label from the allowlist. A misbehaving
+// one can echo back attacker-controlled email content, and app.log is served to
+// any admin by GET /api/logs — so truncating keeps a diagnostic from becoming a
+// channel for message content to escape the owning user's state.db.
 const maxLoggedLabelBytes = 64
 
 // clipForLog trims and bounds a model-produced string for logging, and strips
@@ -835,15 +819,13 @@ func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc user
 // mailmsg.MaxInboundMessageBytes uses for the size cap itself.
 var sendRejectionNotice = mailmsg.SMTPDeliver
 
-// rejectOversizedMessage is handleMessage's branch for a message
-// ListUnreadInbox flagged as TooLarge: instead of the normal rule/classify/
-// label pipeline (which has no real content to act on — Body was
-// deliberately left empty), it best-effort emails a rejection notice to the
-// account's own address and records a distinct "rejected_too_large"
-// Decision, then marks the message processed so it isn't retried every poll
-// tick. A failure to send the notice is logged and folded into the
-// Decision's Detail, but never blocks recording the decision or marking the
-// message processed — an SMTP misconfiguration must not leave the same
+// rejectOversizedMessage is handleMessage's branch for a message ListUnreadInbox
+// flagged as TooLarge. Instead of the normal rule/classify/label pipeline (which
+// has no content to act on — Body was deliberately left empty), it best-effort
+// emails a rejection notice to the account's own address, records a distinct
+// "rejected_too_large" Decision, and marks the message processed so it is not
+// retried every tick. A failed notice is folded into the Decision's Detail but
+// never blocks either step: an SMTP misconfiguration must not leave the same
 // oversized message retried forever.
 func (p *Poller) rejectOversizedMessage(uc userCtx, msg imapadapter.Message) error {
 	detail := fmt.Sprintf("message from %q exceeded the %d MiB inbound size limit and was not processed", msg.Sender, mailmsg.MaxInboundMessageBytes/(1<<20))
@@ -865,15 +847,11 @@ func (p *Poller) rejectOversizedMessage(uc userCtx, msg imapadapter.Message) err
 }
 
 // notifyMessageTooLarge emails a rejection notice to the mailbox owner's own
-// address — the IMAP username, the same "this account's address" convention
-// api.handleMailSend uses for accountAddr — using the poller's per-user IMAP/
-// SMTP config and the mailmsg SMTP-send helpers from Task 16. The notice
-// deliberately carries only the sender and subject the rejected message
-// already exposed in its IMAP overview (cheap header metadata fetched
-// without ever reading the oversized body — see ListUnreadInbox), plus the
-// size limit itself: never the message's own content, which this server
-// never read into memory in the first place, so there's nothing sensitive
-// left to leak.
+// address — the IMAP username, the same convention api.handleMailSend uses for
+// accountAddr — via the poller's per-user IMAP/SMTP config and the mailmsg SMTP
+// helpers. The notice carries only the sender and subject the rejected message
+// already exposed in its IMAP overview, plus the size limit: never the message's
+// own content, which this server never read into memory.
 func (p *Poller) notifyMessageTooLarge(uc userCtx, msg imapadapter.Message) error {
 	payload, exists, err := mailmsg.ReadIMAPConfigPayload(p.userIMAPConfigPath(uc.id), p.imapKeyPath)
 	if err != nil {
@@ -934,13 +912,11 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 
 	cfg := p.currentConfig()
 
-	// Filter rules run first, before classification (below), and skip it
-	// entirely when a matched rule's actions include "stop" — mirrors
-	// Sieve's delivery-time semantics and avoids burning a rate-limited
-	// Ollama call on mail a rule will immediately delete/spam. Rule
-	// matching is local and never leaves the system, so the raw
-	// (unredacted) message is used here, unlike the redacted body handed to
-	// classifyWithRetry further down.
+	// Filter rules run first, before classification, and skip it entirely when a
+	// matched rule's actions include "stop" — mirroring Sieve's delivery-time
+	// semantics and avoiding a rate-limited Ollama call on mail a rule will delete.
+	// Rule matching is local and never leaves the system, so the raw (unredacted)
+	// message is used here, unlike the redacted body handed to classifyWithRetry.
 	uid, _ := strconv.Atoi(strings.TrimSpace(msg.ID))
 	ruleInput := rules.EvalInput{
 		UID:       uid,
@@ -1036,12 +1012,10 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	redacted := p.currentRedaction().Apply(body)
 
 	// Clamp the headers too. The prompt builder puts the instruction block, the
-	// nonced fence and the tuning document BEFORE the email text, and Ollama
-	// truncates from the front — so an unbounded Subject pushes the fence out
-	// of num_ctx and the model sees attacker text with no instructions. The
-	// classifier's own num_ctx note assumes a bounded worst-case prompt; only
-	// the body was actually bounded. Rune-wise so a multi-byte character is
-	// never split.
+	// nonced fence and the tuning document BEFORE the email text and Ollama
+	// truncates from the front, so an unbounded Subject pushes the fence out of
+	// num_ctx and the model sees attacker text with no instructions. Rune-wise so a
+	// multi-byte character is never split.
 	sender := truncateRunes(strings.TrimSpace(msg.Sender), maxClassifySenderRunes)
 	subject := truncateRunes(strings.TrimSpace(msg.Subject), maxClassifySubjectRunes)
 
@@ -1067,13 +1041,11 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	}
 	// A successful classification means the classifier has credits again; clear any flag.
 	p.clearAICreditsExhausted()
-	// No sender and no subject. This logger writes to the instance-wide app.log
-	// that GET /api/logs serves to ANY admin, so anything put here leaves every
-	// user's correspondence metadata readable by an account that is not theirs —
-	// on a server whose whole premise is that only the recipient can read their
-	// mail. Sender and subject are already recorded in the state.Decision row
-	// below, which lives in the user's own state.db and is served only to them.
-	// The message id is enough to join the two when debugging.
+	// No sender and no subject. This logger writes to the instance-wide app.log that
+	// GET /api/logs serves to ANY admin, so anything here leaves one user's
+	// correspondence metadata readable by an account that is not theirs. Sender and
+	// subject are recorded in the state.Decision row below, which lives in the
+	// user's own state.db; the message id joins the two when debugging.
 	p.log.Info("classification result", "user_id", uc.id, "message_id", msg.ID, "raw_label", clipForLog(label))
 	selected := classifier.SelectLabelFromText(cfg.Labels.Allowlist, label)
 	if selected == "" {
@@ -1229,12 +1201,13 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 	notification := NativePushMessage{Title: title, Body: body, Data: data}
 
 	outcome, err := SendNativePush(context.Background(), p.nativePushDispatcher, p.health, uc.store, notification, func(device state.NativeDevice, platform string, sendErr error) {
-		// TODO(server-side management): a failed send (relay unreachable,
-		// upstream 5xx, or a 429 when the relay's per-server rate limit is
-		// exceeded) currently drops the push — the email still syncs in-app,
-		// but no notification fires. Add server-side handling: honor the
-		// relay's Retry-After, queue and re-attempt over-limit / transient
-		// failures with backoff, and surface persistent failures to the user.
+		// This fires only after sendWithRetry has spent its attempts — transient
+		// failures (relay unreachable, upstream 5xx, 429) are retried with backoff,
+		// honouring the relay's Retry-After. What reaches here is a relay that stayed
+		// down for the whole window, and the notification is dropped: the email still
+		// syncs in-app, and health.RecordNativePushFailure surfaces the relay as
+		// failing. Re-attempt ACROSS requests would be a queue, not a retry; see
+		// sendWithRetry.
 		p.log.Error(
 			"native notification failed",
 			"user_id", uc.id,
@@ -1325,13 +1298,11 @@ func buildNotificationBody(msg imapadapter.Message) string {
 
 // buildNativeNotificationText renders a mobile push. With includeContent it
 // reads as a mail app's does — sender as the title, subject as the body.
-// Without it, the notification is generic and carries no message metadata at
-// all.
+// Without it the notification is generic and carries no message metadata.
 //
 // includeContent is off unless the user turned on
-// UserNotificationSettings.ContentPreview, because a native push is not
-// delivered by this server: it goes backend -> relay Worker -> FCM/APNs, in
-// cleartext to every hop. See that field's doc comment.
+// UserNotificationSettings.ContentPreview, because a native push goes backend ->
+// relay Worker -> FCM/APNs, in cleartext to every hop.
 func buildNativeNotificationText(msg imapadapter.Message, includeContent bool) (title, body string) {
 	if !includeContent {
 		return "KyPost", "You have a new email."
@@ -1352,17 +1323,15 @@ func buildNativeNotificationText(msg imapadapter.Message, includeContent bool) (
 // buildNativePushData builds the data payload accompanying a native push.
 //
 // Without includeContent it carries only the message id (so tapping the
-// notification can open the right message once the app syncs over its own
+// notification opens the right message once the app syncs over its own
 // authenticated connection) and the deep link. No sender, no subject, no
-// keywords — keywords leak the classification, which is itself a statement
-// about the message.
+// keywords — keywords leak the classification, which is itself a statement about
+// the message.
 //
-// The sender appears under both "sender" and "senderName", and the subject
-// under both "subject" and "emailSubject". That is not redundancy to clean
-// up: the mobile client reads senderName/emailSubject on the FCM path and
-// falls back to sender/subject on the App Pull path, so removing either pair
-// breaks one of them. The client already renders generic text when they are
-// absent, which is exactly what this function produces when previews are off.
+// The sender appears under both "sender" and "senderName", the subject under
+// both "subject" and "emailSubject": the mobile client reads
+// senderName/emailSubject on the FCM path and falls back to sender/subject on
+// App Pull, so removing either pair breaks one of them.
 func buildNativePushData(msg imapadapter.Message, messageKeywords []string, title, body string, includeContent bool) map[string]string {
 	data := map[string]string{
 		"messageId": strings.TrimSpace(msg.ID),
@@ -1521,14 +1490,12 @@ func applySingleKeywordWithRetry(ctx context.Context, c imapadapter.Client, mess
 	return err
 }
 
-// disabledLabelingFallback picks the label applied when auto-labeling is
-// off. "Primary" is preferred for backward compatibility, but it only
-// matches a tab the frontend actually shows by default
-// (server.go's bucket()/firstMatchingKeyword, ReadPage.tsx's tabs[0]
-// default) when it's genuinely one of the account's configured labels. If
-// it isn't, falling back to the literal string leaves mail silently
-// stranded in the Uncategorized tab, which looks like mail vanishing
-// (effectively an unrequested auto-archive) rather than being sorted.
+// disabledLabelingFallback picks the label applied when auto-labeling is off.
+// "Primary" is preferred for backward compatibility, but it only matches a tab
+// the frontend shows by default (server.go's bucket()/firstMatchingKeyword,
+// ReadPage.tsx's tabs[0]) when it is genuinely one of the account's configured
+// labels. Otherwise falling back to the literal string strands mail in the
+// Uncategorized tab, which looks like mail vanishing rather than being sorted.
 func disabledLabelingFallback(allowlist []string) string {
 	for _, label := range allowlist {
 		if strings.EqualFold(strings.TrimSpace(label), "Primary") {

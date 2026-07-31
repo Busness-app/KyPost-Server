@@ -1,10 +1,8 @@
 // Sign-in and session identity: password login, the second-factor challenge
 // completions (TOTP, recovery code), session mint/teardown, and the middleware
 // every authenticated route goes through (withAuth, withMailAuth, csrfCheckOK,
-// currentUser).
-//
-// Keep the lockout key, the case-folding account lookup, and the credential
-// check within reading distance of each other. They have to agree on what "the
+// currentUser). Keep the lockout key, the case-folding account lookup, and the
+// credential check within reading distance: they have to agree on what "the
 // same account" means, and that agreement is invisible from any one of them.
 package api
 
@@ -28,21 +26,12 @@ import (
 
 // Session tracks who a live session token belongs to.
 //
-// Sessions are in-memory only (Server.sessions), never persisted, and that is
-// settled: persisting them would write bearer-equivalent credentials to the
-// same volume this project works to keep free of plaintext secrets, to buy
-// back an annoyance. A stolen token cannot outlive the process and revocation
-// is a map delete that cannot fail halfway.
-//
-// The cost is that any restart logs everyone out, and the process does not
-// decide when it restarts. `restart: unless-stopped`, a host reboot, a
-// `docker compose pull`, and supervisord giving up on the API all end every
-// session; the one in-process trigger (scheduleContainerRestart, from
-// handleRepair) is the rare case, not the whole set. Saving config does not
-// restart anything.
-//
-// Only the API process has sessions at all; a second API replica would not
-// share them.
+// Sessions are in-memory only (Server.sessions) and never persisted: persisting
+// them would write bearer-equivalent credentials to the same volume this project
+// keeps free of plaintext secrets. A stolen token cannot outlive the process,
+// and revocation is a map delete that cannot fail halfway. The cost is that any
+// restart logs everyone out, and the process does not decide when it restarts.
+// Only the API process has sessions; a second replica would not share them.
 //
 // Role is deliberately not stored here: currentUser looks the user up live on
 // every request, so a role change or deactivation takes effect on the next
@@ -50,12 +39,11 @@ import (
 // (see csrfCheckOK), mirrored into the non-HttpOnly csrf_token cookie.
 type Session struct {
 	UserID string
-	// IssuedAt is when this session was minted. ExpiresAt slides forward on
-	// every request so an active user is not logged out mid-work, but
-	// IssuedAt never moves, and sessionMaxLifetime past it the session dies
-	// regardless of activity. Without that cap a stolen cookie is valid
-	// forever: the thief's own polling keeps renewing it, and the legitimate
-	// user has no way to see it or end it short of changing their password.
+	// IssuedAt is when this session was minted and never moves; ExpiresAt slides
+	// forward on every request so an active user is not logged out mid-work.
+	// sessionMaxLifetime past IssuedAt the session dies regardless of activity,
+	// without which a stolen cookie is valid forever — the thief's own polling
+	// keeps renewing it.
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 	CSRFToken string
@@ -71,12 +59,9 @@ const (
 	// sessions that expired without anyone presenting them again.
 	sessionSweepInterval = time.Hour
 	// sessionSlideGranularity is how much the idle window must have advanced
-	// before currentUser bothers rewriting a session's ExpiresAt.
-	//
-	// This is the resolution sessionIdleTimeout is enforced at: a session may
-	// die up to this long before a strict reading of "24 hours since the last
-	// request". Against a 24-hour horizon that is noise, and it is what keeps
-	// the common request path on a read lock instead of an exclusive one.
+	// before currentUser rewrites a session's ExpiresAt — i.e. the resolution
+	// sessionIdleTimeout is actually enforced at. Noise against a 24-hour horizon,
+	// and it is what keeps the common request path on a read lock.
 	sessionSlideGranularity = 5 * time.Minute
 )
 
@@ -86,6 +71,17 @@ type AuthContext struct {
 	Username           string
 	Role               users.Role
 	MustChangePassword bool
+
+	// SessionCSRFToken is the CSRF token of the session this request authenticated
+	// with, and is EMPTY for every other authentication path (paired-device
+	// headers, CardDAV Basic).
+	//
+	// It is how csrfCheckOK knows whether the caller presented an ambient,
+	// browser-attached credential, rather than inferring it from whether a cookie
+	// happened to be on the request. The old inference answered "no session found
+	// for this cookie" by allowing the request, survivable only because the session
+	// cookie is SameSite=Lax and never reaches a cross-site POST.
+	SessionCSRFToken string
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -97,10 +93,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		// AuthSecret is the client-derived authentication half of the stretched
 		// password — see login_params.go and frontend/src/lib/authSecret.ts. The
-		// key-wrapping half is derived from the same stretch under a different
-		// HKDF label and never leaves the browser, which is what makes the PGP
-		// vault genuinely end-to-end rather than "sealed with a key the server is
-		// handed on every login".
+		// key-wrapping half is derived from the same stretch under a different HKDF
+		// label and never leaves the browser, which is what makes the PGP vault
+		// genuinely end-to-end.
 		AuthSecret string `json:"authSecret,omitempty"`
 		// LoginSalt/LoginIterations are what the client actually used, echoed
 		// back so a legacy upgrade can pin the credential to them.
@@ -108,12 +103,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		LoginIterations int    `json:"loginIterations,omitempty"`
 		CaptchaToken    string `json:"captchaToken,omitempty"`
 	}
-	// Bounded before it is buffered. This is the only unauthenticated decode in
-	// the codebase, and it runs before the lockout and captcha checks below, so
-	// an unbounded body let any anonymous caller choose the server's allocation:
+	// Bounded before it is buffered. This is the only unauthenticated decode in the
+	// codebase and it runs before the lockout and captcha checks below, so an
+	// unbounded body let any anonymous caller choose the server's allocation:
 	// json.Decode buffers the whole value and then allocates the string on top,
-	// measured at ~5.6x the wire size. A login body is a username, a password
-	// and a captcha token.
+	// measured at ~5.6x the wire size.
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
@@ -122,23 +116,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Instance-wide rate limit FIRST, before anything that costs real work.
 	//
 	// The per-account lockout below cannot bound total work: it is keyed on
-	// username+IP and the username comes out of the request body, so a caller
-	// who never repeats one never trips it — while every attempt against an
-	// unknown account runs scrypt on purpose (see equalizeLoginTiming). This
-	// bucket is what stands between that and an unauthenticated caller pegging
-	// every CPU on a host that is also running an LLM.
-	// The bucket holds seconds of derivation work, so this reserves one attempt's
-	// worth and chargeLoginKDF below settles up with what the attempt really
-	// cost. That is what makes the ceiling hold on a machine where a derivation
-	// is slower than the reference: the budget drains faster, rather than the
-	// same number of requests being waved through to burn more CPU each.
+	// username+IP and the username comes out of the request body, so a caller who
+	// never repeats one never trips it — while every attempt against an unknown
+	// account runs scrypt on purpose (see equalizeLoginTiming).
 	//
-	// The reservation is held in `budget` and released exactly once — by
-	// chargeLoginKDF when a derivation actually runs, or by the deferred refund
-	// otherwise. Every return between here and there is a path that reserved
-	// derivation work and then did none of it; keeping the reservation on those
-	// is what let a locked-out caller drain the instance budget with requests
-	// that cost the server nothing. See loginBudget.
+	// The bucket holds seconds of derivation work: this reserves one attempt's worth
+	// and chargeLoginKDF settles up with what the attempt really cost, so a slower
+	// machine drains the budget faster instead of waving through the same number of
+	// requests to burn more CPU each. The reservation is released exactly once — by
+	// chargeLoginKDF, or by the deferred refund on any path that derived nothing.
+	// See loginBudget.
 	var budget loginBudget
 	if s.loginRateLimiter != nil {
 		if ok, retryAfter := s.loginRateLimiter.admitCost(loginRateLimitKey, loginKDFReserveSeconds); !ok {
@@ -156,10 +143,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Per-IP lockout, independent of the username. Closes the rotating-username
 	// hole in the per-account budget below: 50 failures from one address in 15
-	// minutes stops that address, whatever names it tried. Loose on purpose —
-	// a NAT egress or an office must not be easier to lock out than an account.
-	// Login is where a constant clientIP does the most damage and the first place
-	// an operator notices it, so it is where the misconfiguration announces itself.
+	// minutes stops that address, whatever names it tried. Loose on purpose — a NAT
+	// egress or an office must not be easier to lock out than an account. Login is
+	// where a constant clientIP does the most damage, so it is where the proxy
+	// misconfiguration announces itself.
 	s.warnOnUnusedProxyHeaders(r)
 	ipLockoutKey := lockoutKeyForIP(clientIP(r))
 	if allowed, retryAfter := s.loginIPLockout.tryAttempt(ipLockoutKey); !allowed {
@@ -172,15 +159,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Three-strikes/15-minute lockout, keyed on username+client IP: on the
-	// username whether or not it exists (so lockout behavior cannot enumerate
-	// accounts), and on the IP (so hammering a known username cannot lock its
-	// real owner out from their own machine).
+	// Three-strikes/15-minute lockout, keyed on username+client IP: on the username
+	// whether or not it exists (so lockout behavior cannot enumerate accounts), and
+	// on the IP (so hammering a known username cannot lock its real owner out from
+	// their own machine).
 	//
-	// The username MUST be folded through users.NormalizeUsername — the same
-	// fold GetByUsername resolves the account with. On the raw string,
-	// "victim", "Victim" and " victim " are one account to the lookup but
-	// three strike budgets here, and padding makes that key space unbounded.
+	// The username MUST be folded through users.NormalizeUsername — the same fold
+	// GetByUsername resolves the account with. On the raw string, "victim",
+	// "Victim" and " victim " are one account to the lookup but three strike
+	// budgets here, and padding makes that key space unbounded.
 	lockoutKey := users.NormalizeUsername(req.Username) + "\x00" + lockoutKeyForIP(clientIP(r))
 	if allowed, retryAfter := s.loginLockout.tryAttempt(lockoutKey); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
@@ -199,23 +186,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ok, err := s.captchaVerifier.Verify(r.Context(), req.CaptchaToken, clientIP(r))
 		switch {
 		case errors.Is(err, captcha.ErrChallengeExpired):
-			// Self-hosted proof-of-work only: a correctly signed solution that
-			// arrived after its deadline — a tab left open, not a credential.
-			// Refund the strike so three stale tabs cannot lock anyone out.
-			// 401, not the 503 below, which means "the provider is down" and
-			// there is no provider here. No password is checked on this path,
-			// so the refund buys an attacker no guesses.
+			// Self-hosted proof-of-work only: a correctly signed solution that arrived
+			// after its deadline — a tab left open, not a credential. Refund the strike so
+			// three stale tabs cannot lock anyone out. 401, not the 503 below, which means
+			// "the provider is down" and there is no provider here. No password is checked
+			// on this path, so the refund buys an attacker no guesses.
 			s.loginLockout.cancelAttempt(lockoutKey)
 			s.loginIPLockout.cancelAttempt(ipLockoutKey)
 			http.Error(w, "security check expired, please try again", http.StatusUnauthorized)
 			return
 		case errors.Is(err, captcha.ErrChallengeWrongClient):
-			// Self-hosted proof-of-work only: a valid solution presented from a
-			// different address than it was issued to. The binding is what
-			// stops an attacker fetching cheap challenges from a clean address
-			// and spending them from an escalated one — but a phone handing off
-			// wifi to cellular mid-solve looks identical. A changed address is
-			// a network event, not a wrong credential, so refund the strike.
+			// Self-hosted proof-of-work only: a valid solution presented from a different
+			// address than it was issued to. The binding stops an attacker fetching cheap
+			// challenges from a clean address and spending them from an escalated one, but
+			// a phone handing off wifi to cellular mid-solve looks identical. A changed
+			// address is a network event, not a wrong credential, so refund the strike.
 			s.loginLockout.cancelAttempt(lockoutKey)
 			s.loginIPLockout.cancelAttempt(ipLockoutKey)
 			http.Error(w, "your network address changed during the security check, please try again", http.StatusUnauthorized)
@@ -242,13 +227,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	u, err := s.users.GetByUsername(req.Username)
 	if err != nil || !u.Active {
-		// Pay the same scrypt cost a real check would, so response timing
-		// doesn't reveal whether the username exists (or is inactive).
-		//
-		// Equalize against whichever credential was offered: a converted client
-		// sends only AuthSecret, so equalizing on the empty Password would make
-		// the unknown-account path cheap again for exactly the callers that
-		// matter.
+		// Pay the same scrypt cost a real check would, so response timing doesn't
+		// reveal whether the username exists (or is inactive). Equalize against
+		// whichever credential was offered: a converted client sends only AuthSecret,
+		// so equalizing on the empty Password would make the unknown-account path cheap
+		// again for exactly the callers that matter.
 		if _, err := s.chargeLoginKDF(r.Context(), &budget, func() bool {
 			equalizeLoginTiming(cmp.Or(req.AuthSecret, req.Password))
 			return false
@@ -270,24 +253,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	// Two credential shapes, chosen by what the ACCOUNT stores rather than by
-	// what the client sent. Letting the request pick would mean a caller could
-	// present a plaintext password against a derived-auth account (or the
-	// reverse) and have the server try both — and since the derivation salt is
-	// public (login_params.go), "try both" would let anyone authenticate with a
-	// value they can compute from the salt alone.
+	// Two credential shapes, chosen by what the ACCOUNT stores rather than by what
+	// the client sent. Letting the request pick would mean a caller could present a
+	// plaintext password against a derived-auth account (or the reverse) and have
+	// the server try both — and since the derivation salt is public
+	// (login_params.go), "try both" would let anyone authenticate with a value they
+	// can compute from the salt alone.
 	verify := func() bool { return users.VerifyPassword(u, req.Password) }
 	if u.UsesDerivedAuth() {
 		verify = func() bool { return users.VerifyAuthSecret(u, req.AuthSecret) }
 	}
 	verified, err := s.chargeLoginKDF(r.Context(), &budget, verify)
 	if err != nil {
-		// Saturated slots, not a wrong password. Refund both strikes: a 401
-		// here would spend a third of this account's budget on a credential
-		// nobody looked at, so three unlucky arrivals during a burst would lock
-		// out a user who typed everything correctly. recordFailure is skipped
-		// for the same reason — proof-of-work escalation prices guessing, not
-		// queueing.
+		// Saturated slots, not a wrong password. Refund both strikes: a 401 here would
+		// spend a third of this account's budget on a credential nobody looked at, so
+		// three unlucky arrivals during a burst would lock out a user who typed
+		// everything correctly. recordFailure is skipped for the same reason.
 		s.loginLockout.cancelAttempt(lockoutKey)
 		s.loginIPLockout.cancelAttempt(ipLockoutKey)
 		writeKDFBusy(w)
@@ -305,15 +286,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.loginIPLockout.recordSuccess(ipLockoutKey)
 
 	// Transparently upgrade a password hash written at an older, cheaper scrypt
-	// cost. This is the only moment the plaintext is legitimately in hand, so it
-	// is the only place the upgrade can happen — otherwise raising the cost
-	// protects new accounts and leaves every existing one at the old strength
-	// forever, which is most of what an attacker with users.json would be
-	// cracking.
+	// cost. This is the only moment the plaintext is legitimately in hand, so it is
+	// the only place the upgrade can happen — otherwise raising the cost protects
+	// new accounts and leaves every existing one at the old strength forever.
 	//
-	// Best-effort and non-blocking to the login: a failure here means the
-	// account keeps its old hash and gets another chance next time, which is
-	// strictly better than refusing a correct password.
+	// Best-effort and non-blocking to the login: a failure here means the account
+	// keeps its old hash and gets another chance next time, which is strictly
+	// better than refusing a correct password.
 	if users.NeedsRehash(u.PasswordHash) {
 		credential := req.Password
 		if u.UsesDerivedAuth() {
@@ -325,14 +304,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert a legacy account to derived auth, now that the password has been
-	// proven and the client has supplied the secret it derived from it. This is
-	// the only moment both are in hand, and after it the password stops being
-	// transmitted at all.
+	// proven and the client has supplied the secret it derived from it — the only
+	// moment both are in hand. After this the password stops being transmitted at
+	// all.
 	//
 	// Pinned to the salt the CLIENT used, which for a legacy account is the
-	// synthetic one loginParamsFor handed out — recomputed here rather than
-	// trusted from the request, so a caller cannot pin their credential to a
-	// salt of their choosing.
+	// synthetic one loginParamsFor handed out, recomputed here rather than trusted
+	// from the request so a caller cannot pin their credential to a salt of their
+	// choosing.
 	if !u.UsesDerivedAuth() && req.AuthSecret != "" {
 		salt := s.syntheticLoginSalt(req.Username)
 		iterations := req.LoginIterations
@@ -372,11 +351,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		pushDispatched, pushRetryAfter := false, time.Duration(0)
 		if u.PushMFAEnabled {
 			if allowed, retryAfter := s.mfaPushLimiter.tryConsume(u.ID); allowed {
-				// At most one challenge for this account is ever both pushed and
-				// answerable. Earlier attempts that were never answered are dropped
-				// rather than left polling an id no device was told about — which,
-				// combined with the old one-push-per-window cap, is exactly how push
-				// MFA came to look broken after the first sign-in.
+				// At most one challenge for this account is ever both pushed and answerable.
+				// Earlier attempts that were never answered are dropped rather than left
+				// polling an id no device was told about — which, with the old
+				// one-push-per-window cap, is how push MFA came to look broken after the first
+				// sign-in.
 				s.mfaChallenges.SupersedeUnansweredPush(u.ID, ch.ID)
 				pushDispatched = true
 				// Snapshot the request context before the goroutine: r is not
@@ -433,14 +412,12 @@ func (s *Server) handleCaptchaConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleCSRFToken returns the CSRF token paired with the caller's session,
-// for same-origin JS that cannot read the non-HttpOnly csrf_token cookie —
-// specifically the service worker's pushsubscriptionchange handler, which
-// must send X-CSRF-Token on its resubscription POST but has no access to
-// document.cookie. The response carries no CORS headers, so a cross-origin
-// page can trigger this GET but never read the token; possession of the
-// session cookie remains the only way to obtain it, which is exactly the
-// double-submit invariant csrfCheckOK enforces.
+// handleCSRFToken returns the CSRF token paired with the caller's session, for
+// same-origin JS that cannot read the non-HttpOnly csrf_token cookie —
+// specifically the service worker's pushsubscriptionchange handler, which must
+// send X-CSRF-Token but has no access to document.cookie. The response carries
+// no CORS headers, so a cross-origin page can trigger this GET but never read
+// the token; possession of the session cookie remains the only way to obtain it.
 func (s *Server) handleCSRFToken(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.currentUser(r); !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
@@ -451,9 +428,13 @@ func (s *Server) handleCSRFToken(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
-	s.sessMu.Lock()
+	// Read lock: this is a lookup, and the whole reason cfgMu and sessMu were
+	// split off the old single mu is that taking sessMu exclusively on a request
+	// path serializes every other request behind it. csrfCheckOK does the
+	// identical lookup under RLock thirty lines below.
+	s.sessMu.RLock()
 	sess, ok := s.sessions[cookie.Value]
-	s.sessMu.Unlock()
+	s.sessMu.RUnlock()
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
@@ -557,18 +538,16 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Per-account replay guard. Single-use protection on the challenge alone
-	// is not enough: a password-holding attacker can mint unlimited
-	// challenges, so a captured valid code would be replayable once per fresh
-	// one. SetLastUsedTOTPStep atomically rejects any step not strictly newer
-	// than the last accepted for this account, across challenges.
+	// Per-account replay guard. Single-use protection on the challenge alone is not
+	// enough: a password-holding attacker can mint unlimited challenges, so a
+	// captured valid code would be replayable once per fresh one.
+	// SetLastUsedTOTPStep rejects any step not strictly newer than the last accepted
+	// for this account, across challenges.
 	//
-	// Ordering is load-bearing. This runs after every other check, so a
-	// rejected code never advances the recorded step; a rejection here answers
-	// exactly like a wrong code, so the two are indistinguishable on the wire;
-	// and recordSuccess stays below it, so a replay counts against the lockout
-	// instead of clearing it — otherwise one captured code holds the counter at
-	// zero while the attacker brute-forces the current one.
+	// Ordering is load-bearing: this runs after every other check so a rejected code
+	// never advances the recorded step and answers exactly like a wrong code, and
+	// recordSuccess stays below it so a replay counts against the lockout instead of
+	// clearing it.
 	if _, err := s.users.SetLastUsedTOTPStep(u.ID, step); err != nil {
 		s.mfaChallenges.Delete(ch.ID)
 		http.Error(w, "invalid code", http.StatusUnauthorized)
@@ -612,12 +591,11 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A KDF slot per comparison, not one slot around the whole call.
-	// ConsumeRecoveryCode compares the candidate against every stored hash until
-	// one matches, so a wrong code is up to ten scrypt derivations at 128 MiB
-	// each — and this endpoint takes no session, a challenge id is the whole
-	// credential. A single slot held across all ten would park a quarter of the
-	// instance's derivation capacity for ~2 s per request, so four concurrent
-	// wrong codes would stall every login. Guarding each comparison keeps peak
+	// ConsumeRecoveryCode compares the candidate against every stored hash until one
+	// matches, so a wrong code is up to ten scrypt derivations at 128 MiB each — and
+	// this endpoint takes no session, a challenge id is the whole credential. A
+	// single slot held across all ten would park a quarter of the instance's
+	// derivation capacity for ~2s per request. Guarding each comparison keeps peak
 	// memory per caller at one derivation and lets logins interleave.
 	var matched bool
 	_, matched, err = s.users.ConsumeRecoveryCode(u.ID, strings.TrimSpace(req.Code),
@@ -679,12 +657,10 @@ func currentSessionToken(r *http.Request) string {
 
 // revokeUserSessions deletes every live session belonging to userID, except
 // keepToken if non-empty (the caller's own session, when the caller and the
-// affected account are the same — e.g. a user changing their own password).
-// Called after a password change/reset or MFA disable/regeneration so a
-// stolen session cookie for that account is cut off from continued access
-// as soon as the legitimate user (or an admin, on their behalf) takes one of
-// those recovery actions, rather than remaining valid for up to the
-// remaining 24h sliding-expiry window.
+// affected account are the same). Called after a password change/reset or MFA
+// disable/regeneration so a stolen session cookie is cut off as soon as the
+// legitimate user, or an admin on their behalf, takes one of those recovery
+// actions, rather than staying valid for the remaining 24h sliding window.
 func (s *Server) revokeUserSessions(userID, keepToken string) {
 	s.sessMu.Lock()
 	defer s.sessMu.Unlock()
@@ -746,16 +722,13 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		NewLoginSalt  string `json:"newLoginSalt,omitempty"`
 		NewIterations int    `json:"newIterations,omitempty"`
 
-		// RewrappedPGPKey is the client-wrapped private-key envelope re-sealed
-		// under the NEW password, written in the SAME transaction as the
-		// credential.
+		// RewrappedPGPKey is the client-wrapped private-key envelope re-sealed under
+		// the NEW password, written in the SAME transaction as the credential.
 		//
-		// It used to be a second, separate request the browser fired after this
-		// one returned. A dropped connection in between left the password changed
-		// and the envelope still sealed under the old one — permanently, because
-		// the only rewrap path re-derives from the CURRENT password and therefore
-		// could never open it again. The documented recovery ("unlock with your
-		// PREVIOUS password, then change your password again") could not work.
+		// As a separate follow-up request, a dropped connection in between left the
+		// password changed and the envelope still sealed under the old one —
+		// permanently, because the only rewrap path re-derives from the CURRENT
+		// password and could never open it again.
 		RewrappedPGPKey string `json:"rewrappedPgpKey,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
@@ -769,15 +742,13 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the CURRENT credential in whichever form this account stores, for
-	// the same reason handleLogin does: the account decides, not the request.
+	// Verify the CURRENT credential in whichever form this account stores, for the
+	// same reason handleLogin does: the account decides, not the request.
 	//
-	// Under a KDF slot, and behind a lockout. A session is not a licence to
-	// spend the box's memory: this is three 128 MiB derivations per request (the
-	// check here, plus the hash and any rewrap below), on an endpoint any
-	// authenticated account can call in a loop. The lockout stops the
-	// old-credential check being an unlimited oracle for a stolen session — a
-	// thief with the cookie but not the password could otherwise guess forever.
+	// Under a KDF slot, and behind a lockout. This is three 128 MiB derivations per
+	// request (the check here, plus the hash and any rewrap below) on an endpoint
+	// any authenticated account can call in a loop, and the lockout stops the
+	// old-credential check being an unlimited oracle for a stolen session.
 	verifyCurrent := func() (bool, error) {
 		var ok bool
 		err := s.withKDFSlot(r.Context(), func() {
@@ -799,11 +770,11 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// may not have a password to prove.
 	mustVerify := !u.MustChangePassword || strings.TrimSpace(offeredCurrent) != ""
 	if mustVerify {
-		// Keyed on user AND client IP, like the login lockout and for the same
-		// reason: on the user alone, an attacker holding a stolen cookie burns
-		// the whole budget from their own machine and locks the real owner out
-		// of changing their password — during the incident where changing it is
-		// the remedy. Keyed on the pair, a thief locks out only themselves.
+		// Keyed on user AND client IP, like the login lockout and for the same reason:
+		// on the user alone, an attacker holding a stolen cookie burns the whole budget
+		// from their own machine and locks the real owner out of changing their
+		// password — during the incident where changing it is the remedy. Keyed on the
+		// pair, a thief locks out only themselves.
 		lockKey := ac.UserID + "\x00" + lockoutKeyForIP(clientIP(r))
 		if allowed, retryAfter := s.passwordChangeLockout.tryAttempt(lockKey); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
@@ -873,13 +844,12 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// A password change is what a user reaches for when they think they have
-	// been compromised, so it must cut off EVERY credential, not just
-	// sessions: a device secret minted from a stolen session is independent of
-	// the password and would otherwise keep full mailbox access and — since
-	// every device registers MFAApprover=true — a standing second factor.
-	// The caller's own session is preserved so they are not logged out of the
-	// tab they are standing in.
+	// A password change is what a user reaches for when they think they have been
+	// compromised, so it must cut off EVERY credential, not just sessions: a device
+	// secret minted from a stolen session is independent of the password and would
+	// otherwise keep full mailbox access and — since every device registers
+	// MFAApprover=true — a standing second factor. The caller's own session is
+	// preserved.
 	s.revokeAllUserCredentialsExcept(u, currentSessionToken(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -891,15 +861,14 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
-		if !s.csrfCheckOK(r) {
+		if !csrfCheckOK(r, ac) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "missing or invalid csrf token"})
 			return
 		}
-		// Enforce the first-login password change server-side: a user who still
-		// owes a password change (e.g. the bootstrap admin) gets a full session
-		// but may reach nothing except the change/logout endpoints until they
-		// rotate it. Without this the flag is merely advisory and a default
-		// credential grants full access.
+		// Enforce the first-login password change server-side: a user who still owes
+		// one (e.g. the bootstrap admin) gets a full session but may reach nothing
+		// except the change/logout endpoints. Without this the flag is merely advisory
+		// and a default credential grants full access.
 		if ac.MustChangePassword && !mustChangePasswordExemptPaths[r.URL.Path] {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "password change required", "mustChangePassword": true})
 			return
@@ -909,47 +878,38 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // csrfCheckOK enforces a double-submit CSRF check on cookie-authenticated,
-// state-changing (non-GET/HEAD/OPTIONS) requests: the X-CSRF-Token header
-// must match the csrf_token minted alongside the caller's session (see
-// startSession). It intentionally does nothing when no kypost_session cookie
-// is present — mobile clients (X-Kypost-Device-Id/X-Kypost-Device-Secret
-// headers, see resolveMailAuthContext) and CardDAV (HTTP Basic Auth) never send that
-// cookie, so they carry no ambient, forgeable credential for CSRF to exploit
-// in the first place and are structurally exempt rather than specially
-// carved out here.
-func (s *Server) csrfCheckOK(r *http.Request) bool {
+// state-changing (non-GET/HEAD/OPTIONS) requests: the X-CSRF-Token header must
+// match the csrf_token minted alongside the caller's session (see startSession).
+//
+// It takes the RESOLVED AuthContext rather than re-deriving one from the
+// request. Looking the cookie up here means answering "I don't know" — no
+// cookie, or a cookie matching no session — with "allow", which leaves
+// SameSite=Lax as the only real control. TestSessionCookieStaysSameSiteLax pins
+// that attribute; this function no longer depends on it.
+//
+// Callers that did not authenticate by cookie — paired mobile clients
+// (X-Kypost-Device-Id/X-Kypost-Device-Secret, see resolveMailAuthContext) and
+// CardDAV (HTTP Basic) — leave SessionCSRFToken empty and are structurally
+// exempt: their credential is not attached by the browser.
+func csrfCheckOK(r *http.Request, ac AuthContext) bool {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
 	}
-	cookie, err := r.Cookie("kypost_session")
-	if err != nil {
-		return true
-	}
-	s.sessMu.RLock()
-	sess, ok := s.sessions[cookie.Value]
-	s.sessMu.RUnlock()
-	if !ok {
-		// No matching session for this cookie value: either it's stale (the
-		// caller-visible auth check elsewhere will already reject the
-		// request) or this request actually authenticated via a different,
-		// cookie-free path (e.g. withMailAuth's mobile fallback) despite an
-		// unrelated cookie being present. Either way there's no session CSRF
-		// token to check against.
+	if ac.SessionCSRFToken == "" {
 		return true
 	}
 	header := r.Header.Get("X-CSRF-Token")
-	return header != "" && subtle.ConstantTimeCompare([]byte(header), []byte(sess.CSRFToken)) == 1
+	return header != "" && subtle.ConstantTimeCompare([]byte(header), []byte(ac.SessionCSRFToken)) == 1
 }
 
 // withMailAuth gates endpoints mobile clients need to reach without a web
 // session — mail read/act-on (inbox, folders, actions, draft, send), contacts
-// dedupe/groups/photo-get, and the PGP QR token mint — for either a web
-// session cookie or a paired device's own X-Kypost-Device-Id/
-// X-Kypost-Device-Secret credentials — see resolveMailAuthContext. Despite
-// the name, it's no longer mail-exclusive; IMAP/SMTP account setup
-// (/api/imap/config, /api/imap/test) and other web-UI-only writes
-// intentionally stay on withAuth only.
+// dedupe/groups/photo-get, and the PGP QR token mint — for either a web session
+// cookie or a paired device's own X-Kypost-Device-Id/X-Kypost-Device-Secret
+// credentials (see resolveMailAuthContext). Despite the name it is no longer
+// mail-exclusive; IMAP/SMTP account setup (/api/imap/config, /api/imap/test)
+// and other web-UI-only writes intentionally stay on withAuth only.
 func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ac, err := s.resolveMailAuthContext(r)
@@ -963,7 +923,7 @@ func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
-		if !s.csrfCheckOK(r) {
+		if !csrfCheckOK(r, ac) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "missing or invalid csrf token"})
 			return
 		}
@@ -1003,11 +963,10 @@ func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
 	}
 
 	now := time.Now()
-	// Read under the read lock first. The overwhelmingly common case is a live
-	// session that was already touched moments ago and does not need its expiry
-	// rewritten, and taking the write lock for that turned every authenticated
-	// request into an exclusive critical section — see the sessMu note on
-	// Server.
+	// Read under the read lock first. The common case is a live session that was
+	// already touched moments ago and does not need its expiry rewritten, and
+	// taking the write lock for that turned every authenticated request into an
+	// exclusive critical section — see the sessMu note on Server.
 	s.sessMu.RLock()
 	sess, ok := s.sessions[cookie.Value]
 	s.sessMu.RUnlock()
@@ -1031,13 +990,10 @@ func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
 	}
 
 	// Sliding idle window for active users; IssuedAt is deliberately carried
-	// through unchanged so the absolute ceiling still applies.
-	//
-	// Only written when the window has actually moved by a meaningful amount.
-	// The expiry is a 24-hour horizon, so rewriting it because 40 milliseconds
-	// elapsed since the last request buys nothing and costs an exclusive lock
-	// on the hot path. sessionSlideGranularity is the resolution the idle
-	// timeout is enforced at, and it is minutes against a horizon of hours.
+	// through unchanged so the absolute ceiling still applies. Only written when
+	// the window has moved by sessionSlideGranularity — rewriting a 24-hour horizon
+	// because 40 milliseconds elapsed buys nothing and costs an exclusive lock on
+	// the hot path.
 	if now.Sub(sess.ExpiresAt.Add(-sessionIdleTimeout)) >= sessionSlideGranularity {
 		s.sessMu.Lock()
 		if cur, still := s.sessions[cookie.Value]; still {
@@ -1054,14 +1010,21 @@ func (s *Server) currentUser(r *http.Request) (AuthContext, bool) {
 		s.sessMu.Unlock()
 		return AuthContext{}, false
 	}
-	return AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role, MustChangePassword: u.MustChangePassword}, true
+	return AuthContext{
+		UserID:             u.ID,
+		Username:           u.Username,
+		Role:               u.Role,
+		MustChangePassword: u.MustChangePassword,
+		// This request authenticated by cookie, so it carries an ambient
+		// credential and csrfCheckOK must enforce the double submit.
+		SessionCSRFToken: sess.CSRFToken,
+	}, true
 }
 
 // mustChangePasswordExemptPaths are the only authenticated routes a user with
-// an unsatisfied first-login password-change requirement may reach: the
-// change endpoint itself and logout. Everything else is refused until the
-// password is rotated, so a known/default bootstrap credential cannot be used
-// for anything but changing it.
+// an unsatisfied first-login password-change requirement may reach: the change
+// endpoint itself and logout. Everything else is refused, so a known or default
+// bootstrap credential cannot be used for anything but changing it.
 var mustChangePasswordExemptPaths = map[string]bool{
 	"/api/auth/password": true,
 	"/api/auth/logout":   true,

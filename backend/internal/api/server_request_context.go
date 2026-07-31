@@ -4,13 +4,10 @@
 // the externally-reachable base URL, and whether the connection was really TLS
 // (which decides the session cookie's Secure flag).
 //
-// Small, but collected here on purpose: every one of these is a trust decision,
-// and clientIP in particular is a lockout key. Scattering them through a
-// 4,500-line file is how the left-most vs right-most X-Forwarded-For hop
-// question gets answered twice, differently — which is exactly what had
-// happened: clientIP read the right-most hop because the left-most is
-// client-controlled, while isRequestSecure and externalBaseURL, twenty lines
-// away, read the left-most. All three now go through lastForwardedValue.
+// Collected here because every one of these is a trust decision and clientIP in
+// particular is a lockout key. Scattered through a 4,500-line file, the
+// left-most vs right-most X-Forwarded-For hop question gets answered twice,
+// differently. All three now go through lastForwardedValue.
 package api
 
 import (
@@ -29,26 +26,22 @@ import (
 //
 // This replaces a bare TRUST_PROXY_HEADERS=true boolean, which was not a trust
 // decision at all: it trusted the headers on EVERY connection, from any peer
-// that could reach the port. The shipped docker-compose.yml published 5866 on
-// 0.0.0.0 and the README instructed operators to set the flag, so the common
-// deployment — reverse proxy on 443, container port still published — let
-// anyone connecting directly to 5866 name their own IP and thereby bypass every
-// IP-keyed control in this package at once: the login lockout, the CardDAV
-// lockout, the device lockout, the WKD rate limiter, and the proof-of-work
-// escalation and challenge-to-client binding.
+// that could reach the port. With the container port published, that let anyone
+// connecting directly to 5866 name their own IP and bypass every IP-keyed
+// control at once — the login, CardDAV and device lockouts, the WKD limiter, and
+// the proof-of-work escalation and challenge-to-client binding.
 //
-// Empty (the default) means trust nothing and use RemoteAddr, which is the only
-// safe default for a directly-exposed listener.
+// Empty (the default) means trust nothing and use RemoteAddr, the only safe
+// default for a directly-exposed listener.
 var trustedProxyNets = parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
 
 // parseTrustedProxyCIDRs accepts CIDRs ("10.0.0.0/8", "::1/128") and bare IPs
 // ("172.18.0.1", which is what a docker-compose sidecar proxy looks like),
 // normalizing the latter to single-host CIDRs.
 //
-// A malformed entry is skipped rather than silently widening trust. It is also
-// not fatal: refusing to boot because one entry has a typo would take the mail
-// server down to protect a header, and the failure mode of skipping is to trust
-// less, not more.
+// A malformed entry is skipped rather than silently widening trust, and is not
+// fatal: refusing to boot over one typo would take the mail server down to
+// protect a header, and skipping fails toward trusting less.
 func parseTrustedProxyCIDRs(raw string) []*net.IPNet {
 	var nets []*net.IPNet
 	for _, field := range strings.Split(raw, ",") {
@@ -71,12 +64,9 @@ func parseTrustedProxyCIDRs(raw string) []*net.IPNet {
 	return nets
 }
 
-// proxyHeadersTrusted reports whether r's X-Forwarded-* headers may be
-// believed, which is true only when the request's own peer address is inside
-// trustedProxyNets.
-//
-// The peer address is the one thing about a request a client cannot forge, so
-// it is the only sound basis for this decision.
+// proxyHeadersTrusted reports whether r's X-Forwarded-* headers may be believed,
+// which is true only when the request's own peer address is inside
+// trustedProxyNets — the one thing about a request a client cannot forge.
 func proxyHeadersTrusted(r *http.Request) bool {
 	if len(trustedProxyNets) == 0 {
 		return false
@@ -103,12 +93,12 @@ func proxyHeadersTrusted(r *http.Request) bool {
 // Right-most, always, for every one of these headers. An appending proxy
 // (nginx's $proxy_add_x_forwarded_for) turns a client-sent "a" into
 // "a, <realip>", so the left-most element is whatever the client chose to
-// prepend and the right-most is what the nearest trusted hop actually
-// observed. Reading the left-most for the scheme while reading the right-most
-// for the address is how the Secure flag on the session cookie ended up
-// decided by a value the client supplies.
+// prepend and the right-most is what the nearest trusted hop actually observed.
+// Reading the left-most for the scheme while reading the right-most for the
+// address is how the session cookie's Secure flag ended up decided by a
+// client-supplied value.
 //
-// This assumes a single trusted proxy in front. Multi-proxy deployments should
+// Assumes a single trusted proxy in front; multi-proxy deployments should
 // terminate the chain at a known hop.
 func lastForwardedValue(r *http.Request, header string) string {
 	raw := r.Header.Get(header)
@@ -144,29 +134,26 @@ func externalBaseURL(r *http.Request) string {
 // clientIP resolves the caller's IP for logging, CAPTCHA context, and lockout
 // keying.
 //
-// This is a lockout key, so getting it wrong does not degrade gracefully — a
-// caller who can choose what this returns has defeated every rate limit and
-// lockout keyed on it, and a value that is CONSTANT across callers is just as
-// broken in the other direction: every visitor shares one bucket, so 50 failures
-// from anyone locks out everyone. That is why the trust test is on the peer
-// address rather than on a global flag, and why the order below matters.
+// This is a lockout key, so getting it wrong does not degrade gracefully. A
+// caller who can choose what this returns has defeated every rate limit keyed on
+// it, and a value that is CONSTANT across callers is just as broken the other
+// way: every visitor shares one bucket, so 50 failures from anyone locks out
+// everyone. Hence the trust test on the peer address rather than a global flag,
+// and the order below.
 //
 // When the peer is a trusted proxy (see proxyHeadersTrusted), in order:
 //
-//  1. CF-Connecting-IP. Cloudflare sets this to exactly the visitor's address —
-//     one value, no chain to parse. It is preferred over X-Forwarded-For because
-//     XFF arrives as a list and the correct element depends on how many hops
-//     appended to it: Cloudflare's edge appends the visitor IP, but a tunnel
-//     daemon or a second proxy in the path can append its own address after it,
-//     which silently makes the right-most element a loopback address and
-//     collapses per-client keying for the whole instance. CF-Connecting-IP has no
-//     such ambiguity, and Cloudflare's own rules engine will not let a transform
-//     rule rewrite a cf- header (it can only be removed), so it cannot be forged
-//     through the edge.
+//  1. CF-Connecting-IP, which Cloudflare sets to exactly the visitor's address.
+//     Preferred over X-Forwarded-For because the correct XFF element depends on
+//     how many hops appended to it: a tunnel daemon or a second proxy can append
+//     its own address after Cloudflare's, silently making the right-most element
+//     a loopback address and collapsing per-client keying for the whole instance.
+//     Cloudflare's rules engine cannot rewrite a cf- header, only remove it, so
+//     it cannot be forged through the edge.
 //  2. The right-most X-Forwarded-For element, for every other proxy.
 //
-// Untrusted peers, and anything that does not parse as an IP, fall through to the
-// connection's own address.
+// Untrusted peers, and anything that does not parse as an IP, fall through to
+// the connection's own address.
 //
 // This returns the caller's ACTUAL address. Callers using it as a lockout or
 // rate-limit key must pass it through lockoutKeyForIP first, which folds IPv6 to
@@ -194,32 +181,25 @@ func clientIP(r *http.Request) string {
 // lockoutKeyForIP normalizes an address for use as a lockout or rate-limit map
 // key, collapsing IPv6 onto its /64 prefix and passing IPv4 through unchanged.
 //
-// Every key in this package is a budget: N attempts per key per window. That
-// bounds an attacker only if acquiring the next key costs something. For IPv4 it
-// does — another address means another host or another rented VPS. For IPv6 it
-// costs nothing: the smallest allocation a residential ISP hands out is a /64, so
-// one visitor holds 2^64 addresses, and SLAAC privacy extensions already rotate
-// through them unprompted. Keyed on the full address, every control here — the
-// login, CardDAV and device lockouts, the WKD limiter, the proof-of-work
-// escalation — is defeated by one `ip -6 addr add`.
+// Every key in this package is a budget of N attempts per window, which bounds
+// an attacker only if acquiring the next key costs something. For IPv4 it does;
+// for IPv6 it costs nothing — the smallest allocation a residential ISP hands
+// out is a /64, so one visitor holds 2^64 addresses and SLAAC privacy extensions
+// already rotate through them unprompted. Keyed on the full address, every
+// control here is defeated by one `ip -6 addr add`.
 //
 // /64 and not /56 or /48: a /64 is the one length guaranteed to belong to a
 // single subscriber, being the smallest SLAAC-capable unit and the minimum
-// assignment RFC 6177 tells ISPs to make. Residential delegations of /56 and /48
-// are common, so masking further would be closer to one budget per subscriber —
-// but those sizes are not guaranteed, and on a provider handing /64s to distinct
-// customers a /48 key would put unrelated people in one bucket, where a
-// stranger's failures lock you out. /64 is the largest aggregate that cannot do
-// that.
+// assignment RFC 6177 tells ISPs to make. Masking further would be closer to one
+// budget per subscriber, but on a provider handing /64s to distinct customers a
+// /48 key puts unrelated people in one bucket, where a stranger's failures lock
+// you out.
 //
-// Deliberately NOT applied to four things that want the caller's real address:
-// logging, the MFA push's ipAddress, /api/status's clientIp, and the address
-// handed to a CAPTCHA provider (Turnstile's siteverify wants a real remoteip; a
-// prefix in a security notification tells the reader nothing). Nor to the
+// Deliberately NOT applied where the caller's real address is wanted: logging,
+// the MFA push's ipAddress, /api/status's clientIp, the address handed to a
+// CAPTCHA provider (Turnstile's siteverify wants a real remoteip), and the
 // proof-of-work challenge binding, which compares the exact address a challenge
-// was issued to — captcha.PoWVerifier.Verify's comment depends on both sides
-// being the same textual form, and handleLogin already refunds the strike when a
-// client's address changes mid-solve.
+// was issued to.
 func lockoutKeyForIP(ip string) string {
 	parsed := net.ParseIP(strings.TrimSpace(ip))
 	if parsed == nil {
@@ -243,10 +223,9 @@ func lockoutKeyForIP(ip string) string {
 // one.
 //
 // Validated rather than passed through, because the result becomes a lockout map
-// key. An unvalidated header lets a misconfigured proxy (or a trusted-but-buggy
-// one) turn "unknown", an empty element from a trailing comma, or arbitrary text
-// into keys — unbounded cardinality in a table this codebase works to keep
-// bounded, and a key that silently matches nothing real.
+// key: an unvalidated header lets a misconfigured or buggy proxy turn "unknown",
+// an empty element from a trailing comma, or arbitrary text into keys —
+// unbounded cardinality in a table this codebase works to keep bounded.
 //
 // Accepts a bare IP and an ip:port pair, because proxies in the wild send both.
 func parseClientAddr(raw string) string {
@@ -278,12 +257,11 @@ func isRequestSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	// SERVER_BASE_URL is the operator's own statement of the scheme users reach
-	// them on, and it is already trusted to mint pickup and pairing links. With
-	// TLS terminated at a proxy and TRUSTED_PROXY_CIDRS unset — a common
-	// deployment, warned about only once per process — this predicate was false,
-	// so the session cookie and the CSRF double-submit value both shipped
-	// without Secure and no HSTS was sent. Users on https cannot be locked out
+	// SERVER_BASE_URL is the operator's own statement of the scheme users reach them
+	// on, and is already trusted to mint pickup and pairing links. With TLS
+	// terminated at a proxy and TRUSTED_PROXY_CIDRS unset, this predicate is
+	// otherwise false, so the session cookie and the CSRF double-submit value both
+	// ship without Secure and no HSTS is sent. Users on https cannot be locked out
 	// by honouring it: their browser is already on TLS.
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(os.Getenv("SERVER_BASE_URL"))), "https://")
 }
@@ -295,37 +273,32 @@ const uploadReadDeadline = 10 * time.Minute
 // withUploadDeadline extends this request's read deadline past the server-wide
 // ReadTimeout, for the routes that accept a real upload.
 //
-// http.Server's ReadTimeout covers the entire request including the body, so
-// one global value has to serve both a 200-byte login and a 25 MiB attachment.
-// At 60 s, a 25 MiB body needs a sustained 3.5 Mbit/s upload to survive —
-// which residential DSL and mobile networks do not provide, so every large
-// attachment failed with a connection reset the frontend could not tell apart
-// from a network blip. Raising the global value instead would hand every other
-// route the same generosity, and those routes are exactly where a dribbling
-// body should be cut off.
+// http.Server's ReadTimeout covers the entire request including the body, so one
+// global value has to serve both a 200-byte login and a 25 MiB attachment. At
+// 60 s a 25 MiB body needs a sustained 3.5 Mbit/s upload, which residential DSL
+// and mobile networks do not provide, so large attachments failed with a
+// connection reset the frontend could not tell from a network blip. Raising the
+// global value would hand every other route the same generosity, and those
+// routes are exactly where a dribbling body should be cut off.
 //
-// Note this only moves the READ deadline. WriteTimeout (10 min) already covers
-// the response, and ReadHeaderTimeout (10 s) is unaffected, so slowloris on
-// the headers is still refused on these routes too.
+// Only the READ deadline moves. WriteTimeout (10 min) already covers the
+// response and ReadHeaderTimeout (10 s) is unaffected, so header slowloris is
+// still refused on these routes.
 func withUploadDeadline(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// A failure here means the connection does not support deadlines (a
-		// test's in-memory pipe, say). The handler must still run: the caller's
+		// Ignored on purpose: a failure here means the connection does not
+		// support deadlines (a test's in-memory pipe, say), and the caller's
 		// upload is not less valid because the deadline could not be moved.
-		if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadReadDeadline)); err != nil {
-			_ = err
-		}
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadReadDeadline))
 		next(w, r)
 	}
 }
 
 // warnOnRetiredProxyEnv complains loudly if the operator still has the retired
-// TRUST_PROXY_HEADERS set without configuring its replacement.
-//
-// Silently ignoring it would be a security regression delivered by an upgrade:
-// the operator believes forwarded headers are trusted, so they believe their
-// session cookies carry Secure and their lockouts key off the real caller. Both
-// would quietly stop being true. A retired setting has to say so.
+// TRUST_PROXY_HEADERS set without configuring its replacement. Ignoring it
+// silently would be a security regression delivered by an upgrade: the operator
+// believes forwarded headers are trusted, so believes their session cookies
+// carry Secure and their lockouts key off the real caller.
 func warnOnRetiredProxyEnv(logger *logging.Logger) {
 	if logger == nil {
 		return
@@ -352,19 +325,16 @@ var unusedProxyHeaderWarning sync.Once
 // through a proxy whose forwarding headers this server is discarding.
 //
 // warnOnRetiredProxyEnv above covers the operator who upgraded from
-// TRUST_PROXY_HEADERS. It says nothing to the far more common case: a fresh
-// deployment that puts Cloudflare or nginx in front and never sets
-// TRUSTED_PROXY_CIDRS at all, because nothing asks them to. Failing closed is
-// right — the alternative is letting any caller name their own IP — but failing
-// closed *silently* is what let this run in production unnoticed: clientIP then
-// returns the proxy's address for every caller, so it is not merely wrong, it is
-// CONSTANT, and every control keyed on it collapses into a single shared bucket.
-// The comment on clientIP names that as the failure mode to avoid; this is the
-// part that notices it has happened.
+// TRUST_PROXY_HEADERS. This covers the far more common case: a fresh deployment
+// that puts Cloudflare or nginx in front and never sets TRUSTED_PROXY_CIDRS,
+// because nothing asks them to. Failing closed is right, but failing closed
+// silently means clientIP returns the proxy's address for every caller — not
+// merely wrong but CONSTANT, collapsing every control keyed on it into one
+// shared bucket.
 //
-// The trigger is a forwarding header being present while trust is unconfigured,
-// which is unambiguous: something upstream is telling us who the caller is and we
-// are throwing it away. A directly-exposed server sees no such header and stays
+// The trigger is a forwarding header present while trust is unconfigured, which
+// is unambiguous: something upstream is telling us who the caller is and we are
+// throwing it away. A directly-exposed server sees no such header and stays
 // quiet.
 func (s *Server) warnOnUnusedProxyHeaders(r *http.Request) {
 	if s.logger == nil || len(trustedProxyNets) != 0 {

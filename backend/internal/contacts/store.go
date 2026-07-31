@@ -129,12 +129,10 @@ func (s *Store) Upsert(c Contact) (Contact, error) {
 }
 
 // SetPhotoRef sets (or, with an empty ref, clears) the server-owned photo
-// reference for uid.
-//
-// Separate from Upsert because upsertLocked deliberately carries PhotoRef
-// forward from the stored record, so no ordinary contact write can change it.
-// The photo upload and delete handlers are the only legitimate writers, and
-// this is their door in. Returns false if uid is unknown.
+// reference for uid. Separate from Upsert because upsertLocked deliberately
+// carries PhotoRef forward from the stored record, so no ordinary contact write
+// can change it; the photo upload and delete handlers are the only legitimate
+// writers. Returns false if uid is unknown.
 func (s *Store) SetPhotoRef(uid, ref string) (Contact, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,29 +212,23 @@ func (s *Store) getLocked(uid string) (Contact, bool) {
 	return Contact{}, false
 }
 
-// upsertLocked performs the write. Callers must hold s.mu and must already
-// have called refreshFromDiskLocked this call (Upsert and UpsertIfMatch both
-// do so before any precondition check, so the check and the write below see
-// the same, current-as-of-lock-acquisition state).
 // carryPGPProvenance restores the TOFU pin (fingerprint, source, verified) from
 // the stored record when a writer sends back the same key material without it.
 //
 // PGPKeyFingerprint is the first-seen pin that makes the resolver's
-// tierKeyChanged refusal work at all — that check is gated on pinnedFP != "",
-// so a contact whose pin is missing will silently accept and auto-trust the
-// next WKD result for that address, which is the key substitution the pin
-// exists to prevent. Three of five write paths (sync, CardDAV PUT, vCard
-// import) had no field for the provenance and so dropped it on every ordinary
-// write: one routine phone sync left the key in place with an empty pin.
+// tierKeyChanged refusal work at all — that check is gated on pinnedFP != "", so
+// a contact whose pin is missing silently accepts and auto-trusts the next WKD
+// result for that address, which is the key substitution the pin exists to
+// prevent. Three of five write paths (sync, CardDAV PUT, vCard import) have no
+// field for the provenance and so dropped it on every ordinary write.
 //
-// Carrying it here rather than at the call sites is the point. A sixth write
+// Carrying it here rather than at the call sites is the point: a sixth write
 // path cannot forget, in the same way none can drop a PhotoRef.
 //
 // Only when the key material is byte-identical. A different key deserves a
-// different pin, and stamping the old fingerprint onto new key material would
-// be worse than dropping it — the record would claim a pin that describes
-// nothing, and tierKeyChanged would compare against a fingerprint no key has.
-// An emptied key takes its provenance with it, for the same reason.
+// different pin, and stamping the old fingerprint onto new key material would be
+// worse than dropping it — tierKeyChanged would compare against a fingerprint no
+// key has. An emptied key takes its provenance with it, for the same reason.
 //
 // A writer that supplies provenance explicitly is authoritative and is left
 // alone: that is how the resolver re-pins a verified key change and how
@@ -351,15 +343,13 @@ func (s *Store) Delete(uid string) (bool, error) {
 	return true, nil
 }
 
-// SetSelf marks (self=true) or unmarks (self=false) the contact at uid as
-// the caller's own contact card — the one api.handlePGPQRKey includes in
-// the PGP QR key-exchange response. Marking a contact clears the flag from
-// whichever contact previously held it, enforcing at most one self-contact
-// per store. Every contact whose IsSelf value actually flips (the target,
-// and any other contact being cleared) gets a fresh Rev/UpdatedAt so
-// ChangedSince reports the change to sync clients; a call that changes
-// nothing (e.g. unmarking a contact that wasn't self) is a no-op. Returns
-// found=false if uid doesn't exist.
+// SetSelf marks (self=true) or unmarks (self=false) the contact at uid as the
+// caller's own contact card — the one api.handlePGPQRKey includes in the PGP QR
+// key-exchange response. Marking clears the flag from whichever contact
+// previously held it, enforcing at most one self-contact per store. Every
+// contact whose IsSelf value actually flips gets a fresh Rev/UpdatedAt so
+// ChangedSince reports the change to sync clients; a call that changes nothing
+// is a no-op. Returns found=false if uid does not exist.
 func (s *Store) SetSelf(uid string, self bool) (Contact, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -691,22 +681,20 @@ type BatchOp struct {
 	Contact Contact
 }
 
-// ApplyBatch applies every op under a single lock and a single write, or
-// applies none of them.
+// ApplyBatch applies every op under a single lock and a single write, or applies
+// none of them.
 //
-// The mobile sync handler used to call Upsert/Delete once per change. Each of
-// those takes the mutex, takes the inter-process file lock, re-reads
-// contacts.json from disk, and rewrites the whole file with an fsync — so a
-// 4,000-change push from a phone that had been offline was 4,000 full-file
-// rewrites, holding the lock for the duration and blocking every other reader.
+// Per-op Upsert/Delete each takes the mutex, takes the inter-process file lock,
+// re-reads contacts.json from disk, and rewrites the whole file with an fsync —
+// so a 4,000-change push from a phone that had been offline was 4,000 full-file
+// rewrites, holding the lock throughout and blocking every other reader.
 //
-// Atomicity is the more important half. On a failure partway through, the loop
-// left the earlier changes committed and returned an error, so the client's sync
-// cursor no longer described the server's state: it would resync from its old
-// base cursor and re-apply everything it had already applied. Either the whole
-// batch lands and the returned cursor is meaningful, or nothing does.
-//
-// The in-memory state is restored on failure, not left ahead of the file.
+// Atomicity is the more important half. Failing partway left the earlier changes
+// committed, so the client's sync cursor no longer described the server's state:
+// it would resync from its old base cursor and re-apply everything it had
+// already applied. Either the whole batch lands and the returned cursor is
+// meaningful, or nothing does. The in-memory state is restored on failure, not
+// left ahead of the file.
 func (s *Store) ApplyBatch(ops []BatchOp) error {
 	if len(ops) == 0 {
 		return nil

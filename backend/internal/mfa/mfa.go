@@ -40,10 +40,18 @@ var (
 )
 
 // Push-challenge status values. An empty stored status is treated as pending.
+//
+// PushLocked is a terminal state distinct from PushDenied: the approving device
+// answered with the wrong number, so the push channel for this challenge is shut
+// and the sign-in must finish on TOTP. It is not "denied" because nobody refused
+// the sign-in, and the browser must be able to tell the two apart — a denial
+// means "that was not me", a lock means "that tap did not match, use your
+// authenticator".
 const (
 	PushPending  = "pending"
 	PushApproved = "approved"
 	PushDenied   = "denied"
+	PushLocked   = "locked"
 )
 
 // Challenge is an in-progress second-factor login. It exists between a
@@ -78,8 +86,9 @@ type Challenge struct {
 	// theatre: the endpoint is reachable by anyone holding device credentials.
 	MatchDigits string
 	DecoyDigits []string
-	// MatchAttempts counts wrong digits submitted against this challenge, so a
-	// two-digit space cannot be brute-forced within the TTL.
+	// MatchAttempts counts wrong digits submitted against this challenge. The
+	// budget is one: the first wrong number locks push for this challenge (see
+	// maxMatchAttempts).
 	MatchAttempts int
 }
 
@@ -251,8 +260,11 @@ func (s *Store) DeleteByUser(userID string) {
 // which is what made push MFA appear to stop working after the first sign-in.
 //
 // Only *unanswered* ones. An approved-but-not-yet-consumed challenge belongs to
-// a browser that is about to call ConsumePushApproval, and a denied one is a
-// decision the user already made; deleting either would discard a real answer.
+// a browser that is about to call ConsumePushApproval, a denied one is a
+// decision the user already made, and a locked one is a browser that has just
+// been handed the TOTP fallback and is still using this challenge id to redeem
+// it; deleting any of the three would discard a real answer or strand the
+// failover.
 // Superseding an unanswered challenge does cancel whatever earlier attempt was
 // still waiting on it, and that is the intended trade: that attempt had no
 // reachable notification behind it anyway, and its poll now reports "expired"
@@ -265,7 +277,7 @@ func (s *Store) SupersedeUnansweredPush(userID, exceptID string) int {
 		if ch.UserID != userID || id == exceptID {
 			continue
 		}
-		if ch.PushStatus == PushApproved || ch.PushStatus == PushDenied {
+		if isPushResolved(ch.PushStatus) {
 			continue
 		}
 		delete(s.m, id)
@@ -274,9 +286,25 @@ func (s *Store) SupersedeUnansweredPush(userID, exceptID string) int {
 	return superseded
 }
 
+// isPushResolved reports whether a stored status is terminal — a real answer
+// that must not be overwritten, superseded, or retried.
+//
+// One definition, because the three call sites that ask this question have to
+// agree. ResolvePushWithMatch refusing to overwrite a status that
+// SupersedeUnansweredPush is willing to delete is how a resolved challenge
+// becomes reopenable.
+func isPushResolved(status string) bool {
+	switch status {
+	case PushApproved, PushDenied, PushLocked:
+		return true
+	}
+	return false
+}
+
 // PushStatus returns the current push status for a live challenge: "pending",
-// "approved", or "denied". ok=false means missing or expired (caller should
-// treat as "expired"). It is in-memory only — cheap enough to poll frequently.
+// "approved", "denied", or "locked". ok=false means missing or expired (caller
+// should treat as "expired"). It is in-memory only — cheap enough to poll
+// frequently.
 func (s *Store) PushStatus(id string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -289,31 +317,6 @@ func (s *Store) PushStatus(id string) (string, bool) {
 		return PushPending, true
 	}
 	return ch.PushStatus, true
-}
-
-// ResolvePush records the first approve/deny decision for a push challenge and
-// the device that made it. First response wins: once a decision exists, a
-// later call returns that decision together with ErrChallengeAlreadyResolved
-// rather than overwriting it.
-func (s *Store) ResolvePush(id, deviceID string, approve bool) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ch, ok := s.m[id]
-	if !ok || time.Now().After(ch.ExpiresAt) {
-		delete(s.m, id)
-		return "", ErrChallengeNotFound
-	}
-	if ch.PushStatus == PushApproved || ch.PushStatus == PushDenied {
-		return ch.PushStatus, ErrChallengeAlreadyResolved
-	}
-	if approve {
-		ch.PushStatus = PushApproved
-	} else {
-		ch.PushStatus = PushDenied
-	}
-	ch.RespondedBy = deviceID
-	s.m[id] = ch
-	return ch.PushStatus, nil
 }
 
 // ConsumePushApproval atomically verifies the challenge is approved and, if so,

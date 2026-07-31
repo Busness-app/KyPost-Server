@@ -18,7 +18,13 @@ WORKDIR /app
 COPY backend/go.mod backend/go.sum* ./backend/
 RUN cd backend && go mod download
 COPY backend ./backend
-RUN cd backend && go build -o /app/bin/kypost-server ./cmd/main.go
+# -trimpath, in a file whose first fifteen lines are about reproducible builds.
+# Without it the absolute build path is baked into the binary, so two builds of
+# the same commit from different checkout directories differ — the exact property
+# the digest pins above exist to remove. CGO is off because every dependency is
+# pure Go (modernc.org/sqlite, not mattn/go-sqlite3), which keeps the build from
+# silently acquiring a link against the builder stage's glibc.
+RUN cd backend && CGO_ENABLED=0 go build -trimpath -o /app/bin/kypost-server ./cmd/main.go
 
 FROM node:26.5.0-slim@sha256:715e55e4b84e4bb0ff48e49b398a848f08e55daed8eb6a0ea1839ae53bc57583 AS frontend-builder
 WORKDIR /frontend
@@ -107,8 +113,10 @@ EXPOSE 5866
 # restart policies react to a container exiting, and health status only drives
 # replacement under Swarm.
 #
-# Self-healing comes from supervisord's startretries instead — see
-# supervisord.conf.
+# Self-healing comes from supervisord plus Docker's restart policy, not from
+# this probe: a supervised program that exhausts its (bounded) startretries goes
+# FATAL, the crashexit event listener takes PID 1 down, the container exits, and
+# `restart: unless-stopped` restarts it with backoff. See supervisord.conf.
 #
 # start-period is generous because first boot pulls the Ollama model.
 #

@@ -361,7 +361,7 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	// QR/deep-link a user scans to pair a new device. Without this, the same
 	// captured token stays valid for its full TTL and could register an
 	// unlimited number of devices.
-	if !s.nativePairingNonces.consume(claims.Nonce, nativePairingTokenTTL) {
+	if !s.consumeNativePairingNonce(claims.Nonce, nativePairingTokenTTL) {
 		http.Error(w, "pairing token already used", http.StatusConflict)
 		return
 	}
@@ -384,10 +384,16 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	// one lock, not a separate check followed by a later write) so a caller
 	// can't hijack a victim's device-index entry and deny that device
 	// service, even under concurrent registration requests.
-	if !s.reserveDeviceID(ownerID, strings.TrimSpace(req.DeviceID)) {
+	// release is armed immediately and unconditionally: every return between
+	// here and commitDeviceID below is a path that reserved an ID and then did
+	// not write a device under it. See reserveDeviceID for what one of those
+	// costs if it survives.
+	reservation, reserved := s.reserveDeviceID(ownerID, strings.TrimSpace(req.DeviceID))
+	if !reserved {
 		http.Error(w, "device id already registered", http.StatusConflict)
 		return
 	}
+	defer reservation.Release()
 
 	// Mint this device's own pairing secret. Only its hash is ever persisted
 	// (see state.NativeDevice.SecretHash); the raw value is returned once
@@ -428,24 +434,11 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		}
 	}
 
-	s.userMu.Lock()
-	// Release the reservation when UpsertNativeDevice merged this registration
-	// into an existing row: the ID the request asked for was reserved above,
-	// but the merge means no NativeDevice record was ever created under it.
-	//
-	// Left behind, that entry is permanent. revokeUserDevices only removes IDs
-	// it finds in the user's device list, so nothing ever cleans it up — the ID
-	// becomes unregisterable by anyone forever (reserveDeviceID sees an owner),
-	// and every auth attempt against it costs deviceAuthFromRequest a lockout
-	// strike, because the owner lookup succeeds and GetNativeDevice then fails.
-	// Re-registering devices would grow the map without bound.
-	if requested := strings.TrimSpace(req.DeviceID); requested != "" && requested != registeredDeviceID {
-		if owner, ok := s.deviceIndex[requested]; ok && owner == ownerID {
-			delete(s.deviceIndex, requested)
-		}
-	}
-	s.deviceIndex[registeredDeviceID] = ownerID
-	s.userMu.Unlock()
+	// Point the index at the ID the device was actually persisted under. When
+	// UpsertNativeDevice merged this registration into an existing row the
+	// requested ID never got a record, so Commit settles that one too. The
+	// deferred Release above becomes a no-op.
+	reservation.Commit(registeredDeviceID)
 
 	serverBaseURL := s.serverBaseURL
 	if serverBaseURL == "" {

@@ -76,23 +76,35 @@ func TestClassifyPushFailureDistinguishesTheUsefulCases(t *testing.T) {
 			want: "timeout",
 		},
 		{
+			// The reason the code is a field and not a regex match. The body is
+			// written by whoever owns the host the device points at, and it used
+			// to be scanned for "status=NNN" alongside our own formatting.
+			name: "attacker-controlled body cannot forge the status",
+			err: &relayStatusError{
+				Code: 502,
+				Body: "status=401 status=429 nice try",
+				err:  errors.New("UnifiedPush endpoint failed: status=502 response=status=401 status=429 nice try"),
+			},
+			want: "server_error",
+		},
+		{
 			name: "auth",
-			err:  errors.New("relay rejected the request: status=401 response=bad key"),
+			err:  &relayStatusError{Code: 401, Body: "bad key", err: errors.New("relay rejected the request: status=401 response=bad key")},
 			want: "unauthorized",
 		},
 		{
 			name: "rate limited",
-			err:  errors.New("relay rejected the request: status=429 response=slow down"),
+			err:  &relayStatusError{Code: 429, Body: "slow down", err: errors.New("relay rejected the request: status=429 response=slow down")},
 			want: "rate_limited",
 		},
 		{
 			name: "remote server error",
-			err:  errors.New("UnifiedPush endpoint failed: status=503 response=maintenance"),
+			err:  &relayStatusError{Code: 503, Body: "maintenance", err: errors.New("UnifiedPush endpoint failed: status=503 response=maintenance")},
 			want: "server_error",
 		},
 		{
 			name: "other client error",
-			err:  errors.New("UnifiedPush endpoint failed: status=418 response=teapot"),
+			err:  &relayStatusError{Code: 418, Body: "teapot", err: errors.New("UnifiedPush endpoint failed: status=418 response=teapot")},
 			want: "rejected",
 		},
 	}

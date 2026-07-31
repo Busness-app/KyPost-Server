@@ -438,17 +438,14 @@ func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "challenge already resolved", "status": status})
 			return
 		}
-		if errors.Is(err, mfa.ErrMatchDigitsMismatch) {
-			// Not 401: the credentials were fine and the challenge is still
-			// live. The client should re-prompt, not re-authenticate.
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error": "that is not the number shown in the browser",
-			})
-			return
-		}
 		if errors.Is(err, mfa.ErrMatchAttemptsExhausted) {
+			// A wrong number is terminal for push (see mfa.maxMatchAttempts).
+			// Not 401 — the device's credentials were fine — and not 400, which
+			// would read as "try again": there is nothing to try again. The
+			// sign-in is still completable, on TOTP, in the browser.
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"error": "too many incorrect attempts; start the sign-in again",
+				"error":  "that is not the number shown in the browser; push approval is now locked for this sign-in, finish it with your authenticator app",
+				"status": mfa.PushLocked,
 			})
 			return
 		}

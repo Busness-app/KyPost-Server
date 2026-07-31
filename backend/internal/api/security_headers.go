@@ -71,11 +71,35 @@ func buildContentSecurityPolicy(provider captcha.Provider) string {
 	return strings.Join(directives, "; ")
 }
 
+// permissionsPolicy denies the powerful features this app never uses.
+//
+// An empty allowlist is a denial, and it applies to embedded content too — so a
+// sender's HTML that survives DOMPurify still cannot reach for the camera,
+// microphone or location from inside EmailBodyFrame. Nothing here is a
+// capability the app wants: it composes and reads mail.
+const permissionsPolicy = "accelerometer=(), autoplay=(), camera=(), display-capture=(), " +
+	"encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), " +
+	"midi=(), payment=(), usb=(), xr-spatial-tracking=()"
+
 // withSecurityHeaders stamps defense-in-depth headers on every response the
 // server produces — API JSON, frontend assets, attachment downloads, the
 // CardDAV surface, and the unauthenticated pickup page alike. HSTS is only
 // meaningful (and only safe to assert) once the request demonstrably arrived
 // over TLS, so it keys off isRequestSecure rather than being unconditional.
+//
+// Cross-Origin-Opener-Policy matters more here than in a typical app: for a
+// client-protected account this origin holds an UNLOCKED OpenPGP private key in
+// module memory (lib/keyVault.ts). same-origin severs window.opener for anything
+// this page opens or is opened by, which is the link EmailBodyFrame's
+// allow-popups-to-escape-sandbox plus <base target="_blank"> otherwise creates
+// for every link in every message.
+//
+// Cross-Origin-Embedder-Policy is deliberately NOT set. require-corp would give
+// full cross-origin isolation, and it would also break every third-party
+// subresource the CSP allows on purpose — the Turnstile frame, the Friendly
+// Captcha WASM bundle from jsDelivr, Google Fonts. Buying isolation by breaking
+// the CAPTCHA that guards the login form is the wrong trade; revisit if those
+// origins ever serve CORP headers.
 func withSecurityHeaders(next http.Handler, policy string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -83,6 +107,8 @@ func withSecurityHeaders(next http.Handler, policy string) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Permissions-Policy", permissionsPolicy)
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		if isRequestSecure(r) {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}

@@ -192,6 +192,44 @@ func (s *Server) withWKDRateLimit(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// pushPollBurst/pushPollRefillPerSec meter the two unauthenticated push-MFA
+// endpoints PER IP, in requests.
+//
+// /api/auth/mfa/push/poll and /api/auth/mfa/push/finish take a challenge id and
+// nothing else, and they were the only public routes in the table with no meter
+// at all. The challenge id is 24 bytes from crypto/rand, so this is not about
+// guessing it — it is that both take mfa.Store's single process-wide mutex, and
+// LoginPage polls at 1.5s intervals, so an anonymous caller could contend that
+// lock as fast as it could open connections, against every sign-in in progress.
+//
+// Generous, because a real browser legitimately polls every 1.5s for the whole
+// five-minute challenge TTL: the refill sustains that with room to spare, and
+// the burst covers a tab that wakes up and catches up.
+const (
+	pushPollBurst        = 60
+	pushPollRefillPerSec = 2
+)
+
+// withPushPollRateLimit throttles the public push-challenge endpoints per client
+// IP. Same shape as withWKDRateLimit, and it shares that limiter's key function
+// so an IPv6 caller is metered on its /64 rather than per address.
+func (s *Server) withPushPollRateLimit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.pushPollLimiter != nil {
+			if ok, retryAfter := s.pushPollLimiter.allow(lockoutKeyForIP(clientIP(r))); !ok {
+				seconds := int(math.Ceil(retryAfter.Seconds()))
+				if seconds < 1 {
+					seconds = 1
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(seconds))
+				writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many requests"})
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
 // intervalGate allows an action at most once per interval, process-wide.
 // Used where a miss must still be able to trigger expensive repair work, but
 // the miss itself is attacker-controlled and so cannot be allowed to drive it.

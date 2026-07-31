@@ -50,24 +50,18 @@ type User struct {
 	UpdatedAt          string `json:"updatedAt"`
 	DeactivatedAt      string `json:"deactivatedAt,omitempty"`
 
-	// Two-factor auth (Milestone 1: TOTP). TOTPSecretEnc is a cryptutil
-	// envelope JSON string sealed with the dedicated TOTP key; it is set at
-	// enrollment ("pending") and only becomes active once TOTPEnabled flips
-	// true on confirmation. These fields are never exposed via Public().
+	// TOTPSecretEnc is a cryptutil envelope sealed with the dedicated TOTP key,
+	// set at enrollment; TOTPEnabled flips true on confirmation. Never exposed
+	// via Public().
 	TOTPEnabled       bool     `json:"totpEnabled,omitempty"`
 	TOTPSecretEnc     string   `json:"totpSecretEnc,omitempty"`
 	TOTPConfirmedAt   string   `json:"totpConfirmedAt,omitempty"`
 	RecoveryCodesHash []string `json:"recoveryCodesHash,omitempty"`
-	// LastUsedTOTPStep is the RFC 6238 time-step (Unix seconds / 30) of the
-	// most recently accepted TOTP code for this account, tracked across every
-	// login challenge (not just the ephemeral, per-challenge replay guard in
-	// mfa.Store.ConsumeTOTPStep). TOTP steps strictly increase over time, so
-	// rejecting any code whose step is <= this value blocks replay of a
-	// captured valid code against a freshly minted challenge, without
-	// affecting legitimate retry-after-typo attempts at the current step (a
-	// rejected code never advances this field — see handleMFATOTP). The zero
-	// value (no code ever accepted yet) never rejects anything, since real
-	// TOTP steps are large positive integers (currently around 1.7e9).
+	// LastUsedTOTPStep is the RFC 6238 time-step (Unix seconds / 30) of the most
+	// recently accepted TOTP code, tracked across every login challenge. Steps
+	// strictly increase, so rejecting step <= this blocks replay of a captured
+	// code against a fresh challenge; a rejected code never advances it, so
+	// retry-after-typo at the current step still works. Zero rejects nothing.
 	LastUsedTOTPStep int64 `json:"lastUsedTotpStep,omitempty"`
 	// PushMFAEnabled is reserved for a later push-2FA milestone; nothing in
 	// Milestone 1 sets or reads it.
@@ -75,45 +69,34 @@ type User struct {
 
 	// Login credential derivation.
 	//
-	// AuthDerivationPBKDF2 means PasswordHash is a hash of the AUTH SECRET the
-	// browser derived, not of the password itself — the server never receives
-	// the password for this account. LoginSalt is the salt the client must use
-	// to reproduce that secret, and LoginIterations the work factor.
+	// AuthDerivationPBKDF2: PasswordHash covers the AUTH SECRET the browser
+	// derived, not the password — the server never receives the password.
+	// LoginSalt and LoginIterations let the client reproduce that secret. This
+	// exists because the client-side PGP key vault derives its wrapping key from
+	// the same password (frontend/src/lib/keyVault.ts); sending the plaintext
+	// password would have put every client-protected key within four lines of the
+	// login handler.
 	//
-	// This exists because the client-side PGP key vault derives its wrapping key
-	// from the same password (frontend/src/lib/keyVault.ts), and that made the
-	// "the server cannot open your key" claim false: the server was handed the
-	// plaintext password on every single login and merely chose not to keep it.
-	// Four lines in the login handler would have opened every client-protected
-	// key on the instance. The browser now splits one password into two
-	// domain-separated secrets and sends only the authentication half.
-	//
-	// AuthDerivationLegacy (the empty string) means PasswordHash is over the
-	// plaintext password, as every account created before this existed. Those
-	// upgrade in place on their next successful sign-in — see
-	// UpgradeToDerivedAuth. Admin-set temporary passwords are deliberately
-	// written legacy, because the admin's browser cannot derive a secret for
-	// somebody else's account; the mandatory first-login password change
-	// converts them.
+	// AuthDerivationLegacy (the empty string) means PasswordHash covers the
+	// plaintext password. Those upgrade in place on the next successful sign-in —
+	// see UpgradeToDerivedAuth. Admin-set temporary passwords are written legacy
+	// (the admin's browser cannot derive a secret for somebody else's account);
+	// the mandatory first-login change converts them.
 	AuthDerivation  string `json:"authDerivation,omitempty"`
 	LoginSalt       string `json:"loginSalt,omitempty"`
 	LoginIterations int    `json:"loginIterations,omitempty"`
 
-	// PGP identity. The public key is not sensitive. The private key is
-	// stored one of two ways, distinguished by PGPKeyProtection:
+	// PGP identity. The public key is not sensitive; the private key is stored one
+	// of two ways, per PGPKeyProtection:
 	//
-	//   "client" — PGPPrivateKeyWrapped holds an envelope the BROWSER
-	//     produced, sealed under a key derived from the user's password
-	//     (see frontend/src/lib/keyVault.ts). The server cannot open it and
-	//     has no code that tries. This is the end-to-end mode: possession of
-	//     the disk, a backup, or this process's memory does not yield the
-	//     private key or anything encrypted to it.
+	//   "client" — PGPPrivateKeyWrapped holds an envelope the BROWSER sealed under
+	//     a key derived from the user's password (frontend/src/lib/keyVault.ts).
+	//     The server cannot open it and has no code that tries.
 	//
-	//   "server" — LEGACY. PGPPrivateKeyEnc holds a cryptutil envelope
-	//     sealed with a master key sitting on the same volume, which means
-	//     the server (and anyone who can read that volume) can decrypt every
-	//     message. Retained only so existing installs keep working until the
-	//     owner logs in and migrates; see MigratePGPKeyToClientProtection.
+	//   "server" — LEGACY. PGPPrivateKeyEnc holds a cryptutil envelope sealed with
+	//     a master key on the same volume, so anyone who can read that volume can
+	//     decrypt every message. Retained only until the owner logs in and
+	//     migrates; see MigratePGPKeyToClientProtection.
 	//
 	// Neither private field is ever exposed via Public().
 	PGPFingerprint string `json:"pgpFingerprint,omitempty"`
@@ -137,10 +120,9 @@ const (
 	PGPProtectionServer = "server"
 )
 
-// PGPProtection returns the effective protection mode for u's identity.
-// An identity with no explicit mode but a legacy sealed key is "server";
-// this keeps pre-existing users.json files readable without a migration
-// pass.
+// PGPProtection returns the effective protection mode for u's identity. No
+// explicit mode plus a legacy sealed key means "server", so pre-existing
+// users.json files stay readable without a migration pass.
 func (u User) PGPProtection() string {
 	if u.PGPKeyProtection == PGPProtectionClient || u.PGPPrivateKeyWrapped != "" {
 		return PGPProtectionClient
@@ -151,21 +133,16 @@ func (u User) PGPProtection() string {
 	return ""
 }
 
-// HasServerReadableKey reports whether the server can still decrypt this
-// user's mail on their behalf. Every server-side PGP operation must check
-// this and refuse rather than assume — under client protection there is no
-// key here to use.
+// HasServerReadableKey reports whether the server can still decrypt this user's
+// mail on their behalf. Every server-side PGP operation must check this and
+// refuse rather than assume — under client protection there is no usable key.
 func (u User) HasServerReadableKey() bool {
 	return u.PGPProtection() == PGPProtectionServer
 }
 
-// clone returns a deep copy of u.
-//
-// Every read path that serves a User out of the Store's cache goes through
-// this. A User is otherwise copied by value for free, but RecoveryCodesHash is
-// a slice: handing it out shares the cache's backing array, so a caller that
-// sorted or overwrote it would silently corrupt state every subsequent request
-// reads. One small allocation per lookup is the cheaper half of that trade.
+// clone returns a deep copy of u. Every read served out of the Store's cache
+// goes through this: RecoveryCodesHash is a slice, so a plain struct copy would
+// share the cache's backing array and let a caller corrupt shared state.
 func (u User) clone() User {
 	if u.RecoveryCodesHash != nil {
 		u.RecoveryCodesHash = slices.Clone(u.RecoveryCodesHash)
@@ -228,26 +205,22 @@ var (
 	// identity would silently discard a browser-wrapped private key. There is
 	// deliberately no downgrade path (docs/E2E_PGP.md); this enforces it.
 	ErrWouldDowngradeCustody = errors.New("account uses a client-held key: delete the existing identity first")
-	// ErrPGPFingerprintChanged is returned when a caller that read one key
-	// tries to write its result back after a different key has replaced it.
-	// The caller's copy is stale, not wrong; retrying against the current key
-	// is the correct response.
+	// ErrPGPFingerprintChanged means the caller read one key and tried to write
+	// back after a different key replaced it. The copy is stale, not wrong;
+	// retrying against the current key is the correct response.
 	ErrPGPFingerprintChanged = errors.New("the account's pgp key changed while this update was in flight")
 	ErrPasswordWeak          = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 	ErrUsernameInvalid       = errors.New("username must start with a letter or digit and may otherwise contain only letters, digits, dot, underscore and hyphen (max 64 characters)")
 )
 
-// MinPasswordLen is the minimum length of any password this store will
-// accept. Length is the only rule enforced: character-class requirements
-// push users toward predictable substitutions without adding real entropy,
-// while a length floor is what actually defeats the online guessing this
-// server's lockout only slows down.
+// MinPasswordLen is the minimum length of any password this store accepts.
+// Length is the only rule enforced: character-class requirements buy
+// predictable substitutions rather than real entropy.
 const MinPasswordLen = 14
 
-// ValidatePassword enforces MinPasswordLen. It is called by every store
-// method that sets a password (Create, SetPassword) rather than by each API
-// handler, so a new call site cannot forget it. Length is counted in runes,
-// not bytes, so a passphrase in a non-Latin script is not penalized.
+// ValidatePassword enforces MinPasswordLen. Called by every store method that
+// sets a password (Create, SetPassword) rather than by each handler, so a new
+// call site cannot forget it. Length is counted in runes, not bytes.
 func ValidatePassword(password string) error {
 	if len([]rune(password)) < MinPasswordLen {
 		return ErrPasswordWeak
@@ -257,34 +230,21 @@ func ValidatePassword(password string) error {
 
 // usernamePattern is the set of usernames this store will create.
 //
-// A username is not just a label here: the CardDAV surface builds every
-// principal and address-book URL out of it (dav_server.go's
-// CurrentUserPrincipal/AddressBookHomeSetPath) and then guards access by
-// comparing the first path segment back against it. Nothing enforced that it
-// WAS one path segment, so an admin could create "alice/bob" — whose owner is
-// then served a principal URL of "/dav/alice/bob/" and refused it with
-// "address book belongs to a different user" — or ".." , whose principal path
-// ("//") escapes the /dav mount entirely.
+// A username is a path segment on the CardDAV surface: dav_server.go builds
+// principal and address-book URLs out of it and guards access by comparing the
+// first path segment back against it, so "alice/bob" or ".." break that
+// comparison. No cross-user access is reachable either way — the backend
+// resolves the store from the authenticated UserID, never from the path.
 //
-// No cross-user access was reachable either way (the backend resolves the store
-// from the authenticated UserID, never from the path), so this is a validity
-// rule, not a patched hole: it keeps the one place that treats a username as a
-// path segment honest.
-//
-// The leading character must be alphanumeric, which is what rules out "." and
-// ".." — both of which match the body character class (dot is legitimately
-// wanted in "first.last") and both of which are path traversal, not names. It
-// also rules out a leading hyphen, which is an argument-injection hazard
-// anywhere a username reaches a command line.
+// The leading character must be alphanumeric, ruling out "." and ".." (dot is
+// legitimate in "first.last") and a leading hyphen, an argument-injection hazard
+// wherever a username reaches a command line.
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // ValidateUsername enforces usernamePattern. Called by Create rather than by
-// the handler, for the same reason ValidatePassword is: a future call site
-// cannot forget it.
-//
-// Deliberately NOT applied to existing accounts on read. An install that
-// already has a "first last" username keeps working; only new accounts are
-// held to the rule, exactly as NormalizeUsername's case-collision rule is.
+// the handler, so a future call site cannot forget it. Deliberately NOT applied
+// to existing accounts on read: an install that already has a "first last"
+// username keeps working.
 func ValidateUsername(username string) error {
 	if !usernamePattern.MatchString(strings.TrimSpace(username)) {
 		return ErrUsernameInvalid
@@ -293,19 +253,14 @@ func ValidateUsername(username string) error {
 }
 
 // NormalizeUsername folds a username to its comparison form. Usernames are
-// stored as the user typed them (minus surrounding whitespace) but compared
-// case-insensitively, so "admin", "Admin", and "ADMIN" can never coexist as
-// separate accounts on a system where the admin role can reach every other
-// user's configuration. Comparing rather than rewriting means accounts
-// created before this rule existed keep working without a migration.
+// stored as typed (minus surrounding whitespace) but compared
+// case-insensitively, so "admin" and "Admin" cannot coexist as separate accounts
+// on a system where the admin role reaches every user's configuration.
 //
-// Exported because this fold is not an internal detail of the store: anything
-// that keys per-account state off a client-supplied username must key it off
-// the SAME string GetByUsername would resolve, or the two disagree about which
-// account is which. The login lockout learned that the hard way — it keyed on
-// the raw submitted username, so " Admin " and "admin" were one account to the
-// lookup and two independent strike budgets to the lockout, which made the
-// three-strikes limit unbounded. See api.handleLogin.
+// Exported because anything keying per-account state off a client-supplied
+// username must key it off the SAME string GetByUsername resolves. Keyed on the
+// raw string, " Admin " and "admin" are one account to the lookup and two strike
+// budgets to the login lockout, which makes three-strikes unbounded.
 func NormalizeUsername(username string) string {
 	return strings.ToLower(strings.TrimSpace(username))
 }
@@ -317,41 +272,66 @@ type usersFile struct {
 
 // Store is the on-disk users.json store.
 //
-// Every mutation is a read-modify-write of the whole file, and this file is
-// written by BOTH processes supervisord starts: the api process (password
-// changes, TOTP enrollment, recovery-code consumption) and the daemon
-// process (processor/sendas_check.go's SetPGPIdentity, when a verified
-// send-as alias is added to a user's key). mu only serializes goroutines
-// within one process, so every mutator additionally takes an inter-process
-// file lock for the whole read-modify-write cycle — see
-// fsutil.WithFileLock. Without it, two overlapping mutations each read the
-// same starting state and the second write silently discards the first: a
-// lost password change, or a recovery code that stays usable after being
-// consumed.
+// Every mutation is a read-modify-write of the whole file, and the file is
+// written by BOTH processes supervisord starts: api (password changes, TOTP
+// enrollment, recovery-code consumption) and daemon
+// (processor/sendas_check.go's SetPGPIdentity). mu only serializes goroutines
+// within one process, so every mutator additionally takes an inter-process file
+// lock for the whole cycle — see fsutil.WithFileLock. Without it two
+// overlapping mutations each read the same starting state and the second write
+// silently discards the first: a lost password change, or a recovery code that
+// stays usable after being consumed.
+//
 // Reads are served from a stat-guarded cache — see load.
 type Store struct {
 	mu   sync.RWMutex
 	path string
 
-	// cached is the last parsed file, valid only while the file's mtime and
-	// size still match cachedMod/cachedSize. Guarded by mu.
+	// cached is the last parsed file, valid only while the file's mtime and size
+	// still match cachedMod/cachedSize. Guarded by mu. Without it Get reparsed
+	// every account's armored key material on every authenticated request —
+	// api.currentUser calls it per request, deliberately, so a deactivation takes
+	// effect immediately.
 	//
-	// Without this, Get reparsed the whole of users.json on every authenticated
-	// request: api.currentUser calls it per request (deliberately, so a
-	// deactivation takes effect immediately), and a User carries PGPPublicKey,
-	// PGPPrivateKeyWrapped and RecoveryCodesHash — so answering "is this
-	// account still active?" meant reading and JSON-decoding every account's
-	// armored key material, every time.
-	//
-	// mtime+size rather than a notify/invalidation protocol because the file is
-	// written by two processes (api and daemon) and every writer goes through
-	// fsutil.AtomicWriteFile, which renames a new inode into place. A rename
-	// always moves mtime, so the other process's write is always observed. An
-	// in-process invalidation hook could not see the daemon's writes at all.
+	// mtime+size rather than an invalidation protocol because the file is written
+	// by two processes and every writer goes through fsutil.AtomicWriteFile, which
+	// renames a new inode into place; a rename always moves mtime. An in-process
+	// hook could not see the daemon's writes at all.
 	cached     usersFile
+	cachedIdx  userIndex
 	cachedMod  time.Time
 	cachedSize int64
 	cacheValid bool
+}
+
+// userIndex resolves a lookup key to a position in usersFile.Users, replacing
+// linear scans on a path api.currentUser takes for every authenticated request.
+//
+// Positions rather than *User: the slice aliases the cache (see load), so
+// pointers would let a caller mutate the shared copy. Every read still goes
+// through User.clone. Rebuilt only when the file changes.
+type userIndex struct {
+	byID       map[string]int
+	byUsername map[string]int
+}
+
+func buildUserIndex(f usersFile) userIndex {
+	idx := userIndex{
+		byID:       make(map[string]int, len(f.Users)),
+		byUsername: make(map[string]int, len(f.Users)),
+	}
+	for i, u := range f.Users {
+		idx.byID[u.ID] = i
+		// Folded with the same function GetByUsername folds the query with, so the
+		// index cannot disagree with the lookup about what "the same account" means.
+		// First writer wins on a duplicate, matching the scan this replaces.
+		if key := NormalizeUsername(u.Username); key != "" {
+			if _, exists := idx.byUsername[key]; !exists {
+				idx.byUsername[key] = i
+			}
+		}
+	}
+	return idx
 }
 
 func newStore(path string) *Store {
@@ -362,24 +342,22 @@ func newStore(path string) *Store {
 // unchanged since it was last parsed.
 //
 // The returned usersFile's Users slice ALIASES the cache. Reach it through
-// withCachedUsers, which is the only caller, so the alias cannot escape to a
-// reader that keeps or reorders it.
+// withCachedUsers, the only caller, so the alias cannot escape.
 //
 // Callers must NOT hold mu: this takes it, for reading and then possibly for
-// writing. Mutators hold the inter-process file lock and call readFileUnlocked
-// directly instead — a cached copy is exactly what a read-modify-write cycle
-// must not start from.
-func (s *Store) load() (usersFile, error) {
+// writing. Mutators hold the file lock and call readFileUnlocked instead — a
+// read-modify-write cycle must not start from a cached copy.
+func (s *Store) load() (usersFile, userIndex, error) {
 	info, err := os.Stat(s.path)
 	if err != nil {
-		return usersFile{}, err
+		return usersFile{}, userIndex{}, err
 	}
 
 	s.mu.RLock()
 	if s.cacheValid && s.cachedSize == info.Size() && s.cachedMod.Equal(info.ModTime()) {
-		f := s.cached
+		f, idx := s.cached, s.cachedIdx
 		s.mu.RUnlock()
-		return f, nil
+		return f, idx, nil
 	}
 	s.mu.RUnlock()
 
@@ -388,44 +366,43 @@ func (s *Store) load() (usersFile, error) {
 	// Re-check under the write lock: another goroutine may have refreshed while
 	// this one waited.
 	if s.cacheValid && s.cachedSize == info.Size() && s.cachedMod.Equal(info.ModTime()) {
-		return s.cached, nil
+		return s.cached, s.cachedIdx, nil
 	}
 	f, err := s.readFileUnlocked()
 	if err != nil {
-		return usersFile{}, err
+		return usersFile{}, userIndex{}, err
 	}
+	// Built whether or not the caching below takes, so a read that raced a write
+	// still gets an index consistent with the slice it is returned alongside.
+	idx := buildUserIndex(f)
 	// Stat again AFTER the read. A write that landed between the first stat and
-	// the read would otherwise be cached under the pre-write stamp and served
-	// as current until the next change — stale for an unbounded time. Caching
-	// only when the file did not move underneath us costs one stat and makes
-	// that impossible.
+	// the read would otherwise be cached under the pre-write stamp and served as
+	// current for an unbounded time.
 	if after, err := os.Stat(s.path); err == nil &&
 		after.Size() == info.Size() && after.ModTime().Equal(info.ModTime()) {
 		s.cached = f
+		s.cachedIdx = idx
 		s.cachedMod = info.ModTime()
 		s.cachedSize = info.Size()
 		s.cacheValid = true
 	}
-	return f, nil
+	return f, idx, nil
 }
 
-// invalidateCacheLocked drops the cached copy. Callers must hold mu.
-//
-// Called after a mutation so the next read re-parses rather than waiting for a
-// stat to disagree. Mostly belt-and-braces: AtomicWriteFile changes the mtime
-// anyway. It matters on a filesystem with coarse mtime granularity, where a
-// write landing in the same tick as the cached stamp would otherwise be
-// invisible.
+// invalidateCacheLocked drops the cached copy; callers must hold mu. Mostly
+// belt-and-braces, since AtomicWriteFile moves the mtime anyway. It matters on
+// a filesystem with coarse mtime granularity, where a write landing in the same
+// tick as the cached stamp would otherwise be invisible.
 func (s *Store) invalidateCacheLocked() {
 	s.cacheValid = false
 	s.cached = usersFile{}
 }
 
 // LoadOrMigrate opens CONFIG_DIR/users.json, creating it on first run by
-// best-effort importing the legacy single-admin admin.env, or minting a
-// fresh default admin if neither exists. This is intentionally simple:
-// there is no production data to preserve, so a clean reset is an
-// acceptable fallback if the legacy file is missing or unparseable.
+// best-effort importing the legacy single-admin admin.env, or minting a fresh
+// default admin if neither exists. There is no production data to preserve, so
+// a clean reset is an acceptable fallback for a missing or unparseable legacy
+// file.
 func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
 	path := filepath.Join(configDir, "users.json")
 	store := newStore(path)
@@ -472,9 +449,8 @@ func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
 	}
 
 	// Fresh install with no legacy admin.env: mint a default admin. In the
-	// normal container flow scripts/bootstrap.sh runs first and admin.env
-	// will already exist, so this path is mainly a defensive fallback for
-	// running the server standalone (e.g. local dev).
+	// container flow scripts/bootstrap.sh runs first and admin.env already exists,
+	// so this path is mainly for running the server standalone.
 	randomPassword, err := randomPassword()
 	if err != nil {
 		return nil, err
@@ -510,8 +486,8 @@ func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
 
 // createInitial writes the very first users.json atomically and exclusively.
 // The api and daemon processes start at the same time on first boot; if the
-// other process creates the file first, the loser silently adopts the
-// winner's copy so both agree on the admin's user ID.
+// other creates the file first, the loser adopts the winner's copy so both
+// agree on the admin's user ID.
 func (s *Store) createInitial(f usersFile) (won bool, err error) {
 	if f.Version == 0 {
 		f.Version = 1
@@ -578,14 +554,10 @@ func readLegacyAdminEnv(path string) (map[string]string, bool) {
 }
 
 // readFileUnlocked reads and parses the file from disk, bypassing the read
-// cache entirely.
-//
-// "Unlocked" means it takes no lock of its own; the caller must already hold
-// both mu and the file lock.
-//
-// Every mutator uses this rather than load(): a read-modify-write cycle must
-// start from what is actually on disk, inside the inter-process file lock, or
-// it can serialize a cached copy back over another process's committed write.
+// cache. It takes no lock of its own; the caller must already hold both mu and
+// the file lock. Every mutator uses this rather than load(): a read-modify-write
+// cycle must start from what is actually on disk, or it can serialize a cached
+// copy back over another process's committed write.
 func (s *Store) readFileUnlocked() (usersFile, error) {
 	b, err := os.ReadFile(s.path)
 	if err != nil {
@@ -645,12 +617,9 @@ func FirstAdminFrom(all []User) User {
 	return best
 }
 
-// List returns every user (including deactivated ones), sorted by username.
-//
-// The returned slice is a deep copy. It used to sort f.Users in place and hand
-// the slice straight back, which was harmless while every call re-read the file
-// but corrupts a shared cache: the sort reorders the cached backing array while
-// another goroutine is ranging over it.
+// List returns every user (including deactivated ones), sorted by username. The
+// returned slice is a deep copy: sorting f.Users in place would reorder the
+// cached backing array while another goroutine ranges over it.
 func (s *Store) List() ([]User, error) {
 	var out []User
 	err := s.withCachedUsers(func(all []User) {
@@ -670,20 +639,15 @@ func (s *Store) List() ([]User, error) {
 
 // withCachedUsers calls fn with the cached user records.
 //
-// The slice fn receives IS the cache's own backing array — not a copy. It is
-// passed to a callback rather than returned so it cannot escape: a reader that
-// keeps it, sorts it, or writes through it corrupts what every subsequent
-// request in the process reads, and "the returned slice aliases the cache" is a
-// rule that survives exactly as long as the next person to add a reader happens
-// to read the comment. Nothing here can retain it by accident.
+// The slice fn receives IS the cache's own backing array. It is passed to a
+// callback rather than returned so it cannot escape: a reader that keeps, sorts,
+// or writes through it corrupts what every subsequent request reads. fn must
+// clone anything it keeps (see User.clone, which also copies RecoveryCodesHash,
+// the one field a plain struct copy still shares).
 //
-// fn must therefore clone anything it keeps (see User.clone, which also copies
-// RecoveryCodesHash — the one field a plain struct copy still shares).
-//
-// Mutators do NOT use this: a read-modify-write cycle must start from what is on
-// disk, inside the file lock. See readFileUnlocked.
+// Mutators do NOT use this; see readFileUnlocked.
 func (s *Store) withCachedUsers(fn func(all []User)) error {
-	f, err := s.load()
+	f, _, err := s.load()
 	if err != nil {
 		return err
 	}
@@ -691,23 +655,32 @@ func (s *Store) withCachedUsers(fn func(all []User)) error {
 	return nil
 }
 
-// Get returns a user by ID.
-//
-// Served from the stat-guarded cache (see load): api.currentUser calls this on
-// every authenticated request, and re-parsing every account's armored key
-// material to answer "is this account still active?" was the single hottest
-// avoidable cost in the request path.
+// withIndexedUsers is withCachedUsers for the two lookups that have a key, so
+// they resolve by index instead of scanning. pos is -1 when the key is absent.
+func (s *Store) withIndexedUsers(index func(userIndex) (int, bool), fn func(u User)) error {
+	f, idx, err := s.load()
+	if err != nil {
+		return err
+	}
+	pos, ok := index(idx)
+	if !ok || pos < 0 || pos >= len(f.Users) {
+		return nil
+	}
+	fn(f.Users[pos])
+	return nil
+}
+
+// Get returns a user by ID, served from the stat-guarded cache (see load).
+// api.currentUser calls this on every authenticated request, so re-parsing
+// every account's armored key material to answer "is this account still
+// active?" was the hottest avoidable cost in the request path.
 func (s *Store) Get(id string) (User, error) {
 	found := false
 	var out User
-	err := s.withCachedUsers(func(all []User) {
-		for _, u := range all {
-			if u.ID == id {
-				out, found = u.clone(), true
-				return
-			}
-		}
-	})
+	err := s.withIndexedUsers(
+		func(idx userIndex) (int, bool) { pos, ok := idx.byID[id]; return pos, ok },
+		func(u User) { out, found = u.clone(), true },
+	)
 	if err != nil {
 		return User{}, err
 	}
@@ -723,14 +696,10 @@ func (s *Store) GetByUsername(username string) (User, error) {
 	want := NormalizeUsername(username)
 	found := false
 	var out User
-	err := s.withCachedUsers(func(all []User) {
-		for _, u := range all {
-			if NormalizeUsername(u.Username) == want {
-				out, found = u.clone(), true
-				return
-			}
-		}
-	})
+	err := s.withIndexedUsers(
+		func(idx userIndex) (int, bool) { pos, ok := idx.byUsername[want]; return pos, ok },
+		func(u User) { out, found = u.clone(), true },
+	)
 	if err != nil {
 		return User{}, err
 	}
@@ -801,12 +770,10 @@ func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
 // same lock as the write. guard receives every user as freshly read from disk
 // plus the target; returning an error aborts without writing.
 //
-// A precondition checked in the handler and enforced by a separate write is
-// not a precondition. Evaluating isLastActiveAdmin outside this lock lets two
-// concurrent requests each see one other active admin and both proceed,
-// leaving an instance with zero admins — unrecoverable short of hand-editing
-// the volume, since there is no delete-user endpoint and LoadOrMigrate only
-// mints an admin when users.json is absent.
+// A precondition checked in the handler and enforced by a separate write is not
+// a precondition: evaluating isLastActiveAdmin outside this lock lets two
+// concurrent requests each see one other active admin and both proceed, leaving
+// an instance with zero admins and no way back but hand-editing the volume.
 func (s *Store) mutateGuarded(id string, guard func(all []User, target User) error, fn func(*User) error) (User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -869,18 +836,15 @@ func (s *Store) SetPassword(id, newPassword string, requireChange bool) (User, e
 	return s.mutate(id, func(u *User) error {
 		u.PasswordHash = hash
 		u.MustChangePassword = requireChange
-		// Back to legacy derivation. This path stores a hash of a PLAINTEXT
-		// password — it is how an admin sets a temporary one, and an admin's
-		// browser cannot derive an auth secret for somebody else's account
-		// (it would need to know the password it is about to hand over, which
-		// is the thing derived auth exists to avoid transmitting).
+		// Back to legacy derivation. This path stores a hash of a PLAINTEXT password,
+		// which is how an admin sets a temporary one — an admin's browser cannot
+		// derive an auth secret for somebody else's account.
 		//
-		// Clearing these three is load-bearing, not tidiness: leaving
-		// AuthDerivation set while PasswordHash covers a plaintext password
-		// would make VerifyAuthSecret the active check against a hash it can
-		// never match, and lock the user out of the temporary password they were
-		// just given. The mandatory first-login change converts the account back
-		// to derived auth.
+		// Clearing these three is load-bearing, not tidiness: leaving AuthDerivation
+		// set while PasswordHash covers a plaintext password would make
+		// VerifyAuthSecret the active check against a hash it can never match, and lock
+		// the user out of the temporary password they were just given. The mandatory
+		// first-login change converts the account back to derived auth.
 		u.AuthDerivation = AuthDerivationLegacy
 		u.LoginSalt = ""
 		u.LoginIterations = 0
@@ -908,10 +872,10 @@ func (s *Store) Deactivate(id string) (User, error) {
 	})
 }
 
-// guardNotLastActiveAdmin refuses a write that would leave the instance with
-// no active admin. Evaluated inside mutateGuarded's lock against the file as
-// just read, so concurrent callers cannot each observe the other's admin as
-// still active and both proceed.
+// guardNotLastActiveAdmin refuses a write that would leave the instance with no
+// active admin. Evaluated inside mutateGuarded's lock against the file as just
+// read, so concurrent callers cannot each observe the other's admin as still
+// active and both proceed.
 func guardNotLastActiveAdmin(all []User, target User) error {
 	if target.Role != RoleAdmin || !target.Active {
 		return nil
@@ -987,17 +951,14 @@ func (s *Store) SetPushMFAEnabled(id string, enabled bool) (User, error) {
 // i.e. the caller is attempting to record a replayed or out-of-order code.
 var ErrTOTPStepNotNewer = errors.New("totp step is not newer than last recorded step")
 
-// SetLastUsedTOTPStep atomically checks-and-records the RFC 6238 time-step of
-// an accepted TOTP code for replay protection scoped to the account (rather
-// than a single ephemeral challenge — see mfa.Store.ConsumeTOTPStep for that
-// narrower guard). It only writes, and only reports success, when step is
-// strictly greater than the currently stored value; otherwise it returns
-// ErrTOTPStepNotNewer without writing (mirroring ConsumeRecoveryCode's
-// no-match-means-no-write behavior). Doing the check and the write inside the
-// same mutate lock (rather than a separate Get + later write) closes a TOCTOU
-// window where two concurrent requests bearing the same captured valid code —
-// each against its own freshly minted challenge — could otherwise both pass a
-// stale "not yet recorded" check before either request recorded it.
+// SetLastUsedTOTPStep atomically checks-and-records the RFC 6238 time-step of an
+// accepted TOTP code, for replay protection scoped to the account rather than to
+// a single challenge (see mfa.Store.ConsumeTOTPStep for that narrower guard). It
+// writes, and reports success, only when step is strictly greater than the
+// stored value; otherwise it returns ErrTOTPStepNotNewer without writing. Check
+// and write share one mutate lock, closing the TOCTOU window where two
+// concurrent requests bearing the same captured code — each against its own
+// fresh challenge — could both pass a stale check before either recorded it.
 func (s *Store) SetLastUsedTOTPStep(id string, step int64) (User, error) {
 	return s.mutate(id, func(u *User) error {
 		if step <= u.LastUsedTOTPStep {
@@ -1011,15 +972,14 @@ func (s *Store) SetLastUsedTOTPStep(id string, step int64) (User, error) {
 // SetPGPIdentity stores a legacy, SERVER-READABLE PGP identity: the armored
 // public key plus a private key sealed with the server's own master key.
 //
-// New identities must not use this. It exists for the send-as User ID
-// reconcile, which can only run against a key the server can already open,
-// and which skips client-protected identities entirely.
+// New identities must not use this. It exists for the send-as User ID reconcile,
+// which can only run against a key the server can already open, and which skips
+// client-protected identities entirely.
 func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, privateKeyEnc, source, createdAt string) (User, error) {
 	return s.mutate(id, func(u *User) error {
-		// Refuse to overwrite a client-held identity with a server-readable
-		// one: clearing PGPPrivateKeyWrapped here would silently downgrade
-		// custody and destroy the browser envelope, the opposite of what
-		// docs/E2E_PGP.md promises.
+		// Refuse to overwrite a client-held identity with a server-readable one:
+		// clearing PGPPrivateKeyWrapped here would silently downgrade custody and
+		// destroy the browser envelope, the opposite of what docs/E2E_PGP.md promises.
 		if u.PGPProtection() == PGPProtectionClient {
 			return ErrWouldDowngradeCustody
 		}
@@ -1039,26 +999,24 @@ func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, private
 // for an identity whose fingerprint is still expectFingerprint, leaving key ID,
 // source, creation time and protection untouched.
 //
-// This is the narrow write the daemon's send-as reconcile needs: it adds User
-// IDs to an existing key, which changes the key's bytes but not its identity.
-// Do not substitute SetPGPIdentity: it rewrites everything, and since the
-// caller snapshots the user, spends hundreds of microseconds re-signing, and
-// only then writes, a key replaced during that window is silently reverted.
+// This is the narrow write the daemon's send-as reconcile needs: adding User IDs
+// changes the key's bytes but not its identity. Do not substitute
+// SetPGPIdentity, which rewrites everything — the caller snapshots the user,
+// spends hundreds of microseconds re-signing, and only then writes, so a key
+// replaced during that window is silently reverted.
 //
-// expectFingerprint closes that window — the caller states which key it read,
-// and the write is refused under the lock if that is no longer current. An
-// empty expectation is rejected rather than treated as "any": a vacuous
-// precondition is worst exactly when the account has no key and a stale write
-// would install one.
+// expectFingerprint closes that window. An empty expectation is rejected rather
+// than treated as "any": a vacuous precondition is worst exactly when the
+// account has no key and a stale write would install one.
 func (s *Store) UpdatePGPKeyMaterial(id, expectFingerprint, armoredPublicKey, privateKeyEnc string) (User, error) {
 	if strings.TrimSpace(expectFingerprint) == "" {
 		return User{}, errors.New("expected fingerprint is required to update key material")
 	}
 	return s.mutate(id, func(u *User) error {
-		// Same refusal as SetPGPIdentity, restated rather than inherited so the
-		// two preconditions cannot drift apart: writing privateKeyEnc onto a
-		// client-held identity would hand the server back a readable copy of a
-		// key it is not supposed to have, and destroy the browser envelope.
+		// Same refusal as SetPGPIdentity, restated rather than inherited so the two
+		// preconditions cannot drift apart: writing privateKeyEnc onto a client-held
+		// identity would hand the server back a readable copy of a key it is not
+		// supposed to have, and destroy the browser envelope.
 		if u.PGPProtection() == PGPProtectionClient {
 			return ErrWouldDowngradeCustody
 		}
@@ -1071,11 +1029,11 @@ func (s *Store) UpdatePGPKeyMaterial(id, expectFingerprint, armoredPublicKey, pr
 	})
 }
 
-// SetPGPIdentityClientProtected stores an end-to-end PGP identity. wrapped
-// is an opaque envelope the browser produced under a key derived from the
-// user's password; this store never interprets it, and clearing
-// PGPPrivateKeyEnc is the point — after this call there is no copy of the
-// private key on this server that this server can open.
+// SetPGPIdentityClientProtected stores an end-to-end PGP identity. wrapped is an
+// opaque envelope the browser produced under a key derived from the user's
+// password; this store never interprets it. Clearing PGPPrivateKeyEnc is the
+// point — after this call no copy of the private key on this server is one this
+// server can open.
 func (s *Store) SetPGPIdentityClientProtected(id, fingerprint, keyID, armoredPublicKey, wrapped, source, createdAt string) (User, error) {
 	if strings.TrimSpace(wrapped) == "" {
 		return User{}, errors.New("wrapped private key is required for client-protected identities")
@@ -1093,11 +1051,10 @@ func (s *Store) SetPGPIdentityClientProtected(id, fingerprint, keyID, armoredPub
 	})
 }
 
-// RewrapPGPPrivateKey replaces only the wrapped private key envelope,
-// leaving the identity (fingerprint, public key, provenance) untouched.
-// Used when the user changes their password: the wrapping key is derived
-// from that password, so the browser unwraps with the old one and rewraps
-// with the new one, and this stores the result.
+// RewrapPGPPrivateKey replaces only the wrapped private key envelope, leaving
+// the identity (fingerprint, public key, provenance) untouched. Used when the
+// user changes their password: the wrapping key is derived from that password,
+// so the browser unwraps with the old one and rewraps with the new one.
 func (s *Store) RewrapPGPPrivateKey(id, wrapped string) (User, error) {
 	if strings.TrimSpace(wrapped) == "" {
 		return User{}, errors.New("wrapped private key is required")
@@ -1107,12 +1064,10 @@ func (s *Store) RewrapPGPPrivateKey(id, wrapped string) (User, error) {
 			return errors.New("no pgp identity to rewrap")
 		}
 		// Rewrap exists for a password change on an account that is ALREADY
-		// client-protected: unwrap with the old password, rewrap with the new,
-		// store the result. Reaching it with a server-custody account instead
-		// cleared PGPPrivateKeyEnc — the only copy of the private key anyone
-		// could open — while leaving the identity advertised, so every message
-		// ever encrypted to it became permanently unreadable and senders kept
-		// encrypting to a key nobody held.
+		// client-protected. Reaching it with a server-custody account instead cleared
+		// PGPPrivateKeyEnc — the only copy of the private key anyone could open — while
+		// leaving the identity advertised, so every message ever encrypted to it became
+		// permanently unreadable and senders kept encrypting to a key nobody held.
 		if u.PGPProtection() != PGPProtectionClient {
 			return ErrNotClientProtected
 		}
@@ -1152,30 +1107,28 @@ var errRecoveryCodeNoMatch = errors.New("recovery code no match")
 
 // KDFGuard wraps one memory-hard comparison so a caller can meter it.
 //
-// A recovery-code check is up to ten derivations, so taking a concurrency slot
-// once and running all ten inside it holds that slot for seconds. With four
-// slots process-wide, four such checks own the instance's entire derivation
-// capacity and no login can proceed until they finish. Guarding each comparison
-// instead lets other work interleave between them while still never exceeding
-// one derivation's memory per caller.
+// A recovery-code check is up to ten derivations; one concurrency slot held
+// across all ten owns that slot for seconds, and with four slots process-wide
+// four such checks stall every login. Guarding each comparison lets other work
+// interleave while never exceeding one derivation's memory per caller.
 //
 // Returning an error abandons the remaining comparisons and surfaces from
-// ConsumeRecoveryCode unchanged, so an overloaded server can shed rather than
-// queue. A nil guard runs the comparisons directly.
+// ConsumeRecoveryCode unchanged, so an overloaded server sheds rather than
+// queues. A nil guard runs the comparisons directly.
 type KDFGuard func(compare func()) error
 
 // ConsumeRecoveryCode verifies candidate against the user's stored recovery
 // hashes; on the first match it removes that hash (one-time use) and persists.
 // It returns matched=false with a nil error and no write when nothing matches.
-// The scrypt comparisons run OUTSIDE the store lock, against a snapshot. Doing
-// them inside mutate held both s.mu and the users.json file lock across up to
-// ten 128 MiB derivations (~3s), and every authenticated request in the process
-// takes s.mu.RLock via currentUser -> Get, so one wrong code stalled the whole
-// API. Matching on the hash string rather than an index keeps the removal
-// correct even if the list changed while we were deriving.
 //
-// guard meters each comparison individually; see KDFGuard for why that is not
-// the same as metering the call. Pass nil to run unmetered.
+// The scrypt comparisons run OUTSIDE the store lock, against a snapshot: holding
+// s.mu and the file lock across up to ten 128 MiB derivations (~3s) stalls every
+// authenticated request, which takes s.mu.RLock via currentUser -> Get. Matching
+// on the hash string rather than an index keeps the removal correct if the list
+// changed while we were deriving.
+//
+// guard meters each comparison individually; see KDFGuard. Pass nil for
+// unmetered.
 func (s *Store) ConsumeRecoveryCode(id, candidate string, guard KDFGuard) (User, bool, error) {
 	snapshot, err := s.Get(id)
 	if err != nil {
@@ -1221,16 +1174,14 @@ func (s *Store) ConsumeRecoveryCode(id, candidate string, guard KDFGuard) (User,
 	return u, true, nil
 }
 
-// VerifyPassword checks a candidate password against a user's stored hash.
 // VerifyPassword checks a plaintext password against u's stored hash.
 //
-// Refuses outright for a derived-auth account. That is not a formality: after
-// conversion PasswordHash covers the client-derived AUTH SECRET, so a bare
-// comparison would happily accept that secret here as though it were the
-// password. Nothing today passes one where the other is expected — but the two
-// are different credentials for the same account, and the only way to keep them
-// from being interchangeable by accident is to make each verifier refuse the
-// other's accounts. See VerifyAuthSecret for the mirror image.
+// Refuses outright for a derived-auth account. After conversion PasswordHash
+// covers the client-derived AUTH SECRET, so a bare comparison would happily
+// accept that secret here as though it were the password. The two are different
+// credentials for the same account, and each verifier refusing the other's
+// accounts is what keeps them from becoming interchangeable by accident. See
+// VerifyAuthSecret for the mirror image.
 func VerifyPassword(u User, candidate string) bool {
 	if u.UsesDerivedAuth() {
 		return false
@@ -1239,9 +1190,9 @@ func VerifyPassword(u User, candidate string) bool {
 }
 
 // VerifySecretHash checks a candidate secret against a scrypt-encoded hash
-// produced by HashPassword. It is a generic counterpart to VerifyPassword for
-// callers hashing something other than a User's login password (e.g. an
-// app-specific CardDAV password).
+// produced by HashPassword — the generic counterpart to VerifyPassword, for
+// secrets other than a User's login password (e.g. an app-specific CardDAV
+// password).
 func VerifySecretHash(encoded, candidate string) bool {
 	return verifyScryptHash(encoded, candidate)
 }
@@ -1256,20 +1207,18 @@ const deviceSecretPrefix = "sha256:"
 // Plain SHA-256 where the rest of this file uses scrypt. A password KDF exists
 // to price guesses at a low-entropy human-chosen secret; a device secret is 24
 // bytes from crypto/rand (api.randomToken), unguessable by construction. So
-// scrypt bought nothing here and cost ~16 MB and ~50 ms on every request a
-// paired device makes — App Pull polls, mail sync, contacts sync, push-MFA.
+// scrypt bought nothing and cost ~16 MB and ~50 ms on every request a paired
+// device makes — App Pull polls, mail sync, contacts sync, push-MFA.
 //
-// Do NOT use this for anything a human types or chooses. Not full-entropy
-// random means HashPassword.
+// Do NOT use this for anything a human types or chooses; that needs
+// HashPassword.
 func HashDeviceSecret(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
 	return deviceSecretPrefix + hex.EncodeToString(sum[:])
 }
 
 // VerifyDeviceSecret checks a candidate device secret against a stored hash in
-// constant time.
-//
-// Untagged values fall through to scrypt: devices paired before
+// constant time. Untagged values fall through to scrypt: devices paired before
 // HashDeviceSecret existed hold one, and rejecting them would silently unpair
 // every phone on every existing install. New registrations write the tagged
 // form, so that branch drains as devices re-pair.
@@ -1288,15 +1237,14 @@ func VerifyDeviceSecret(stored, candidate string) bool {
 
 // Current scrypt cost parameters for newly written password hashes.
 //
-// N was 16384 (16 MiB), which is scrypt's original 2009 "interactive" figure and
-// the floor of current guidance rather than a target. 2^17 is 128 MiB and
-// roughly 200 ms of a core — the standard recommendation for an interactive
-// login, and about 8x the work per guess for anyone who steals users.json.
+// 2^17 is 128 MiB and roughly 200 ms of a core — the standard recommendation for
+// an interactive login, and about 8x the work per guess of the previous 16 MiB
+// setting for anyone who steals users.json.
 //
 // The cost is paid on every login attempt, including attempts against usernames
 // that do not exist (equalizeLoginTiming, so timing cannot enumerate accounts).
-// That is only safe because the login endpoint is now throttled instance-wide
-// AND per-IP AND per-account, and proof-of-work is on by default — see
+// That is only safe because the login endpoint is throttled instance-wide AND
+// per-IP AND per-account, and proof-of-work is on by default — see
 // api.handleLogin. Do NOT raise this further without checking those bounds
 // again: this constant and loginRateRefillPerSec multiply together into the CPU
 // an anonymous caller can spend.
@@ -1304,8 +1252,7 @@ func VerifyDeviceSecret(stored, candidate string) bool {
 // Stored hashes carry their own parameters (see verifyScryptHash), so raising
 // this does not invalidate anything. NeedsRehash reports which stored hashes are
 // below the current cost, and the login path upgrades them on the next
-// successful sign-in — the one moment the plaintext password is legitimately in
-// hand.
+// successful sign-in.
 const (
 	scryptN      = 1 << 17
 	scryptR      = 8
@@ -1313,12 +1260,11 @@ const (
 	scryptKeyLen = 32
 )
 
-// hashCostN is the N that new hashes are written with, and the floor
-// NeedsRehash measures stored hashes against. It is scryptN everywhere except
-// under SetHashCostForTest.
-//
-// Verification never reads this: verifyScryptHash takes the parameters from the
-// stored hash, so lowering it cannot weaken anything already on disk.
+// hashCostN is the N that new hashes are written with, and the floor NeedsRehash
+// measures stored hashes against. It is scryptN everywhere except under
+// SetHashCostForTest. Verification never reads it: verifyScryptHash takes the
+// parameters from the stored hash, so lowering it cannot weaken anything already
+// on disk.
 var hashCostN = scryptN
 
 // HashCostN reports the N new hashes are currently written with. Callers that
@@ -1332,34 +1278,26 @@ func HashCostN() int { return hashCostN }
 const MinVerifiableScryptN = 1 << 14
 
 // ProductionScryptN is the cost real password hashes are written at. Exported so
-// tests whose subject is the cost can restore it by name instead of repeating
-// the literal: a hardcoded 1<<17 in a test helper stops meaning "production" the
-// moment scryptN is raised, and the login-budget tests it exists for then
-// measure a cost the server does not use.
+// tests whose subject is the cost can restore it by name: a hardcoded 1<<17 in a
+// test helper stops meaning "production" the moment scryptN is raised.
 const ProductionScryptN = scryptN
 
 // SetHashCostForTest lowers the write-side scrypt cost and returns a function
-// that restores it.
-//
-// 128 MiB and ~200 ms per derivation is right for a login and ruinous for a
-// test suite: internal/api alone spent over four minutes on it, and again in CI
-// under -race.
+// that restores it: 128 MiB and ~200 ms per derivation is right for a login and
+// ruinous for a test suite.
 //
 // It panics outside a test binary. It weakens password hashing and is exported
 // from a package production code imports, so a dev-only flag or fixture loader
-// calling it would drop every credential written afterwards to 16 MiB — and
-// because NeedsRehash measures against hashCostN too, nothing would flag them
-// for upgrade.
+// calling it would drop every credential written afterwards to 16 MiB, with
+// NeedsRehash measuring against hashCostN too and never flagging them.
 //
-// It panics below MinVerifiableScryptN: verifyScryptHash rejects anything under
-// that floor, so a lower setting mints hashes that can never verify, surfacing
-// as a pile of unrelated "invalid credentials" assertions rather than as an
-// invalid cost.
+// It panics below MinVerifiableScryptN, which verifyScryptHash rejects — a lower
+// setting mints hashes that can never verify.
 //
-// Call it from TestMain, before any test starts. It writes a package-level
-// variable with no synchronization, so changing it while tests are running is a
-// data race. Tests that assert production strength, or that measure the CPU the
-// login budget meters, must run in a package that does not apply the override.
+// Call it from TestMain, before any test starts: it writes a package-level
+// variable with no synchronization. Tests that assert production strength, or
+// measure the CPU the login budget meters, must run in a package that does not
+// apply the override.
 func SetHashCostForTest(n int) (restore func()) {
 	if !testing.Testing() {
 		panic("users.SetHashCostForTest called outside a test binary: this weakens password hashing and must never run in production")
@@ -1417,17 +1355,13 @@ func verifyScryptHash(encoded, candidate string) bool {
 	if err != nil {
 		return false
 	}
-	// Bound the cost parameters: scrypt.Key allocates 128*r*N bytes of
-	// whatever it is told, and these three come out of a file (users.json,
-	// per-user state.json, an operator's ADMIN_PASS_HASH). One bad value asks
-	// the allocator for terabytes on the next login, OOM-kills the process,
-	// and supervisord restarts it straight back into the same crash.
-	// x/crypto's own check only rejects values far above this.
-	//
-	// Floor is MinVerifiableScryptN: low enough to keep verifying hashes
-	// written before the cost was raised, high enough that nothing this
-	// package would mint today falls under it. Ceiling is ~1 GB, above any
-	// plausible tuning.
+	// Bound the cost parameters: scrypt.Key allocates 128*r*N bytes of whatever it
+	// is told, and these come out of a file (users.json, per-user state.json, an
+	// operator's ADMIN_PASS_HASH). One bad value asks for terabytes on the next
+	// login and OOM-kills the process into a supervisord restart loop; x/crypto's
+	// own check only rejects values far above this. The floor is
+	// MinVerifiableScryptN so hashes written before the cost was raised still
+	// verify; the ceiling is ~1 GB.
 	if n < MinVerifiableScryptN || n > 1<<20 || n&(n-1) != 0 || r < 1 || r > 32 || p < 1 || p > 16 {
 		return false
 	}
@@ -1451,16 +1385,12 @@ func verifyScryptHash(encoded, candidate string) bool {
 
 // NeedsRehash reports whether a stored scrypt hash was written with cost
 // parameters below the current ones, so a caller holding the verified plaintext
-// can upgrade it.
-//
-// Raising scryptN protects new accounts and does nothing for existing ones,
-// which is the majority of the accounts an attacker who steals users.json would
-// be cracking. The only moment the plaintext is legitimately available to
-// re-derive from is immediately after a successful verification, so that is
-// where the upgrade has to happen.
+// can upgrade it. Raising scryptN otherwise protects only new accounts, and
+// immediately after a successful verification is the one moment the plaintext is
+// legitimately available to re-derive from.
 //
 // An unparseable or foreign-format hash returns false: rehashing something this
-// package did not write is not an upgrade, it is a guess.
+// package did not write is a guess, not an upgrade.
 func NeedsRehash(encoded string) bool {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "scrypt" {
@@ -1485,13 +1415,10 @@ func NeedsRehash(encoded string) bool {
 }
 
 // RehashPassword re-derives id's password hash at the current cost parameters,
-// given the already-verified plaintext.
-//
-// Verifies the candidate again inside the write lock before replacing anything.
-// The caller has necessarily already checked it, but this function's whole job
-// is overwriting a credential, and re-checking under the lock is what makes a
-// bug at the call site fail closed instead of setting the account's password to
-// whatever string was passed in.
+// given the already-verified plaintext. It verifies the candidate again inside
+// the write lock: this function's whole job is overwriting a credential, and
+// re-checking under the lock is what makes a bug at the call site fail closed
+// instead of setting the account's password to whatever string was passed in.
 //
 // MustChangePassword and every other field are left untouched: this is not a
 // password change, and it must be invisible to the user.
@@ -1499,8 +1426,8 @@ func (s *Store) RehashPassword(id, verifiedCredential string) error {
 	_, err := s.mutate(id, func(u *User) error {
 		// Whichever credential form this account stores. VerifyPassword refuses
 		// derived-auth accounts by design, so branching here is required, not
-		// defensive — without it the rehash upgrade would silently never run for
-		// a converted account and those hashes would stay at the old cost.
+		// defensive — without it the rehash upgrade would silently never run for a
+		// converted account.
 		ok := VerifyPassword(*u, verifiedCredential)
 		if u.UsesDerivedAuth() {
 			ok = VerifyAuthSecret(*u, verifiedCredential)
@@ -1531,16 +1458,12 @@ const (
 	AuthDerivationPBKDF2 = "pbkdf2-sha256-v1"
 )
 
-// MinAuthSecretHexLen is the shortest client-derived auth secret this store
-// will accept, as hex.
-//
-// The server can no longer measure the password's length — that is the entire
-// point — so it measures what it does receive. The browser derives 32 bytes (64
-// hex chars); anything shorter is a client that is not doing the derivation, and
-// accepting it would let a modified client register a trivially guessable
-// credential. The password length floor (MinPasswordLen) is enforced in the
-// browser before derivation, and by this store on every path where it still
-// sees a plaintext password.
+// MinAuthSecretHexLen is the shortest client-derived auth secret this store will
+// accept, as hex. The server can no longer measure the password's length — that
+// is the point — so it measures what it does receive: the browser derives 32
+// bytes (64 hex chars), and anything shorter is a client that is not doing the
+// derivation. MinPasswordLen is enforced in the browser before derivation, and
+// by this store on every path where it still sees a plaintext password.
 const MinAuthSecretHexLen = 64
 
 // ErrAuthSecretMalformed is returned when a client-supplied auth secret is not
@@ -1565,12 +1488,10 @@ func (u User) UsesDerivedAuth() bool {
 }
 
 // VerifyAuthSecret checks a client-derived auth secret against u's stored hash.
-//
 // Separate from VerifyPassword so no call site can accidentally accept a
-// plaintext password for a derived-auth account, or the reverse. The two are
-// different credentials for the same account and must never be interchangeable:
-// treating a derived secret as a password would let anyone who read the salt
-// off the public login-params endpoint authenticate with it.
+// plaintext password for a derived-auth account, or the reverse: treating a
+// derived secret as a password would let anyone who read the salt off the public
+// login-params endpoint authenticate with it.
 func VerifyAuthSecret(u User, candidate string) bool {
 	if !u.UsesDerivedAuth() {
 		return false
@@ -1580,10 +1501,8 @@ func VerifyAuthSecret(u User, candidate string) bool {
 
 // SetDerivedAuth replaces id's credential with a client-derived auth secret,
 // recording the salt and iteration count the client used so a later login can
-// reproduce it.
-//
-// requireChange mirrors SetPassword's flag. The PGP-key envelope is written in
-// the same mutation when rewrapped is non-empty — see the note on
+// reproduce it. requireChange mirrors SetPassword's flag. The PGP-key envelope
+// is written in the same mutation when rewrapped is non-empty — see
 // SetDerivedAuthAndRewrapPGP.
 func (s *Store) SetDerivedAuth(id, authSecret, loginSalt string, iterations int, requireChange bool) (User, error) {
 	return s.SetDerivedAuthAndRewrapPGP(id, authSecret, loginSalt, iterations, requireChange, "")
@@ -1593,15 +1512,12 @@ func (s *Store) SetDerivedAuth(id, authSecret, loginSalt string, iterations int,
 // non-empty, the client-wrapped PGP private key envelope — both inside one
 // mutation, or neither.
 //
-// The two writes have to be atomic. The PGP envelope is sealed under a key
-// derived from the account password, so a password change that lands without the
-// matching rewrap leaves the envelope openable only with a password the user no
-// longer has. That was two sequential HTTP requests, and a dropped connection
-// between them permanently stranded the key: the documented recovery path
-// ("unlock with your PREVIOUS password, then change your password again") could
-// not work, because changing the password again re-derives from the CURRENT one
-// and fails to unwrap. There is no way back from that except deleting the
-// identity and losing every message ever encrypted to it.
+// The two writes have to be atomic. The envelope is sealed under a key derived
+// from the account password, so a password change that lands without the
+// matching rewrap leaves it openable only with a password the user no longer
+// has — permanently, since a later rewrap re-derives from the CURRENT password.
+// The only way back is deleting the identity and losing every message encrypted
+// to it.
 func (s *Store) SetDerivedAuthAndRewrapPGP(id, authSecret, loginSalt string, iterations int, requireChange bool, rewrapped string) (User, error) {
 	if err := ValidateAuthSecret(authSecret); err != nil {
 		return User{}, err
@@ -1636,25 +1552,20 @@ func (s *Store) SetDerivedAuthAndRewrapPGP(id, authSecret, loginSalt string, ite
 	})
 }
 
-// MinLoginIterations is the floor on a client-declared PBKDF2 work factor.
-//
-// The client chooses it (it has to — it does the derivation), so the server
-// bounds it. Without a floor a modified or downgraded client could declare 1
-// iteration and register a credential derived at effectively no cost, which
-// would be indistinguishable from a proper one to everything downstream.
+// MinLoginIterations is the floor on a client-declared PBKDF2 work factor. The
+// client chooses it — it does the derivation — so the server bounds it. Without
+// a floor a modified or downgraded client could declare 1 iteration and register
+// a credential derived at effectively no cost, indistinguishable downstream from
+// a proper one.
 const MinLoginIterations = 100_000
 
 // UpgradeToDerivedAuth converts a legacy account to client-derived auth after a
 // successful legacy login, given the auth secret the client derived alongside
-// the password it just proved.
-//
-// Called on the legacy login path, which is the only moment both credentials are
-// in hand at once. Verifies the plaintext password again inside the write lock:
-// this replaces a credential, so a bug at the call site has to fail closed
-// rather than pin the account to a caller-supplied secret.
-//
-// A no-op for an account that has already upgraded, so a racing second login
-// cannot downgrade or re-pin it.
+// the password it just proved — the only moment both credentials are in hand at
+// once. It verifies the plaintext again inside the write lock so a bug at the
+// call site fails closed rather than pinning the account to a caller-supplied
+// secret. A no-op for an account that has already upgraded, so a racing second
+// login cannot downgrade it.
 func (s *Store) UpgradeToDerivedAuth(id, verifiedPassword, authSecret, loginSalt string, iterations int) error {
 	if err := ValidateAuthSecret(authSecret); err != nil {
 		return err

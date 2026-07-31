@@ -97,11 +97,11 @@ func (c *mfaPushLimiter) tryConsume(userID string) (ok bool, retryAfter time.Dur
 // mfaPushWindow, so anything older than that is dead weight, and the rule in this
 // codebase is that every bounded in-memory map in this package has an explicit
 // sweep (see backend/AGENTS.md). This map was the one that did not. The 12x
-// margin over the window matches sendAsCooldownSweepMaxAge, so entries are never
+// margin over the window matches cooldownSweepMaxAge, so entries are never
 // reclaimed while still influencing a live decision.
 const mfaPushLimiterSweepMaxAge = 1 * time.Hour
 
-// mfaPushLimiterSweepInterval mirrors sendAsCooldownSweepInterval: the map is
+// mfaPushLimiterSweepInterval mirrors cooldownSweepInterval: the map is
 // tiny and bounded by the account count, so there is nothing to gain from
 // sweeping it more eagerly than the margin above.
 const mfaPushLimiterSweepInterval = 1 * time.Hour

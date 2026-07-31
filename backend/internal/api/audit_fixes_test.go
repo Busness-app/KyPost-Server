@@ -73,16 +73,154 @@ func TestForeignDeviceIDIsAConflict(t *testing.T) {
 	}
 
 	// Test 1: attacker trying to reserve victim's device should fail (conflict).
-	if srv.reserveDeviceID(attacker.ID, victimDeviceID) {
+	if _, ok := srv.reserveDeviceID(attacker.ID, victimDeviceID); ok {
 		t.Fatal("attacker should fail to reserve a device id owned by the victim")
 	}
 	// Test 2: victim re-registering their own device should succeed (no conflict).
-	if !srv.reserveDeviceID(victimID, victimDeviceID) {
+	victimRes, ok := srv.reserveDeviceID(victimID, victimDeviceID)
+	if !ok {
 		t.Fatal("the victim should succeed to reserve their own device id")
 	}
+	victimRes.Release()
 	// Test 3: attacker trying to reserve an unused device should succeed.
-	if !srv.reserveDeviceID(attacker.ID, "brand-new-device-id") {
+	attackerRes, ok := srv.reserveDeviceID(attacker.ID, "brand-new-device-id")
+	if !ok {
 		t.Fatal("an unused device id should be reserved successfully")
+	}
+	attackerRes.Release()
+}
+
+// A registration that fails after reserving must not leave the id claimed.
+//
+// A leaked reservation is permanent: nothing sweeps an index entry the owner
+// still holds, reserveDeviceID refuses the id to everyone afterwards, and every
+// auth attempt against it burns a deviceLockout strike, because the owner lookup
+// succeeds and only then finds no device. One transient SQLite error during
+// re-pairing used to brick that phone until the process restarted.
+func TestFailedRegistrationReleasesItsDeviceIDReservation(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	ownerID := all[0].ID
+
+	res, ok := srv.reserveDeviceID(ownerID, "device-that-never-persists")
+	if !ok {
+		t.Fatal("reserve should succeed for an unused id")
+	}
+	res.Release() // the handler's deferred release, on a path that never committed
+
+	srv.userMu.Lock()
+	_, stillIndexed := srv.deviceIndex["device-that-never-persists"]
+	inFlight := srv.deviceReserving["device-that-never-persists"]
+	srv.userMu.Unlock()
+	if stillIndexed {
+		t.Fatal("a released reservation left the device id claimed; it is now unregisterable forever")
+	}
+	if inFlight != 0 {
+		t.Fatalf("in-flight count = %d after release, want 0", inFlight)
+	}
+
+	// And the id is registerable again, by anyone.
+	if _, ok := srv.reserveDeviceID(ownerID, "device-that-never-persists"); !ok {
+		t.Fatal("the id should be reservable again after a released reservation")
+	}
+}
+
+// Commit must win over the handler's deferred Release, which runs after it.
+func TestCommitSurvivesTheDeferredRelease(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	ownerID := all[0].ID
+
+	res, ok := srv.reserveDeviceID(ownerID, "committed-device")
+	if !ok {
+		t.Fatal("reserve should succeed")
+	}
+	res.Commit("committed-device")
+	res.Release() // the deferred call, arriving after the commit
+
+	srv.userMu.Lock()
+	owner, indexed := srv.deviceIndex["committed-device"]
+	srv.userMu.Unlock()
+	if !indexed || owner != ownerID {
+		t.Fatal("the deferred Release undid a committed registration")
+	}
+}
+
+// A merged registration (upsert folded it into an existing row) must release the
+// id the request asked for while indexing the one it actually landed under.
+func TestCommitReleasesTheRequestedIDWhenTheUpsertMerged(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	ownerID := all[0].ID
+
+	res, ok := srv.reserveDeviceID(ownerID, "requested-id")
+	if !ok {
+		t.Fatal("reserve should succeed")
+	}
+	res.Commit("actual-id-from-the-merge")
+	res.Release()
+
+	srv.userMu.Lock()
+	_, requestedStillHeld := srv.deviceIndex["requested-id"]
+	_, actualIndexed := srv.deviceIndex["actual-id-from-the-merge"]
+	srv.userMu.Unlock()
+	if requestedStillHeld {
+		t.Fatal("the merged-away id is still claimed and can never be registered again")
+	}
+	if !actualIndexed {
+		t.Fatal("the id the device actually landed under was not indexed")
+	}
+}
+
+// deviceIndex was the one bounded map in this package with no sweeper. Residue
+// there is not inert: it makes an id unregisterable and turns every attempt
+// against it into a lockout strike.
+func TestSweepDeviceIndexDropsResidueButKeepsLiveAndInFlight(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	ownerID := all[0].ID
+	liveDeviceID, _ := pairNativeDevice(t, srv, ownerID, "live-device")
+
+	// Residue: an entry with no device row behind it, e.g. one the daemon
+	// removed as stale in the other process.
+	srv.userMu.Lock()
+	srv.deviceIndex["orphan-device"] = ownerID
+	srv.userMu.Unlock()
+
+	// In flight: reserved, not yet persisted. The sweep decides by looking at
+	// disk, so without the exemption this is exactly what it would delete.
+	inFlight, ok := srv.reserveDeviceID(ownerID, "in-flight-device")
+	if !ok {
+		t.Fatal("reserve should succeed")
+	}
+	defer inFlight.Release()
+
+	if removed := srv.sweepDeviceIndex(); removed != 1 {
+		t.Fatalf("removed = %d, want 1 (only the orphan)", removed)
+	}
+
+	srv.userMu.Lock()
+	defer srv.userMu.Unlock()
+	if _, ok := srv.deviceIndex["orphan-device"]; ok {
+		t.Fatal("residue survived the sweep")
+	}
+	if _, ok := srv.deviceIndex[liveDeviceID]; !ok {
+		t.Fatal("the sweep dropped a device that is on disk; it now costs a lockout strike per request")
+	}
+	if _, ok := srv.deviceIndex["in-flight-device"]; !ok {
+		t.Fatal("the sweep dropped an in-flight reservation, reopening the concurrent-registration hijack")
 	}
 }
 
@@ -130,12 +268,12 @@ func TestMFALockoutIsPerAccountAcrossChallenges(t *testing.T) {
 	srv := newTestServer(t)
 	const userID = "user-abc"
 	for i := 0; i < mfaMaxFailures; i++ {
-		if ok, _ := srv.mfaLockout.allowed(userID); !ok {
+		if ok, _ := srv.mfaLockout.lockedNow(userID); !ok {
 			t.Fatalf("attempt %d: should be allowed before the cap", i+1)
 		}
 		_, _ = srv.mfaLockout.tryAttempt(userID)
 	}
-	if ok, _ := srv.mfaLockout.allowed(userID); ok {
+	if ok, _ := srv.mfaLockout.lockedNow(userID); ok {
 		t.Fatal("second-factor attempts must be locked out for the account after the cap, regardless of new challenges")
 	}
 }

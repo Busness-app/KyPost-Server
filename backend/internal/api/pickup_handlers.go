@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"html"
 	"html/template"
 	"net/http"
 	"net/smtp"
@@ -111,15 +110,42 @@ func (s *Server) handlePickupOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	body = s.pickupDisplayBody(body, mode)
 
+	var buf bytes.Buffer
+	if err := serverSealedMessageTemplate.Execute(&buf, struct{ Subject, Body string }{subject, body}); err != nil {
+		// The link is already burned by View, so there is nothing to retry and
+		// no second chance to render. Say so rather than showing a blank page.
+		s.logger.Error("failed to render pickup message page", "error", err.Error())
+		http.Error(w, "the message could not be displayed, and this link has now been used", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>%s</title></head>`+
-		`<body style="font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px">`+
-		`<h1>%s</h1><pre style="white-space:pre-wrap;font-family:inherit">%s</pre>`+
-		`<p style="color:#666">This message has now been marked as viewed and cannot be retrieved again.</p>`+
-		`</body></html>`,
-		html.EscapeString(subject), html.EscapeString(subject), html.EscapeString(body))
+	_, _ = w.Write(buf.Bytes())
 }
+
+// serverSealedMessagePage renders the decrypted message.
+//
+// html/template, not fmt.Fprintf with html.EscapeString — the rule the landing
+// page below already followed, applied to the page that actually carries
+// sender-controlled content. The two renderers sat fifteen lines apart with
+// different escaping strategies, and serverSealedLandingTemplate's own comment
+// called the other one wrong: "a hand-rolled fmt.Sprintf here would put an
+// attacker-adjacent value into a format string".
+//
+// html.EscapeString happened to be sufficient for these two sinks (element text
+// in <title> and <pre>), so this is not a fix for a live hole. It removes the
+// standing invitation to add a third interpolation — into an attribute, a URL,
+// or a style — where manual escaping stops being sufficient and nothing would
+// have flagged it.
+const serverSealedMessagePage = `<!doctype html><html><head><meta charset="utf-8">` +
+	`<title>{{.Subject}}</title><meta name="robots" content="noindex,nofollow"></head>` +
+	`<body style="font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px">` +
+	`<h1>{{.Subject}}</h1>` +
+	`<pre style="white-space:pre-wrap;font-family:inherit">{{.Body}}</pre>` +
+	`<p style="color:#666">This message has now been marked as viewed and cannot be retrieved again.</p>` +
+	`</body></html>`
+
+var serverSealedMessageTemplate = template.Must(template.New("pickupMessage").Parse(serverSealedMessagePage))
 
 // serverSealedLandingPage is the shell shown before the message is read. It
 // contains no message content — not even the subject — so fetching it

@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
 	"kypost-server/backend/internal/config"
 	"kypost-server/backend/internal/health"
+	"kypost-server/backend/internal/retry"
 	"kypost-server/backend/internal/state"
 
 	"github.com/SherClockHolmes/webpush-go"
@@ -113,6 +116,95 @@ type NativePushOutcome struct {
 	Queued bool
 }
 
+// Transient-failure retry for a single device send.
+//
+// The TODO this replaces read: "a failed send (relay unreachable, upstream 5xx,
+// or a 429 when the relay's per-server rate limit is exceeded) currently drops
+// the push — the email still syncs in-app, but no notification fires." It sat on
+// the delivery path with no backoff, no retry and no circuit breaker, which made
+// a one-second relay hiccup indistinguishable from a dead relay: both silently
+// lost the notification.
+//
+// Retried IN-REQUEST, deliberately. A durable queue with its own scheduler is a
+// feature — it needs persistence, ordering, a drain worker and a poisoned-message
+// story — and it is not what a transient 503 needs. What this covers is the
+// common case: the relay was briefly unavailable and is fine a second later.
+//
+// NOT retried: a stale token (the relay is healthy and pruning), a 4xx that is
+// not 429 (the request is wrong; repeating it will not fix it), and anything
+// that is not a recognised relay failure. Retrying a permanent error is how a
+// dead relay turns into a thread pool full of sleeping goroutines.
+//
+// A persistent failure still ends at health.RecordNativePushFailure, which is
+// what surfaces it — the retry narrows the window, it does not replace the
+// signal. What remains unbuilt is re-attempt across requests: a relay down for
+// longer than pushRetryAttempts * backoff still drops the notification, and the
+// email still syncs in-app. That is the accepted limitation, recorded here
+// rather than as a TODO nobody is scheduled to do.
+const (
+	// nativePushSendTimeout bounds ONE attempt, not the whole retry sequence.
+	nativePushSendTimeout = 12 * time.Second
+
+	pushRetryAttempts = 3
+	pushRetryBackoff  = 500 * time.Millisecond
+	// maxRelayRetryAfter bounds how long a relay-supplied Retry-After may park
+	// this send. The value comes from the far end; unbounded, a hostile or broken
+	// relay picks how long a goroutine sleeps.
+	maxRelayRetryAfter = 5 * time.Second
+)
+
+// retryablePushFailure reports whether err is worth another attempt.
+func retryablePushFailure(err error) bool {
+	if err == nil || errors.Is(err, ErrNativeDeviceStale) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	// Timeouts and transport failures: the request never produced a response.
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	var statusErr *relayStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.Code == http.StatusTooManyRequests || statusErr.Code >= 500
+	}
+	return false
+}
+
+// pushRetryDelay is the wait before the next attempt: the relay's own
+// Retry-After when it supplied one, otherwise exponential backoff.
+func pushRetryDelay(err error, attempt int) time.Duration {
+	var statusErr *relayStatusError
+	if errors.As(err, &statusErr) && statusErr.RetryAfter > 0 {
+		return statusErr.RetryAfter
+	}
+	return pushRetryBackoff << attempt
+}
+
+// sendWithRetry dispatches one device's notification, retrying transient
+// failures. Each attempt gets its own timeout derived from ctx.
+func sendWithRetry(ctx context.Context, dispatcher *NativePushDispatcher, device state.NativeDevice, message NativePushMessage) error {
+	var lastErr error
+	_, err := retry.Loop(ctx, pushRetryAttempts,
+		func(int) time.Duration { return pushRetryDelay(lastErr, 0) },
+		func(attempt int) (struct{}, error, bool) {
+			sendCtx, cancel := context.WithTimeout(ctx, nativePushSendTimeout)
+			defer cancel()
+			err := dispatcher.Send(sendCtx, device, message)
+			lastErr = err
+			return struct{}{}, err, retryablePushFailure(err)
+		})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // SendNativePush dispatches message to every native device registered in
 // store. See SendNativePushToDevices for the delivery semantics; this is a
 // thin wrapper that targets every device in store.
@@ -156,9 +248,7 @@ func SendNativePushToDevices(ctx context.Context, dispatcher *NativePushDispatch
 			platform = "android" // default for unknown/empty
 		}
 
-		sendCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-		err := dispatcher.Send(sendCtx, device, message)
-		cancel()
+		err := sendWithRetry(ctx, dispatcher, device, message)
 		if err != nil {
 			failed++
 			if errors.Is(err, ErrNativeDeviceStale) {
