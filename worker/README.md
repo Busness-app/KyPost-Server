@@ -29,6 +29,9 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(service acc
    npx wrangler kv namespace create API_KEYS
    npx wrangler kv namespace create OAUTH_CACHE
    ```
+   The `RELAY_COORDINATOR` Durable Object needs no setup step — the
+   `[[migrations]]` block in the template creates it on your first deploy. See
+   [Token pinning](#token-pinning) for why it is required.
 3. Set secrets from your Firebase service-account JSON (the same file the Go
    backend used as `FCM_SERVICE_ACCOUNT_FILE`):
    ```sh
@@ -152,6 +155,19 @@ device token, including ones it has no business reaching. A claim is
 automatically released for reclaiming if the owning key is later revoked,
 disabled, or expires — so rotating your key never permanently orphans your
 own devices, it just re-claims them on the next successful send.
+
+Ownership is held by the `RELAY_COORDINATOR` Durable Object, not by KV. "Is this
+token already claimed?" followed by "claim it" is a check-then-write, and KV is
+eventually consistent — two keys racing the first send to one token could both
+be told it was free, which is exactly the spoofing this rule exists to stop. All
+requests for one token route to the same Durable Object instance and are handled
+one at a time, so the check and the write cannot be interleaved. The same object
+enforces one active self-registered key per IP on `/register`.
+
+The binding is **required**: `/send` and `/register` both return `503` without
+it, rather than silently falling back to the racy path. Durable Objects are
+available on the Workers Free plan; the `[[migrations]]` block in
+`wrangler.toml.example` creates the class on first deploy.
 
 ## Rate limiting
 

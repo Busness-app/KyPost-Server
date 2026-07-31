@@ -27,9 +27,18 @@ type davCredentialCacheEntry struct {
 
 // davCredentialCache is a short-lived, in-memory cache of verified CardDAV
 // Basic Auth credentials, keyed by a hash of username+password.
+//
+// `generation` is what makes revocation immediate rather than eventually
+// immediate. Clearing the map is not enough on its own: a request that read the
+// credential file just before revokeAllUserCredentials deleted it is still in
+// flight, and its `put` lands after the clear — re-admitting a credential that
+// no longer exists for a full davCredentialTTL. Callers therefore snapshot the
+// generation BEFORE they read the credential they are about to verify, and
+// `put` drops the entry if invalidation bumped it in between.
 type davCredentialCache struct {
-	mu      sync.Mutex
-	entries map[string]davCredentialCacheEntry
+	mu         sync.Mutex
+	entries    map[string]davCredentialCacheEntry
+	generation uint64
 }
 
 func newDAVCredentialCache() davCredentialCache {
@@ -57,10 +66,24 @@ func (c *davCredentialCache) get(username, password string) (AuthContext, bool) 
 	return entry.authContext, true
 }
 
-func (c *davCredentialCache) put(username, password string, ac AuthContext) {
+// currentGeneration snapshots the invalidation counter. Take it BEFORE reading
+// the credential that is about to be verified, and hand it back to put.
+func (c *davCredentialCache) currentGeneration() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.generation
+}
+
+// put caches a verified credential, unless the cache was invalidated since gen
+// was taken — in which case the credential this verification was based on may
+// already have been deleted, and caching it would resurrect it.
+func (c *davCredentialCache) put(gen uint64, username, password string, ac AuthContext) {
 	key := davCredentialCacheKey(username, password)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.generation != gen {
+		return
+	}
 	c.entries[key] = davCredentialCacheEntry{authContext: ac, expiresAt: time.Now().Add(davCredentialTTL)}
 }
 
@@ -69,10 +92,15 @@ func (c *davCredentialCache) put(username, password string, ac AuthContext) {
 // possible password hash, so password regeneration/revocation just clears
 // the whole cache — cheap at the expected scale (a handful of self-hosted
 // users).
+//
+// The generation bump is the half that closes the window: clearing the map
+// evicts what is already cached, bumping the generation rejects what verifiers
+// still in flight are about to cache.
 func (c *davCredentialCache) invalidateUser(_ string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries = map[string]davCredentialCacheEntry{}
+	c.generation++
 }
 
 // withDAVBasicAuth authenticates a CardDAV request via HTTP Basic Auth
@@ -129,6 +157,12 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			return
 		}
 
+		// Snapshot the invalidation counter before anything below reads the
+		// account or the credential file, so a revocation that races this
+		// verification is guaranteed to be seen by the put at the end (see
+		// davCredentialCache).
+		gen := s.davCredentials.currentGeneration()
+
 		u, err := s.users.GetByUsername(username)
 		if err != nil || !u.Active {
 			// Pay the same scrypt cost a real password check would, so
@@ -175,7 +209,7 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 
 		s.davLockout.recordSuccess(lockKey)
 		ac := AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}
-		s.davCredentials.put(username, password, ac)
+		s.davCredentials.put(gen, username, password, ac)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	})
 }

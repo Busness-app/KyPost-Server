@@ -2,7 +2,7 @@
 
 ## Purpose
 
-React 18 single-page application for configuration, health monitoring, classification decision auditing, and log streaming. Served as static files from the Go API server after build.
+React 19 single-page application for configuration, health monitoring, classification decision auditing, and log streaming. Served as static files from the Go API server after build.
 
 ## Ownership
 
@@ -10,7 +10,7 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 
 ## Local Contracts
 
-- React 18.3, React Router 6.30, TypeScript, Vite, Quill (WYSIWYG compose editor), qrcode (mobile pairing QR)
+- React 19.2, React Router 8.3, TypeScript 7, Vite 8, Quill (WYSIWYG compose editor), qrcode (mobile pairing QR)
 - All HTTP calls go through `src/api/client.ts` (`getJSON`, `postJSON`, `putJSON`, `deleteJSON`, `postFormData`) — never use `fetch` directly in page components
 - Auth state is owned by `App.tsx` and published through `AuthContext` (`src/auth.tsx`); pages read `{authenticated, userId, username, role, mustChangePassword}` via `useAuth()`, not via direct `/api/auth/me` calls
 - RBAC: `protect(element, adminOnly)` in `App.tsx` gates routes (`/users` and `/logs` are admin-only, redirecting non-admins to `/read`); `settingsNavItems` entries carry an `adminOnly` flag that filters the settings nav; `ConfigPage` shows only the Email Settings tab (plus a local theme card) to non-admins — Application/Labels/Remote LLM tabs are admin-only. Frontend gating is UX only; the server enforces all policy

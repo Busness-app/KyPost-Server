@@ -9,6 +9,8 @@
  * which createRelayFetchHandler below assembles into each worker's `fetch`.
  */
 
+import type { RelayCoordinator } from "./relay-coordinator";
+
 /** Cloudflare native rate-limiting binding (configured in wrangler.toml). */
 export interface RateLimitBinding {
   limit(options: { key: string }): Promise<{ success: boolean }>;
@@ -54,6 +56,13 @@ export interface CommonEnv {
   REGISTER_RATE_LIMITER?: RateLimitBinding;
   /** Per-key usage counters, offloaded off the KV write path. */
   USAGE_ANALYTICS?: AnalyticsEngineDatasetLike;
+  /**
+   * Strongly-consistent owner of the two check-then-write invariants KV cannot
+   * hold: device-token pinning and one-active-key-per-IP. See RelayCoordinator.
+   * Optional in the type only so the binding can be reported missing rather than
+   * crashing; both call sites fail CLOSED without it.
+   */
+  RELAY_COORDINATOR?: DurableObjectNamespace<RelayCoordinator>;
 }
 
 export interface ApiKeyRecord {
@@ -193,65 +202,113 @@ export function isExpired(record: ApiKeyRecord, now: number): boolean {
 // claim is released for reclaiming once the owning key is revoked/expired/
 // deleted, so key rotation never permanently orphans a legitimate device.
 
-export type TokenBindingResult = { allowed: true } | { allowed: false; reason: string };
-
 /**
- * Checks whether keyId may send to token: allowed if the token is unclaimed,
- * already claimed by this same key, or the claiming key is no longer active.
+ * Resolves the coordinator instance that owns one claim. Naming the instance
+ * after the thing being claimed is what serializes the racers: every request for
+ * one token, or one registering IP, lands on the same object.
  */
-export async function checkTokenBinding(env: CommonEnv, token: string, keyId: string): Promise<TokenBindingResult> {
-  const tokenHash = await sha256Hex(token);
-  const boundKeyId = await env.API_KEYS.get(BOUND_TOKEN_PREFIX + tokenHash);
-  if (!boundKeyId || boundKeyId === keyId) {
-    return { allowed: true };
+function coordinatorFor(env: CommonEnv, name: string): DurableObjectStub<RelayCoordinator> | null {
+  const ns = env.RELAY_COORDINATOR;
+  if (!ns) {
+    return null;
   }
-  const boundHash = await env.API_KEYS.get(KEY_INDEX_PREFIX + boundKeyId);
-  if (!boundHash) {
-    return { allowed: true }; // the claiming key was fully deleted
-  }
-  const boundRecord = await env.API_KEYS.get<ApiKeyRecord>(KEY_PREFIX + boundHash, "json");
-  if (!boundRecord || !boundRecord.enabled || isExpired(boundRecord, Date.now())) {
-    return { allowed: true }; // claiming key is revoked/disabled/expired: free to reclaim
-  }
-  return { allowed: false, reason: "token is already bound to a different active api key" };
+  return ns.get(ns.idFromName(name));
 }
 
-/** Claims token for keyId. */
-export async function bindToken(env: CommonEnv, token: string, keyId: string): Promise<void> {
-  const tokenHash = await sha256Hex(token);
-  await env.API_KEYS.put(BOUND_TOKEN_PREFIX + tokenHash, keyId);
+export function tokenCoordinator(env: CommonEnv, tokenHash: string): DurableObjectStub<RelayCoordinator> | null {
+  return coordinatorFor(env, "token:" + tokenHash);
+}
+
+export function registrationCoordinator(env: CommonEnv, ipBucketKey: string): DurableObjectStub<RelayCoordinator> | null {
+  return coordinatorFor(env, "ip:" + ipBucketKey);
+}
+
+/** Whether keyId still names a key that may hold a claim. */
+async function keyIsActive(env: CommonEnv, keyId: string): Promise<boolean> {
+  const hash = await env.API_KEYS.get(KEY_INDEX_PREFIX + keyId);
+  if (!hash) {
+    return false; // fully deleted
+  }
+  const record = await env.API_KEYS.get<ApiKeyRecord>(KEY_PREFIX + hash, "json");
+  return Boolean(record && record.enabled && !isExpired(record, Date.now()));
 }
 
 /** Releases token's claim (used to roll back a pre-send claim on a dead token). */
-export async function releaseToken(env: CommonEnv, token: string): Promise<void> {
+export async function releaseToken(rc: RequestContext, token: string, keyId: string): Promise<void> {
   const tokenHash = await sha256Hex(token);
-  await env.API_KEYS.delete(BOUND_TOKEN_PREFIX + tokenHash);
+  const stub = tokenCoordinator(rc.env, tokenHash);
+  if (!stub) {
+    return;
+  }
+  await stub.releaseToken(keyId);
 }
 
 export type ClaimResult =
   | { allowed: true; newlyClaimed: boolean }
-  | { allowed: false; reason: string };
+  // `status`/`logReason` travel with the denial so a misconfigured relay is not
+  // reported to the caller as "that token belongs to someone else" — a 403 tells
+  // a self-hoster their device is spoken for and to stop retrying, which is the
+  // wrong answer to an outage on our side.
+  | { allowed: false; reason: string; status: number; logReason: string };
 
 /**
- * Checks the token binding and, when the token is unclaimed, claims it for keyId
- * BEFORE delivery — claiming afterwards would let a first-sender deliver a
- * spoofed push ahead of the legitimate owner's claim. KV is eventually
- * consistent, so this narrows but cannot eliminate a simultaneous-first-send
- * race; that needs a strongly-consistent store (Durable Object). `newlyClaimed`
- * lets the caller release the claim if delivery reveals the token is dead.
+ * Claims token for keyId BEFORE delivery — claiming afterwards would let a
+ * first-sender deliver a spoofed push ahead of the legitimate owner's claim.
+ * `newlyClaimed` lets the caller release the claim if delivery reveals the token
+ * is dead.
+ *
+ * The claim is a single serialized turn inside the token's RelayCoordinator, so
+ * two keys racing the first send to one token can no longer both be told the
+ * token is free. The one KV question left — is the current owner's key still
+ * active, which decides whether a rotated key's tokens can be re-claimed — is
+ * answered out here and applied back as a compare-and-swap, so a re-claim by the
+ * legitimate owner in the meantime beats the takeover rather than being
+ * overwritten by it.
+ *
+ * Fails CLOSED when the binding is missing, for the same reason checkMinuteLimit
+ * does: "the coordinator is misconfigured" and "there is no coordinator" are
+ * indistinguishable from outside, and falling back to the KV path would restore
+ * the exact race this exists to remove, silently.
  */
-export async function claimTokenForSend(env: CommonEnv, token: string, keyId: string): Promise<ClaimResult> {
-  const result = await checkTokenBinding(env, token, keyId);
-  if (!result.allowed) {
-    return result;
-  }
+export async function claimTokenForSend(rc: RequestContext, token: string, keyId: string): Promise<ClaimResult> {
+  const { env } = rc;
   const tokenHash = await sha256Hex(token);
-  const existing = await env.API_KEYS.get(BOUND_TOKEN_PREFIX + tokenHash);
-  if (existing === keyId) {
-    return { allowed: true, newlyClaimed: false };
+  const stub = tokenCoordinator(env, tokenHash);
+  if (!stub) {
+    rc.log({ level: "error", event: "tokenclaim.binding_missing" });
+    return {
+      allowed: false,
+      reason: "token ownership coordinator unavailable",
+      status: 503,
+      logReason: "coordinator_binding_missing",
+    };
   }
-  await bindToken(env, token, keyId);
-  return { allowed: true, newlyClaimed: true };
+
+  // Pre-Durable-Object claims live in KV; hand the recorded owner over so this
+  // token's instance adopts it the first time it is touched, instead of treating
+  // every already-owned token as free. Ignored on every later call.
+  const legacyOwner = await env.API_KEYS.get(BOUND_TOKEN_PREFIX + tokenHash);
+
+  const first = await stub.claimToken({ keyId, legacyOwner });
+  if (first.owner === keyId) {
+    return { allowed: true, newlyClaimed: first.newlyClaimed };
+  }
+
+  const denied = {
+    allowed: false,
+    reason: "token is already bound to a different active api key",
+    status: 403,
+    logReason: "token_bound_to_other_key",
+  } as const;
+  if (await keyIsActive(env, first.owner)) {
+    return denied;
+  }
+
+  const takeover = await stub.claimToken({ keyId, takeoverFrom: first.owner });
+  if (takeover.owner !== keyId) {
+    return denied; // someone else re-claimed it between the two calls
+  }
+  return { allowed: true, newlyClaimed: takeover.newlyClaimed };
 }
 
 // ---- per-key rate limits ---------------------------------------------------
@@ -471,6 +528,14 @@ export function registrationEnabled(env: CommonEnv): boolean {
  * re-register. That bounds only *concurrent* keys per IP, so it is paired with a
  * per-IP minute-tier rate limit (REGISTER_RATE_LIMITER) on top of the per-key
  * rolling limits and the REGISTRATION_ENABLED kill-switch.
+ *
+ * "One" is enforced by the IP's RelayCoordinator, not by a KV read followed by a
+ * KV write. As four separate KV operations — look up the prior key, revoke it,
+ * mint, index — concurrent registrations from one address interleaved into
+ * several permanent active keys, which is the quota abuse the invariant exists
+ * to prevent. The coordinator swaps the IP's current key and returns the one it
+ * displaced in a single serialized turn, so racing registrations form a chain
+ * where each revokes its predecessor and exactly one key is left active.
  */
 export async function handleRegister(request: Request, rc: RequestContext): Promise<Response> {
   const { env } = rc;
@@ -493,18 +558,28 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   const body = await jsonObjectBody<{ label?: string }>(request);
   const label = (body.label ?? "").trim() || "self-registered";
 
-  // Enforce one active key per IP: invalidate any prior key for this IP first.
-  if (registeredIp) {
-    const priorId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
-    if (priorId && (await revokeKeyById(env, priorId))) {
-      rc.log({ level: "info", event: "key.superseded", keyId: priorId, ip: registeredIp });
-    }
+  // Refuse rather than mint an unconstrained key: without the coordinator the
+  // one-active-key-per-IP invariant is unenforceable, and an unconstrained
+  // permanent key on a public endpoint is the thing that invariant guards. Same
+  // fail-closed reasoning as checkMinuteLimit and claimTokenForSend.
+  const ipStub = registeredIp ? registrationCoordinator(env, registeredIp) : null;
+  if (registeredIp && !ipStub) {
+    rc.log({ level: "error", event: "register.denied", reason: "coordinator_binding_missing", ip: registeredIp });
+    return fail(rc, 503, "registration is temporarily unavailable");
   }
 
   // Self-registered keys don't expire by default — they back long-lived servers.
   const { record, key } = await mintKey(env, rc, { label, expiresAt: null, source: "self", registeredIp });
-  if (registeredIp) {
+  if (registeredIp && ipStub) {
+    // Swap first, then revoke what the swap displaced. The other order is the
+    // race: two registrations can both read the same prior key and both believe
+    // they superseded it, leaving both of their own keys active.
+    const legacyKeyId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
+    const priorId = await ipStub.claimRegistrationIp(record.id, legacyKeyId);
     await env.API_KEYS.put(IP_INDEX_PREFIX + registeredIp, record.id);
+    if (priorId && (await revokeKeyById(env, priorId))) {
+      rc.log({ level: "info", event: "key.superseded", keyId: priorId, ip: registeredIp });
+    }
   }
   return json({ id: record.id, label: record.label, key, expiresAt: record.expiresAt }, 201);
 }

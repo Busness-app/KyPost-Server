@@ -66,3 +66,20 @@ dataset = "kypost_push_usage_apns"
 #   APNS_TOPIC         - Bundle ID, e.g. "com.urlxl.mail"
 #   APNS_ENVIRONMENT   - "production" or "sandbox"
 #   ADMIN_SECRET       - random secret guarding the /admin/keys endpoints
+
+# Durable Object holding the two ownership rules KV cannot hold atomically:
+# device-token pinning (first key to deliver to a token owns it) and one active
+# self-registered key per IP. Both were check-then-write against eventually
+# consistent KV, so concurrent requests could both win. Every request for one
+# token (or one IP) routes to the same instance by name and is handled one at a
+# time — see push-relay-shared/relay-coordinator.ts.
+#
+# Both /send and /register FAIL CLOSED without this binding, so it is required,
+# not optional. SQLite-backed and available on the Workers Free plan.
+[[durable_objects.bindings]]
+name = "RELAY_COORDINATOR"
+class_name = "RelayCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayCoordinator"]
