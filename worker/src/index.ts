@@ -102,19 +102,16 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return fail(rc, 400, "missing token");
   }
 
-  const binding = await claimTokenForSend(env, token, record.id);
-  if (!binding.allowed) {
-    rc.log({ level: "warn", event: "send.denied", reason: "token_bound_to_other_key", keyId: record.id });
-    return fail(rc, 403, binding.reason);
-  }
-
   const config = fcmConfig(env);
   if (!isConfigured(config)) {
     rc.log({ level: "error", event: "send.misconfigured", keyId: record.id });
     return fail(rc, 500, "relay not configured");
   }
 
-  // Minute tier first (native binding, no KV). Then the hour/day tiers in KV.
+  // Minute tier before the token claim below: claiming is a durable write, so a
+  // request that is about to be refused must not leave a device token pinned to
+  // the refusing key. Claiming first also let a caller pin unlimited tokens at
+  // any rate, since only delivery — not the claim — was behind the limiter.
   if (!(await checkMinuteLimit(env.PUSH_RATE_LIMITER, rc, hash))) {
     rc.log({ level: "warn", event: "send.denied", reason: "rate_limited", keyId: record.id, window: "minute" });
     const response = fail(rc, 429, "rate limit exceeded", {
@@ -124,6 +121,12 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     });
     response.headers.set("Retry-After", "60");
     return response;
+  }
+
+  const binding = await claimTokenForSend(env, token, record.id);
+  if (!binding.allowed) {
+    rc.log({ level: "warn", event: "send.denied", reason: "token_bound_to_other_key", keyId: record.id });
+    return fail(rc, 403, binding.reason);
   }
 
   // Count the accepted send in Analytics Engine (off the KV write path). No KV

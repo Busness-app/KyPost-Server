@@ -44,7 +44,12 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(service acc
 
 ## Self-registration (no maintainer involvement)
 
-Self-hosted servers get a key on their own — you don't issue anything. The Go
+**Off by default.** `/register` is an unauthenticated key-minting endpoint, so it
+stays closed until you set `REGISTRATION_ENABLED = "true"` in `wrangler.toml` and
+redeploy. The shipped `wrangler.toml.example` leaves it `"false"`; until you flip
+it, issue keys with [`POST /admin/keys`](#issuing-a-key-manually-optional).
+
+Once open, self-hosted servers get a key on their own — you don't issue anything. The Go
 backend does this automatically: on first start with `PUSH_RELAY_URL` set and no
 `PUSH_RELAY_KEY`, it calls `/register`, then persists the key under `SECRET_DIR`
 and reuses it on every restart. Equivalent by hand:
