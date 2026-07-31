@@ -461,10 +461,21 @@ export function resolveExpiry(body: { expiresAt?: unknown; ttlDays?: unknown }):
 export async function mintKey(
   env: CommonEnv,
   rc: RequestContext,
-  opts: { label: string; expiresAt: string | null; source: "admin" | "self"; registeredIp?: string | null },
+  opts: {
+    label: string;
+    expiresAt: string | null;
+    source: "admin" | "self";
+    registeredIp?: string | null;
+    /**
+     * Pre-generated key id. handleRegister needs the id BEFORE the record
+     * exists, so it can reserve the IP first and persist nothing until that
+     * reservation succeeds. Defaults to a fresh uuid for every other caller.
+     */
+    id?: string;
+  },
 ): Promise<{ record: ApiKeyRecord; key: string }> {
   const key = randomToken();
-  const id = crypto.randomUUID();
+  const id = opts.id ?? crypto.randomUUID();
   const record: ApiKeyRecord = {
     id,
     // Clamped here rather than at each call site so no minting path can store an
@@ -577,22 +588,39 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
     return fail(rc, 503, "registration is temporarily unavailable");
   }
 
-  // Self-registered keys don't expire by default — they back long-lived servers.
-  const { record, key } = await mintKey(env, rc, { label, expiresAt: null, source: "self", registeredIp });
+  // Reserve the id and the IP BEFORE persisting anything. Minting first meant a
+  // throwing coordinator (or a KV error) left an enabled key record behind that
+  // the 500 response never handed to anyone — unusable, since the raw key only
+  // ever travels in the response body, but still an orphan in KV and in every
+  // /admin/keys listing, mintable on repeat.
+  //
+  // Reordering beats minting-then-rolling-back: a compensating revoke is another
+  // write on the path that just failed, so it is exactly the write least likely
+  // to succeed. Here a failed mint instead leaves the coordinator pointing at an
+  // id that has no record, which costs nothing — revokeKeyById reports the
+  // unknown id as "already gone", the previous key is never revoked and keeps
+  // working, and the next registration displaces the dangling id.
+  const keyId = crypto.randomUUID();
+  let priorId: string | null = null;
   if (registeredIp && ipStub) {
     // Swap first, then revoke what the swap displaced. The other order is the
     // race: two registrations can both read the same prior key and both believe
     // they superseded it, leaving both of their own keys active. Here each
     // registration is handed its own immediate predecessor, so N racers form a
     // chain of N-1 revocations and exactly one key is left standing.
-    //
+    const legacyKeyId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
+    priorId = await ipStub.claimRegistrationIp(keyId, legacyKeyId);
+  }
+
+  // Self-registered keys don't expire by default — they back long-lived servers.
+  const { record, key } = await mintKey(env, rc, { label, expiresAt: null, source: "self", registeredIp, id: keyId });
+
+  if (registeredIp) {
     // The KV index is no longer the authority — it only seeds a coordinator
     // instance that has never been touched, and gives revokeKeyById something to
     // tidy up. It is written after the swap and may lose a race with
     // revokeKeyById's cleanup below; that costs nothing, because the coordinator
     // holds the real answer and ignores the seed once set.
-    const legacyKeyId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
-    const priorId = await ipStub.claimRegistrationIp(record.id, legacyKeyId);
     await env.API_KEYS.put(IP_INDEX_PREFIX + registeredIp, record.id);
     if (priorId && (await revokeKeyById(env, priorId))) {
       rc.log({ level: "info", event: "key.superseded", keyId: priorId, ip: registeredIp });
