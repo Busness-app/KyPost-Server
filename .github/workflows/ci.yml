@@ -33,6 +33,7 @@ concurrency:
 
 jobs:
   backend:
+    name: ci-backend
     runs-on: ubuntu-latest
     # The api package alone takes 7-8 minutes under -race, and users another 4.
     # 25 leaves headroom without inheriting GitHub's 6-hour default, which is
@@ -119,6 +120,7 @@ jobs:
         run: go test -race -count=1 -timeout=20m ./...
 
   frontend:
+    name: ci-frontend
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -193,6 +195,7 @@ jobs:
         run: npm run build
 
   docker:
+    name: ci-docker
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
