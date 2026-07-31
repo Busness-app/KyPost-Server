@@ -111,23 +111,22 @@ func (s *Store) Snapshot(mailboxKey string, limit int) ([]Entry, bool) {
 
 // Sync reconciles mailboxKey's cached window against a freshly fetched live
 // overview snapshot (the current top-`limit` from IMAP, source of truth),
-// replacing the stored window, and returns the delta relevant to a caller
-// whose last known cursor was `since` (0 = everything).
+// replacing the stored window, and returns the delta relevant to a caller whose
+// last known cursor was `since` (0 = everything).
 //
 // New/Updated are computed from the current, post-sync window filtered by
-// FirstRev/Rev against since — not from "what changed in this specific
-// call" — so a second poller with an older cursor still correctly receives
-// entries that were bumped by a different caller's earlier Sync call (this
-// is contacts.Store.ChangedSince's trick, applied here too).
+// FirstRev/Rev against since — not from what changed in this specific call — so
+// a second poller with an older cursor still correctly receives entries that
+// were bumped by a different caller's earlier Sync.
 //
 // Removed is the one piece not retained across calls: it is only
-// "previously-in-window, now absent from live", computed relative to this
-// call's own prior window. See the package doc for the accepted
-// multi-poller staleness gap this implies.
+// "previously-in-window, now absent from live", computed relative to this call's
+// own prior window. See the package doc for the accepted multi-poller staleness
+// gap this implies.
 //
-// If limit differs from the window's stored Limit, the prior window is
-// discarded without computing Removed (a limit change invalidates window
-// comparability) — every live entry is reported as New.
+// If limit differs from the window's stored Limit, the prior window is discarded
+// without computing Removed (a limit change invalidates window comparability)
+// and every live entry is reported as New.
 func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64) (SyncResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -229,37 +228,36 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 	return result, nil
 }
 
-// warmBody is the Body to persist for in. A decrypted OpenPGP body is never
-// written: this cache is plain JSON on disk (see Store.path), so storing the
-// plaintext of a message someone took the trouble to encrypt would recreate
-// at rest exactly the exposure the encryption was for — and it would do so
-// for every encrypted message the owner has ever received, which is a larger
-// disclosure than the sealed private key beside it.
+// warmBody is the Body to persist for in.
+//
+// A decrypted OpenPGP body is never written: this cache is plain JSON on disk
+// (see Store.path), so storing the plaintext of a message someone took the
+// trouble to encrypt recreates at rest exactly the exposure the encryption was
+// for — and does so for every encrypted message the owner has ever received,
+// which is a larger disclosure than the sealed private key beside it.
 //
 // The PGP flags are still stored: clients need them to render the badge, and
-// correctness is unaffected, because callers already read an empty Body as
-// "not warmed yet, fetch live if needed" rather than "empty message" (see
-// Entry.Body).
+// callers already read an empty Body as "not warmed yet, fetch live if needed"
+// rather than "empty message" (see Entry.Body).
 //
-// The performance cost is real and larger than one fetch: Snapshot reports a
-// window as warmed only when every entry has a body, so one encrypted message
-// makes the whole mailbox read as cold and handleInbox's cache-first branch is
-// skipped. That is the right trade as it stands — serving that branch from a
-// window with empty PGP bodies would emit pgpEncrypted with no body and no
-// pgpDecryptError, which is exactly the wire signature of a CLIENT-protected
-// message, so clients would tell a server-mode user their own mail is
-// unreadable. See docs/E2E_PGP.md for the fix if the fast path is wanted back.
+// The cost is real and larger than one fetch: Snapshot reports a window as
+// warmed only when every entry has a body, so one encrypted message makes the
+// whole mailbox read as cold and handleInbox's cache-first branch is skipped.
+// Serving that branch from a window with empty PGP bodies would emit
+// pgpEncrypted with no body and no pgpDecryptError, which is exactly the wire
+// signature of a CLIENT-protected message, so clients would tell a server-mode
+// user their own mail is unreadable. See docs/E2E_PGP.md.
 //
-// A Sent body is never written either. That folder holds every message the
-// owner has ever sent, in plaintext, on the disk of a server whose claim for
+// A Sent body is never written either: that folder holds every message the owner
+// has ever sent, in plaintext, on the disk of a server whose claim for
 // client-custody mail is that it cannot read that mail — and under client
 // custody the pickup-link notice lands there carrying the key to a message the
-// server is otherwise storing as ciphertext it cannot open. Sent is opened far
-// less often than the inbox, so the cost is one live fetch on a rare path.
+// server is otherwise storing as ciphertext. Sent is opened far less often than
+// the inbox, so the cost is one live fetch on a rare path.
 //
-// This is enforced here rather than at the two internal/api call sites so a
-// future third caller cannot bypass it, and so the caller's own response
-// entry keeps the body it just fetched.
+// Enforced here rather than at the two internal/api call sites so a future third
+// caller cannot bypass it, and so the caller's own response entry keeps the body
+// it just fetched.
 func warmBody(mailboxKey string, in Entry) string {
 	if in.PGPEncrypted || isSentMailbox(mailboxKey) {
 		return ""
@@ -294,18 +292,16 @@ var pickupLinkFragment = regexp.MustCompile(`(/pickup/[^\s"'<>]*#)[^\s"'<>]+`)
 // fragment, which browsers never transmit, so the server storing the ciphertext
 // cannot read it — see pickup_client_sealed.go, which states the key "is never
 // written to disk". The notice carrying that link is ordinary unencrypted mail,
-// so without this it was cached verbatim onto the same volume as the ciphertext,
+// so without this it was cached verbatim onto the same volume as the ciphertext
 // and the claim was simply false.
 //
 // Not caching Sent bodies (above) covers the sender. This covers the case that
-// does not: when the recipient is another user on this same instance, the notice
-// arrives in their INBOX and the poller warms it there.
+// does not: a recipient on this same instance, whose INBOX the poller warms.
 //
 // Content matching is unavoidable here — every cache write originates from an
 // IMAP read, so the server has no memory that a message was a pickup notice by
-// the time it caches it. What makes that acceptable is that the pattern is this
-// server's own URL shape rather than arbitrary content, and a miss is no worse
-// than the status quo it replaces.
+// the time it caches it. The pattern is this server's own URL shape rather than
+// arbitrary content, and a miss is no worse than the status quo it replaces.
 func redactPickupLinkFragments(body string) string {
 	// Cheap guard: the overwhelming majority of mail has no pickup link, and
 	// this runs on every cached body.
@@ -315,16 +311,15 @@ func redactPickupLinkFragments(body string) string {
 	return pickupLinkFragment.ReplaceAllString(body, "${1}[redacted]")
 }
 
-// Upsert merges freshly-known entries into mailboxKey's window without
-// inferring removals — unlike Sync, the caller (the background poller,
-// which only ever sees UNSEEN-since-checkpoint INBOX mail) never has the
-// full window in view, so absence from entries must never be treated as
-// "message gone". New UID -> append, stamp Rev/FirstRev. Existing UID with
-// changed metadata -> update fields, stamp Rev (FirstRev untouched).
-// Existing UID with a newly-available Body -> attach it without bumping Rev
-// (a cached body becoming available isn't a change a polling client needs
-// to be told about). Trims the window to maxWindowEntries by evicting the
-// lowest-UID entries beyond the cap.
+// Upsert merges freshly-known entries into mailboxKey's window without inferring
+// removals: unlike Sync, the caller (the background poller, which only ever sees
+// UNSEEN-since-checkpoint INBOX mail) never has the full window in view, so
+// absence from entries must never be treated as "message gone". New UID ->
+// append, stamp Rev/FirstRev. Existing UID with changed metadata -> update
+// fields, stamp Rev (FirstRev untouched). Existing UID with a newly-available
+// Body -> attach it without bumping Rev, since a cached body becoming available
+// is not a change a polling client needs to be told about. Trims the window to
+// maxWindowEntries by evicting the lowest-UID entries beyond the cap.
 func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 	if len(entries) == 0 {
 		return nil

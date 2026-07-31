@@ -19,15 +19,13 @@ import (
 	"kypost-server/backend/internal/mailmsg"
 )
 
-// envelopeHeaderOrder lists the outer RFC 5322 headers preserved verbatim on
-// a PGP/MIME-wrapped message, in the order mailmsg.Message.Build() writes
-// them. PGP/MIME wraps only the *content* (Content-Type + body); routing and
-// display headers stay outside the encrypted/signed part — OpenPGP does not
-// protect message routing metadata, only the body. Autocrypt is included
-// here (rather than being folded into the encrypted content like Subject)
-// because it exists to let a receiving client opportunistically pick up the
-// sender's public key without decrypting anything — it must stay on the
-// outer, unencrypted envelope of both signed and encrypted mail.
+// envelopeHeaderOrder lists the outer RFC 5322 headers preserved verbatim on a
+// PGP/MIME-wrapped message, in the order mailmsg.Message.Build() writes them.
+// PGP/MIME wraps only the content (Content-Type + body); OpenPGP does not
+// protect routing metadata, so routing and display headers stay outside the
+// encrypted/signed part. Autocrypt is here rather than folded into the encrypted
+// content because it exists to let a receiving client opportunistically pick up
+// the sender's public key without decrypting anything.
 var envelopeHeaderOrder = []string{"From", "To", "Cc", "Bcc", "Subject", "Autocrypt"}
 
 // splitMessage separates a raw RFC 5322 message (as produced by
@@ -87,19 +85,18 @@ func writeEnvelopeHeaders(w io.Writer, envelope textproto.MIMEHeader) {
 const OuterPlaceholderSubject = "[Encrypted] Email Sent by KyPost"
 
 // protectContent wraps an inner MIME content part (a Content-Type header line
-// plus body, as produced by splitMessage) in a Protected Headers v1 structure
-// — the "memoryhole" convention of draft-ietf-lamps-header-protection emitted
-// and consumed by Thunderbird, Mutt and K-9. The real subject is copied onto
-// the wrapper's own headers (protected-headers="v1") so an aware client shows
-// it, and, when non-empty, into a leading text/rfc822-headers "legacy display"
-// part so any other client (gpg CLI, older MUAs) still renders it human-
-// readably. The original content is nested byte-verbatim as the final part.
+// plus body, as produced by splitMessage) in a Protected Headers v1 structure —
+// the "memoryhole" convention of draft-ietf-lamps-header-protection emitted and
+// consumed by Thunderbird, Mutt and K-9. The real subject is copied onto the
+// wrapper's own headers (protected-headers="v1") so an aware client shows it,
+// and, when non-empty, into a leading text/rfc822-headers "legacy display" part
+// so any other client still renders it readably. The original content is nested
+// byte-verbatim as the final part.
 //
-// Scope is deliberately Subject-only (LAMPS baseline); no other headers are
-// protected — see the plan. Hand-assembled rather than via a
-// mime/multipart.Writer for the same reason as buildSignedEnvelope: CreatePart
-// injects its own header separator and would corrupt the byte-verbatim nested
-// content.
+// Scope is deliberately Subject-only (LAMPS baseline). Hand-assembled rather
+// than via a mime/multipart.Writer for the same reason as buildSignedEnvelope:
+// CreatePart injects its own header separator and would corrupt the
+// byte-verbatim nested content.
 func protectContent(content []byte, subject string) []byte {
 	subject = mailmsg.SanitizeHeaderValue(subject)
 	boundary := randomBoundary()
@@ -132,12 +129,12 @@ func protectContent(content []byte, subject string) []byte {
 
 // ExtractProtectedSubject reads a protected Subject header from a decrypted
 // PGP/MIME content part (the bytes returned by DecryptMIME). It accepts both
-// KyPost's own protectContent output and Thunderbird/Mutt/K-9 protected-
-// headers mail, RFC 2047-decoding an encoded-word subject. The inner Subject
-// is sender-authored encrypted data — the same trust level as the body — so it
-// is accepted regardless of the protected-headers parameter. ok is false when
-// no Subject header is present or it decodes to empty, in which case callers
-// fall back to the outer envelope subject.
+// KyPost's own protectContent output and Thunderbird/Mutt/K-9 protected-headers
+// mail, RFC 2047-decoding an encoded-word subject. The inner Subject is
+// sender-authored encrypted data — the same trust level as the body — so it is
+// accepted regardless of the protected-headers parameter. ok is false when no
+// Subject is present or it decodes to empty, and callers then fall back to the
+// outer envelope subject.
 func ExtractProtectedSubject(content []byte) (subject string, ok bool) {
 	reader := textproto.NewReader(bufio.NewReader(bytes.NewReader(content)))
 	header, err := reader.ReadMIMEHeader()
@@ -161,13 +158,12 @@ func ExtractProtectedSubject(content []byte) (subject string, ok bool) {
 
 // EncryptMIME wraps a plaintext RFC 5322 message (as produced by
 // mailmsg.Message.Build()) in an RFC 3156 multipart/encrypted envelope. The
-// message's Content-Type and body become the encrypted payload; From/To/Cc/
-// Bcc stay on the outer, unencrypted envelope headers. When the message has a
-// Subject, it is moved into the encrypted payload via protected headers and
-// the outer Subject is replaced with OuterPlaceholderSubject, so the real
-// subject never travels in cleartext. If signer is non-nil, the content is
-// signed before encryption (combined sign+encrypt, verified in one step by
-// DecryptMIME on the way back).
+// message's Content-Type and body become the encrypted payload; From/To/Cc/Bcc
+// stay on the outer, unencrypted envelope headers. A Subject is moved into the
+// encrypted payload via protected headers and the outer Subject replaced with
+// OuterPlaceholderSubject, so the real subject never travels in cleartext. A
+// non-nil signer signs the content before encryption, verified in one step by
+// DecryptMIME on the way back.
 func EncryptMIME(plaintext []byte, recipientArmoredPubKeys []string, signer *Identity) ([]byte, error) {
 	if len(recipientArmoredPubKeys) == 0 {
 		return nil, errors.New("pgpmail: at least one recipient key required")
@@ -301,20 +297,16 @@ func DecryptMIME(armoredPGPMessage string, recipient *Identity, signerArmoredPub
 	}
 	result, err := decHandle.Decrypt([]byte(armoredPGPMessage), crypto.Auto)
 	if err != nil {
-		// This errors.Is check is best-effort, not the primary guarantee:
-		// go-crypto's HandleSensitiveParsingError deliberately genericizes
-		// every parsing error encountered while reading symmetrically-
-		// decrypted data — including a MaxDecompressedMessageSize overflow —
-		// into an opaque "parsing error", specifically so an attacker can't
-		// use the error to distinguish "ciphertext too large" from
-		// "ciphertext corrupted/wrong key" before the message is
-		// authenticated (an oracle-attack mitigation). So for an ordinary
-		// encrypted message, a decompression-bomb rejection surfaces here as
-		// a generic decrypt error, not opgperrors.ErrMessageTooLarge — this
-		// branch only catches it on the rarer paths where go-crypto doesn't
-		// genericize (e.g. non-SEIPD-wrapped data). Either way, decryption
-		// still fails closed and the oversized plaintext is never returned;
-		// see TestDecryptMIMERejectsDecompressionBomb.
+		// Best-effort, not the primary guarantee: go-crypto's
+		// HandleSensitiveParsingError genericizes every parsing error encountered while
+		// reading symmetrically-decrypted data — including a MaxDecompressedMessageSize
+		// overflow — into an opaque "parsing error", so an attacker cannot use the error
+		// to distinguish "ciphertext too large" from "wrong key" before the message is
+		// authenticated. For an ordinary encrypted message a decompression-bomb
+		// rejection therefore surfaces as a generic decrypt error, and this branch only
+		// catches it on the rarer paths go-crypto does not genericize. Either way
+		// decryption fails closed and the oversized plaintext is never returned; see
+		// TestDecryptMIMERejectsDecompressionBomb.
 		if errors.Is(err, opgperrors.ErrMessageTooLarge) {
 			return nil, mailmsg.ErrMessageTooLarge
 		}
@@ -356,18 +348,17 @@ func SignMIME(plaintext []byte, signer *Identity) ([]byte, error) {
 	return buildSignedEnvelope(envelope, content, string(signature)), nil
 }
 
-// buildSignedEnvelope hand-assembles the multipart/signed structure instead
-// of using mime/multipart.Writer for the first part: stdlib's CreatePart
-// always inserts its own blank-line header separator, which would corrupt
-// the signed part's bytes (content already carries its own embedded
-// Content-Type header line) — the signed part's bytes on the wire must be
-// byte-identical to what was passed to Sign, or verification on the
-// receiving end fails. Per RFC 2046, the CRLF immediately before a boundary
-// delimiter belongs to the delimiter, not the part body — it must always be
-// written after content, unconditionally, even when content already ends in
-// its own "\r\n" (e.g. a multipart/mixed inner structure with attachments):
-// that trailing CRLF is signed data, and a compliant parser will strip
-// exactly one additional CRLF as the delimiter separator, not two.
+// buildSignedEnvelope hand-assembles the multipart/signed structure instead of
+// using mime/multipart.Writer for the first part: CreatePart always inserts its
+// own blank-line header separator, which would corrupt the signed part's bytes
+// (content already carries its own embedded Content-Type header line), and those
+// bytes on the wire must be byte-identical to what was passed to Sign.
+//
+// Per RFC 2046 the CRLF immediately before a boundary delimiter belongs to the
+// delimiter, not the part body, so it is written after content unconditionally —
+// even when content already ends in its own "\r\n". That trailing CRLF is
+// signed data, and a compliant parser strips exactly one additional CRLF as the
+// delimiter separator, not two.
 func buildSignedEnvelope(envelope textproto.MIMEHeader, content []byte, armoredSignature string) []byte {
 	boundary := randomBoundary()
 
@@ -447,15 +438,6 @@ func VerifyDetached(data []byte, armoredSignature string, signerArmoredPubKeys [
 // attachments) nests only a couple of levels.
 const maxContentDepth = 8
 
-// ParseContent decodes a decrypted PGP/MIME content part (a Content-Type
-// header line, a blank line, and a body — either a single text part or a
-// multipart structure) into a display body and any attachments. It recurses
-// into nested multipart parts, so both KyPost's own protected-headers wrapper
-// and third-party senders whose inner structure differs (e.g. Thunderbird's
-// nested multipart/alternative) render correctly. text/rfc822-headers parts
-// (the protected-headers legacy-display part) are skipped. Anything
-// unrecognized degrades gracefully to an attachment rather than erroring, so
-// the message still renders.
 // bodyMode reports which render mode a part's Content-Type asks for. The caller
 // carries it to the client so nothing downstream has to sniff the bytes.
 func bodyMode(contentType string) string {
@@ -472,6 +454,15 @@ const (
 	BodyModePlain = "plain"
 )
 
+// ParseContent decodes a decrypted PGP/MIME content part (a Content-Type header
+// line, a blank line, and a body — either a single text part or a multipart
+// structure) into a display body and any attachments. It recurses into nested
+// multipart parts, so both KyPost's own protected-headers wrapper and
+// third-party senders whose inner structure differs (e.g. Thunderbird's nested
+// multipart/alternative) render correctly. text/rfc822-headers parts (the
+// protected-headers legacy-display part) are skipped. Anything unrecognized
+// degrades gracefully to an attachment rather than erroring, so the message
+// still renders.
 func ParseContent(content []byte) (body, mode string, attachments []mailmsg.Attachment, err error) {
 	if int64(len(content)) > mailmsg.MaxInboundMessageBytes {
 		return "", "", nil, mailmsg.ErrMessageTooLarge

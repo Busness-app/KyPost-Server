@@ -17,23 +17,18 @@ import (
 // Anti-phishing Tier A: a pure, deterministic check for mail that impersonates
 // this app itself.
 //
-// The threat is specific. Every client registers as the system handler for the
-// kypost:// scheme (the Flatpak's x-scheme-handler/kypost, Android's
-// native-pair intent filter), so an
+// Every client registers as the system handler for the kypost:// scheme (the
+// Flatpak's x-scheme-handler/kypost, Android's native-pair intent filter), so an
 // <a href="kypost://native-pair?srv=https://evil.example&pt=..."> in a message
 // body is one click from the app's own pairing-confirm dialog naming an
-// attacker's server: phishing wearing the trusted UI.
+// attacker's server. The clients refuse non-allowlisted schemes themselves; this
+// scan tells the user WHY a message is hostile rather than being what stops it,
+// so every rule can afford to be conservative — a miss costs a banner, not the
+// block.
 //
-// The clients refuse non-allowlisted schemes themselves, with no server input.
-// This scan exists to tell the user WHY a message is hostile, not to be what
-// stops it — which is why every rule here can afford to be conservative. A miss
-// costs a banner, never the block.
-//
-// Deliberately not here: lookalike/homograph domains, anchor-text-vs-href
-// mismatch scoring, urgency-language heuristics, reputation lists. Those are
-// probabilistic, and this verdict is shown to the user as a statement of fact.
-// The Ollama classifier is likewise never consulted -- a security verdict must
-// not be non-deterministic, nor rationed by an LLM rate-limit budget.
+// Deliberately excluded: lookalike/homograph domains, anchor-text-vs-href
+// scoring, urgency heuristics, reputation lists, and the Ollama classifier.
+// Those are probabilistic, and this verdict is shown to the user as fact.
 
 // Reason strings reach both the user (as the client warning banner) and the
 // audit log (the Decision's Detail, via GET /api/decisions), so they are
@@ -51,30 +46,28 @@ type phishFinding struct {
 }
 
 // R1. The scheme punctuation is what makes this a link rather than the app's
-// name in prose, so the separator is required: "kypost: notes from today" is an
-// ordinary subject line, while "kypost://" is an attack. The alternations cover
-// the encodings a sender can use in HTML and still have the client resolve a
-// working URL -- raw colon, decimal entity (zero-padded or not), named entity,
-// and percent-encoded colon -- plus a percent-encoded first slash.
+// name in prose: "kypost: notes from today" is an ordinary subject line,
+// "kypost://" is an attack. The alternations cover the encodings a sender can
+// use in HTML and still have the client resolve a working URL — raw colon,
+// decimal entity (zero-padded or not), named entity, percent-encoded colon, and
+// a percent-encoded first slash.
 //
 // ponytail: not full HTML-entity/percent normalisation, so a creative encoding
 // slips past. Accepted ceiling: the client-side scheme allowlist blocks the
-// navigation regardless, so a bypass costs a missing banner, never the refusal.
-// Upgrade path: none — doing it properly means reimplementing a browser's URL
-// parser against untrusted input to improve a message string.
+// navigation regardless, so a bypass costs a missing banner. Upgrade path: none
+// — doing it properly means reimplementing a URL parser against untrusted input
+// to improve a message string.
 var appDeepLinkPattern = regexp.MustCompile(`(?i)kypost\s*(?::|&#0*58;|&colon;|%3a)\s*(?:/|%2f)`)
 
-// R2. Host-agnostic on purpose: an attacker's own host serving a lookalike
-// page at this app's pairing or pickup path IS the attack, so the path alone is
-// what matters.
+// R2. Host-agnostic on purpose: an attacker's own host serving a lookalike page
+// at this app's pairing or pickup path IS the attack, so the path alone matters.
 //
-// It must be a path in a URL a client would resolve, never a substring match.
-// A false positive here is not cosmetic: the Tier-B clear requires
+// It must be a path in a URL a client would resolve, never a substring match. A
+// false positive cannot be cleared — the Tier-B clear requires
 // sameAddress(msg.Sender, ownAddress), which inbound third-party mail can never
-// satisfy, so a wrong hit can never be cleared and rides a durable $Phishing
-// IMAP keyword into every other client the user owns. The banner is this
-// subsystem's whole product; firing it on a grocer's collection-slot page
-// teaches people to dismiss it.
+// satisfy — so it rides a durable $Phishing IMAP keyword into every other client
+// the user owns, and firing on a grocer's collection-slot page teaches people to
+// dismiss the banner.
 var sensitiveEndpointPaths = []string{
 	"/api/notifications/native/register",
 	"/api/notifications/desktop/pair",
@@ -138,12 +131,11 @@ const sendAsNoticeSubjectPrefix = "verify send-as: "
 
 // scanForAppImpersonation reports whether this message impersonates KyPost.
 //
-// bodyText and bodyHTML are both taken because they are not interchangeable:
-// the poller's own fetch (imap.ListUnreadInbox) prefers the text/plain part
-// while every client-facing path prefers text/html, so a
-// multipart/alternative message can show this scan an innocuous plain-text
-// part while the clients render a hostile HTML one. Scanning either alone
-// would miss the headline attack.
+// bodyText and bodyHTML are both taken because they are not interchangeable: the
+// poller's own fetch (imap.ListUnreadInbox) prefers the text/plain part while
+// every client-facing path prefers text/html, so a multipart/alternative message
+// can show this scan an innocuous plain-text part while the clients render a
+// hostile HTML one.
 //
 // First match wins, cheapest and most specific rule first.
 func scanForAppImpersonation(subject, bodyText, bodyHTML string) phishFinding {
@@ -170,21 +162,16 @@ func scanForAppImpersonation(subject, bodyText, bodyHTML string) phishFinding {
 	return phishFinding{}
 }
 
-// phishKeyword is the durable verdict channel: an IMAP keyword, set on the
-// message in the mailbox itself.
-//
-// Chosen over a new inboxEmail wire field or a mailcache.Entry field because it
-// survives the mail cache's churning top-N window and poller restarts, is
-// already carried to every client by bucket()'s entry.Keywords, is already
-// inside mailcache's entryMeta (so Rev bumps exactly once when the flag lands
-// and delta clients learn about it for free), and is removable by the user from
-// the existing webmail keyword editor -- a no-code escape hatch for a false
-// positive.
+// phishKeyword is the durable verdict channel: an IMAP keyword set on the
+// message in the mailbox itself. It survives the mail cache's top-N window and
+// poller restarts, is already carried to every client by bucket()'s
+// entry.Keywords and already inside mailcache's entryMeta (so Rev bumps once and
+// delta clients learn about it for free), and the user can remove it from the
+// existing webmail keyword editor — a no-code escape hatch for a false positive.
 //
 // $Phishing is the reserved RFC 8621 keyword, so other MUAs understand it too.
-// Deliberately NOT added to config.Labels.Allowlist: collectAllowedKeywords
-// must never turn it into a tab, because the message does not move -- not on
-// disk, and not visually.
+// Deliberately NOT added to config.Labels.Allowlist: collectAllowedKeywords must
+// never turn it into a tab, because the message does not move.
 //
 // IMAP keywords are case-insensitive, so every comparison against this must be
 // too; a server may hand back "$phishing".
@@ -216,17 +203,16 @@ func hasPhishKeyword(keywords []string) bool {
 }
 
 // flagAppImpersonation is the poller's best-effort receive-side anti-phishing
-// step, run once per newly-seen inbound message. Like harvestAutocrypt, it
-// never returns an error -- every failure is logged and swallowed, so it can
-// never disturb mail processing. It reports whether the message was flagged, so
-// the caller can mirror the keyword into the mail cache.
+// step, run once per newly-seen inbound message. Like harvestAutocrypt it never
+// returns an error — every failure is logged and swallowed — and it reports
+// whether the message was flagged so the caller can mirror the keyword into the
+// mail cache.
 //
-// What "flagged" means, and does not mean: the message keeps its place in
-// INBOX, its unread state, and its body. It is not moved, archived, filed to
-// Junk, deleted, or bounced, and no notice is emailed. The user is told, and
-// the client refuses the dangerous scheme on its own. That refusal is
-// unconditional and needs nothing from here, which is what makes every step
-// below safe to fail.
+// Flagged means only that: the message keeps its place in INBOX, its unread
+// state and its body. It is not moved, archived, filed to Junk, deleted or
+// bounced, and no notice is emailed. The client refuses the dangerous scheme on
+// its own, unconditionally and with no input from here, which is what makes
+// every step below safe to fail.
 //
 // ownAddress is the account's own full mail address, resolved once per tick by
 // the caller rather than re-read per message.
@@ -252,32 +238,24 @@ func (p *Poller) flagAppImpersonation(ctx context.Context, uc userCtx, msg imapa
 		return false
 	}
 
-	// Tier B. Only reached by mail that already looks like app impersonation,
-	// so the DNS cost is paid on a vanishing fraction of messages. This server
-	// emails its own notices (and its own /pickup/ links), so this is what
-	// keeps a genuine notice from wearing a phishing warning.
+	// Tier B. Only reached by mail that already looks like app impersonation, so the
+	// DNS cost is paid on a vanishing fraction of messages. This server emails its
+	// own notices and its own /pickup/ links, so this is what keeps a genuine notice
+	// from wearing a phishing warning.
 	//
-	// The gate requires BOTH a valid DKIM signature over the account's own
-	// domain AND a From address equal to the account's own address. DKIM alone
-	// was not enough, and was in fact no gate at all for most users: it keyed
-	// on the *domain* of the account address, so for an account at
-	// victim@gmail.com the domain is "gmail.com" and every message any Gmail
-	// user sends carries a valid d=gmail.com signature. Any attacker with a
-	// free account on the victim's own provider cleared the gate and got their
-	// kypost:// deep link delivered with no banner. The same held for
-	// outlook.com, yahoo.com, icloud.com — i.e. for most people connecting this
-	// client to a mailbox they already had.
+	// The gate requires BOTH a valid DKIM signature over the account's own domain
+	// AND a From address equal to the account's own address. DKIM alone is no gate
+	// on a shared provider: for an account at victim@gmail.com every message any
+	// Gmail user sends carries a valid d=gmail.com signature, so any attacker with a
+	// free account on the victim's provider cleared it. A provider will only
+	// DKIM-sign a From header it authenticated the sender for, so the pair means the
+	// account itself sent the message. Neither half is sufficient alone — a From
+	// address is trivially forged without DKIM.
 	//
-	// Pairing the two closes that: a shared-domain provider will only DKIM-sign
-	// a From header it authenticated the sender for, so "signed by the account
-	// domain AND from the account's own address" means the account itself sent
-	// it. Neither half is sufficient alone — a From address is trivially forged
-	// without DKIM, and DKIM without the From check is the hole above.
-	//
-	// A DNS failure makes the real verifier fail closed, which leaves the
-	// message flagged: fail-safe in verdict, fail-soft in consequence -- the
-	// only cost is an advisory banner on legitimate mail, and the https link
-	// still opens. Logged at Info, not Error, because it is not a malfunction.
+	// A DNS failure makes the real verifier fail closed, which leaves the message
+	// flagged: fail-safe in verdict, fail-soft in consequence — the only cost is an
+	// advisory banner on legitimate mail, and the https link still opens. Logged at
+	// Info, not Error, because it is not a malfunction.
 	if ownDomain := domainOf(ownAddress); ownDomain != "" && sameAddress(msg.Sender, ownAddress) {
 		if uid, err := strconv.Atoi(strings.TrimSpace(msg.ID)); err == nil {
 			if raw, err := uc.mail.FetchRawMessage(ctx, uid); err == nil && len(raw) > 0 {
@@ -300,10 +278,9 @@ func (p *Poller) flagAppImpersonation(ctx context.Context, uc userCtx, msg imapa
 	//
 	// Single attempt, deliberately not applySingleKeywordWithRetry: that spends
 	// 3 attempts x 30s, and a server without "PERMANENTFLAGS \*" refuses this
-	// keyword every time. A burst of flagged mail would stall the whole poll
-	// tick past its 8-minute context -- starving every other user's mail to
-	// re-ask a server that already said no, for a banner the client-side scheme
-	// allowlist does not need in order to block the attack.
+	// keyword every time. A burst of flagged mail would stall the whole poll tick
+	// past its 8-minute context, starving every other user's mail to re-ask a server
+	// that already said no.
 	if err := applyPhishKeyword(ctx, uc.mail, msg.ID); err != nil {
 		p.log.Error("app-impersonation scan: keyword apply failed", "user_id", uc.id, "message_id", msg.ID, "error", err.Error())
 		detail += "; keyword could not be applied: " + err.Error()
@@ -329,14 +306,13 @@ func (p *Poller) flagAppImpersonation(ctx context.Context, uc userCtx, msg imapa
 //
 // tickUser warms the mail cache from the whole fetched batch before the
 // per-message loop runs, so a message flagged inside that loop would otherwise
-// sit in the cache with stale keywords until the next tick. The webmail classic
-// path reads that cache, so without this the warning would be up to a poll
-// interval late on precisely the message the user is most likely to open now.
+// sit in the cache with stale keywords until the next tick — leaving the warning
+// up to a poll interval late on exactly the message the user is most likely to
+// open now.
 //
 // Keywords is part of mailcache's entryMeta, so this bumps Rev exactly once and
-// delta clients see one "updated" entry -- no new field and no diffing change.
-// Best-effort: the IMAP keyword set above is the durable channel, so a cache
-// failure costs only the immediacy.
+// delta clients see one updated entry. Best-effort: the IMAP keyword above is
+// the durable channel, so a cache failure costs only the immediacy.
 func (p *Poller) mirrorPhishKeyword(cache *mailcache.Store, msg imapadapter.Message) {
 	if cache == nil {
 		return
@@ -353,9 +329,8 @@ func (p *Poller) mirrorPhishKeyword(cache *mailcache.Store, msg imapadapter.Mess
 
 // sameAddress reports whether a message's From header names exactly the
 // account's own address. sender arrives in whatever shape the IMAP server's
-// envelope produced — bare "a@b.example", or `"Display Name" <a@b.example>` —
-// so the angle-addr is extracted before comparing, and never the display name:
-// a display name is entirely sender-controlled, so matching on it would let
+// envelope produced, so the angle-addr is extracted before comparing — never the
+// display name, which is sender-controlled and would let
 // `From: "victim@gmail.com" <attacker@gmail.com>` clear the gate.
 func sameAddress(sender, ownAddress string) bool {
 	own := strings.ToLower(strings.TrimSpace(ownAddress))
@@ -379,15 +354,13 @@ func sameAddress(sender, ownAddress string) bool {
 
 // accountAddress resolves the full mail address of the account itself, for the
 // DKIM + From gate to authenticate against. Empty when it cannot be determined,
-// which leaves a tripped message flagged rather than quietly cleared.
-//
-// Returns the whole address, not just its domain: the domain alone is not a
-// usable identity on a shared provider — see the gate in flagAppImpersonation.
+// which leaves a tripped message flagged rather than quietly cleared. Returns
+// the whole address, not just its domain: the domain alone is not a usable
+// identity on a shared provider — see the gate in flagAppImpersonation.
 //
 // A thin I/O shim on purpose: the account address lives in the sealed IMAP
-// config, which no unit test in this package can construct. Keeping the read
-// here and passing the resulting address into flagAppImpersonation as a plain
-// string is what makes the actual decision logic testable.
+// config, which no unit test in this package can construct, so keeping the read
+// here is what makes the decision logic testable.
 func (p *Poller) accountAddress(userID string) string {
 	payload, exists, err := mailmsg.ReadIMAPConfigPayload(p.userIMAPConfigPath(userID), p.imapKeyPath)
 	if err != nil || !exists {

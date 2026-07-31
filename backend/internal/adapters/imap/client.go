@@ -31,37 +31,27 @@ type Message struct {
 	Keywords []string
 	AtUTC    string
 	Body     string
-	// BodyHTML is the message's text/html part, when it has one, and is empty
-	// otherwise. It exists because Body above is NOT the body the clients
-	// render: ListUnreadInbox (which fills this struct) prefers the text/plain
-	// part, while every client-facing path — ListUnreadMessages,
-	// GetMessageBodies — prefers text/html. A multipart/alternative message can
-	// therefore show the poller an innocuous plain-text part while the clients
-	// display a hostile HTML one.
-	//
-	// The anti-phishing scan (processor.scanForAppImpersonation) needs both for
-	// exactly that reason: a kypost:// pairing link planted only in the HTML
-	// part would otherwise be invisible to the server while being one click
-	// away in the UI. Filled from the same GetEmails parse as Body, so it costs
-	// no extra IMAP round trip.
+	// BodyHTML is the message's text/html part when it has one, empty otherwise.
+	// Body above is NOT what the clients render: ListUnreadInbox prefers the
+	// text/plain part while every client-facing path (ListUnreadMessages,
+	// GetMessageBodies) prefers text/html, so a multipart/alternative message can
+	// show the poller an innocuous plain-text part while the clients display a
+	// hostile HTML one. The anti-phishing scan (processor.scanForAppImpersonation)
+	// needs both for that reason. Filled from the same GetEmails parse as Body, so
+	// it costs no extra IMAP round trip.
 	BodyHTML string
 	// HasAttachments is set from the same GetEmails parse that fills Body, so
 	// the poller's cache-warm path can carry it into mailcache.Entry without
 	// any extra IMAP round trip.
 	HasAttachments bool
-	// TooLarge is set instead of Body/HasAttachments being populated when
-	// this message is too large to safely pull into memory — see
-	// ListUnreadInbox, which decides this via a server-side
-	// "UNSEEN LARGER <cap>" SEARCH before ever fetching the body, so an
-	// oversized message's HTML/text/attachments are never read off the wire
-	// in the first place. Sender/Subject/SentTo/CC/BCC are still populated,
-	// sourced from a cheap GetOverviews FETCH (flags/envelope only, no
-	// body), so the poller can build a rejection notice without ever
-	// holding the oversized body in memory. The poller's handleMessage
-	// checks this instead of an error return, since ListUnreadInbox fetches
-	// every unread message in one batch — one oversized message must not
-	// fail the whole batch (nor block checkpoint progress for every other
-	// message in it).
+	// TooLarge is set instead of populating Body/HasAttachments when this message is
+	// too large to safely pull into memory — see ListUnreadInbox, which decides via
+	// a server-side "UNSEEN LARGER <cap>" SEARCH before fetching any body, so the
+	// oversized content never comes off the wire. Sender/Subject/SentTo/CC/BCC are
+	// still populated from a cheap GetOverviews FETCH, so the poller can build a
+	// rejection notice. handleMessage checks this instead of an error return:
+	// ListUnreadInbox fetches every unread message in one batch, and one oversized
+	// message must not fail the batch or block checkpoint progress.
 	TooLarge bool
 }
 
@@ -81,21 +71,16 @@ type UnreadMessage struct {
 	Status   string
 	// HasAttachments comes from the same GetEmails parse as Body.
 	HasAttachments bool
-	// PGPEncryptedPayload holds the armored OpenPGP message when the
-	// fetched email's Content-Type was multipart/encrypted (RFC 3156) —
-	// detected by sniffing e.Attachments for an armored PGP message, since
-	// neither e.Text nor e.HTML is populated for content types goimap can't
-	// render as plain text. Empty when the message isn't PGP-encrypted.
-	// Decryption itself happens in internal/api, which holds the reading
-	// user's key — this package only detects and exposes the raw payload.
+	// PGPEncryptedPayload holds the armored OpenPGP message when the fetched email's
+	// Content-Type was multipart/encrypted (RFC 3156), detected by sniffing
+	// e.Attachments — neither e.Text nor e.HTML is populated for content types
+	// goimap cannot render as plain text. Empty otherwise. Decryption happens in
+	// internal/api, which holds the reading user's key.
 	PGPEncryptedPayload string
-	// PGPSignaturePayload holds the armored OpenPGP detached signature when
-	// the fetched email is RFC 3156 multipart/signed (signed but not
-	// encrypted) — detected by sniffing e.Attachments for an armored PGP
-	// signature block. Unlike PGPEncryptedPayload, this is set alongside a
-	// normal, readable Body (signed-only mail isn't opaque to goimap).
-	// Empty when the message carries no detached signature. Verification
-	// happens in internal/api, which holds the sender's known public keys.
+	// PGPSignaturePayload holds the armored OpenPGP detached signature when the
+	// email is RFC 3156 multipart/signed, detected by sniffing e.Attachments. Unlike
+	// PGPEncryptedPayload this is set alongside a normal, readable Body.
+	// Verification happens in internal/api, which holds the sender's public keys.
 	PGPSignaturePayload string
 	// PGPEncrypted/PGPSigned/PGPVerified/PGPSignerFingerprint/
 	// PGPDecryptError are populated by internal/api after decryption or
@@ -119,30 +104,23 @@ type MessageContent struct {
 	// BodyMode is BodyModeHTML or BodyModePlain — see clientBody.
 	BodyMode       string
 	HasAttachments bool
-	// TooLarge is set instead of Body/HasAttachments being populated when
-	// this UID was identified as oversized by GetMessageBodies's server-side
-	// "UID <set> LARGER <cap>" SEARCH (or, as a defense-in-depth fallback,
-	// by the post-fetch emailContentSize check) — mirrors Message.TooLarge
-	// on ListUnreadInbox's result type. The message's content is never
-	// buffered into memory in the search-caught case. Set per-UID rather
-	// than failing the whole GetMessageBodies call, since one oversized
-	// message must not make every other UID in the same batch unreadable.
+	// TooLarge is set instead of populating Body/HasAttachments when this UID was
+	// identified as oversized by GetMessageBodies's server-side
+	// "UID <set> LARGER <cap>" SEARCH, or by the post-fetch emailContentSize
+	// fallback. Mirrors Message.TooLarge. Set per-UID rather than failing the whole
+	// call: one oversized message must not make every other UID in the batch
+	// unreadable.
 	TooLarge bool
-	// PGPEncryptedPayload holds the armored OpenPGP message when the
-	// fetched email's Content-Type was multipart/encrypted (RFC 3156) —
-	// detected by sniffing e.Attachments for an armored PGP message, since
-	// neither e.Text nor e.HTML is populated for content types goimap can't
-	// render as plain text. Empty when the message isn't PGP-encrypted.
-	// Decryption itself happens in internal/api, which holds the reading
-	// user's key — this package only detects and exposes the raw payload.
+	// PGPEncryptedPayload holds the armored OpenPGP message when the fetched email's
+	// Content-Type was multipart/encrypted (RFC 3156), detected by sniffing
+	// e.Attachments — neither e.Text nor e.HTML is populated for content types
+	// goimap cannot render as plain text. Empty otherwise. Decryption happens in
+	// internal/api, which holds the reading user's key.
 	PGPEncryptedPayload string
-	// PGPSignaturePayload holds the armored OpenPGP detached signature when
-	// the fetched email is RFC 3156 multipart/signed (signed but not
-	// encrypted) — detected by sniffing e.Attachments for an armored PGP
-	// signature block. Unlike PGPEncryptedPayload, this is set alongside a
-	// normal, readable Body. Empty when the message carries no detached
-	// signature. Verification happens in internal/api, which holds the
-	// sender's known public keys.
+	// PGPSignaturePayload holds the armored OpenPGP detached signature when the
+	// email is RFC 3156 multipart/signed, detected by sniffing e.Attachments. Unlike
+	// PGPEncryptedPayload this is set alongside a normal, readable Body.
+	// Verification happens in internal/api, which holds the sender's public keys.
 	PGPSignaturePayload string
 	// PGPEncrypted/PGPSigned/PGPVerified/PGPSignerFingerprint/
 	// PGPDecryptError are populated by internal/api after decryption or
@@ -160,13 +138,11 @@ type MessageContent struct {
 }
 
 // pgpDetectPayload scans attachments for an armored OpenPGP message — the
-// RFC 3156 multipart/encrypted data part, which goimap's underlying enmime
-// parser (see message.go) always classifies as an attachment (its
-// application/octet-stream content type unconditionally matches enmime's
-// attachment rule, regardless of Content-Disposition). Detection is
-// content-based (pgpcrypto.IsPGPMessage sniffs the armor header) rather than
-// MIME-type-based, so it also picks up encrypted mail from any other
-// PGP/MIME sender.
+// RFC 3156 multipart/encrypted data part, which enmime always classifies as an
+// attachment (its application/octet-stream type matches enmime's attachment rule
+// regardless of Content-Disposition). Detection is content-based
+// (pgpcrypto.IsPGPMessage sniffs the armor header) rather than MIME-type-based,
+// so it also picks up encrypted mail from any other PGP/MIME sender.
 func pgpDetectPayload(attachments []goimap.Attachment) string {
 	for _, a := range attachments {
 		if pgpcrypto.IsPGPMessage(string(a.Content)) {
@@ -176,13 +152,10 @@ func pgpDetectPayload(attachments []goimap.Attachment) string {
 	return ""
 }
 
-// pgpDetectSignature scans attachments for an armored OpenPGP detached
-// signature — the application/pgp-signature part of an RFC 3156
-// multipart/signed message (the "signature.asc" attachment written by this
-// codebase's own signed-MIME builder, and the equivalent from any other
-// PGP/MIME sender). Unlike encrypted mail, a signed-only message keeps a
-// normal readable body, so callers check for this alongside the body rather
-// than only when the body is empty.
+// pgpDetectSignature scans attachments for an armored OpenPGP detached signature
+// — the application/pgp-signature part of an RFC 3156 multipart/signed message.
+// Unlike encrypted mail, a signed-only message keeps a normal readable body, so
+// callers check for this alongside the body rather than only when it is empty.
 func pgpDetectSignature(attachments []goimap.Attachment) string {
 	for _, a := range attachments {
 		if strings.HasPrefix(strings.TrimSpace(string(a.Content)), "-----BEGIN PGP SIGNATURE-----") {
@@ -218,16 +191,15 @@ type DraftMessage struct {
 	Body        string
 	Mode        string
 	Attachments []mailmsg.Attachment
-	// Raw is a complete RFC 5322 message to append verbatim. When set, every
-	// other field except To (which saveMessage requires) is ignored and no
-	// message is built.
+	// Raw is a complete RFC 5322 message to append verbatim. When set, every other
+	// field except To (which saveMessage requires) is ignored and no message is
+	// built.
 	//
-	// This exists for the client-custody Sent copy, which arrives already
-	// wrapped as PGP/MIME by the browser. Running it back through
-	// mailmsg.Message.Build would nest a complete multipart/encrypted message
-	// inside a freshly generated envelope, so no reader would decrypt it — and
-	// it would need the real Subject to rebuild a header, which is exactly the
-	// value the encryption exists to hide.
+	// This exists for the client-custody Sent copy, which arrives already wrapped as
+	// PGP/MIME by the browser. Rebuilding it would nest a complete
+	// multipart/encrypted message inside a fresh envelope, so no reader would
+	// decrypt it — and it would need the real Subject, which is the value the
+	// encryption exists to hide.
 	Raw []byte
 }
 
@@ -472,23 +444,21 @@ func uidSetCriteria(uids []int) string {
 	return strings.Join(parts, ",")
 }
 
-// partitionUIDsBySize splits filtered (the batch of UIDs a caller is about to
-// process — ListUnreadInbox's unseen, past-checkpoint UIDs, or
-// GetMessageBodies's requested UIDs) into toFetch — safe to hand to
-// go-imap's GetEmails, which fully buffers each message's body and
-// attachments into memory — and tooLarge — UIDs a server-side
-// "... LARGER <cap>" SEARCH (UNSEEN-scoped for ListUnreadInbox, UID-set-scoped
-// for GetMessageBodies) already identified as oversized, which must never be
-// passed to GetEmails at all. oversized is exactly what that SEARCH returned;
-// membership is intersected against filtered so a UID the search reports but
-// that isn't in this batch (e.g. it fell out of UNSEEN between the two round
-// trips) is silently ignored rather than fabricating a message for it. Pulled
-// out as a pure function, with no IMAP connection involved, specifically so a
-// test can assert on it directly — this package has no live/fake
-// *goimap.Dialer to drive ListUnreadInbox/GetMessageBodies themselves
-// end-to-end (see client_test.go), so this is the seam that proves oversized
-// UIDs are structurally excluded from the fetch list, not just
-// checked-and-discarded after GetEmails already ran.
+// partitionUIDsBySize splits filtered — the batch a caller is about to process
+// (ListUnreadInbox's unseen, past-checkpoint UIDs, or GetMessageBodies's
+// requested UIDs) — into toFetch, safe to hand to go-imap's GetEmails, which
+// fully buffers each body and attachment into memory, and tooLarge, the UIDs a
+// server-side "... LARGER <cap>" SEARCH already identified as oversized and
+// which must never reach GetEmails.
+//
+// oversized is exactly what that SEARCH returned; membership is intersected
+// against filtered, so a UID the search reports that is not in this batch (it
+// fell out of UNSEEN between the two round trips) is ignored rather than
+// fabricating a message for it.
+//
+// A pure function with no IMAP connection, so a test can assert on it directly:
+// this package has no live or fake *goimap.Dialer, so this is the seam that
+// proves oversized UIDs are structurally excluded from the fetch list.
 func partitionUIDsBySize(filtered []int, oversized []int) (toFetch []int, tooLarge []int) {
 	large := make(map[int]bool, len(oversized))
 	for _, uid := range oversized {
@@ -539,16 +509,13 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 	}
 	sort.Ints(filtered)
 
-	// Ask the server which of these are oversized *before* fetching any
-	// bodies: LARGER is evaluated against the server's own RFC822.SIZE, so
-	// an oversized message's literal is never sent to us at all — a genuine
-	// protocol-level pre-fetch bound, not just a post-fetch check (contrast
-	// fetchAttachments below, which has no equivalent search step ahead of
-	// it and so keeps the post-fetch emailContentSize check as its only
-	// guard; GetMessageBodies uses this same UNSEEN/UID-scoped LARGER
-	// technique for its own batch). UNSEEN is included in the same SEARCH
-	// so this stays scoped to exactly the messages we're about to consider
-	// (IMAP ANDs search criteria together).
+	// Ask the server which of these are oversized BEFORE fetching any bodies: LARGER
+	// is evaluated against the server's own RFC822.SIZE, so an oversized message's
+	// literal is never sent to us — a protocol-level pre-fetch bound, not a
+	// post-fetch check. (fetchAttachments below has no equivalent search step and so
+	// keeps emailContentSize as its only guard.) UNSEEN is in the same SEARCH so
+	// this stays scoped to the messages we are about to consider; IMAP ANDs search
+	// criteria together.
 	sb := goimap.Search().Unseen().Larger(int(mailmsg.MaxInboundMessageBytes))
 	oversizedUIDs, err := d.SearchUIDs(sb)
 	if err != nil {
@@ -897,15 +864,12 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 		return nil, err
 	}
 
-	// Ask the server which of the requested UIDs are oversized *before*
-	// fetching any bodies — the same technique ListUnreadInbox uses for the
-	// poller's UNSEEN batch, scoped here to exactly the UID set this caller
-	// asked about via a UID search key (ANDed with LARGER, since IMAP search
-	// criteria are implicitly conjunctive). This closes the gap the
-	// LARGER-search-less mail-cache-sync/rules-run paths otherwise had: an
-	// attacker-delivered oversized message could previously be fully
-	// buffered by GetEmails below before any size check ran, on every
-	// inbox-cache-sync or rules-run pass over the victim's mailbox.
+	// Ask the server which of the requested UIDs are oversized BEFORE fetching any
+	// bodies — the technique ListUnreadInbox uses for the poller's UNSEEN batch,
+	// scoped here to this caller's UID set (ANDed with LARGER, since IMAP search
+	// criteria are implicitly conjunctive). Without it, an attacker-delivered
+	// oversized message was fully buffered by GetEmails on every mail-cache-sync or
+	// rules-run pass over the victim's mailbox.
 	sb := goimap.Search().UID(uidSetCriteria(uids)).Larger(int(mailmsg.MaxInboundMessageBytes))
 	oversizedUIDs, err := d.SearchUIDs(sb)
 	if err != nil {
@@ -933,13 +897,9 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 		if e == nil {
 			continue
 		}
-		// Defense-in-depth: the message could have grown between the
-		// SEARCH above and this fetch (new mail arriving concurrently,
-		// etc). Re-check the actual decoded size rather than trusting the
-		// search result was still accurate by the time GetEmails ran. Marks
-		// this one UID TooLarge and moves on instead of failing the whole
-		// batch — one oversized message must not make every other UID in
-		// this call unreadable.
+		// Defense-in-depth: the message could have grown between the SEARCH above and
+		// this fetch, so re-check the actual decoded size. Marks this one UID TooLarge
+		// and moves on instead of failing the whole batch.
 		if emailContentSize(e) > mailmsg.MaxInboundMessageBytes {
 			out[uid] = MessageContent{TooLarge: true}
 			continue
@@ -1073,22 +1033,14 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action, mai
 	}
 }
 
-// emailContentSize sums the bytes an already-fetched *goimap.Email holds in
-// memory: its HTML/text bodies plus every attachment's content. Used to
-// enforce mailmsg.MaxInboundMessageBytes uniformly across GetMessageBodies
-// and fetchAttachments (and, transitively, ListAttachments/GetAttachment,
-// which both call fetchAttachments) — a single message with many small
-// attachments that add up past the cap is exactly as much of an OOM risk as
-// one huge attachment, so the check is on the total, not any single part.
 // inboxBodies splits one parsed email into the two body views ListUnreadInbox
-// reports: Body, which keeps this path's long-standing text/plain preference
-// (it is what gets classified, redacted, and warmed into the mail cache), and
-// BodyHTML, which is the text/html part verbatim or empty. See Message.BodyHTML
-// for why both are needed.
+// reports: Body, which keeps this path's text/plain preference (it is what gets
+// classified, redacted, and warmed into the mail cache), and BodyHTML, the
+// text/html part verbatim or empty. See Message.BodyHTML for why both are
+// needed.
 //
-// Extracted as a pure function rather than left inline so it can be tested
-// without a live *goimap.Dialer, matching partitionUIDsBySize and
-// parseHeaderFieldsRecords in this package.
+// A pure function so it can be tested without a live *goimap.Dialer, matching
+// partitionUIDsBySize and parseHeaderFieldsRecords in this package.
 func inboxBodies(e *goimap.Email) (body, bodyHTML string) {
 	bodyHTML = strings.TrimSpace(e.HTML)
 	body = strings.TrimSpace(e.Text)
@@ -1112,14 +1064,13 @@ const (
 // markup from a plain-text message that merely contains angle brackets, and
 // "<user@example.com>" — RFC 5322's own address form — is the common case it
 // gets wrong: routed through the HTML pipeline it parses as an unknown tag and
-// is dropped, deleting an address from the message. The parse already knows the
-// answer, so carry it.
+// the address is deleted from the message. The parse already knows the answer,
+// so carry it.
 //
-// An empty body reports an empty mode, not BodyModePlain. "" is the wire
-// contract's "the server does not know", and a message with no readable text
-// part (a PGP envelope, an attachment-only mail) is exactly that case.
-// mailcache.Store.Sync preserves whatever is reported here, and the client
-// trusts it over the fallback it would otherwise have used.
+// An empty body reports an empty mode, not BodyModePlain: "" is the wire
+// contract's "the server does not know", which is exactly a PGP envelope or an
+// attachment-only mail. mailcache.Store.Sync preserves what is reported here,
+// and the client trusts it over its own fallback.
 func clientBody(e *goimap.Email) (body, mode string) {
 	if body = strings.TrimSpace(e.HTML); body != "" {
 		return body, BodyModeHTML
@@ -1131,15 +1082,11 @@ func clientBody(e *goimap.Email) (body, mode string) {
 }
 
 // goimapDefaults sets the vendored library's package-level tunables exactly
-// once.
-//
-// DialTimeout/CommandTimeout/RetryCount are globals inside go-imap, and this
-// assignment used to run inline on every first-connect. Each APIClient has its
-// own mutex but there is one of them per user, and the poller runs several
-// user ticks concurrently, so -race flagged concurrent writes here. Every
-// writer wrote the same constants, which is why it never misbehaved — but the
-// project runs -race in CI, and it stops being benign the moment any of these
-// becomes configurable.
+// once. DialTimeout/CommandTimeout/RetryCount are globals inside go-imap, and
+// assigning them inline on every first-connect had several concurrent user ticks
+// writing them at once, which -race flags. Every writer wrote the same
+// constants, so it never misbehaved — and stops being benign the moment any of
+// these becomes configurable.
 var goimapDefaults sync.Once
 
 func configureGoIMAPDefaults() {
@@ -1152,20 +1099,16 @@ func configureGoIMAPDefaults() {
 
 // Close tears down this client's IMAP connection, if it has opened one.
 //
-// An APIClient holds a live, authenticated *goimap.Dialer for its whole life
-// and Go's GC does not close sockets, so a client that is dropped without this
-// leaves its session open on the far end until the server times it out —
-// minutes to half an hour, and IMAP providers cap concurrent sessions per
-// account (Gmail: 15). Both cache owners rebuild their client when the stored
-// credentials change (api's userMailClient/invalidateUserMail, the poller's
-// userMailClient), so without a close every IMAP settings save burned one
-// session per process and a handful of saves could lock a user out of their
-// own mailbox.
+// An APIClient holds a live, authenticated *goimap.Dialer for its whole life and
+// Go's GC does not close sockets, so a client dropped without this leaves its
+// session open until the far end times it out — minutes to half an hour, against
+// providers that cap concurrent sessions per account (Gmail: 15). Both cache
+// owners rebuild their client when the stored credentials change, so without a
+// close every IMAP settings save burned one session per process.
 //
-// Deliberately NOT added to the Client interface: the interface is implemented
-// by six test fakes that have nothing to close, and the two eviction sites
-// type-assert io.Closer instead. Safe to call more than once, and safe on a
-// client that never connected.
+// Deliberately NOT on the Client interface: six test fakes have nothing to
+// close, and the two eviction sites type-assert io.Closer instead. Safe to call
+// more than once, and on a client that never connected.
 func (c *APIClient) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
