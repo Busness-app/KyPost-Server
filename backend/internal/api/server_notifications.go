@@ -41,6 +41,37 @@ type notificationTestPayload struct {
 	Body  string `json:"body"`
 }
 
+// Field bounds for anything a registration persists and the poller later
+// carries into a delivery attempt.
+//
+// The body limit on these handlers is 1 MiB, which is the bound on ONE request.
+// It is not a bound on what gets stored: every one of these fields was written
+// verbatim at whatever length the caller chose, up to that limit, and then read
+// back on every poll tick — a push endpoint URL is dialled, a device name and
+// user agent are returned by the devices listing. Generous against real values
+// (a push endpoint URL is a few hundred bytes; the RFC 8291 keys are fixed-size
+// base64), tight against a caller filling the store with the largest values the
+// body limit allows.
+const (
+	maxPushEndpointLen = 2048
+	maxPushKeyLen      = 256
+	maxDeviceTokenLen  = 4096
+	maxDeviceTextLen   = 256
+	maxUserAgentLen    = 512
+)
+
+// clampField trims s and cuts it to max bytes. Used on stored metadata (user
+// agent, device name, app version) where over-length is not worth refusing the
+// registration over — unlike the credential fields, which are rejected outright
+// because a truncated one would be silently wrong.
+func clampField(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
+}
+
 func (s *Server) handleNotificationVAPIDPublicKey(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.RLock()
 	publicKey := strings.TrimSpace(s.cfg.Notifications.PublicKey)
@@ -72,6 +103,10 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 			http.Error(w, "endpoint and keys are required", http.StatusBadRequest)
 			return
 		}
+		if len(payload.Endpoint) > maxPushEndpointLen || len(payload.Keys.Auth) > maxPushKeyLen || len(payload.Keys.P256DH) > maxPushKeyLen {
+			http.Error(w, "endpoint or keys are too long", http.StatusBadRequest)
+			return
+		}
 		// Screened exactly like the UnifiedPush endpoint already is. This is a
 		// user-supplied URL the poller later POSTs to, and it had only a
 		// non-empty check — so it was an authenticated SSRF into the
@@ -89,10 +124,20 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 			Endpoint:  payload.Endpoint,
 			Auth:      payload.Keys.Auth,
 			P256DH:    payload.Keys.P256DH,
-			UserAgent: strings.TrimSpace(r.Header.Get("User-Agent")),
+			UserAgent: clampField(r.Header.Get("User-Agent"), maxUserAgentLen),
 			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		}
 		if err := store.UpsertNotificationSubscription(sub); err != nil {
+			// 409, not 500: the request is well-formed and the server is fine
+			// — this account is simply at its cap and has to unsubscribe
+			// something before adding another. Refreshing a subscription that
+			// already exists never hits this.
+			if errors.Is(err, state.ErrRegistrationLimit) {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error": fmt.Sprintf("this account already has the maximum of %d push subscriptions; remove one first", state.MaxNotificationSubscriptions),
+				})
+				return
+			}
 			http.Error(w, "failed to persist notification subscription", http.StatusInternalServerError)
 			return
 		}
@@ -132,6 +177,22 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	// Before any work. This handler dispatches to every registration the
+	// account has, serially, each with its own network timeout — so without a
+	// meter it is an authenticated user's switch for making the server spend
+	// unbounded time on outbound requests to destinations they chose.
+	if allowed, retryAfter := s.notificationTestCooldown.tryConsume(ac.UserID); !allowed {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":             "a test notification was just sent; try again shortly",
+			"retryAfterSeconds": int(retryAfter.Seconds()) + 1,
+		})
+		return
+	}
 	store, err := s.storeFor(r)
 	if err != nil {
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
@@ -177,7 +238,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		vapidPublic := s.cfg.Notifications.PublicKey
 		vapidKeyPath := s.cfg.Notifications.PrivateKeyPath
 		s.cfgMu.RUnlock()
-		outcome, err := processor.SendWebPush(store, vapidPublic, vapidKeyPath, 3600, payloadBytes)
+		outcome, err := processor.SendWebPush(r.Context(), store, vapidPublic, vapidKeyPath, 3600, payloadBytes)
 		if err != nil {
 			http.Error(w, "failed to load notification private key", http.StatusInternalServerError)
 			return
@@ -339,6 +400,13 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		http.Error(w, "subscriberId, pairingToken, and deviceToken are required", http.StatusBadRequest)
 		return
 	}
+	// Bounded before anything persists it. deviceToken is an FCM/APNs token or
+	// a UnifiedPush endpoint URL, and deviceId is client-chosen — all three are
+	// stored and read back on every delivery.
+	if len(deviceToken) > maxDeviceTokenLen || len(strings.TrimSpace(req.DeviceID)) > maxDeviceTextLen {
+		http.Error(w, "deviceToken or deviceId is too long", http.StatusBadRequest)
+		return
+	}
 
 	platform := normalizeNativePlatform(req.Platform)
 	transport, err := normalizeNativeTransport(req.Transport, req.Platform)
@@ -428,14 +496,23 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		Platform:    platform,
 		Transport:   transport,
 		PushToken:   deviceToken,
-		DeviceName:  strings.TrimSpace(req.DeviceName),
-		AppVersion:  strings.TrimSpace(req.AppVersion),
-		UserAgent:   strings.TrimSpace(r.Header.Get("User-Agent")),
+		DeviceName:  clampField(req.DeviceName, maxDeviceTextLen),
+		AppVersion:  clampField(req.AppVersion, maxDeviceTextLen),
+		UserAgent:   clampField(r.Header.Get("User-Agent"), maxUserAgentLen),
 		UserID:      ownerID,
 		MFAApprover: true,
 		SecretHash:  secretHash,
 	}
 	if err := store.UpsertNativeDevice(device); err != nil {
+		// See the same branch on the web-push subscription handler: at the cap
+		// the request is refused, not failed. Re-pairing a device that is
+		// already registered updates its row and never reaches this.
+		if errors.Is(err, state.ErrRegistrationLimit) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": fmt.Sprintf("this account already has the maximum of %d paired devices; unpair one first", state.MaxNativeDevices),
+			})
+			return
+		}
 		http.Error(w, "failed to persist native device", http.StatusInternalServerError)
 		return
 	}

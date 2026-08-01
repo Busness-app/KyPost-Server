@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -518,6 +519,18 @@ func newClassifierClient(cfg config.Config) *classifier.HTTPClient {
 	}
 	if classifyPath == "" {
 		classifyPath = "/api/generate"
+	}
+
+	// Reported, not enforced. PUT /api/config refuses a base URL that fails
+	// this, so the only way to arrive here with one is a value persisted before
+	// that check existed or an env var the operator set directly — and neither
+	// is a reason to refuse to start a mail server. What it is a reason for is
+	// saying so out loud once per boot, because the failure mode this catches
+	// (email and the API key crossing the public internet in the clear) has no
+	// symptom otherwise: classification keeps working exactly as before.
+	if err := classifier.ValidateBaseURL(baseURL); err != nil {
+		slog.Error("classifier endpoint fails the transport policy; email content is being sent to it anyway",
+			"error", err.Error())
 	}
 
 	// The default tuning text only backstops callers that pass no per-call

@@ -326,11 +326,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// choosing.
 	if !u.UsesDerivedAuth() && req.AuthSecret != "" {
 		salt := s.syntheticLoginSalt(req.Username)
+		// Checked against what this server ISSUED, not clamped into range.
+		//
+		// loginParamsFor hands a legacy account exactly one work factor —
+		// clientLoginIterations — so that is the only value a client can
+		// honestly echo. Clamping an out-of-range echo was worse than useless:
+		// the stored count has to be the one the client actually derived with,
+		// so silently substituting a different number pins the account to a
+		// credential nobody can reproduce, and the next sign-in fails for good.
+		// A mismatch means the client did not use the parameters it was given,
+		// which is not something to paper over.
+		//
+		// Zero is the one exception: a client that never sent the field used
+		// what it was handed, because there was nothing else to use.
 		iterations := req.LoginIterations
-		if iterations < users.MinLoginIterations {
+		if iterations == 0 {
 			iterations = clientLoginIterations
 		}
-		if err := s.users.UpgradeToDerivedAuth(r.Context(), u.ID, req.Password, req.AuthSecret, salt, iterations); err != nil {
+		if iterations != clientLoginIterations {
+			// Non-fatal, like every other failure in this block: the account
+			// keeps authenticating the legacy way.
+			s.logger.Error("refusing auth derivation upgrade: client used a work factor this server did not issue",
+				"user_id", u.ID, "client_iterations", strconv.Itoa(req.LoginIterations))
+		} else if err := s.users.UpgradeToDerivedAuth(r.Context(), u.ID, req.Password, req.AuthSecret, salt, iterations); err != nil {
 			// Non-fatal: the account keeps authenticating the legacy way and
 			// gets another chance next sign-in. Refusing a correct password
 			// because an optimization failed would be worse.

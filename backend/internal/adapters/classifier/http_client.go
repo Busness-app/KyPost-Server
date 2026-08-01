@@ -170,7 +170,7 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 		apiKey:         strings.TrimSpace(apiKey),
 		path:           path,
 		model:          model,
-		client:         &http.Client{Timeout: timeout},
+		client:         &http.Client{Timeout: timeout, CheckRedirect: refuseCrossOriginRedirect},
 		tuningTemplate: tuningTemplate,
 		classifySem:    make(chan struct{}, concurrency),
 		paceInterval:   pace,

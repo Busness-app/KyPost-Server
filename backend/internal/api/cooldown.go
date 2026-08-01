@@ -89,6 +89,16 @@ const sendAsVerificationCooldownFor = 5 * time.Minute
 // the same backend. Keyed on the admin's user ID.
 const classifierTestCooldownFor = 10 * time.Second
 
+// notificationTestCooldownFor bounds how often one user may fire
+// POST /api/notifications/test.
+//
+// The handler fans out to every registration the account has, serially, each
+// with its own multi-second network timeout, on the request goroutine. It is
+// the one endpoint that lets an authenticated user trigger that fanout on
+// demand and as often as they like, against destinations they chose. Keyed on
+// the caller's user ID.
+const notificationTestCooldownFor = 10 * time.Second
+
 // cooldownSweepMaxAge bounds how long an entry is kept before StartCooldownSweeper
 // reclaims it.
 //

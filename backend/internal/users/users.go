@@ -1620,11 +1620,11 @@ func (s *Store) SetDerivedAuthAndRewrapPGP(ctx context.Context, id, authSecret, 
 	if err := ValidateAuthSecret(authSecret); err != nil {
 		return User{}, err
 	}
-	if strings.TrimSpace(loginSalt) == "" {
-		return User{}, errors.New("login salt is required for derived auth")
+	if err := validateLoginSalt(loginSalt); err != nil {
+		return User{}, err
 	}
-	if iterations < MinLoginIterations {
-		return User{}, fmt.Errorf("login iterations must be at least %d", MinLoginIterations)
+	if err := validateLoginIterations(iterations); err != nil {
+		return User{}, err
 	}
 	hash, err := HashPassword(ctx, authSecret)
 	if err != nil {
@@ -1657,6 +1657,67 @@ func (s *Store) SetDerivedAuthAndRewrapPGP(ctx context.Context, id, authSecret, 
 // a proper one.
 const MinLoginIterations = 100_000
 
+// MaxLoginIterations is the ceiling, and it exists for the opposite reason to
+// the floor.
+//
+// This value is not a cost the server pays; it is a cost the BROWSER pays, on
+// every sign-in, forever, because the credential is pinned to whatever was
+// stored here. A client that declares 10^12 does not attack the server — it
+// bricks the account, and the account cannot be fixed from the client that can
+// no longer sign in to it.
+//
+// It must equal MAX_ITERATIONS in frontend/src/lib/authSecret.ts, which refuses
+// to derive above it. That was the whole bug: the server enforced only the
+// floor, so it would happily store a work factor its own client then rejected
+// as unsupported, and the two halves of one contract disagreed about which
+// credentials were usable. TestLoginIterationCeilingMatchesFrontend pins them
+// together.
+const MaxLoginIterations = 12_000_000
+
+// validateLoginIterations bounds a client-declared work factor at both ends.
+// One function so the two write paths — SetDerivedAuthAndRewrapPGP and
+// UpgradeToDerivedAuth — cannot drift, which is exactly how the ceiling came to
+// be missing from both.
+func validateLoginIterations(iterations int) error {
+	if iterations < MinLoginIterations {
+		return fmt.Errorf("login iterations must be at least %d", MinLoginIterations)
+	}
+	if iterations > MaxLoginIterations {
+		return fmt.Errorf("login iterations must be at most %d", MaxLoginIterations)
+	}
+	return nil
+}
+
+// MinLoginSaltBytes and MaxLoginSaltBytes bound the DECODED salt.
+//
+// The frontend calls atob() on this value before deriving, so a salt that is
+// not valid base64 does not produce a weaker credential — it produces a client
+// that throws on sign-in for an account that has no other way in. Both salts
+// this server ever issues (newLoginSalt in the browser, syntheticLoginSalt on
+// the server) are 16 bytes, so the range is generous in both directions and
+// exists to reject shapes, not to second-guess sizes.
+const (
+	MinLoginSaltBytes = 16
+	MaxLoginSaltBytes = 64
+)
+
+// validateLoginSalt checks that salt is the base64 the client will try to
+// decode, at a length that could plausibly be a salt.
+func validateLoginSalt(salt string) error {
+	salt = strings.TrimSpace(salt)
+	if salt == "" {
+		return errors.New("login salt is required for derived auth")
+	}
+	raw, err := base64.StdEncoding.DecodeString(salt)
+	if err != nil {
+		return errors.New("login salt must be standard base64")
+	}
+	if len(raw) < MinLoginSaltBytes || len(raw) > MaxLoginSaltBytes {
+		return fmt.Errorf("login salt must decode to between %d and %d bytes", MinLoginSaltBytes, MaxLoginSaltBytes)
+	}
+	return nil
+}
+
 // UpgradeToDerivedAuth converts a legacy account to client-derived auth after a
 // successful legacy login, given the auth secret the client derived alongside
 // the password it just proved — the only moment both credentials are in hand at
@@ -1668,11 +1729,11 @@ func (s *Store) UpgradeToDerivedAuth(ctx context.Context, id, verifiedPassword, 
 	if err := ValidateAuthSecret(authSecret); err != nil {
 		return err
 	}
-	if strings.TrimSpace(loginSalt) == "" {
-		return errors.New("login salt is required for derived auth")
+	if err := validateLoginSalt(loginSalt); err != nil {
+		return err
 	}
-	if iterations < MinLoginIterations {
-		return fmt.Errorf("login iterations must be at least %d", MinLoginIterations)
+	if err := validateLoginIterations(iterations); err != nil {
+		return err
 	}
 	hash, err := HashPassword(ctx, authSecret)
 	if err != nil {

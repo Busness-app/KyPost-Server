@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -234,14 +235,49 @@ func (s *Store) Seen(id string) (bool, error) {
 	return n > 0, nil
 }
 
-// MarkProcessed records that a message has been classified. One row, not a
-// rewrite of every message id ever seen.
-func (s *Store) MarkProcessed(id string) error {
-	_, err := s.db.Exec(
+func markProcessed(e execer, id string) error {
+	_, err := e.Exec(
 		`INSERT INTO processed(message_id, seen_at) VALUES(?, ?)
 		 ON CONFLICT(message_id) DO UPDATE SET seen_at = excluded.seen_at`,
 		id, time.Now().UTC().Unix())
 	return err
+}
+
+// MarkProcessed records that a message has been classified. One row, not a
+// rewrite of every message id ever seen.
+//
+// Prefer RecordProcessedDecision when the caller is also writing the decision
+// that retires the message: the two together are one state change, and this
+// entry point cannot enforce that.
+func (s *Store) MarkProcessed(id string) error {
+	return markProcessed(s.db, id)
+}
+
+// RecordProcessedDecision writes d to the audit log AND retires d.MessageID in
+// ONE transaction.
+//
+// Every terminal path in the poller ends in exactly these two writes, and they
+// used to be two separate statements — issued in opposite orders on different
+// branches, with the errors dropped on some of them. Both orders lose:
+//
+//   - decision first, marker fails: the next tick reprocesses the message, so
+//     the audit log grows a duplicate row and every paired device gets a second
+//     notification for mail the user already has.
+//   - marker first, decision fails: the message is retired with no record that
+//     anything happened to it. It is never looked at again and the audit log,
+//     which is the only account of what this server did to someone's mail,
+//     silently omits it.
+//
+// SQLITE_BUSY past the busy_timeout is reachable here — the api and daemon
+// processes contend on this file — so neither failure is hypothetical. One
+// transaction makes "recorded and retired" the only two outcomes.
+func (s *Store) RecordProcessedDecision(d Decision) error {
+	return s.tx(func(tx *sql.Tx) error {
+		if err := insertDecision(tx, d); err != nil {
+			return err
+		}
+		return markProcessed(tx, d.MessageID)
+	})
 }
 
 func (s *Store) ProcessedSince(since time.Time) int {
@@ -493,8 +529,59 @@ func (s *Store) ListNotificationSubscriptionsStrict() ([]NotificationSubscriptio
 	return out, rows.Err()
 }
 
+// ErrRegistrationLimit is returned by the upserts below when a NEW registration
+// would take the account past its cap. Refreshing a registration that already
+// exists never returns it, so a device at the cap can still renew its token.
+var ErrRegistrationLimit = errors.New("registration limit reached")
+
+// MaxNotificationSubscriptions and MaxNativeDevices cap how many push
+// destinations one account may register.
+//
+// Not a storage concern — a delivery one. Both fanouts are serial, each
+// destination gets its own multi-second network timeout, and the whole thing
+// runs inside the goroutine poller.tick's wg.Wait() awaits. So the number of
+// rows here is a multiplier on how long one user's poll tick can take, and the
+// tick does not finish until the slowest user does: an account that registered
+// registrations without bound could hold up mail polling for everyone on the
+// instance without ever doing anything an authenticated user is not allowed to
+// do. The cap is what makes that multiplier finite.
+//
+// Sized for a person, not for a fleet: browsers, phones and tablets. Anyone
+// legitimately past this has a deployment question, not a notification one.
+const (
+	MaxNotificationSubscriptions = 20
+	MaxNativeDevices             = 20
+)
+
+// countRows reports how many rows table holds. Callers pass a *sql.Tx so the
+// count and the insert it gates cannot interleave with another registration.
+func countRows(q queryer, table string) (int, error) {
+	var n int
+	// table is a package-level constant string at every call site, never
+	// request data.
+	err := q.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n)
+	return n, err
+}
+
 func (s *Store) UpsertNotificationSubscription(sub NotificationSubscription) error {
 	return s.tx(func(tx *sql.Tx) error {
+		// Counted inside the transaction that inserts, not by the handler
+		// beforehand: a check followed by a separate write lets N concurrent
+		// registrations all read "under the cap" and then all insert.
+		var exists int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM notifications WHERE endpoint = ?`, sub.Endpoint).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			n, err := countRows(tx, "notifications")
+			if err != nil {
+				return err
+			}
+			if n >= MaxNotificationSubscriptions {
+				return ErrRegistrationLimit
+			}
+		}
 		var seq int64
 		if err := tx.QueryRow(
 			`SELECT COALESCE(MAX(seq), -1) + 1 FROM notifications`).Scan(&seq); err != nil {
@@ -664,6 +751,18 @@ func (s *Store) upsertNativeDeviceTx(tx *sql.Tx, device NativeDevice) error {
 		if err != sql.ErrNoRows {
 			return err
 		}
+	}
+
+	// Neither match rule fired, so this is a genuinely new device and the only
+	// branch the cap applies to — re-registering or refreshing an existing
+	// device returned above and must keep working at the cap. Counted in this
+	// transaction so concurrent registrations cannot both pass the check.
+	n, err := countRows(tx, "native_devices")
+	if err != nil {
+		return err
+	}
+	if n >= MaxNativeDevices {
+		return ErrRegistrationLimit
 	}
 
 	var nextSeq int

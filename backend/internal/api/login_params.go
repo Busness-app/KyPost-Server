@@ -80,7 +80,13 @@ func (s *Server) handleLoginParams(w http.ResponseWriter, r *http.Request) {
 func (s *Server) loginParamsFor(username string) (salt string, iterations int) {
 	if u, err := s.users.GetByUsername(username); err == nil && u.UsesDerivedAuth() && u.LoginSalt != "" {
 		it := u.LoginIterations
-		if it < users.MinLoginIterations {
+		// Clamped at BOTH ends. The floor has always been here; the ceiling
+		// matters because the client refuses to derive above
+		// MaxLoginIterations, so serving a stored value past it hands the
+		// browser a parameter it will reject and locks the account out of
+		// itself. The store now rejects such a value on write — this covers
+		// anything already persisted, and costs nothing.
+		if it < users.MinLoginIterations || it > users.MaxLoginIterations {
 			it = clientLoginIterations
 		}
 		return u.LoginSalt, it

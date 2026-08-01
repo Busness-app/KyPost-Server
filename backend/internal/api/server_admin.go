@@ -135,6 +135,14 @@ func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "classifier base url is not configured", http.StatusBadRequest)
 		return
 	}
+	// Same policy the config PUT enforces. This handler builds its own client
+	// from whatever is currently stored, so a base URL persisted before that
+	// check existed would otherwise still get a live request sent to it —
+	// carrying the API key, in the clear, on an admin's button press.
+	if err := classifier.ValidateBaseURL(baseURL); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
 
 	path := strings.TrimSpace(cfg.Classifier.ClassifyPath)
 	if path == "" {
