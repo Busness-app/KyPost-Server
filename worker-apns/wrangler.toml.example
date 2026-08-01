@@ -1,6 +1,12 @@
 name = "kypost-push-relay-apns"
 main = "src/index.ts"
-compatibility_date = "2024-11-01"
+# The date whose runtime behaviour this Worker is pinned to. It is not a
+# "leave it wherever it landed" field: it had sat on 2024-11-01 for well over a
+# year, so every runtime fix and API added since was invisible here. Bump it
+# deliberately (and re-run `npm run typecheck` plus a `wrangler dev` smoke test
+# when you do) rather than on a copy-paste — see
+# https://developers.cloudflare.com/workers/configuration/compatibility-dates/
+compatibility_date = "2026-07-31"
 
 # Persist the structured logs so send failures / rate-limit events are queryable
 # in the dashboard (not just via a live `wrangler tail`).

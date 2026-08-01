@@ -22,6 +22,24 @@ type Status struct {
 	NativePushLastError   string `json:"nativePushLastError,omitempty"`
 	NativePushFailingAt   string `json:"nativePushFailingAt,omitempty"`
 	NativePushLastSuccess string `json:"nativePushLastSuccessUtc,omitempty"`
+
+	// Classification health, on the same terms as native push: independent of
+	// Healthy, because a server that cannot classify still delivers mail
+	// perfectly well and restarting it every five minutes (which is what flipping
+	// Healthy does) fixes nothing.
+	//
+	// It reports that classify attempts are FAILING, whatever the cause — the
+	// configured model missing or still downloading, Ollama unreachable, an
+	// upstream error, credits exhausted (which also raises the more specific flag
+	// above). Read it as "labels are not being applied right now", not as a
+	// model-install status. It exists because a model pull that failed at startup
+	// showed up nowhere except a log line nobody was watching; every other cause
+	// happens to need the same signal.
+	//
+	// No error text: the reason a classify call failed can carry an upstream
+	// response body, and this struct is served to admins over /api/health.
+	ClassifierFailing   bool   `json:"classifierFailing"`
+	ClassifierFailingAt string `json:"classifierFailingAt,omitempty"`
 }
 
 type Service struct {
@@ -40,6 +58,11 @@ type Service struct {
 	nativePushLastError   string
 	nativePushFailingAt   string
 	nativePushLastSuccess string
+
+	// Classifier state, sticky and independent of Healthy, updated only via
+	// RecordClassifier{Success,Failure}.
+	classifierFailing   bool
+	classifierFailingAt string
 }
 
 func NewService() *Service {
@@ -86,7 +109,31 @@ func (s *Service) GetStatus() Status {
 	st.NativePushLastError = s.nativePushLastError
 	st.NativePushFailingAt = s.nativePushFailingAt
 	st.NativePushLastSuccess = s.nativePushLastSuccess
+	st.ClassifierFailing = s.classifierFailing
+	st.ClassifierFailingAt = s.classifierFailingAt
 	return st
+}
+
+// RecordClassifierSuccess clears the classifier flag: the model answered, so it
+// is installed and reachable whatever happened before.
+func (s *Service) RecordClassifierSuccess() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.classifierFailing = false
+	s.classifierFailingAt = ""
+}
+
+// RecordClassifierFailure raises it. The first failure stamps ClassifierFailingAt
+// and later ones leave it alone, so the field reports how long classification has
+// been down — which is what distinguishes one bad message from a model that was
+// never installed.
+func (s *Service) RecordClassifierFailure() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.classifierFailing {
+		s.classifierFailing = true
+		s.classifierFailingAt = time.Now().UTC().Format(time.RFC3339)
+	}
 }
 
 // SetAICreditsExhausted raises the sticky AI-credits flag. It is independent of

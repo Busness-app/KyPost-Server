@@ -83,7 +83,11 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		list := store.List()
+		list, err := store.List()
+		if err != nil {
+			http.Error(w, "failed to read rules", http.StatusInternalServerError)
+			return
+		}
 		out := make([]rulePayload, 0, len(list))
 		for _, rl := range list {
 			out = append(out, ruleToPayload(rl))
@@ -100,7 +104,12 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
-		if len(store.List()) >= maxRulesPerUser {
+		existing, err := store.List()
+		if err != nil {
+			http.Error(w, "failed to read rules", http.StatusInternalServerError)
+			return
+		}
+		if len(existing) >= maxRulesPerUser {
 			http.Error(w, "too many rules for this account", http.StatusBadRequest)
 			return
 		}
@@ -325,9 +334,16 @@ func (s *Server) handleRulesRun(w http.ResponseWriter, r *http.Request) {
 		limit = 200
 	}
 
+	all, err := store.List()
+	if err != nil {
+		// This is the manual "run rules now" backfill, which moves and deletes
+		// real messages — it does not run against a list we could not re-read.
+		http.Error(w, "failed to read rules", http.StatusInternalServerError)
+		return
+	}
 	var activeRules []rules.Rule
 	needsBody := false
-	for _, rl := range store.List() {
+	for _, rl := range all {
 		if !rl.Enabled {
 			continue
 		}

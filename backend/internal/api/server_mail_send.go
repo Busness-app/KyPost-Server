@@ -302,7 +302,13 @@ func resolveMailFrom(accountAddr, requestedFrom string, aliasStoreFn func() (*se
 	if aerr != nil {
 		return "", "", http.StatusInternalServerError, "failed to check send-as aliases"
 	}
-	alias, ok := aliasStore.FindVerifiedByEmail(candidate)
+	alias, ok, ferr := aliasStore.FindVerifiedByEmail(candidate)
+	if ferr != nil {
+		// Unreadable alias file: a storage fault, not a verdict. Answering 403
+		// here would be a guess, and answering from the last good in-memory copy
+		// would authorize an alias the account may have deleted.
+		return "", "", http.StatusInternalServerError, "failed to check send-as aliases"
+	}
 	if !ok {
 		return "", "", http.StatusForbidden, "the from address is not a verified send-as alias for this account"
 	}

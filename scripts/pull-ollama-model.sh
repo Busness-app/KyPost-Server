@@ -17,16 +17,51 @@ if ! touch "$models_dir/.write-test" 2>/dev/null; then
 fi
 rm -f "$models_dir/.write-test"
 
+# This program runs ONCE per container start (supervisord: autorestart=false),
+# so every transient failure below has to be handled here or not at all. It
+# used to fall out of the wait loop without checking whether the API had ever
+# answered and then run a single `ollama pull`: a slow first start or a minute
+# of registry trouble left the container up, healthy, and permanently without
+# the model it is supposed to classify with, until a human restarted it.
 echo "Waiting for Ollama API at $base_url"
-for i in $(seq 1 60); do
+ready=""
+for _ in $(seq 1 60); do
   if ollama list >/dev/null 2>&1; then
+    ready=1
     break
   fi
   sleep 2
 done
+if [ -z "$ready" ]; then
+  echo "ERROR: Ollama API did not answer at $base_url within 120s; not pulling $model." >&2
+  echo "       Check the ollama program's log, then restart the container to retry." >&2
+  exit 1
+fi
 
 echo "Pulling model: $model"
 echo "Using Ollama models dir: $OLLAMA_MODELS"
-ollama pull "$model"
+attempt=1
+max_attempts=5
+while :; do
+  if ollama pull "$model"; then
+    echo "Ollama model ready: $model"
+    exit 0
+  fi
+  if [ "$attempt" -ge "$max_attempts" ]; then
+    break
+  fi
+  # Linear backoff: 15s, 30s, 45s, 60s — 2.5 minutes of registry trouble
+  # absorbed without a hot loop against a service that is already unhappy.
+  delay=$((attempt * 15))
+  echo "pull failed (attempt $attempt/$max_attempts); retrying in ${delay}s" >&2
+  sleep "$delay"
+  attempt=$((attempt + 1))
+done
 
-echo "Ollama model ready: $model"
+# Nonzero, and loudly. Classification stays broken until the model is present;
+# the server reports that as classifierFailing in GET /api/health rather than as
+# an unhealthy container, because restarting the container does not install a
+# model the registry would not serve.
+echo "ERROR: could not pull $model after $max_attempts attempts. Mail will be delivered" >&2
+echo "       but not classified. Restart the container to retry once the cause is fixed." >&2
+exit 1

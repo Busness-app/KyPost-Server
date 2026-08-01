@@ -67,3 +67,34 @@ func TestNativePushFailureDoesNotAffectHealthy(t *testing.T) {
 		t.Fatalf("native push failure must not flip overall Healthy")
 	}
 }
+
+// Same contract as native push: the classifier signal reports a model that is
+// missing or unreachable without flipping Healthy, which drives restarts that
+// would not install it. It is sticky across MarkHealthy, and its timestamp is
+// the first failure, not the latest.
+func TestClassifierFailureIsStickyAndDoesNotAffectHealthy(t *testing.T) {
+	s := NewService()
+	s.RecordClassifierFailure()
+	first := s.GetStatus()
+	if !first.ClassifierFailing || first.ClassifierFailingAt == "" {
+		t.Fatalf("failure not recorded: %+v", first)
+	}
+	if !first.Healthy {
+		t.Fatal("a classifier failure must not flip overall Healthy")
+	}
+
+	s.MarkHealthy()
+	s.RecordClassifierFailure()
+	again := s.GetStatus()
+	if !again.ClassifierFailing {
+		t.Fatal("MarkHealthy cleared the sticky classifier flag")
+	}
+	if again.ClassifierFailingAt != first.ClassifierFailingAt {
+		t.Fatalf("ClassifierFailingAt moved to the latest failure: %q -> %q", first.ClassifierFailingAt, again.ClassifierFailingAt)
+	}
+
+	s.RecordClassifierSuccess()
+	if st := s.GetStatus(); st.ClassifierFailing || st.ClassifierFailingAt != "" {
+		t.Fatalf("success did not clear the classifier flag: %+v", st)
+	}
+}
