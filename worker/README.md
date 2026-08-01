@@ -38,8 +38,12 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(service acc
    npx wrangler secret put FCM_CLIENT_EMAIL   # "client_email"
    npx wrangler secret put FCM_PRIVATE_KEY    # "private_key" (full PEM, keep newlines)
    npx wrangler secret put FCM_PROJECT_ID     # "project_id"
-   npx wrangler secret put ADMIN_SECRET       # a long random string you choose
+   npx wrangler secret put ADMIN_SECRET       # `openssl rand -hex 32` — see below
    ```
+   `ADMIN_SECRET` must be **at least 32 characters**. It is the only thing in
+   front of the endpoints that mint and revoke every key this relay honours, so
+   a shorter one is rejected outright: `/admin/keys` answers `401` to everybody,
+   including you, and logs `admin_secret_unusable`.
 4. Deploy:
    ```sh
    npx wrangler deploy
@@ -140,10 +144,33 @@ revoke them, so you can see which keys lapsed.
 Responses: `200 {"ok":true}` on delivery; `403` when the token is already
 claimed by a different active key (see Token pinning below); `410 {"stale":true}`
 when the token is no longer registered (the Go server then removes the
-device); `401` for a bad or expired key; `429` when the per-key rate limit is
-exceeded (body has `"window":"minute"` and a `Retry-After` header); `502` for
-other upstream FCM errors. Error bodies include a `requestId` that matches the
-`X-Request-Id` response header and the structured logs.
+device); `401` for a bad or expired key; `413` when the body exceeds 16 KiB;
+`400` for a malformed one; `429` when the per-key rate limit is exceeded (body
+has `"window":"minute"` and a `Retry-After` header); `502 {"error":"push
+delivery failed"}` for every other upstream FCM error. Error bodies include a
+`requestId` that matches the `X-Request-Id` response header and the structured
+logs.
+
+The `502` is deliberately coarse. FCM's own error text describes *this relay's*
+Firebase project, service account, and quota state, so it stays in the operator
+logs (as a bare status code) instead of being handed to every key holder.
+Quote the `requestId` when you need the operator to look one up.
+
+Body limits, applied before the payload reaches FCM:
+
+| Field   | Limit                    | Over the limit                |
+| ------- | ------------------------ | ----------------------------- |
+| body    | 16 KiB total             | `413`                         |
+| `token` | 512 chars, string        | `400`                         |
+| `title` | 256 chars, string        | clipped                       |
+| `body`  | 1024 chars, string       | clipped                       |
+| `data`  | 16 entries, string values; keys 64 chars | `400`         |
+| `data` values | 1024 chars         | clipped                       |
+
+Text is clipped rather than refused because a title is a sender and a body is a
+subject — both come from whoever emailed the self-hoster, and dropping a
+notification over a long subject line is the worse failure. Unknown fields
+(like `platform`) are ignored, not rejected.
 
 ## Token pinning
 
@@ -202,6 +229,19 @@ with `{"error":"rate limit exceeded","window":"minute","limit":10,"retryAfterSec
 > Restore rolling hour/day caps with Durable Objects (exact, atomic, no KV write
 > pressure) once running on Workers Paid — see the `TODO(paid-tier)` in
 > `src/index.ts`.
+
+`POST /register` has its own per-IP limiter (`REGISTER_RATE_LIMITER`), and the
+`/admin/keys` endpoints have a third (`ADMIN_RATE_LIMITER`, `limit = 20`,
+per IP bucket). The admin one is checked **before** `ADMIN_SECRET` is compared,
+so it caps how fast an address can guess the secret rather than just recording
+that it did; constant-time comparison prevents leaking the secret a character at
+a time, it does nothing about simply trying again. Over the budget is `429` with
+a `Retry-After`, whether the presented secret was right or not.
+
+All three fail **closed**: a missing binding refuses the request. If you deploy
+this Worker against a `wrangler.toml` copied before `ADMIN_RATE_LIMITER`
+existed, `/admin/keys` answers `429` until you add the block from
+`wrangler.toml.example` — add it and redeploy.
 
 ## Usage
 

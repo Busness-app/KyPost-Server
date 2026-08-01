@@ -40,8 +40,10 @@ import {
   claimTokenForSend,
   createRelayFetchHandler,
   fail,
+  failDelivery,
   isExpired,
   json,
+  readSendPayload,
   recordUsageAnalytics,
   resolveLimit,
   settleToken,
@@ -95,17 +97,16 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return fail(rc, 401, "api key expired", { expiresAt: record.expiresAt });
   }
 
-  // Validate the request before it counts against the rolling quota.
-  let payload: Partial<PushMessage>;
-  try {
-    payload = (await request.json()) as Partial<PushMessage>;
-  } catch {
-    return fail(rc, 400, "invalid json body");
+  // Validate the request before it counts against the rolling quota. Bounded and
+  // type-checked in the shared reader (see readSendPayload): the body is refused
+  // at MAX_SEND_BODY_BYTES before it is parsed, so an authenticated key cannot
+  // spend its per-minute quota on multi-megabyte allocations here.
+  const parsed = await readSendPayload(request);
+  if (!parsed.ok) {
+    return fail(rc, parsed.status, parsed.error);
   }
-  const token = (payload.token ?? "").trim();
-  if (!token) {
-    return fail(rc, 400, "missing token");
-  }
+  const payload = parsed.value;
+  const token = payload.token;
 
   const config = apnsConfig(env);
   if (!apnsConfigured(env)) {
@@ -143,12 +144,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   // Count the accepted send in Analytics Engine (off the KV write path).
   recordUsageAnalytics(env, record);
 
-  const message: PushMessage = {
-    token,
-    title: payload.title ?? "",
-    body: payload.body ?? "",
-    data: payload.data ?? {},
-  };
+  const message: PushMessage = payload;
 
   let result;
   try {
@@ -159,7 +155,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     // claim must not be confirmed by it.
     settle(false);
     rc.log({ level: "error", event: "send.error", keyId: record.id, error: String((err as Error).message ?? err) });
-    return fail(rc, 502, `relay send failed: ${(err as Error).message}`);
+    return failDelivery(rc);
   }
 
   if (result.ok) {
@@ -177,7 +173,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   }
   settle(false);
   rc.log({ level: "error", event: "send.apns_failed", keyId: record.id, apnsStatus: result.status });
-  return fail(rc, 502, `apns send failed: status=${result.status} response=${result.detail}`);
+  return failDelivery(rc);
 }
 
 // ---- router ------------------------------------------------------------

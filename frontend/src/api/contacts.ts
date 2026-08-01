@@ -1,4 +1,4 @@
-import { getJSON, postJSON, putJSON, deleteJSON, readCsrfToken } from "./client";
+import { getJSON, postJSON, putJSON, deleteJSON, postFormData } from "./client";
 
 export type ContactValue = {
   label?: string;
@@ -260,42 +260,20 @@ type ImportResult = {
   errorCount: number;
 };
 
-export async function importContacts(file: File): Promise<ImportResult> {
+export function importContacts(file: File): Promise<ImportResult> {
   const formData = new FormData();
   formData.append("file", file);
-
-  const response = await fetch("/api/contacts/import", {
-    method: "POST",
-    headers: { "X-CSRF-Token": readCsrfToken() },
-    body: formData
-  });
-
-  if (!response.ok) {
-    throw new Error(`Import failed: ${response.statusText}`);
-  }
-
-  return response.json() as Promise<ImportResult>;
+  return postFormData<ImportResult>("/api/contacts/import", formData);
 }
 
 export function contactPhotoUrl(uid: string): string {
   return `/api/contacts/${encodeURIComponent(uid)}/photo`;
 }
 
-export async function uploadContactPhoto(uid: string, file: File): Promise<{ photoRef: string; photoUrl: string }> {
+export function uploadContactPhoto(uid: string, file: File): Promise<{ photoRef: string; photoUrl: string }> {
   const formData = new FormData();
   formData.append("photo", file);
-
-  const response = await fetch(`/api/contacts/${encodeURIComponent(uid)}/photo`, {
-    method: "POST",
-    headers: { "X-CSRF-Token": readCsrfToken() },
-    body: formData
-  });
-
-  if (!response.ok) {
-    throw new Error(`Photo upload failed: ${response.statusText}`);
-  }
-
-  return response.json() as Promise<{ photoRef: string; photoUrl: string }>;
+  return postFormData<{ photoRef: string; photoUrl: string }>(`/api/contacts/${encodeURIComponent(uid)}/photo`, formData);
 }
 
 export function deleteContactPhoto(uid: string): Promise<{ ok: boolean }> {

@@ -54,6 +54,15 @@ export interface CommonEnv {
    * minting many short-lived permanent keys from one address before rotating IPs.
    */
   REGISTER_RATE_LIMITER?: RateLimitBinding;
+  /**
+   * Per-IP minute-tier limiter for the /admin/keys endpoints (native binding,
+   * no KV writes). ADMIN_SECRET is compared in constant time, which stops the
+   * secret leaking a character at a time but does nothing about simply trying
+   * again: without this, the public Worker answered guesses as fast as an
+   * attacker could send them, forever. Checked BEFORE the comparison, so it caps
+   * guesses rather than merely reporting them.
+   */
+  ADMIN_RATE_LIMITER?: RateLimitBinding;
   /** Per-key usage counters, offloaded off the KV write path. */
   USAGE_ANALYTICS?: AnalyticsEngineDatasetLike;
   /**
@@ -96,6 +105,51 @@ export const DEFAULT_LIMIT_PER_MINUTE = 10;
  */
 export const MAX_LABEL_LENGTH = 64;
 
+/**
+ * Minimum accepted length of ADMIN_SECRET. The /admin/keys endpoints mint and
+ * revoke every key this relay honours, they are reachable by anyone on the
+ * internet, and the only thing in front of them is this one string — so its
+ * length is the entire work factor. `openssl rand -hex 32` (64 chars) is what
+ * both READMEs tell you to use; this floor refuses the deployment that typed a
+ * passphrase instead. Enforced at the auth check rather than at deploy time
+ * because a Worker secret is set out-of-band by `wrangler secret put`, so there
+ * is no deploy-time hook that can see it.
+ */
+export const MIN_ADMIN_SECRET_LENGTH = 32;
+
+// ---- request body bounds ----------------------------------------------------
+//
+// Every endpoint here parses attacker-supplied JSON: /register and /admin/keys
+// take one short label, /send takes one notification. Without a ceiling read
+// BEFORE the parse, `await request.json()` allocates whatever was sent — the
+// per-minute limiter caps how many requests a key may make, not how large each
+// one is, so one key at its quota could still make the relay materialize
+// hundreds of megabytes a minute and forward them upstream.
+//
+// The field bounds below are the second half: a body that fits still must not
+// carry a 12 KB "device token" into a provider request.
+
+/** Ceiling on a POST /send body. */
+export const MAX_SEND_BODY_BYTES = 16 * 1024;
+/** Ceiling on a POST /register or POST /admin/keys body (a label and an expiry). */
+export const MAX_JSON_BODY_BYTES = 4 * 1024;
+
+/**
+ * Field bounds for /send. Real device tokens are ~64 (APNs) to ~255 (FCM)
+ * characters, so a longer one is not a token that got clipped, it is not a
+ * token — hence rejected rather than clamped. Text fields are clamped instead:
+ * a title is a sender and a body is a subject, both of which arrive from
+ * whoever emailed the self-hoster, and refusing to deliver a notification
+ * because a stranger sent a long subject line is a worse failure than
+ * delivering a clipped one. Same reasoning as MAX_LABEL_LENGTH.
+ */
+export const MAX_TOKEN_LENGTH = 512;
+export const MAX_TITLE_LENGTH = 256;
+export const MAX_NOTIFICATION_BODY_LENGTH = 1024;
+export const MAX_DATA_ENTRIES = 16;
+export const MAX_DATA_KEY_LENGTH = 64;
+export const MAX_DATA_VALUE_LENGTH = 1024;
+
 // ---- small helpers ---------------------------------------------------------
 
 export interface RequestContext<TEnv extends CommonEnv = CommonEnv> {
@@ -120,6 +174,26 @@ export function fail(
   extra?: Record<string, unknown>,
 ): Response {
   return json({ error: message, requestId: rc.requestId, ...(extra ?? {}) }, status);
+}
+
+/**
+ * The one answer every failed delivery gets, whatever the provider said.
+ *
+ * FCM and APNs error bodies describe OUR project: the Firebase project id, the
+ * APNs topic, the service account, quota and routing state, and whatever
+ * diagnostic Google or Apple adds next. That text used to be interpolated
+ * straight into the 502 body, so any holder of any per-server API key — which,
+ * with public registration open, is anyone — could read the relay's upstream
+ * configuration by sending deliberately broken sends and reading the errors.
+ *
+ * The caller gets a stable, coarse failure plus the request id, which is what
+ * they can act on (retry, or quote the id to the operator). The provider status
+ * stays in the structured log as a bare number; the body is not logged either,
+ * because these logs are operator-facing and must not carry upstream response
+ * bodies (see push-relay-shared/AGENTS.md).
+ */
+export function failDelivery(rc: RequestContext): Response {
+  return fail(rc, 502, "push delivery failed");
 }
 
 export function bearer(request: Request): string {
@@ -206,10 +280,63 @@ export function randomToken(): string {
 
 export function requireAdmin(request: Request, env: CommonEnv): boolean {
   const secret = (env.ADMIN_SECRET ?? "").trim();
-  if (!secret) {
+  if (secret.length < MIN_ADMIN_SECRET_LENGTH) {
+    // Covers unset, blank, and "short enough to guess" with one answer. See
+    // MIN_ADMIN_SECRET_LENGTH: a secret below the floor is treated as no secret,
+    // because a relay whose key-minting endpoint is guarded by a passphrase is
+    // not meaningfully guarded.
     return false;
   }
   return timingSafeEqual(bearer(request), secret);
+}
+
+/**
+ * Gate the /admin/keys endpoints: per-IP rate limit, THEN the secret comparison.
+ *
+ * Returns null when the caller is the admin, or the exact response to send back
+ * when they are not. Every denial that is about the credential — no header, a
+ * wrong secret, a secret below the length floor, a relay with no ADMIN_SECRET
+ * set at all — is the same bare 401, so a guesser learns only "no", never "no,
+ * but you are close" or "no, and this deployment is misconfigured".
+ *
+ * Fails CLOSED on a missing limiter binding and on a request with no usable
+ * client address, for the same reason /send and /register do: "misconfigured"
+ * and "absent" are indistinguishable from outside, and what is behind this door
+ * is the ability to mint and revoke every key the relay honours. A missing or
+ * throwing limiter comes back as the 429 (checkMinuteLimit answers "no" to
+ * both), a missing client address as a 503. Both are distinguishable from the
+ * 401 above, deliberately — they are statements about the relay, made before
+ * any credential is looked at, so they tell an attacker nothing about the
+ * secret.
+ */
+export async function authorizeAdmin(request: Request, rc: RequestContext): Promise<Response | null> {
+  const { env } = rc;
+  const ip = ipBucket(request.headers.get("CF-Connecting-IP") ?? "");
+  if (!ip) {
+    rc.log({ level: "error", event: "admin.denied", reason: "no_client_ip" });
+    return fail(rc, 503, "admin endpoints are temporarily unavailable");
+  }
+  if (!(await checkMinuteLimit(env.ADMIN_RATE_LIMITER, rc, ip))) {
+    rc.log({ level: "warn", event: "admin.denied", reason: "rate_limited", ip });
+    const response = fail(rc, 429, "too many admin requests, try again later", {
+      window: "minute",
+      retryAfterSeconds: 60,
+    });
+    response.headers.set("Retry-After", "60");
+    return response;
+  }
+  if ((env.ADMIN_SECRET ?? "").trim().length < MIN_ADMIN_SECRET_LENGTH) {
+    // Logged separately from a wrong guess so the operator can tell "nobody has
+    // the secret" from "this deployment has no usable secret", which the
+    // response deliberately does not distinguish.
+    rc.log({ level: "error", event: "admin.denied", reason: "admin_secret_unusable" });
+    return fail(rc, 401, "unauthorized");
+  }
+  if (!requireAdmin(request, env)) {
+    rc.log({ level: "warn", event: "admin.denied", reason: "invalid_secret", ip });
+    return fail(rc, 401, "unauthorized");
+  }
+  return null;
 }
 
 export function isExpired(record: ApiKeyRecord, now: number): boolean {
@@ -547,25 +674,187 @@ export async function mintKey(
   return { record, key };
 }
 
+/** A refusal that a handler returns as-is; `ok: true` carries the parsed value. */
+export type BodyResult<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
+
+const TOO_LARGE: BodyResult<never> = { ok: false, status: 413, error: "request body too large" };
+
 /**
- * Parse a JSON object body, tolerating anything else. `request.json()` accepts
- * valid-but-non-object JSON (`null`, arrays, scalars), and reading a property off
- * `null` throws — a body of literal `null` turned these handlers into a 500.
+ * Read a request body with a hard byte ceiling, never holding more than that.
+ *
+ * Content-Length is checked first because it is free, but it is not trusted as
+ * the bound: it is absent on a chunked body and it is a claim by the sender
+ * either way. The stream is therefore counted as it arrives and cancelled the
+ * moment it goes over, so the refusal costs `maxBytes`, not the body's size.
  */
-async function jsonObjectBody<T extends object>(request: Request): Promise<Partial<T>> {
+export async function readBoundedBody(request: Request, maxBytes: number): Promise<BodyResult<string>> {
+  const declared = Number(request.headers.get("Content-Length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    return TOO_LARGE;
+  }
+  const stream = request.body;
+  if (!stream) {
+    return { ok: true, value: "" };
+  }
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return TOO_LARGE;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, status: 400, error: "could not read request body" };
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, value: new TextDecoder().decode(merged) };
+}
+
+/**
+ * Parse a bounded JSON object body, tolerating anything else. JSON.parse accepts
+ * valid-but-non-object JSON (`null`, arrays, scalars), and reading a property off
+ * `null` throws — a body of literal `null` turned these handlers into a 500. An
+ * oversized body is NOT tolerated: it is refused before it is parsed, which is
+ * the whole point of the ceiling.
+ */
+async function jsonObjectBody<T extends object>(
+  request: Request,
+  maxBytes = MAX_JSON_BODY_BYTES,
+): Promise<BodyResult<Partial<T>>> {
+  const body = await readBoundedBody(request, maxBytes);
+  if (!body.ok) {
+    return body;
+  }
   let parsed: unknown;
   try {
-    parsed = await request.json();
+    parsed = JSON.parse(body.value || "{}");
   } catch {
-    return {};
+    return { ok: true, value: {} };
   }
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Partial<T>) : {};
+  return {
+    ok: true,
+    value: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Partial<T>) : {},
+  };
+}
+
+/** Clamp to `max` characters without splitting a surrogate pair in half. */
+function clampString(value: string, max: number): string {
+  if (value.length <= max) {
+    return value;
+  }
+  const clipped = value.slice(0, max);
+  const last = clipped.charCodeAt(max - 1);
+  return last >= 0xd800 && last <= 0xdbff ? clipped.slice(0, max - 1) : clipped;
+}
+
+/**
+ * The validated /send body, shaped for both providers: worker/'s FcmMessage and
+ * worker-apns/'s PushMessage are the same four fields.
+ */
+export interface SendPayload {
+  token: string;
+  title: string;
+  body: string;
+  data: Record<string, string>;
+}
+
+/**
+ * Read and validate a POST /send body against MAX_SEND_BODY_BYTES and the field
+ * bounds above, returning a payload that is safe to hand to a provider.
+ *
+ * Types are checked, not coerced: `{"title": {...}}` used to become the string
+ * "[object Object]" in a delivered notification, and `data` was forwarded to the
+ * provider unexamined, so any JSON value at all could ride into an FCM/APNs
+ * request under a key holder's quota. Unknown fields are ignored rather than
+ * refused — the Go sender already sends a `platform` field this relay has never
+ * read, and a new one must not become a delivery outage on the older worker.
+ */
+export async function readSendPayload(request: Request): Promise<BodyResult<SendPayload>> {
+  const body = await readBoundedBody(request, MAX_SEND_BODY_BYTES);
+  if (!body.ok) {
+    return body;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.value);
+  } catch {
+    return { ok: false, status: 400, error: "invalid json body" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, status: 400, error: "invalid json body" };
+  }
+  const raw = parsed as Record<string, unknown>;
+
+  if (raw.token !== undefined && typeof raw.token !== "string") {
+    return { ok: false, status: 400, error: "invalid token" };
+  }
+  const token = ((raw.token as string | undefined) ?? "").trim();
+  if (!token) {
+    return { ok: false, status: 400, error: "missing token" };
+  }
+  if (token.length > MAX_TOKEN_LENGTH) {
+    return { ok: false, status: 400, error: "invalid token" };
+  }
+
+  for (const field of ["title", "body"] as const) {
+    if (raw[field] !== undefined && typeof raw[field] !== "string") {
+      return { ok: false, status: 400, error: `invalid ${field}` };
+    }
+  }
+
+  const data: Record<string, string> = {};
+  if (raw.data !== undefined && raw.data !== null) {
+    if (typeof raw.data !== "object" || Array.isArray(raw.data)) {
+      return { ok: false, status: 400, error: "invalid data" };
+    }
+    const entries = Object.entries(raw.data as Record<string, unknown>);
+    if (entries.length > MAX_DATA_ENTRIES) {
+      return { ok: false, status: 400, error: "too many data entries" };
+    }
+    for (const [key, value] of entries) {
+      if (key.length > MAX_DATA_KEY_LENGTH) {
+        return { ok: false, status: 400, error: "invalid data key" };
+      }
+      if (typeof value !== "string") {
+        return { ok: false, status: 400, error: "invalid data value" };
+      }
+      data[key] = clampString(value, MAX_DATA_VALUE_LENGTH);
+    }
+  }
+
+  return {
+    ok: true,
+    value: {
+      token,
+      title: clampString((raw.title as string | undefined) ?? "", MAX_TITLE_LENGTH),
+      body: clampString((raw.body as string | undefined) ?? "", MAX_NOTIFICATION_BODY_LENGTH),
+      data,
+    },
+  };
 }
 
 export async function handleAdminCreate(request: Request, rc: RequestContext): Promise<Response> {
   const { env } = rc;
-  const body = await jsonObjectBody<{ label?: string; ttlDays?: unknown; expiresAt?: unknown }>(request);
-  const label = (body.label ?? "").trim() || "unnamed";
+  const parsed = await jsonObjectBody<{ label?: string; ttlDays?: unknown; expiresAt?: unknown }>(request);
+  if (!parsed.ok) {
+    return fail(rc, parsed.status, parsed.error);
+  }
+  const body = parsed.value;
+  const label = (typeof body.label === "string" ? body.label : "").trim() || "unnamed";
 
   const expiry = resolveExpiry(body);
   if (!expiry.ok) {
@@ -638,8 +927,11 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
     response.headers.set("Retry-After", "60");
     return response;
   }
-  const body = await jsonObjectBody<{ label?: string }>(request);
-  const label = (body.label ?? "").trim() || "self-registered";
+  const parsed = await jsonObjectBody<{ label?: string }>(request);
+  if (!parsed.ok) {
+    return fail(rc, parsed.status, parsed.error);
+  }
+  const label = (typeof parsed.value.label === "string" ? parsed.value.label : "").trim() || "self-registered";
 
   // Refuse rather than mint an unconstrained key: without the coordinator the
   // one-active-key-per-IP invariant is unenforceable, and an unconstrained
@@ -793,8 +1085,9 @@ async function routeRelay<TEnv extends CommonEnv>(
   }
 
   if (path === "/admin/keys") {
-    if (!requireAdmin(request, env)) {
-      return fail(rc, 401, "unauthorized");
+    const denied = await authorizeAdmin(request, rc);
+    if (denied) {
+      return denied;
     }
     if (request.method === "POST") {
       return handleAdminCreate(request, rc);
@@ -807,8 +1100,9 @@ async function routeRelay<TEnv extends CommonEnv>(
 
   const revokeMatch = /^\/admin\/keys\/([^/]+)$/.exec(path);
   if (revokeMatch && request.method === "DELETE") {
-    if (!requireAdmin(request, env)) {
-      return fail(rc, 401, "unauthorized");
+    const denied = await authorizeAdmin(request, rc);
+    if (denied) {
+      return denied;
     }
     return handleAdminRevoke(decodeURIComponent(revokeMatch[1]), rc);
   }

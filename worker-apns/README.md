@@ -44,8 +44,12 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(APNs provid
    npx wrangler secret put APNS_TEAM_ID     # Team ID from your Apple Developer account
    npx wrangler secret put APNS_TOPIC       # Bundle ID, e.g. "com.urlxl.mail"
    npx wrangler secret put APNS_ENVIRONMENT # "production" or "sandbox" (use "sandbox" for debug/TestFlight builds)
-   npx wrangler secret put ADMIN_SECRET     # A long random string you choose (guards /admin/keys endpoints)
+   npx wrangler secret put ADMIN_SECRET     # `openssl rand -hex 32` (guards /admin/keys endpoints)
    ```
+   `ADMIN_SECRET` must be **at least 32 characters**. It is the only thing in
+   front of the endpoints that mint and revoke every key this relay honours, so
+   a shorter one is rejected outright: `/admin/keys` answers `401` to everybody,
+   including you, and logs `admin_secret_unusable`.
 
 5. Deploy:
    ```sh
@@ -139,8 +143,25 @@ Responses:
 - `410 {"stale":true}` when the token is no longer registered (Go server then removes the device)
 - `401` for a bad or expired key
 - `429` when the per-key rate limit is exceeded (body has `"window":"minute"` and a `Retry-After` header)
-- `502` for upstream APNs errors or transient failures
+- `413` when the body exceeds 16 KiB, `400` when it is malformed or a field has the wrong type
+- `502 {"error":"push delivery failed"}` for upstream APNs errors or transient failures. Deliberately coarse: Apple's own error text describes *this relay's* topic, auth key, and routing state, so it stays in the operator logs (as a bare status code) rather than going to every key holder. Quote the `requestId` when you need the operator to look one up
 - Error bodies include a `requestId` that matches the `X-Request-Id` response header
+
+Body limits, applied before the payload reaches APNs:
+
+| Field   | Limit                    | Over the limit                |
+| ------- | ------------------------ | ----------------------------- |
+| body    | 16 KiB total             | `413`                         |
+| `token` | 512 chars, string        | `400`                         |
+| `title` | 256 chars, string        | clipped                       |
+| `body`  | 1024 chars, string       | clipped                       |
+| `data`  | 16 entries, string values; keys 64 chars | `400`         |
+| `data` values | 1024 chars         | clipped                       |
+
+Text is clipped rather than refused because a title is a sender and a body is a
+subject — both come from whoever emailed the self-hoster, and dropping a
+notification over a long subject line is the worse failure. Unknown fields
+(like `platform`) are ignored, not rejected.
 
 ## Token pinning
 
@@ -200,6 +221,10 @@ block in `wrangler.toml.example` creates the class on first deploy.
 Each key is capped by a **per-minute** limit on `/send`, enforced by the native `PUSH_RATE_LIMITER` binding in `wrangler.toml` (`simple = { limit = 10, period = 60 }`) — a fixed 60s window with **no KV writes**. Change the limit there and redeploy. `RATE_LIMIT_PER_MINUTE` in `[vars]` is display-only (`/health` + the 429 body) and should be kept equal to `simple.limit`. Exceeding it returns `429` with `{"error":"rate limit exceeded","window":"minute","limit":10,"retryAfterSeconds":60}`.
 
 > **Hour/day rolling limits were removed for now.** They required a KV read-modify-write on every accepted send, which capped the free tier at ~1,000 pushes/day. Dropping them keeps an accepted send at **zero KV writes**.
+
+`POST /register` has its own per-IP limiter (`REGISTER_RATE_LIMITER`), and the `/admin/keys` endpoints have a third (`ADMIN_RATE_LIMITER`, `limit = 20`, per IP bucket). The admin one is checked **before** `ADMIN_SECRET` is compared, so it caps how fast an address can guess the secret rather than just recording that it did; constant-time comparison prevents leaking the secret a character at a time, it does nothing about simply trying again. Over the budget is `429` with a `Retry-After`, whether the presented secret was right or not.
+
+All three fail **closed**: a missing binding refuses the request. If you deploy this Worker against a `wrangler.toml` copied before `ADMIN_RATE_LIMITER` existed, `/admin/keys` answers `429` until you add the block from `wrangler.toml.example` — add it and redeploy.
 
 ## HTTP/2 and Payload Compatibility
 
