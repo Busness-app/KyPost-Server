@@ -11,7 +11,7 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 ## Local Contracts
 
 - React 19.2, React Router 8.3, TypeScript 7, Vite 8, Quill (WYSIWYG compose editor), qrcode (mobile pairing QR)
-- All HTTP calls go through `src/api/client.ts` (`getJSON`, `postJSON`, `putJSON`, `deleteJSON`, `postFormData`) — never use `fetch` directly in page components
+- All HTTP calls go through `src/api/client.ts` (`getJSON`, `postJSON`, `putJSON`, `deleteJSON`, `postFormData`) — `client.ts` is the only file in `src/` that may call `fetch`, and that includes the `src/api/*.ts` modules, not just page components. Bypassing it costs the 401 session recovery, `credentials: "include"`, the CSRF header, and the `HttpError` carrying the backend's status and error body — which is exactly what the two multipart uploads (contact import, contact photo) lost until `postFormData` existed
 - Auth state is owned by `App.tsx` and published through `AuthContext` (`src/auth.tsx`); pages read `{authenticated, userId, username, role, mustChangePassword}` via `useAuth()`, not via direct `/api/auth/me` calls
 - RBAC: `protect(element, adminOnly)` in `App.tsx` gates routes (`/users` and `/logs` are admin-only, redirecting non-admins to `/read`); `settingsNavItems` entries carry an `adminOnly` flag that filters the settings nav; `ConfigPage` shows only the Email Settings tab (plus a local theme card) to non-admins — Application/Labels/Remote LLM tabs are admin-only. Frontend gating is UX only; the server enforces all policy
 - All pages live under `src/pages/`; routing is defined in `App.tsx`

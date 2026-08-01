@@ -24,8 +24,8 @@ RATE_LIMIT_PER_MINUTE = "10"  # display only; keep equal to PUSH_RATE_LIMITER.si
 # Public self-registration (POST /register). Set to "true" ONLY if you intend to
 # run an unauthenticated key-minting endpoint on the public internet: anyone who
 # can reach this Worker can then mint a key and spend your FCM quota. Left "false"
-# here so a copied-unchanged config is closed; mint keys via POST /admin/keys
-# instead, or flip this on deliberately. When open, self-hosted servers mint their
+# here so a copied-unchanged config is closed; there is no admin API to mint keys
+# with instead, so flip this on deliberately. When open, self-hosted servers mint their
 # own key with no maintainer involvement, and per-IP request rate is capped by the
 # REGISTER_RATE_LIMITER binding below (independent of PUSH_RATE_LIMITER, which
 # only governs /send).
@@ -70,7 +70,9 @@ dataset = "kypost_push_usage"
 #   FCM_CLIENT_EMAIL   - client_email from the Firebase service-account JSON
 #   FCM_PRIVATE_KEY    - private_key from the service-account JSON (PEM, keep the newlines)
 #   FCM_PROJECT_ID     - project_id from the service-account JSON
-#   ADMIN_SECRET       - random secret guarding the /admin/keys endpoints
+#
+# There is no ADMIN_SECRET: the relay has no admin API. Keys are listed and
+# revoked with `npx wrangler kv key` against API_KEYS — see the README.
 
 # Durable Object holding the two ownership rules KV cannot hold atomically:
 # device-token pinning (first key to deliver to a token owns it) and one active

@@ -24,10 +24,14 @@ export class HttpError extends Error {
 // alongside the session cookie at login (double-submit CSRF pattern — see
 // backend's csrfCheckOK). It carries no authority on its own; it only proves
 // this request originated from JS that could read our own cookies, which a
-// cross-site attacker's forged form/script cannot do. Exported for the rare
-// caller (multipart/form-data uploads) that can't go through
-// getJSON/postJSON/putJSON/deleteJSON and must attach the header itself.
-export function readCsrfToken(): string {
+// cross-site attacker's forged form/script cannot do. Deliberately NOT exported:
+// requestJSON attaches it to every non-GET, including postFormData's uploads, so
+// the only reason to reach for it from outside this file was to hand-roll a
+// fetch() — which is what the two multipart uploads did, and what cost them the
+// 401 recovery and the structured error body. Keeping it private makes that
+// contract something the module system enforces rather than something AGENTS.md
+// asks for.
+function readCsrfToken(): string {
   const match = document.cookie.match(/(?:^|; )csrf_token=([^;]*)/);
   return match ? decodeURIComponent(match[1]) : "";
 }
@@ -111,6 +115,21 @@ export async function postJSON<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
+}
+
+// postFormData is the multipart/form-data arm of the same client: uploads
+// (contact import, contact photo) that cannot send a JSON body but need
+// everything else requestJSON does — the CSRF header, credentials, the 401
+// hard-reload recovery, and an HttpError carrying the backend's structured
+// error body and status. Both upload paths used a bare fetch() before, so an
+// expired session on them threw "Import failed: Unauthorized" at the user
+// instead of re-triggering the sign-in flow, and every backend error message
+// was replaced by response.statusText.
+//
+// Content-Type is deliberately NOT set: the browser has to add it itself,
+// because only it knows the multipart boundary it generated for this FormData.
+export async function postFormData<T>(path: string, formData: FormData): Promise<T> {
+  return requestJSON<T>(path, { method: "POST", body: formData });
 }
 
 export async function deleteJSON<T>(path: string, body?: unknown): Promise<T> {

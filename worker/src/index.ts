@@ -11,9 +11,11 @@
  *   GET    /health          (public)                       -> liveness + config
  *   POST   /register        (public)                       -> self-issue a key
  *   POST   /send            (Bearer <per-server API key>)  -> deliver one push
- *   POST   /admin/keys      (Bearer ADMIN_SECRET)          -> mint an API key
- *   GET    /admin/keys      (Bearer ADMIN_SECRET)          -> list key metadata
- *   DELETE /admin/keys/{id} (Bearer ADMIN_SECRET)          -> revoke a key
+ *
+ * That is the whole surface. There is no admin API: listing and revoking keys
+ * is `wrangler kv key` against the API_KEYS namespace (see README), because an
+ * always-on bearer-secret endpoint on the public internet is a worse trade than
+ * a CLI command the maintainer runs a few times a year.
  *
  * Per-key controls:
  *   - Expiry:        keys may carry an expiresAt; expired keys are rejected.
@@ -25,9 +27,9 @@
  * X-Request-Id response header and in error bodies, plus one structured JSON
  * access log line (visible via `wrangler tail` / Workers Logs / Logpush).
  *
- * The API-key admin/registration endpoints, rate limiting, usage analytics,
- * and small crypto/HTTP helpers are shared with the APNs relay (worker-apns/)
- * — see ../../push-relay-shared/push-relay-common.ts.
+ * Self-registration, rate limiting, usage analytics, and small crypto/HTTP
+ * helpers are shared with the APNs relay (worker-apns/) — see
+ * ../../push-relay-shared/push-relay-common.ts.
  */
 
 import { FcmConfig, FcmMessage, sendFcmMessage } from "./fcm";
@@ -42,8 +44,10 @@ import {
   claimTokenForSend,
   createRelayFetchHandler,
   fail,
+  failDelivery,
   isExpired,
   json,
+  readSendPayload,
   recordUsageAnalytics,
   resolveLimit,
   settleToken,
@@ -90,17 +94,16 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
 
   // Validate the request before it counts against the rolling quota, so
   // malformed (400) or misconfigured (500) calls don't consume a self-hoster's
-  // message budget.
-  let payload: Partial<FcmMessage>;
-  try {
-    payload = (await request.json()) as Partial<FcmMessage>;
-  } catch {
-    return fail(rc, 400, "invalid json body");
+  // message budget. Bounded and type-checked in the shared reader (see
+  // readSendPayload): the body is refused at MAX_SEND_BODY_BYTES before it is
+  // parsed, so an authenticated key cannot spend its per-minute quota on
+  // multi-megabyte allocations here.
+  const parsed = await readSendPayload(request);
+  if (!parsed.ok) {
+    return fail(rc, parsed.status, parsed.error);
   }
-  const token = (payload.token ?? "").trim();
-  if (!token) {
-    return fail(rc, 400, "missing token");
-  }
+  const payload = parsed.value;
+  const token = payload.token;
 
   const config = fcmConfig(env);
   if (!isConfigured(config)) {
@@ -139,12 +142,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   // write happens on the send path — see the hour/day TODO above.
   recordUsageAnalytics(env, record);
 
-  const message: FcmMessage = {
-    token,
-    title: payload.title ?? "",
-    body: payload.body ?? "",
-    data: payload.data ?? {},
-  };
+  const message: FcmMessage = payload;
 
   let result;
   try {
@@ -155,7 +153,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     // below — so the claim must not be confirmed by it.
     settle(false);
     rc.log({ level: "error", event: "send.error", keyId: record.id, error: String((err as Error).message ?? err) });
-    return fail(rc, 502, `relay send failed: ${(err as Error).message}`);
+    return failDelivery(rc);
   }
 
   if (result.ok) {
@@ -173,7 +171,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   }
   settle(false);
   rc.log({ level: "error", event: "send.fcm_failed", keyId: record.id, fcmStatus: result.status });
-  return fail(rc, 502, `fcm send failed: status=${result.status} response=${result.detail}`);
+  return failDelivery(rc);
 }
 
 // ---- router ------------------------------------------------------------

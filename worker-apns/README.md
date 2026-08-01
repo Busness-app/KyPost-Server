@@ -44,8 +44,9 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(APNs provid
    npx wrangler secret put APNS_TEAM_ID     # Team ID from your Apple Developer account
    npx wrangler secret put APNS_TOPIC       # Bundle ID, e.g. "com.urlxl.mail"
    npx wrangler secret put APNS_ENVIRONMENT # "production" or "sandbox" (use "sandbox" for debug/TestFlight builds)
-   npx wrangler secret put ADMIN_SECRET     # A long random string you choose (guards /admin/keys endpoints)
    ```
+   There is no `ADMIN_SECRET`: the relay has no admin API. See
+   [Managing keys](#managing-keys).
 
 5. Deploy:
    ```sh
@@ -54,7 +55,7 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(APNs provid
 
 ## Self-registration (no maintainer involvement)
 
-**Off by default.** `/register` is an unauthenticated key-minting endpoint, so it stays closed until you set `REGISTRATION_ENABLED = "true"` in `wrangler.toml` and redeploy; the shipped `wrangler.toml.example` leaves it `"false"`. Until you flip it, issue keys with [`POST /admin/keys`](#issuing-a-key-manually-optional).
+**Off by default.** `/register` is an unauthenticated key-minting endpoint, so it stays closed until you set `REGISTRATION_ENABLED = "true"` in `wrangler.toml` and redeploy; the shipped `wrangler.toml.example` leaves it `"false"`. There is no admin endpoint to mint keys with instead — with registration closed, the relay issues no keys at all, which is the point of the default.
 
 Once open, same as the FCM worker: self-hosted servers get a key on their own. The Go backend does this automatically: on first start with `APNS_RELAY_URL` set and no `APNS_RELAY_KEY`, it calls `/register`, persists the key, and reuses it on every restart.
 
@@ -67,34 +68,29 @@ curl -X POST https://<your-worker>.workers.dev/register \
 
 **One active key per IP.** Registering from an IP that already holds a key invalidates the previous one — so a server that loses its key file can re-register and keep working.
 
-## Issuing a key manually (optional)
+## Managing keys
 
-You can mint keys yourself — e.g. to pre-provision a server or set an expiry:
+There is no admin API, and no admin credential. The relay used to serve `/admin/keys` (mint, list, revoke) behind a bearer secret, and nothing called it — the Go server uses `/register` and `/send`, the apps never touch the relay, and the endpoints existed so the maintainer could curl them. That made the highest-value credential in the deployment permanently guessable by anyone who found the hostname, to save the CLI commands below. The routes are gone.
 
-```sh
-curl -X POST https://<your-worker>.workers.dev/admin/keys \
-  -H "Authorization: Bearer $ADMIN_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"label":"alice-server"}'
-# -> {"id":"...","label":"alice-server","key":"<RAW KEY, shown only once>","expiresAt":null}
-```
-
-Optionally give the key an expiry — either a lifetime in days or an explicit ISO timestamp:
+Everything lives in the `API_KEYS` KV namespace under three prefixes: `key:<sha256 of the raw key>` holds the record, `keyid:<id>` maps an id to that hash, and `ipkey:<bucket>` remembers which key an IP bucket currently holds.
 
 ```sh
--d '{"label":"alice-server","ttlDays":90}'
--d '{"label":"alice-server","expiresAt":"2027-01-01T00:00:00Z"}'
+NS=<your API_KEYS namespace id>       # from wrangler.toml
+
+# who has a key
+npx wrangler kv key list --namespace-id $NS --prefix "key:"
+npx wrangler kv key get  --namespace-id $NS "key:<hash>"
+
+# revoke one, by the id in that record
+HASH=$(npx wrangler kv key get --namespace-id $NS "keyid:<id>")
+npx wrangler kv key delete --namespace-id $NS "key:$HASH"
+npx wrangler kv key delete --namespace-id $NS "keyid:<id>"
+npx wrangler kv key delete --namespace-id $NS "ipkey:<registeredIp>"   # if it still names this id
 ```
 
-Give the self-hoster the raw `key` (out of band). They set on their server:
+Deleting the record is what revokes the key: `/send` looks the presented key up by hash on every request. It also releases that key's device-token claims for re-claiming, because a claim is only protected while its owner's key is still active — so the self-hoster can re-register and their devices come back.
 
-```
-APNS_RELAY_URL=https://<your-worker>.workers.dev
-APNS_RELAY_KEY=<the raw key>
-```
-
-List keys: `curl -H "Authorization: Bearer $ADMIN_SECRET" .../admin/keys`
-Revoke:    `curl -X DELETE -H "Authorization: Bearer $ADMIN_SECRET" .../admin/keys/<id>`
+Send counts and last-seen are not in KV at all; they are in Analytics Engine.
 
 ## Environment-specific deployment
 
@@ -118,9 +114,8 @@ If you want separate dev/sandbox and production workers:
 | GET    | `/health`         | none                   | Liveness + whether configured    |
 | POST   | `/register`       | none                   | Self-issue a per-server key      |
 | POST   | `/send`           | Bearer per-server key  | Deliver one push                 |
-| POST   | `/admin/keys`     | Bearer `ADMIN_SECRET`  | Mint a key (returns raw key once)|
-| GET    | `/admin/keys`     | Bearer `ADMIN_SECRET`  | List key metadata                |
-| DELETE | `/admin/keys/{id}`| Bearer `ADMIN_SECRET`  | Revoke a key                     |
+
+Three routes, and that is the entire surface — anything else is `404`, including the `/admin/keys` endpoints that used to be here.
 
 `POST /send` body:
 
@@ -139,8 +134,25 @@ Responses:
 - `410 {"stale":true}` when the token is no longer registered (Go server then removes the device)
 - `401` for a bad or expired key
 - `429` when the per-key rate limit is exceeded (body has `"window":"minute"` and a `Retry-After` header)
-- `502` for upstream APNs errors or transient failures
+- `413` when the body exceeds 16 KiB, `400` when it is malformed or a field has the wrong type
+- `502 {"error":"push delivery failed"}` for upstream APNs errors or transient failures. Deliberately coarse: Apple's own error text describes *this relay's* topic, auth key, and routing state, so it stays in the operator logs (as a bare status code) rather than going to every key holder. Quote the `requestId` when you need the operator to look one up
 - Error bodies include a `requestId` that matches the `X-Request-Id` response header
+
+Body limits, applied before the payload reaches APNs:
+
+| Field   | Limit                    | Over the limit                |
+| ------- | ------------------------ | ----------------------------- |
+| body    | 16 KiB total             | `413`                         |
+| `token` | 512 chars, string        | `400`                         |
+| `title` | 256 chars, string        | clipped                       |
+| `body`  | 1024 chars, string       | clipped                       |
+| `data`  | 16 entries, string values; keys 64 chars | `400`         |
+| `data` values | 1024 chars         | clipped                       |
+
+Text is clipped rather than refused because a title is a sender and a body is a
+subject — both come from whoever emailed the self-hoster, and dropping a
+notification over a long subject line is the worse failure. Unknown fields
+(like `platform`) are ignored, not rejected.
 
 ## Token pinning
 
@@ -200,6 +212,8 @@ block in `wrangler.toml.example` creates the class on first deploy.
 Each key is capped by a **per-minute** limit on `/send`, enforced by the native `PUSH_RATE_LIMITER` binding in `wrangler.toml` (`simple = { limit = 10, period = 60 }`) — a fixed 60s window with **no KV writes**. Change the limit there and redeploy. `RATE_LIMIT_PER_MINUTE` in `[vars]` is display-only (`/health` + the 429 body) and should be kept equal to `simple.limit`. Exceeding it returns `429` with `{"error":"rate limit exceeded","window":"minute","limit":10,"retryAfterSeconds":60}`.
 
 > **Hour/day rolling limits were removed for now.** They required a KV read-modify-write on every accepted send, which capped the free tier at ~1,000 pushes/day. Dropping them keeps an accepted send at **zero KV writes**.
+
+`POST /register` has its own per-IP limiter (`REGISTER_RATE_LIMITER`), bucketed on the IPv6 /64 so one allocation can't rotate addresses past it. Both fail **closed**: a missing binding refuses the request rather than waving it through, because "misconfigured" and "absent" are indistinguishable from outside and the failure mode of guessing is an open relay.
 
 ## HTTP/2 and Payload Compatibility
 

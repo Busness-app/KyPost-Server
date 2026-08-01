@@ -11,9 +11,11 @@
  *   GET    /health          (public)                       -> liveness + config
  *   POST   /register        (public)                       -> self-issue a key
  *   POST   /send            (Bearer <per-server API key>)  -> deliver one push
- *   POST   /admin/keys      (Bearer ADMIN_SECRET)          -> mint an API key
- *   GET    /admin/keys      (Bearer ADMIN_SECRET)          -> list key metadata
- *   DELETE /admin/keys/{id} (Bearer ADMIN_SECRET)          -> revoke a key
+ *
+ * That is the whole surface. There is no admin API: listing and revoking keys
+ * is `wrangler kv key` against the API_KEYS namespace (see README), because an
+ * always-on bearer-secret endpoint on the public internet is a worse trade than
+ * a CLI command the maintainer runs a few times a year.
  *
  * Per-key controls:
  *   - Expiry:        keys may carry an expiresAt; expired keys are rejected.
@@ -23,8 +25,8 @@
  * Observability: every request gets a UUID request id, echoed in the X-Request-Id
  * response header and in error bodies, plus one structured JSON access log line.
  *
- * The API-key admin/registration endpoints, rate limiting, usage analytics,
- * and small crypto/HTTP helpers are shared with the FCM relay (worker/) — see
+ * Self-registration, rate limiting, usage analytics, and small crypto/HTTP
+ * helpers are shared with the FCM relay (worker/) — see
  * ../../push-relay-shared/push-relay-common.ts.
  */
 
@@ -40,8 +42,10 @@ import {
   claimTokenForSend,
   createRelayFetchHandler,
   fail,
+  failDelivery,
   isExpired,
   json,
+  readSendPayload,
   recordUsageAnalytics,
   resolveLimit,
   settleToken,
@@ -95,17 +99,16 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return fail(rc, 401, "api key expired", { expiresAt: record.expiresAt });
   }
 
-  // Validate the request before it counts against the rolling quota.
-  let payload: Partial<PushMessage>;
-  try {
-    payload = (await request.json()) as Partial<PushMessage>;
-  } catch {
-    return fail(rc, 400, "invalid json body");
+  // Validate the request before it counts against the rolling quota. Bounded and
+  // type-checked in the shared reader (see readSendPayload): the body is refused
+  // at MAX_SEND_BODY_BYTES before it is parsed, so an authenticated key cannot
+  // spend its per-minute quota on multi-megabyte allocations here.
+  const parsed = await readSendPayload(request);
+  if (!parsed.ok) {
+    return fail(rc, parsed.status, parsed.error);
   }
-  const token = (payload.token ?? "").trim();
-  if (!token) {
-    return fail(rc, 400, "missing token");
-  }
+  const payload = parsed.value;
+  const token = payload.token;
 
   const config = apnsConfig(env);
   if (!apnsConfigured(env)) {
@@ -143,12 +146,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   // Count the accepted send in Analytics Engine (off the KV write path).
   recordUsageAnalytics(env, record);
 
-  const message: PushMessage = {
-    token,
-    title: payload.title ?? "",
-    body: payload.body ?? "",
-    data: payload.data ?? {},
-  };
+  const message: PushMessage = payload;
 
   let result;
   try {
@@ -159,7 +157,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     // claim must not be confirmed by it.
     settle(false);
     rc.log({ level: "error", event: "send.error", keyId: record.id, error: String((err as Error).message ?? err) });
-    return fail(rc, 502, `relay send failed: ${(err as Error).message}`);
+    return failDelivery(rc);
   }
 
   if (result.ok) {
@@ -177,7 +175,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   }
   settle(false);
   rc.log({ level: "error", event: "send.apns_failed", keyId: record.id, apnsStatus: result.status });
-  return fail(rc, 502, `apns send failed: status=${result.status} response=${result.detail}`);
+  return failDelivery(rc);
 }
 
 // ---- router ------------------------------------------------------------

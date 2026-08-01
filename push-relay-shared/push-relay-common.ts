@@ -1,7 +1,7 @@
 /**
  * Shared push-relay logic used by both Cloudflare Workers: the FCM relay
  * (worker/) and the APNs relay (worker-apns/). Everything below is identical
- * between them — API-key admin/registration endpoints, per-minute rate limiting,
+ * between them — self-registration, per-minute rate limiting,
  * usage analytics, and small crypto/HTTP helpers.
  *
  * Each worker keeps its own `Env` (extending CommonEnv with its
@@ -28,7 +28,6 @@ export interface AnalyticsEngineDatasetLike {
  */
 export interface CommonEnv {
   API_KEYS: KVNamespace;
-  ADMIN_SECRET: string;
   /**
    * Minute limit is ENFORCED by the PUSH_RATE_LIMITER binding (simple.limit in
    * wrangler.toml). This var is display-only (/health + 429 body) and must be kept
@@ -72,7 +71,10 @@ export interface ApiKeyRecord {
   createdAt: string;
   /** ISO timestamp after which the key is rejected; null/absent = never expires. */
   expiresAt?: string | null;
-  /** How the key was issued: "admin" (via ADMIN_SECRET) or "self" (via /register). */
+  /**
+   * How the key was issued. Every key minted now is "self" (via /register);
+   * "admin" only appears on records left by the admin API that used to exist.
+   */
   source?: "admin" | "self";
   /** Client IP captured at self-registration, for auditing abuse. */
   registeredIp?: string | null;
@@ -92,9 +94,42 @@ export const DEFAULT_LIMIT_PER_MINUTE = 10;
 /**
  * Max stored label length. A label is an operator-facing name for one server,
  * not a payload; without a bound, public /register lets anyone persist
- * megabyte-sized strings into KV and into every /admin/keys listing.
+ * megabyte-sized strings into KV and into every operator's key listing.
  */
 export const MAX_LABEL_LENGTH = 64;
+
+// ---- request body bounds ----------------------------------------------------
+//
+// Both endpoints that take a body parse attacker-supplied JSON: /register takes
+// one short label, /send takes one notification. Without a ceiling read
+// BEFORE the parse, `await request.json()` allocates whatever was sent — the
+// per-minute limiter caps how many requests a key may make, not how large each
+// one is, so one key at its quota could still make the relay materialize
+// hundreds of megabytes a minute and forward them upstream.
+//
+// The field bounds below are the second half: a body that fits still must not
+// carry a 12 KB "device token" into a provider request.
+
+/** Ceiling on a POST /send body. */
+export const MAX_SEND_BODY_BYTES = 16 * 1024;
+/** Ceiling on a POST /register body (one label). */
+export const MAX_JSON_BODY_BYTES = 4 * 1024;
+
+/**
+ * Field bounds for /send. Real device tokens are ~64 (APNs) to ~255 (FCM)
+ * characters, so a longer one is not a token that got clipped, it is not a
+ * token — hence rejected rather than clamped. Text fields are clamped instead:
+ * a title is a sender and a body is a subject, both of which arrive from
+ * whoever emailed the self-hoster, and refusing to deliver a notification
+ * because a stranger sent a long subject line is a worse failure than
+ * delivering a clipped one. Same reasoning as MAX_LABEL_LENGTH.
+ */
+export const MAX_TOKEN_LENGTH = 512;
+export const MAX_TITLE_LENGTH = 256;
+export const MAX_NOTIFICATION_BODY_LENGTH = 1024;
+export const MAX_DATA_ENTRIES = 16;
+export const MAX_DATA_KEY_LENGTH = 64;
+export const MAX_DATA_VALUE_LENGTH = 1024;
 
 // ---- small helpers ---------------------------------------------------------
 
@@ -122,27 +157,30 @@ export function fail(
   return json({ error: message, requestId: rc.requestId, ...(extra ?? {}) }, status);
 }
 
+/**
+ * The one answer every failed delivery gets, whatever the provider said.
+ *
+ * FCM and APNs error bodies describe OUR project: the Firebase project id, the
+ * APNs topic, the service account, quota and routing state, and whatever
+ * diagnostic Google or Apple adds next. That text used to be interpolated
+ * straight into the 502 body, so any holder of any per-server API key — which,
+ * with public registration open, is anyone — could read the relay's upstream
+ * configuration by sending deliberately broken sends and reading the errors.
+ *
+ * The caller gets a stable, coarse failure plus the request id, which is what
+ * they can act on (retry, or quote the id to the operator). The provider status
+ * stays in the structured log as a bare number; the body is not logged either,
+ * because these logs are operator-facing and must not carry upstream response
+ * bodies (see push-relay-shared/AGENTS.md).
+ */
+export function failDelivery(rc: RequestContext): Response {
+  return fail(rc, 502, "push delivery failed");
+}
+
 export function bearer(request: Request): string {
   const header = request.headers.get("Authorization") ?? "";
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match ? match[1].trim() : "";
-}
-
-/**
- * Constant-time comparison for the admin secret. Always walks the longer of
- * the two strings' length rather than returning early on a length mismatch,
- * so response timing doesn't leak how many characters of the presented
- * value happened to match the configured secret's length.
- */
-export function timingSafeEqual(a: string, b: string): boolean {
-  const maxLen = Math.max(a.length, b.length);
-  let mismatch = a.length === b.length ? 0 : 1;
-  for (let i = 0; i < maxLen; i++) {
-    const ca = i < a.length ? a.charCodeAt(i) : 0;
-    const cb = i < b.length ? b.charCodeAt(i) : 0;
-    mismatch |= ca ^ cb;
-  }
-  return mismatch === 0;
 }
 
 /**
@@ -202,14 +240,6 @@ export function randomToken(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-export function requireAdmin(request: Request, env: CommonEnv): boolean {
-  const secret = (env.ADMIN_SECRET ?? "").trim();
-  if (!secret) {
-    return false;
-  }
-  return timingSafeEqual(bearer(request), secret);
 }
 
 export function isExpired(record: ApiKeyRecord, now: number): boolean {
@@ -471,7 +501,7 @@ export function recordUsageAnalytics(env: CommonEnv, record: ApiKeyRecord): void
   try {
     wae.writeDataPoint({
       indexes: [record.id],
-      blobs: [record.id, record.label, record.source ?? "admin"],
+      blobs: [record.id, record.label, record.source ?? "self"],
       doubles: [1],
     });
   } catch {
@@ -479,102 +509,221 @@ export function recordUsageAnalytics(env: CommonEnv, record: ApiKeyRecord): void
   }
 }
 
-// ---- /admin/keys -----------------------------------------------------------
-
-export type ExpiryResult = { ok: true; expiresAt: string | null } | { ok: false; error: string };
-
-/**
- * Resolve an optional expiry from the admin create body. An explicit ISO
- * `expiresAt` wins; otherwise `ttlDays` (a positive number) is added to now.
- * `expiresAt: null` means the key never expires.
- */
-export function resolveExpiry(body: { expiresAt?: unknown; ttlDays?: unknown }): ExpiryResult {
-  if (typeof body.expiresAt === "string" && body.expiresAt.trim()) {
-    const at = Date.parse(body.expiresAt.trim());
-    if (!Number.isFinite(at)) {
-      return { ok: false, error: "invalid expiresAt (expected an ISO 8601 timestamp)" };
-    }
-    return { ok: true, expiresAt: new Date(at).toISOString() };
-  }
-  if (body.ttlDays !== undefined && body.ttlDays !== null) {
-    const days = Number(body.ttlDays);
-    if (!Number.isFinite(days) || days <= 0) {
-      return { ok: false, error: "invalid ttlDays (expected a positive number)" };
-    }
-    return { ok: true, expiresAt: new Date(Date.now() + days * 86_400_000).toISOString() };
-  }
-  return { ok: true, expiresAt: null };
-}
+// ---- key minting ------------------------------------------------------------
 
 /**
  * Mint an API key, persist only its hash, and return the record plus the raw
- * key (which the caller returns to the client exactly once). Shared by the
- * admin endpoint and public self-registration.
+ * key (which the caller returns to the client exactly once).
+ *
+ * `/register` is the only caller: there is no admin API. Keys are therefore
+ * always self-issued and never expire, so neither is a parameter. `expiresAt`
+ * stays on the record (and `isExpired` stays on the read path) because keys
+ * minted by the admin endpoint that used to exist may still carry one.
  */
 export async function mintKey(
   env: CommonEnv,
   rc: RequestContext,
   opts: {
     label: string;
-    expiresAt: string | null;
-    source: "admin" | "self";
     registeredIp?: string | null;
     /**
      * Pre-generated key id. handleRegister needs the id BEFORE the record
      * exists, so it can reserve the IP first and persist nothing until that
-     * reservation succeeds. Defaults to a fresh uuid for every other caller.
+     * reservation succeeds.
      */
-    id?: string;
+    id: string;
   },
 ): Promise<{ record: ApiKeyRecord; key: string }> {
   const key = randomToken();
-  const id = opts.id ?? crypto.randomUUID();
   const record: ApiKeyRecord = {
-    id,
-    // Clamped here rather than at each call site so no minting path can store an
+    id: opts.id,
+    // Clamped here rather than at the call site so no minting path can store an
     // unbounded label (see MAX_LABEL_LENGTH).
     label: opts.label.slice(0, MAX_LABEL_LENGTH),
     enabled: true,
     createdAt: new Date().toISOString(),
-    expiresAt: opts.expiresAt,
-    source: opts.source,
+    expiresAt: null,
+    source: "self",
     registeredIp: opts.registeredIp ?? null,
   };
   const hash = await sha256Hex(key);
   await env.API_KEYS.put(KEY_PREFIX + hash, JSON.stringify(record));
-  await env.API_KEYS.put(KEY_INDEX_PREFIX + id, hash);
-  rc.log({ level: "info", event: "key.created", keyId: id, label: opts.label, source: opts.source, expiresAt: opts.expiresAt });
+  await env.API_KEYS.put(KEY_INDEX_PREFIX + opts.id, hash);
+  rc.log({ level: "info", event: "key.created", keyId: opts.id, label: record.label, source: "self" });
   return { record, key };
 }
 
+/** A refusal that a handler returns as-is; `ok: true` carries the parsed value. */
+export type BodyResult<T> = { ok: true; value: T } | { ok: false; status: number; error: string };
+
+const TOO_LARGE: BodyResult<never> = { ok: false, status: 413, error: "request body too large" };
+
 /**
- * Parse a JSON object body, tolerating anything else. `request.json()` accepts
- * valid-but-non-object JSON (`null`, arrays, scalars), and reading a property off
- * `null` throws — a body of literal `null` turned these handlers into a 500.
+ * Read a request body with a hard byte ceiling, never holding more than that.
+ *
+ * Content-Length is checked first because it is free, but it is not trusted as
+ * the bound: it is absent on a chunked body and it is a claim by the sender
+ * either way. The stream is therefore counted as it arrives and cancelled the
+ * moment it goes over, so the refusal costs `maxBytes`, not the body's size.
  */
-async function jsonObjectBody<T extends object>(request: Request): Promise<Partial<T>> {
-  let parsed: unknown;
-  try {
-    parsed = await request.json();
-  } catch {
-    return {};
+export async function readBoundedBody(request: Request, maxBytes: number): Promise<BodyResult<string>> {
+  const declared = Number(request.headers.get("Content-Length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    return TOO_LARGE;
   }
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Partial<T>) : {};
+  const stream = request.body;
+  if (!stream) {
+    return { ok: true, value: "" };
+  }
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return TOO_LARGE;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, status: 400, error: "could not read request body" };
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, value: new TextDecoder().decode(merged) };
 }
 
-export async function handleAdminCreate(request: Request, rc: RequestContext): Promise<Response> {
-  const { env } = rc;
-  const body = await jsonObjectBody<{ label?: string; ttlDays?: unknown; expiresAt?: unknown }>(request);
-  const label = (body.label ?? "").trim() || "unnamed";
+/**
+ * Parse a bounded JSON object body, tolerating anything else. JSON.parse accepts
+ * valid-but-non-object JSON (`null`, arrays, scalars), and reading a property off
+ * `null` throws — a body of literal `null` turned these handlers into a 500. An
+ * oversized body is NOT tolerated: it is refused before it is parsed, which is
+ * the whole point of the ceiling.
+ */
+async function jsonObjectBody<T extends object>(
+  request: Request,
+  maxBytes = MAX_JSON_BODY_BYTES,
+): Promise<BodyResult<Partial<T>>> {
+  const body = await readBoundedBody(request, maxBytes);
+  if (!body.ok) {
+    return body;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.value || "{}");
+  } catch {
+    return { ok: true, value: {} };
+  }
+  return {
+    ok: true,
+    value: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Partial<T>) : {},
+  };
+}
 
-  const expiry = resolveExpiry(body);
-  if (!expiry.ok) {
-    return fail(rc, 400, expiry.error);
+/** Clamp to `max` characters without splitting a surrogate pair in half. */
+function clampString(value: string, max: number): string {
+  if (value.length <= max) {
+    return value;
+  }
+  const clipped = value.slice(0, max);
+  const last = clipped.charCodeAt(max - 1);
+  return last >= 0xd800 && last <= 0xdbff ? clipped.slice(0, max - 1) : clipped;
+}
+
+/**
+ * The validated /send body, shaped for both providers: worker/'s FcmMessage and
+ * worker-apns/'s PushMessage are the same four fields.
+ */
+export interface SendPayload {
+  token: string;
+  title: string;
+  body: string;
+  data: Record<string, string>;
+}
+
+/**
+ * Read and validate a POST /send body against MAX_SEND_BODY_BYTES and the field
+ * bounds above, returning a payload that is safe to hand to a provider.
+ *
+ * Types are checked, not coerced: `{"title": {...}}` used to become the string
+ * "[object Object]" in a delivered notification, and `data` was forwarded to the
+ * provider unexamined, so any JSON value at all could ride into an FCM/APNs
+ * request under a key holder's quota. Unknown fields are ignored rather than
+ * refused — the Go sender already sends a `platform` field this relay has never
+ * read, and a new one must not become a delivery outage on the older worker.
+ */
+export async function readSendPayload(request: Request): Promise<BodyResult<SendPayload>> {
+  const body = await readBoundedBody(request, MAX_SEND_BODY_BYTES);
+  if (!body.ok) {
+    return body;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.value);
+  } catch {
+    return { ok: false, status: 400, error: "invalid json body" };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, status: 400, error: "invalid json body" };
+  }
+  const raw = parsed as Record<string, unknown>;
+
+  if (raw.token !== undefined && typeof raw.token !== "string") {
+    return { ok: false, status: 400, error: "invalid token" };
+  }
+  const token = ((raw.token as string | undefined) ?? "").trim();
+  if (!token) {
+    return { ok: false, status: 400, error: "missing token" };
+  }
+  if (token.length > MAX_TOKEN_LENGTH) {
+    return { ok: false, status: 400, error: "invalid token" };
   }
 
-  const { record, key } = await mintKey(env, rc, { label, expiresAt: expiry.expiresAt, source: "admin" });
-  // The raw key is returned exactly once; only its hash is stored.
-  return json({ id: record.id, label: record.label, key, expiresAt: record.expiresAt }, 201);
+  for (const field of ["title", "body"] as const) {
+    if (raw[field] !== undefined && typeof raw[field] !== "string") {
+      return { ok: false, status: 400, error: `invalid ${field}` };
+    }
+  }
+
+  const data: Record<string, string> = {};
+  if (raw.data !== undefined && raw.data !== null) {
+    if (typeof raw.data !== "object" || Array.isArray(raw.data)) {
+      return { ok: false, status: 400, error: "invalid data" };
+    }
+    const entries = Object.entries(raw.data as Record<string, unknown>);
+    if (entries.length > MAX_DATA_ENTRIES) {
+      return { ok: false, status: 400, error: "too many data entries" };
+    }
+    for (const [key, value] of entries) {
+      if (key.length > MAX_DATA_KEY_LENGTH) {
+        return { ok: false, status: 400, error: "invalid data key" };
+      }
+      if (typeof value !== "string") {
+        return { ok: false, status: 400, error: "invalid data value" };
+      }
+      data[key] = clampString(value, MAX_DATA_VALUE_LENGTH);
+    }
+  }
+
+  return {
+    ok: true,
+    value: {
+      token,
+      title: clampString((raw.title as string | undefined) ?? "", MAX_TITLE_LENGTH),
+      body: clampString((raw.body as string | undefined) ?? "", MAX_NOTIFICATION_BODY_LENGTH),
+      data,
+    },
+  };
 }
 
 // ---- /register (public self-service) ---------------------------------------
@@ -638,8 +787,11 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
     response.headers.set("Retry-After", "60");
     return response;
   }
-  const body = await jsonObjectBody<{ label?: string }>(request);
-  const label = (body.label ?? "").trim() || "self-registered";
+  const parsed = await jsonObjectBody<{ label?: string }>(request);
+  if (!parsed.ok) {
+    return fail(rc, parsed.status, parsed.error);
+  }
+  const label = (typeof parsed.value.label === "string" ? parsed.value.label : "").trim() || "self-registered";
 
   // Refuse rather than mint an unconstrained key: without the coordinator the
   // one-active-key-per-IP invariant is unenforceable, and an unconstrained
@@ -655,7 +807,7 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   // throwing coordinator (or a KV error) left an enabled key record behind that
   // the 500 response never handed to anyone — unusable, since the raw key only
   // ever travels in the response body, but still an orphan in KV and in every
-  // /admin/keys listing, mintable on repeat.
+  // KV listing, mintable on repeat.
   //
   // Reordering beats minting-then-rolling-back: a compensating revoke is another
   // write on the path that just failed, so it is exactly the write least likely
@@ -672,8 +824,8 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   const legacyKeyId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
   const priorId = await ipStub.claimRegistrationIp(keyId, legacyKeyId);
 
-  // Self-registered keys don't expire by default — they back long-lived servers.
-  const { record, key } = await mintKey(env, rc, { label, expiresAt: null, source: "self", registeredIp, id: keyId });
+  // Self-registered keys don't expire — they back long-lived servers.
+  const { record, key } = await mintKey(env, rc, { label, registeredIp, id: keyId });
 
   // The KV index is no longer the authority — it only seeds a coordinator
   // instance that has never been touched, and gives revokeKeyById something to
@@ -685,38 +837,6 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
     rc.log({ level: "info", event: "key.superseded", keyId: priorId, ip: registeredIp });
   }
   return json({ id: record.id, label: record.label, key, expiresAt: record.expiresAt }, 201);
-}
-
-export async function handleAdminList(rc: RequestContext): Promise<Response> {
-  const { env } = rc;
-  const now = Date.now();
-  const keys = [];
-  // KV list() returns one page (1,000 keys); follow the cursor to completion.
-  // Stopping at the first page silently hid active credentials from the operator
-  // doing the revoking, which is the one listing that has to be complete.
-  let cursor: string | undefined;
-  do {
-    const listed = await env.API_KEYS.list({ prefix: KEY_PREFIX, cursor });
-    cursor = listed.list_complete ? undefined : listed.cursor;
-    for (const entry of listed.keys) {
-      const record = await env.API_KEYS.get<ApiKeyRecord>(entry.name, "json");
-      if (!record) {
-        continue;
-      }
-      keys.push({
-        id: record.id,
-        label: record.label,
-        enabled: record.enabled,
-        createdAt: record.createdAt,
-        expiresAt: record.expiresAt ?? null,
-        expired: isExpired(record, now),
-        source: record.source ?? "admin",
-        registeredIp: record.registeredIp ?? null,
-        // Usage (send counts + last-seen) lives in Analytics Engine, not KV.
-      });
-    }
-  } while (cursor);
-  return json({ keys });
 }
 
 /**
@@ -742,18 +862,9 @@ export async function revokeKeyById(env: CommonEnv, id: string): Promise<boolean
   return true;
 }
 
-export async function handleAdminRevoke(id: string, rc: RequestContext): Promise<Response> {
-  const revoked = await revokeKeyById(rc.env, id);
-  if (!revoked) {
-    return fail(rc, 404, "key not found");
-  }
-  rc.log({ level: "info", event: "key.revoked", keyId: id });
-  return json({ ok: true });
-}
-
 // ---- router / fetch wrapper -------------------------------------------------
 //
-// The two workers' routing (health/send/register/admin-keys dispatch) and their
+// The two workers' routing (health/send/register dispatch) and their
 // `export default { fetch(...) }` wrapper (request-id minting, structured access
 // logging, unhandled-error catch) are identical; only `/health`'s `configured`
 // flag and `/send`'s delivery logic are provider-specific.
@@ -792,27 +903,14 @@ async function routeRelay<TEnv extends CommonEnv>(
     return handleRegister(request, rc);
   }
 
-  if (path === "/admin/keys") {
-    if (!requireAdmin(request, env)) {
-      return fail(rc, 401, "unauthorized");
-    }
-    if (request.method === "POST") {
-      return handleAdminCreate(request, rc);
-    }
-    if (request.method === "GET") {
-      return handleAdminList(rc);
-    }
-    return fail(rc, 405, "method not allowed");
-  }
-
-  const revokeMatch = /^\/admin\/keys\/([^/]+)$/.exec(path);
-  if (revokeMatch && request.method === "DELETE") {
-    if (!requireAdmin(request, env)) {
-      return fail(rc, 401, "unauthorized");
-    }
-    return handleAdminRevoke(decodeURIComponent(revokeMatch[1]), rc);
-  }
-
+  // No admin surface, deliberately. There used to be `/admin/keys` (mint, list,
+  // revoke) behind a bearer ADMIN_SECRET, and nothing called it: the Go server
+  // uses /register and /send, the mobile apps never touch the relay, and the
+  // endpoints existed only for the maintainer to curl. That made the highest
+  // value credential in the deployment — one that mints and revokes every key
+  // the relay honours — permanently guessable by anyone who found the hostname,
+  // to save a `wrangler kv key delete`. Deleting the door beat guarding it. Key
+  // management is now the CLI; see the READMEs.
   return fail(rc, 404, "not found");
 }
 
