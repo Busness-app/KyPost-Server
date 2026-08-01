@@ -110,9 +110,13 @@ type Server struct {
 	mfaPushLimiter         *mfaPushLimiter
 	sendAsCooldown         *cooldown
 	classifierTestCooldown *cooldown
-	captchaVerifier        captcha.Verifier
-	captchaProvider        captcha.Provider
-	captchaSiteKey         string
+	// notificationTestCooldown meters POST /api/notifications/test per user:
+	// the one endpoint an authenticated caller can use to trigger the serial
+	// push fanout on demand. See notificationTestCooldownFor.
+	notificationTestCooldown *cooldown
+	captchaVerifier          captcha.Verifier
+	captchaProvider          captcha.Provider
+	captchaSiteKey           string
 
 	// powVerifier is the same object as captchaVerifier when the configured
 	// provider is pow, held additionally under its concrete type because the
@@ -252,59 +256,60 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	}
 
 	return &Server{
-		cfg:                    cfg,
-		onConfigUpdated:        onConfigUpdated,
-		logger:                 logger,
-		health:                 healthSvc,
-		users:                  usersStore,
-		configDir:              configDir,
-		stateDir:               stateDir,
-		configPath:             filepath.Join(configDir, "config.yaml"),
-		logPath:                logPath,
-		imapConfigKeyPath:      imapConfigKeyPath,
-		totpSecretKeyPath:      totpSecretKeyPath,
-		pgpPrivateKeyPath:      pgpPrivateKeyPath,
-		sessions:               map[string]Session{},
-		mfaChallenges:          mfa.NewStore(),
-		pairingSecret:          pairingSecret,
-		singleUse:              newSingleUseTokens(),
-		serverBaseURL:          strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
-		nativePushDispatcher:   processor.NewNativePushDispatcher(logger),
-		pickupStore:            pgpmail.NewPickupStore(filepath.Join(stateDir, "pickup"), pickupStoreKeyPath),
-		userStores:             map[string]*state.Store{},
-		userContacts:           map[string]*contacts.Store{},
-		userSendAs:             map[string]*sendas.Store{},
-		userGroups:             map[string]*groups.Store{},
-		userRules:              map[string]*rules.Store{},
-		userMailCache:          map[string]*mailcache.Store{},
-		userLastSeen:           map[string]time.Time{},
-		userMail:               map[string]*serverMailEntry{},
-		subIndex:               map[string]string{},
-		deviceIndex:            map[string]string{},
-		deviceReserving:        map[string]int{},
-		davCredentials:         newDAVCredentialCache(),
-		loginLockout:           newLoginLockout(),
-		davLockout:             newFailureLockout(davMaxFailures, davLockoutFor),
-		mfaLockout:             newFailureLockout(mfaMaxFailures, mfaLockoutFor),
-		passwordChangeLockout:  newFailureLockout(passwordChangeMaxFailures, passwordChangeLockoutFor),
-		deviceLockout:          newFailureLockout(deviceMaxFailures, deviceLockoutFor),
-		wkdLimiter:             newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
-		pushPollLimiter:        newIPRateLimiter(pushPollBurst, pushPollRefillPerSec),
-		loginParamsLimiter:     newIPRateLimiter(loginParamsBurst, loginParamsRefillPerSec),
-		deviceRescan:           newIntervalGate(deviceRescanInterval),
-		mfaPushLimiter:         newMfaPushLimiter(),
-		sendAsCooldown:         newCooldown(sendAsVerificationCooldownFor),
-		classifierTestCooldown: newCooldown(classifierTestCooldownFor),
-		captchaVerifier:        captchaVerifier,
-		captchaProvider:        captchaProvider,
-		captchaSiteKey:         captchaSiteKey,
-		powVerifier:            powVerifier,
-		powChallenges:          newPowChallengeLimiter(),
-		powDifficulty:          newPowEscalation(),
-		loginRateLimiter:       newIPRateLimiter(loginKDFBurstSeconds, loginKDFDutyCycle),
-		loginIPLockout:         newFailureLockout(loginIPMaxFailures, loginIPLockoutFor),
-		globalStore:            globalStore,
-		wkdStore:               wkdStore,
+		cfg:                      cfg,
+		onConfigUpdated:          onConfigUpdated,
+		logger:                   logger,
+		health:                   healthSvc,
+		users:                    usersStore,
+		configDir:                configDir,
+		stateDir:                 stateDir,
+		configPath:               filepath.Join(configDir, "config.yaml"),
+		logPath:                  logPath,
+		imapConfigKeyPath:        imapConfigKeyPath,
+		totpSecretKeyPath:        totpSecretKeyPath,
+		pgpPrivateKeyPath:        pgpPrivateKeyPath,
+		sessions:                 map[string]Session{},
+		mfaChallenges:            mfa.NewStore(),
+		pairingSecret:            pairingSecret,
+		singleUse:                newSingleUseTokens(),
+		serverBaseURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
+		nativePushDispatcher:     processor.NewNativePushDispatcher(logger),
+		pickupStore:              pgpmail.NewPickupStore(filepath.Join(stateDir, "pickup"), pickupStoreKeyPath),
+		userStores:               map[string]*state.Store{},
+		userContacts:             map[string]*contacts.Store{},
+		userSendAs:               map[string]*sendas.Store{},
+		userGroups:               map[string]*groups.Store{},
+		userRules:                map[string]*rules.Store{},
+		userMailCache:            map[string]*mailcache.Store{},
+		userLastSeen:             map[string]time.Time{},
+		userMail:                 map[string]*serverMailEntry{},
+		subIndex:                 map[string]string{},
+		deviceIndex:              map[string]string{},
+		deviceReserving:          map[string]int{},
+		davCredentials:           newDAVCredentialCache(),
+		loginLockout:             newLoginLockout(),
+		davLockout:               newFailureLockout(davMaxFailures, davLockoutFor),
+		mfaLockout:               newFailureLockout(mfaMaxFailures, mfaLockoutFor),
+		passwordChangeLockout:    newFailureLockout(passwordChangeMaxFailures, passwordChangeLockoutFor),
+		deviceLockout:            newFailureLockout(deviceMaxFailures, deviceLockoutFor),
+		wkdLimiter:               newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
+		pushPollLimiter:          newIPRateLimiter(pushPollBurst, pushPollRefillPerSec),
+		loginParamsLimiter:       newIPRateLimiter(loginParamsBurst, loginParamsRefillPerSec),
+		deviceRescan:             newIntervalGate(deviceRescanInterval),
+		mfaPushLimiter:           newMfaPushLimiter(),
+		sendAsCooldown:           newCooldown(sendAsVerificationCooldownFor),
+		classifierTestCooldown:   newCooldown(classifierTestCooldownFor),
+		notificationTestCooldown: newCooldown(notificationTestCooldownFor),
+		captchaVerifier:          captchaVerifier,
+		captchaProvider:          captchaProvider,
+		captchaSiteKey:           captchaSiteKey,
+		powVerifier:              powVerifier,
+		powChallenges:            newPowChallengeLimiter(),
+		powDifficulty:            newPowEscalation(),
+		loginRateLimiter:         newIPRateLimiter(loginKDFBurstSeconds, loginKDFDutyCycle),
+		loginIPLockout:           newFailureLockout(loginIPMaxFailures, loginIPLockoutFor),
+		globalStore:              globalStore,
+		wkdStore:                 wkdStore,
 	}
 }
 
@@ -863,7 +868,7 @@ func (s *Server) StartCooldownSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, c := range []*cooldown{s.sendAsCooldown, s.classifierTestCooldown} {
+			for _, c := range []*cooldown{s.sendAsCooldown, s.classifierTestCooldown, s.notificationTestCooldown} {
 				c.sweep(cooldownSweepMaxAge)
 			}
 		}

@@ -88,6 +88,16 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// Only when the classifier block actually changed. This endpoint is how
+		// every other setting on the instance is edited too, and an instance
+		// whose base URL predates this check must not have its timezone field
+		// held hostage by it — but nothing new gets in.
+		if classifierChanged && strings.TrimSpace(next.Classifier.BaseURL) != "" {
+			if err := classifier.ValidateBaseURL(next.Classifier.BaseURL); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+		}
 		if next.RateLimits.PerMinute <= 0 || next.RateLimits.PerHour <= 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "rate limits must be greater than zero"})
 			return

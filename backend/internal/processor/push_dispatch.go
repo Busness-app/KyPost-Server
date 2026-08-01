@@ -25,6 +25,20 @@ type WebPushOutcome struct {
 	Removed       int
 }
 
+// pushFanoutBudget bounds ONE fanout — every destination together, not each.
+//
+// The per-destination timeouts below bound a single request; they say nothing
+// about the total, and both fanouts are serial. state.MaxNotificationSubscriptions
+// caps the multiplier, but 20 destinations that each accept the connection and
+// then sit there still adds up to minutes — spent on the goroutine poller.tick's
+// wg.Wait() is holding the whole instance's polling behind. This is the second
+// half of that bound: a fanout gets a fixed slice of wall clock, and whatever
+// did not get a turn is counted failed rather than waited for.
+//
+// A notification is worth a minute of the server's time and no more. The email
+// itself has already synced either way.
+const pushFanoutBudget = 60 * time.Second
+
 // SendWebPush dispatches payloadBytes to every push subscription in store
 // via the standard Web Push protocol, using the VAPID key material at
 // privateKeyPath/publicKey and the given ttlSeconds. Subscriptions the push
@@ -33,7 +47,10 @@ type WebPushOutcome struct {
 // returned. An error is returned only when the VAPID private key could not
 // be loaded — per-subscription dispatch failures are reflected in the
 // returned outcome, not as an error.
-func SendWebPush(store *state.Store, publicKey, privateKeyPath string, ttlSeconds int, payloadBytes []byte) (WebPushOutcome, error) {
+//
+// ctx bounds the whole fanout (further capped at pushFanoutBudget) and carries
+// cancellation, so a shutdown does not have to wait out a hung push service.
+func SendWebPush(ctx context.Context, store *state.Store, publicKey, privateKeyPath string, ttlSeconds int, payloadBytes []byte) (WebPushOutcome, error) {
 	subs, err := store.ListNotificationSubscriptionsStrict()
 	if err != nil {
 		return WebPushOutcome{}, err
@@ -70,11 +87,22 @@ func SendWebPush(store *state.Store, publicKey, privateKeyPath string, ttlSecond
 		},
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, pushFanoutBudget)
+	defer cancel()
+
 	sent := 0
 	failed := 0
 	staleEndpoints := []string{}
-	for _, sub := range subs {
-		resp, err := webpush.SendNotification(payloadBytes, &webpush.Subscription{
+	for i, sub := range subs {
+		// Budget spent (or shutdown): stop dialling. The rest are counted
+		// failed because that is what they are — the notification did not
+		// reach them — and reporting them any other way would make an
+		// abandoned fanout look like a complete one.
+		if ctx.Err() != nil {
+			failed += len(subs) - i
+			break
+		}
+		resp, err := webpush.SendNotificationWithContext(ctx, payloadBytes, &webpush.Subscription{
 			Endpoint: sub.Endpoint,
 			Keys: webpush.Keys{
 				Auth:   sub.Auth,
@@ -194,7 +222,11 @@ func pushRetryDelay(err error, attempt int) time.Duration {
 func sendWithRetry(ctx context.Context, dispatcher *NativePushDispatcher, device state.NativeDevice, message NativePushMessage) error {
 	var lastErr error
 	_, err := retry.Loop(ctx, pushRetryAttempts,
-		func(int) time.Duration { return pushRetryDelay(lastErr, 0) },
+		// The loop's own attempt counter, not a hardcoded 0. Pinning it to 0
+		// made pushRetryDelay's shift a no-op, so every "exponential" backoff
+		// was the same flat 500ms — the retries an outage produces arrived at a
+		// constant rate against a relay that was already failing.
+		func(attempt int) time.Duration { return pushRetryDelay(lastErr, attempt) },
 		func(attempt int) (struct{}, error, bool) {
 			sendCtx, cancel := context.WithTimeout(ctx, nativePushSendTimeout)
 			defer cancel()
@@ -241,6 +273,12 @@ func SendNativePushToDevices(ctx context.Context, dispatcher *NativePushDispatch
 		return NativePushOutcome{Devices: len(devices), Sent: 1, Queued: true}, nil
 	}
 
+	// The whole fanout, not each device: three attempts at nativePushSendTimeout
+	// apiece, times every paired device, is otherwise the bound. See
+	// pushFanoutBudget.
+	ctx, cancel := context.WithTimeout(ctx, pushFanoutBudget)
+	defer cancel()
+
 	sent := 0
 	failed := 0
 	removed := 0
@@ -249,7 +287,11 @@ func SendNativePushToDevices(ctx context.Context, dispatcher *NativePushDispatch
 	// relay is failing.
 	relayResponded := make(map[string]bool) // platform -> responded
 	relayFailure := make(map[string]string) // platform -> failure reason
-	for _, device := range devices {
+	for i, device := range devices {
+		if ctx.Err() != nil {
+			failed += len(devices) - i
+			break
+		}
 		platform := strings.ToLower(strings.TrimSpace(device.Platform))
 		if platform == "" {
 			platform = "android" // default for unknown/empty

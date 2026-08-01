@@ -165,6 +165,22 @@ func (p *Poller) initCtx() {
 	})
 }
 
+// lifetimeCtx is the poller's own context: cancelled by Stop, and by nothing
+// else. Notification delivery uses it rather than context.Background() so a
+// shutdown can actually interrupt a relay that is timing out — three attempts
+// at a 12s timeout apiece, per device, otherwise runs to completion with
+// nothing able to stop it. It is not the per-message context, which is
+// cancelled as soon as handleMessage returns and so would abort the very
+// notification the message just earned (and is already cancelled by the time
+// recordMessageFailure notifies).
+//
+// It calls initCtx for the same reason Run and Stop do: a directly-constructed
+// Poller, as several tests build, has never been through New.
+func (p *Poller) lifetimeCtx() context.Context {
+	p.initCtx()
+	return p.ctx
+}
+
 func (p *Poller) userStateDir(userID string) string {
 	return filepath.Join(p.stateDir, "users", userID)
 }
@@ -797,19 +813,30 @@ func clipForLog(s string) string {
 // only the MarkProcessed gating is new.
 func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc userCtx, msg imapadapter.Message, err error) {
 	p.log.Error("message processing failed", "user_id", userID, "message_id", msg.ID, "error", err.Error())
-	_ = store.AddDecision(state.Decision{
+	decision := state.Decision{
 		MessageID: msg.ID,
 		Sender:    msg.Sender,
 		SentTo:    msg.SentTo,
 		Subject:   msg.Subject,
 		Status:    "failed",
 		Detail:    err.Error(),
-	})
+	}
+	// Both writes together when the message is being retired, so a failure
+	// cannot leave it retired-but-unrecorded — see RecordProcessedDecision.
+	// A transient classifier error records the decision only: the message is
+	// deliberately left unmarked so the next tick retries it.
+	var writeErr error
 	if shouldMarkProcessedOnError(err) {
-		// Retire the message so it is not retried on the next tick.
-		_ = store.MarkProcessed(msg.ID)
+		writeErr = store.RecordProcessedDecision(decision)
 	} else {
 		p.log.Info("transient classifier error; leaving message unmarked so it is retried next poll tick", "user_id", userID, "message_id", msg.ID)
+		writeErr = store.AddDecision(decision)
+	}
+	// This is already the failure path, so there is nothing above to abort;
+	// logged rather than swallowed because a dropped write here means the
+	// audit log is missing a message the poller reports as handled.
+	if writeErr != nil {
+		p.log.Error("failed to record message failure", "user_id", userID, "message_id", msg.ID, "error", writeErr.Error())
 	}
 	p.maybeSendPushNotification(uc, msg, "", nil)
 	p.maybeSendNativePushNotification(uc, msg, "", nil)
@@ -836,17 +863,14 @@ func (p *Poller) rejectOversizedMessage(uc userCtx, msg imapadapter.Message) err
 		p.log.Error("failed to send too-large rejection notice", "user_id", uc.id, "message_id", msg.ID, "error", err.Error())
 		detail += "; rejection notice could not be sent: " + err.Error()
 	}
-	if err := uc.store.AddDecision(state.Decision{
+	return uc.store.RecordProcessedDecision(state.Decision{
 		MessageID: msg.ID,
 		Sender:    msg.Sender,
 		SentTo:    msg.SentTo,
 		Subject:   msg.Subject,
 		Status:    "rejected_too_large",
 		Detail:    detail,
-	}); err != nil {
-		return err
-	}
-	return uc.store.MarkProcessed(msg.ID)
+	})
 }
 
 // notifyMessageTooLarge emails a rejection notice to the mailbox owner's own
@@ -955,23 +979,28 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		if len(failures) > 0 {
 			detail += fmt.Sprintf("; %d action(s) failed: %s", len(failures), strings.Join(failures, "; "))
 		}
-		if err := uc.store.AddDecision(state.Decision{
+		decision := state.Decision{
 			MessageID: msg.ID,
 			Sender:    msg.Sender,
 			SentTo:    msg.SentTo,
 			Subject:   msg.Subject,
 			Status:    "applied",
 			Detail:    detail,
-		}); err != nil {
-			return err
 		}
+		// A "stop" rule is a terminal path — the decision and the processed
+		// marker are one state change and are written as one. Without "stop"
+		// the message carries on to classification, which will retire it, so
+		// only the decision is recorded here.
 		if outcome.Stopped {
-			if err := uc.store.MarkProcessed(msg.ID); err != nil {
+			if err := uc.store.RecordProcessedDecision(decision); err != nil {
 				return err
 			}
 			p.maybeSendPushNotification(uc, msg, "", nil)
 			p.maybeSendNativePushNotification(uc, msg, "", nil)
 			return nil
+		}
+		if err := uc.store.AddDecision(decision); err != nil {
+			return err
 		}
 	}
 
@@ -989,10 +1018,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 			p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", defaultLabel, "error", err.Error())
 			return err
 		}
-		if err := uc.store.MarkProcessed(msg.ID); err != nil {
-			return err
-		}
-		if err := uc.store.AddDecision(state.Decision{
+		if err := uc.store.RecordProcessedDecision(state.Decision{
 			MessageID: msg.ID,
 			Sender:    msg.Sender,
 			SentTo:    msg.SentTo,
@@ -1058,15 +1084,14 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	selected := classifier.SelectLabelFromText(cfg.Labels.Allowlist, label)
 	if selected == "" {
 		p.log.Info("classification skipped", "user_id", uc.id, "message_id", msg.ID, "reason", "no known label returned", "raw_label", clipForLog(label), "allowlist_count", strconv.Itoa(len(cfg.Labels.Allowlist)))
-		_ = uc.store.AddDecision(state.Decision{
+		if err := uc.store.RecordProcessedDecision(state.Decision{
 			MessageID: msg.ID,
 			Sender:    msg.Sender,
 			SentTo:    msg.SentTo,
 			Subject:   msg.Subject,
 			Status:    "skipped",
 			Detail:    "no known label returned",
-		})
-		if err := uc.store.MarkProcessed(msg.ID); err != nil {
+		}); err != nil {
 			return err
 		}
 		p.maybeSendPushNotification(uc, msg, "", nil)
@@ -1086,10 +1111,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		return err
 	}
 	p.log.Info("label applied", "user_id", uc.id, "message_id", msg.ID, "selected_label", selected, "keywords", strings.Join(keywords, ","))
-	if err := uc.store.MarkProcessed(msg.ID); err != nil {
-		return err
-	}
-	if err := uc.store.AddDecision(state.Decision{
+	if err := uc.store.RecordProcessedDecision(state.Decision{
 		MessageID: msg.ID,
 		Sender:    msg.Sender,
 		SentTo:    msg.SentTo,
@@ -1176,7 +1198,7 @@ func (p *Poller) maybeSendPushNotification(uc userCtx, msg imapadapter.Message, 
 		return
 	}
 
-	outcome, err := SendWebPush(uc.store, publicKey, privateKeyPath, 300, payloadBytes)
+	outcome, err := SendWebPush(p.lifetimeCtx(), uc.store, publicKey, privateKeyPath, 300, payloadBytes)
 	if err != nil {
 		p.log.Error("failed to load notification private key", "error", err.Error())
 		return
@@ -1216,7 +1238,7 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 	// instead of a generic fallback.
 	notification := NativePushMessage{Title: title, Body: body, Data: data}
 
-	outcome, err := SendNativePush(context.Background(), p.nativePushDispatcher, p.health, uc.store, notification, func(device state.NativeDevice, platform string, sendErr error) {
+	outcome, err := SendNativePush(p.lifetimeCtx(), p.nativePushDispatcher, p.health, uc.store, notification, func(device state.NativeDevice, platform string, sendErr error) {
 		// This fires only after sendWithRetry has spent its attempts — transient
 		// failures (relay unreachable, upstream 5xx, 429) are retried with backoff,
 		// honouring the relay's Retry-After. What reaches here is a relay that stayed

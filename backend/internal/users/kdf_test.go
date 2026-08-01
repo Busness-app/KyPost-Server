@@ -126,7 +126,11 @@ func TestEveryDerivationEntryPointSharesTheOneLimit(t *testing.T) {
 			return err
 		}},
 		{"Store.SetDerivedAuth", func() error {
-			_, err := store.SetDerivedAuth(ctx, bootstrap.ID, strings.Repeat("ab", 32), "c2FsdA==", MinLoginIterations, false)
+			// A real 16-byte salt: validateLoginSalt runs before the KDF slot
+			// is taken, so a placeholder shorter than MinLoginSaltBytes would
+			// return that error instead of ever reaching the limit this test
+			// is about.
+			_, err := store.SetDerivedAuth(ctx, bootstrap.ID, strings.Repeat("ab", 32), "YWFhYWFhYWFhYWFhYWFhYQ==", MinLoginIterations, false)
 			return err
 		}},
 		{"Store.ConsumeRecoveryCode", func() error {
