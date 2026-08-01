@@ -32,7 +32,7 @@ func smallVCard(uid string) string {
 // maxContactPhotoBytes must be rejected rather than accepted.
 func TestHandleCardDAVPutRejectsOversizedBody(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("dave", "irrelevant-password", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "dave", "irrelevant-password", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestHandleCardDAVPutRejectsOversizedBody(t *testing.T) {
 // ordinary CardDAV PUTs.
 func TestHandleCardDAVPutAcceptsNormalBody(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("erin", "irrelevant-password", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "erin", "irrelevant-password", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

@@ -1,6 +1,7 @@
 package users
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -16,7 +17,7 @@ import (
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
@@ -25,7 +26,7 @@ func newTestStore(t *testing.T) *Store {
 
 func TestLoadOrMigrateFreshInstallMintsDefaultAdmin(t *testing.T) {
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
@@ -44,7 +45,7 @@ func TestLoadOrMigrateFreshInstallMintsDefaultAdmin(t *testing.T) {
 
 func TestLoadOrMigrateImportsLegacyAdminEnv(t *testing.T) {
 	dir := t.TempDir()
-	hash, err := HashPassword("hunter2")
+	hash, err := HashPassword(context.Background(), "hunter2")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestLoadOrMigrateImportsLegacyAdminEnv(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	store, err := LoadOrMigrate(dir, adminEnvPath)
+	store, err := LoadOrMigrate(context.Background(), dir, adminEnvPath)
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
@@ -65,20 +66,20 @@ func TestLoadOrMigrateImportsLegacyAdminEnv(t *testing.T) {
 	if u.Role != RoleAdmin || !u.Active || u.MustChangePassword {
 		t.Fatalf("unexpected migrated admin: %+v", u)
 	}
-	if !VerifyPassword(u, "hunter2") {
+	if ok, _ := VerifyPassword(context.Background(), u, "hunter2"); !ok {
 		t.Fatalf("VerifyPassword: expected migrated password to verify")
 	}
 }
 
 func TestLoadOrMigrateIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	first, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	first, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
 	firstUsers, _ := first.List()
 
-	second, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	second, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate (second): %v", err)
 	}
@@ -91,20 +92,20 @@ func TestLoadOrMigrateIsIdempotent(t *testing.T) {
 
 func TestStoreLifecycle(t *testing.T) {
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
 
-	u, err := store.Create("alice", "correct-horse-testpassword", RoleUser)
+	u, err := store.Create(context.Background(), "alice", "correct-horse-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if !VerifyPassword(u, "correct-horse-testpassword") {
+	if ok, _ := VerifyPassword(context.Background(), u, "correct-horse-testpassword"); !ok {
 		t.Fatalf("VerifyPassword: expected new user's password to verify")
 	}
 
-	if _, err := store.Create("alice", "other-testpassword", RoleUser); err != ErrUsernameTaken {
+	if _, err := store.Create(context.Background(), "alice", "other-testpassword", RoleUser); err != ErrUsernameTaken {
 		t.Fatalf("Create duplicate: err = %v, want ErrUsernameTaken", err)
 	}
 
@@ -119,11 +120,12 @@ func TestStoreLifecycle(t *testing.T) {
 		t.Fatalf("Role = %v, want admin", got.Role)
 	}
 
-	if _, err := store.SetPassword(u.ID, "new-password-testpassword", true); err != nil {
+	if _, err := store.SetPassword(context.Background(), u.ID, "new-password-testpassword", true); err != nil {
 		t.Fatalf("SetPassword: %v", err)
 	}
 	got, _ = store.Get(u.ID)
-	if !got.MustChangePassword || !VerifyPassword(got, "new-password-testpassword") {
+	okPassword, _ := VerifyPassword(context.Background(), got, "new-password-testpassword")
+	if !got.MustChangePassword || !okPassword {
 		t.Fatalf("unexpected state after SetPassword: %+v", got)
 	}
 
@@ -150,11 +152,11 @@ func TestStoreLifecycle(t *testing.T) {
 
 func TestTOTPEnrollmentLifecycle(t *testing.T) {
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("carol", "pw-carol-testpassword", RoleUser)
+	u, err := store.Create(context.Background(), "carol", "pw-carol-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -169,8 +171,8 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 	}
 
 	// Confirm enables and stores recovery hashes.
-	h1, _ := HashPassword("aaaa-bbbb-cccc")
-	h2, _ := HashPassword("dddd-eeee-ffff")
+	h1, _ := HashPassword(context.Background(), "aaaa-bbbb-cccc")
+	h2, _ := HashPassword(context.Background(), "dddd-eeee-ffff")
 	if _, err := store.EnableTOTP(u.ID, "2026-07-09T00:00:00Z", []string{h1, h2}); err != nil {
 		t.Fatalf("EnableTOTP: %v", err)
 	}
@@ -180,7 +182,7 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 	}
 
 	// Consume a recovery code removes exactly one matching hash.
-	_, matched, err := store.ConsumeRecoveryCode(u.ID, "aaaa-bbbb-cccc", nil)
+	_, matched, err := store.ConsumeRecoveryCode(context.Background(), u.ID, "aaaa-bbbb-cccc")
 	if err != nil || !matched {
 		t.Fatalf("ConsumeRecoveryCode good = (%v, %v)", matched, err)
 	}
@@ -189,7 +191,7 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 		t.Fatalf("after consume: %d hashes left, want 1", len(got.RecoveryCodesHash))
 	}
 	// A non-matching / already-used code does not match and does not write.
-	_, matched, err = store.ConsumeRecoveryCode(u.ID, "aaaa-bbbb-cccc", nil)
+	_, matched, err = store.ConsumeRecoveryCode(context.Background(), u.ID, "aaaa-bbbb-cccc")
 	if err != nil || matched {
 		t.Fatalf("ConsumeRecoveryCode reused = (%v, %v), want (false, nil)", matched, err)
 	}
@@ -206,11 +208,11 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 
 func TestEnableTOTPRequiresPendingSecret(t *testing.T) {
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("dan", "pw-dan-testpassword", RoleUser)
+	u, err := store.Create(context.Background(), "dan", "pw-dan-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -221,11 +223,11 @@ func TestEnableTOTPRequiresPendingSecret(t *testing.T) {
 
 func TestSetLastUsedTOTPStep(t *testing.T) {
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("judy", "pw-judy-testpassword", RoleUser)
+	u, err := store.Create(context.Background(), "judy", "pw-judy-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -272,11 +274,11 @@ func TestSetLastUsedTOTPStep(t *testing.T) {
 
 func TestSetPushMFAEnabled(t *testing.T) {
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("ivan", "pw-ivan-testpassword", RoleUser)
+	u, err := store.Create(context.Background(), "ivan", "pw-ivan-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -313,17 +315,17 @@ func TestValidatePasswordEnforcesMinLength(t *testing.T) {
 
 func TestCreateRejectsWeakPassword(t *testing.T) {
 	store := newTestStore(t)
-	if _, err := store.Create("weakuser", "short", RoleUser); !errors.Is(err, ErrPasswordWeak) {
+	if _, err := store.Create(context.Background(), "weakuser", "short", RoleUser); !errors.Is(err, ErrPasswordWeak) {
 		t.Fatalf("Create with weak password: err = %v, want ErrPasswordWeak", err)
 	}
 }
 
 func TestUsernamesAreCaseInsensitive(t *testing.T) {
 	store := newTestStore(t)
-	if _, err := store.Create("Casey", "casey-testpassword", RoleUser); err != nil {
+	if _, err := store.Create(context.Background(), "Casey", "casey-testpassword", RoleUser); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := store.Create("CASEY", "casey2-testpassword", RoleUser); !errors.Is(err, ErrUsernameTaken) {
+	if _, err := store.Create(context.Background(), "CASEY", "casey2-testpassword", RoleUser); !errors.Is(err, ErrUsernameTaken) {
 		t.Fatalf("Create differing only in case: err = %v, want ErrUsernameTaken", err)
 	}
 	for _, probe := range []string{"Casey", "casey", "CASEY", "  casey  "} {
@@ -340,7 +342,7 @@ func TestUsernamesAreCaseInsensitive(t *testing.T) {
 func TestListIsSortedByUsername(t *testing.T) {
 	store := newTestStore(t)
 	for _, name := range []string{"zoe", "Adam", "mike"} {
-		if _, err := store.Create(name, name+"-testpassword", RoleUser); err != nil {
+		if _, err := store.Create(context.Background(), name, name+"-testpassword", RoleUser); err != nil {
 			t.Fatalf("Create(%q): %v", name, err)
 		}
 	}
@@ -367,7 +369,7 @@ func TestListIsSortedByUsername(t *testing.T) {
 // writes: each reads the same starting file and the last one to write wins.
 func TestConcurrentStoresDoNotLoseUpdates(t *testing.T) {
 	dir := t.TempDir()
-	first, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	first, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
@@ -377,7 +379,7 @@ func TestConcurrentStoresDoNotLoseUpdates(t *testing.T) {
 	const n = 12
 	ids := make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		u, err := first.Create(fmt.Sprintf("user%02d", i), "concurrent-testpassword", RoleUser)
+		u, err := first.Create(context.Background(), fmt.Sprintf("user%02d", i), "concurrent-testpassword", RoleUser)
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}

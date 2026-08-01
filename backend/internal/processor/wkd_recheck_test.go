@@ -9,6 +9,19 @@ import (
 	"kypost-server/backend/internal/wkdpublish"
 )
 
+// verifiedDomains is Store.VerifiedDomains with its read error asserted away.
+// The subject of every test in this file is which claims the re-check leaves
+// verified, not whether the claims file reads — and that error exists so a
+// caller cannot mistake a stale cache for a fresh answer, which includes here.
+func verifiedDomains(t *testing.T, s *wkdpublish.Store) map[string]bool {
+	t.Helper()
+	vd, err := s.VerifiedDomains()
+	if err != nil {
+		t.Fatalf("VerifiedDomains: %v", err)
+	}
+	return vd
+}
+
 // newTestPollerForWKDRecheck builds a minimal *Poller sufficient to exercise
 // recheckWKDDomains: a logger, a stateDir, and a wkdStore rooted at that same
 // stateDir (recheckWKDDomains uses p.wkdStore directly rather than opening
@@ -61,7 +74,7 @@ func TestRecheckSuspendsWhenTXTValueWrong(t *testing.T) {
 
 	p.recheckWKDDomains()
 
-	if store.VerifiedDomains()["example.com"] {
+	if verifiedDomains(t, store)["example.com"] {
 		t.Fatal("claim should be suspended when the TXT value no longer matches")
 	}
 }
@@ -95,7 +108,7 @@ func TestRecheckSuspendsWhenTXTRecordDeleted(t *testing.T) {
 
 	p.recheckWKDDomains()
 
-	if store.VerifiedDomains()["example.com"] {
+	if verifiedDomains(t, store)["example.com"] {
 		t.Fatal("claim should be suspended after the TXT record was deleted (NXDOMAIN/NODATA)")
 	}
 }
@@ -127,7 +140,7 @@ func TestRecheckReVerifiesWhenTXTReappears(t *testing.T) {
 
 	p.recheckWKDDomains()
 
-	if !store.VerifiedDomains()["example.com"] {
+	if !verifiedDomains(t, store)["example.com"] {
 		t.Fatal("claim should be re-verified once TXT proof reappears")
 	}
 }
@@ -161,7 +174,7 @@ func TestRecheckSkipsRecentlyCheckedClaims(t *testing.T) {
 	if called {
 		t.Fatal("a claim checked moments ago must not be re-queried before recheckWKDInterval elapses")
 	}
-	if !store.VerifiedDomains()["example.com"] {
+	if !verifiedDomains(t, store)["example.com"] {
 		t.Fatal("claim should remain verified since it was skipped")
 	}
 }
@@ -199,7 +212,7 @@ func TestRecheckDoesNotSuspendOnLookupError(t *testing.T) {
 	if !called {
 		t.Fatal("test setup bug: lookup was never attempted")
 	}
-	if !store.VerifiedDomains()["example.com"] {
+	if !verifiedDomains(t, store)["example.com"] {
 		t.Fatal("a lookup error must never suspend a verified claim")
 	}
 }
@@ -249,7 +262,7 @@ func TestRunRechecksWKDDomainsOnStartup(t *testing.T) {
 	// end-to-end, not just performed some unrelated DNS lookup.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if !store.VerifiedDomains()["example.com"] {
+		if !verifiedDomains(t, store)["example.com"] {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

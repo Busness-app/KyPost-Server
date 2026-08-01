@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -259,7 +260,7 @@ func TestConfigRoundTripDoesNotCorruptChangeDetection(t *testing.T) {
 // The session that performs the change itself must stay logged in.
 func TestChangePasswordRevokesOtherSessions(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("heidi", "old-password-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "heidi", "old-password-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

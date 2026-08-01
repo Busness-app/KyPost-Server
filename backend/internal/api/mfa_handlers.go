@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -147,7 +149,16 @@ func (s *Server) handleMFAConfirm(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !verifyAccountCredential(u, req.Password, req.AuthSecret) {
+	confirmed, err := verifyAccountCredential(r.Context(), u, req.Password, req.AuthSecret)
+	if err != nil {
+		// Shed before the derivation ran: nothing was examined, so the strike
+		// tryAttempt just spent goes back. Charging it would let a load spike
+		// lock an account out of enrolling a second factor.
+		s.loginLockout.cancelAttempt(ac.Username)
+		writeKDFBusy(w)
+		return
+	}
+	if !confirmed {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid credentials"})
 		return
 	}
@@ -184,7 +195,11 @@ func (s *Server) handleMFAConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	codes, hashes, err := s.newRecoveryCodes()
+	codes, hashes, err := s.newRecoveryCodes(r.Context())
+	if errors.Is(err, users.ErrKDFBusy) {
+		writeKDFBusy(w)
+		return
+	}
 	if err != nil {
 		http.Error(w, "failed to generate recovery codes", http.StatusInternalServerError)
 		return
@@ -218,7 +233,11 @@ func (s *Server) handleMFARecoveryCodesRegenerate(w http.ResponseWriter, r *http
 		http.Error(w, "two-factor auth is not enabled", http.StatusBadRequest)
 		return
 	}
-	codes, hashes, err := s.newRecoveryCodes()
+	codes, hashes, err := s.newRecoveryCodes(r.Context())
+	if errors.Is(err, users.ErrKDFBusy) {
+		writeKDFBusy(w)
+		return
+	}
 	if err != nil {
 		http.Error(w, "failed to generate recovery codes", http.StatusInternalServerError)
 		return
@@ -271,7 +290,15 @@ func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return users.User{}, false
 	}
-	if !verifyAccountCredential(u, req.Password, req.AuthSecret) {
+	confirmed, err := verifyAccountCredential(r.Context(), u, req.Password, req.AuthSecret)
+	if err != nil {
+		// Never reached a credential check, so the strike goes back — same
+		// reasoning as the decode and load failures above.
+		s.loginLockout.cancelAttempt(ac.Username)
+		writeKDFBusy(w)
+		return users.User{}, false
+	}
+	if !confirmed {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid credentials"})
 		return users.User{}, false
 	}
@@ -281,14 +308,22 @@ func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) 
 
 // newRecoveryCodes generates fresh plaintext recovery codes plus their scrypt
 // hashes for storage. The plaintext is returned to the caller exactly once.
-func (s *Server) newRecoveryCodes() (plaintext []string, hashes []string, err error) {
+//
+// recoveryCodeCount derivations in ONE request — by far the most expensive
+// thing an authenticated session can ask this server to do, and for a long
+// time the loop ran entirely outside the concurrency ceiling that exists to
+// bound it. Each hash now takes and releases a slot individually (deliberately
+// NOT one slot across all ten: holding a slot for ten derivations' worth of
+// wall clock is how a handful of these stall every login), and a saturated
+// slot abandons the batch with users.ErrKDFBusy rather than queueing behind it.
+func (s *Server) newRecoveryCodes(ctx context.Context) (plaintext []string, hashes []string, err error) {
 	plaintext, err = mfa.GenerateRecoveryCodes(recoveryCodeCount)
 	if err != nil {
 		return nil, nil, err
 	}
 	hashes = make([]string, 0, len(plaintext))
 	for _, c := range plaintext {
-		h, err := users.HashPassword(c)
+		h, err := users.HashPassword(ctx, c)
 		if err != nil {
 			return nil, nil, err
 		}

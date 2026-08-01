@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -159,7 +160,7 @@ func TestSealedPickupPageContainsNoContent(t *testing.T) {
 // already read its mail), so it is refused rather than half-supported.
 func TestSealedPickupRefusesServerProtectedAccount(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("legacy-pickup", "legacy-pickup-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "legacy-pickup", "legacy-pickup-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

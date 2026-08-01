@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -67,7 +68,7 @@ func newTestServerDefaultCaptcha(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { _ = logger.Close() })
 
-	usersStore, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
+	usersStore, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		t.Fatalf("users.LoadOrMigrate: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestLoginRequiresProofOfWorkByDefault(t *testing.T) {
 		t.Fatal("captchaVerifier is nil on a default install: login would run unthrottled")
 	}
 
-	u, err := srv.users.Create("pow-subject", "correct-horse-battery-staple", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "pow-subject", "correct-horse-battery-staple", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -222,7 +223,7 @@ func TestLoginIPLockoutCatchesRotatingUsernames(t *testing.T) {
 // occasionally mistypes.
 func TestSuccessfulLoginClearsTheIPBudget(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("ip-budget-user", "correct-horse-battery-staple", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "ip-budget-user", "correct-horse-battery-staple", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

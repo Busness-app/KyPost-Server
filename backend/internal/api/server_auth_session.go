@@ -232,8 +232,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// whichever credential was offered: a converted client sends only AuthSecret,
 		// so equalizing on the empty Password would make the unknown-account path cheap
 		// again for exactly the callers that matter.
-		if _, err := s.chargeLoginKDF(r.Context(), &budget, func() bool {
-			equalizeLoginTiming(cmp.Or(req.AuthSecret, req.Password))
+		if _, err := s.chargeLoginKDF(r.Context(), &budget, func(ctx context.Context) bool {
+			// The error is discarded here because the enclosing chargeLoginKDF
+			// already holds the slot, so this derivation cannot be shed — see
+			// users.WithKDFSlot.
+			_ = equalizeLoginTiming(ctx, cmp.Or(req.AuthSecret, req.Password))
 			return false
 		}); err != nil {
 			// Shed before the equalization ran. The refund is not just
@@ -259,9 +262,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// the server try both — and since the derivation salt is public
 	// (login_params.go), "try both" would let anyone authenticate with a value they
 	// can compute from the salt alone.
-	verify := func() bool { return users.VerifyPassword(u, req.Password) }
+	//
+	// Both verifiers run inside chargeLoginKDF's slot, so their busy error is
+	// unreachable here and a false really is a wrong credential.
+	verify := func(ctx context.Context) bool {
+		ok, _ := users.VerifyPassword(ctx, u, req.Password)
+		return ok
+	}
 	if u.UsesDerivedAuth() {
-		verify = func() bool { return users.VerifyAuthSecret(u, req.AuthSecret) }
+		verify = func(ctx context.Context) bool {
+			ok, _ := users.VerifyAuthSecret(ctx, u, req.AuthSecret)
+			return ok
+		}
 	}
 	verified, err := s.chargeLoginKDF(r.Context(), &budget, verify)
 	if err != nil {
@@ -298,7 +310,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if u.UsesDerivedAuth() {
 			credential = req.AuthSecret
 		}
-		if err := s.users.RehashPassword(u.ID, credential); err != nil {
+		if err := s.users.RehashPassword(r.Context(), u.ID, credential); err != nil {
 			s.logger.Error("password hash upgrade failed", "user_id", u.ID, "error", err.Error())
 		}
 	}
@@ -318,7 +330,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if iterations < users.MinLoginIterations {
 			iterations = clientLoginIterations
 		}
-		if err := s.users.UpgradeToDerivedAuth(u.ID, req.Password, req.AuthSecret, salt, iterations); err != nil {
+		if err := s.users.UpgradeToDerivedAuth(r.Context(), u.ID, req.Password, req.AuthSecret, salt, iterations); err != nil {
 			// Non-fatal: the account keeps authenticating the legacy way and
 			// gets another chance next sign-in. Refusing a correct password
 			// because an optimization failed would be worse.
@@ -606,11 +618,12 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 	// matches, so a wrong code is up to ten scrypt derivations at 128 MiB each — and
 	// this endpoint takes no session, a challenge id is the whole credential. A
 	// single slot held across all ten would park a quarter of the instance's
-	// derivation capacity for ~2s per request. Guarding each comparison keeps peak
-	// memory per caller at one derivation and lets logins interleave.
+	// derivation capacity for ~2s per request. Per-comparison admission keeps peak
+	// memory per caller at one derivation and lets logins interleave — which is why
+	// the request context is passed straight through rather than wrapped in
+	// users.WithKDFSlot, and why it must stay that way.
 	var matched bool
-	_, matched, err = s.users.ConsumeRecoveryCode(u.ID, strings.TrimSpace(req.Code),
-		func(compare func()) error { return s.withKDFSlot(r.Context(), compare) })
+	_, matched, err = s.users.ConsumeRecoveryCode(r.Context(), u.ID, strings.TrimSpace(req.Code))
 	switch {
 	case errors.Is(err, errKDFBusy), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// Shed mid-check. No verdict was reached on this code, so refund the
@@ -756,20 +769,19 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// Verify the CURRENT credential in whichever form this account stores, for the
 	// same reason handleLogin does: the account decides, not the request.
 	//
-	// Under a KDF slot, and behind a lockout. This is three 128 MiB derivations per
-	// request (the check here, plus the hash and any rewrap below) on an endpoint
-	// any authenticated account can call in a loop, and the lockout stops the
-	// old-credential check being an unlimited oracle for a stolen session.
+	// Behind a lockout, and every derivation on this path is admitted by the
+	// shared slots. This is three 128 MiB derivations per request on an endpoint
+	// any authenticated account can call in a loop: the check here, plus the hash
+	// and any rewrap below. The comment used to say all three were "under a KDF
+	// slot" while only this one was — SetPassword and SetDerivedAuthAndRewrapPGP
+	// reached scrypt on their own, which is two thirds of the cost of the most
+	// expensive authenticated endpoint sitting outside the ceiling. They now take
+	// the request context and are admitted like everything else.
 	verifyCurrent := func() (bool, error) {
-		var ok bool
-		err := s.withKDFSlot(r.Context(), func() {
-			if u.UsesDerivedAuth() {
-				ok = users.VerifyAuthSecret(u, req.OldAuthSecret)
-				return
-			}
-			ok = users.VerifyPassword(u, req.OldPassword)
-		})
-		return ok, err
+		if u.UsesDerivedAuth() {
+			return users.VerifyAuthSecret(r.Context(), u, req.OldAuthSecret)
+		}
+		return users.VerifyPassword(r.Context(), u, req.OldPassword)
 	}
 	offeredCurrent := req.OldAuthSecret
 	if !u.UsesDerivedAuth() {
@@ -827,8 +839,12 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		}
 		// One mutation for the credential and the PGP envelope, or neither.
 		if _, err := s.users.SetDerivedAuthAndRewrapPGP(
-			u.ID, req.NewAuthSecret, req.NewLoginSalt, iterations, false, req.RewrappedPGPKey,
+			r.Context(), u.ID, req.NewAuthSecret, req.NewLoginSalt, iterations, false, req.RewrappedPGPKey,
 		); err != nil {
+			if errors.Is(err, users.ErrKDFBusy) {
+				writeKDFBusy(w)
+				return
+			}
 			if errors.Is(err, users.ErrAuthSecretMalformed) || errors.Is(err, users.ErrNotClientProtected) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -850,7 +866,11 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "rewrappedPgpKey requires newAuthSecret", http.StatusBadRequest)
 			return
 		}
-		if _, err := s.users.SetPassword(u.ID, req.NewPassword, false); err != nil {
+		if _, err := s.users.SetPassword(r.Context(), u.ID, req.NewPassword, false); err != nil {
+			if errors.Is(err, users.ErrKDFBusy) {
+				writeKDFBusy(w)
+				return
+			}
 			http.Error(w, "failed to update password", http.StatusInternalServerError)
 			return
 		}

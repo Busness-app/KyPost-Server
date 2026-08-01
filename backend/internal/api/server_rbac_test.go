@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +20,7 @@ func newTestUsers(t *testing.T, srv *Server) (admin users.User, regular users.Us
 		t.Fatalf("expected exactly one bootstrap user, got %+v err=%v", all, err)
 	}
 	admin = all[0]
-	regular, err = srv.users.Create("regular", "regular-password", users.RoleUser)
+	regular, err = srv.users.Create(context.Background(), "regular", "regular-password", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -137,7 +138,8 @@ func TestUserLifecycleEndpoints(t *testing.T) {
 		t.Fatalf("reset password: status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	got, _ := srv.users.Get(created.ID)
-	if !got.MustChangePassword || !users.VerifyPassword(got, "temp-password-1234") {
+	okPassword, _ := users.VerifyPassword(context.Background(), got, "temp-password-1234")
+	if !got.MustChangePassword || !okPassword {
 		t.Fatalf("unexpected state after reset: %+v", got)
 	}
 
@@ -196,7 +198,7 @@ func TestLastActiveAdminIsProtected(t *testing.T) {
 	}
 
 	// With a second active admin, deactivating the first is allowed.
-	second, err := srv.users.Create("second-admin", "password-two-testpassword", users.RoleAdmin)
+	second, err := srv.users.Create(context.Background(), "second-admin", "password-two-testpassword", users.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

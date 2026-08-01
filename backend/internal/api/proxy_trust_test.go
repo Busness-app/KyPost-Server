@@ -307,7 +307,7 @@ func TestStatusReportsResolvedClientIP(t *testing.T) {
 // users0 creates a throwaway non-admin account for the status call.
 func users0(t *testing.T, srv *Server) (users.User, error) {
 	t.Helper()
-	return srv.users.Create("status-probe", "correct-horse-battery-staple", users.RoleUser)
+	return srv.users.Create(context.Background(), "status-probe", "correct-horse-battery-staple", users.RoleUser)
 }
 
 // authedRequestForTest attaches an AuthContext, since handleStatus reads the

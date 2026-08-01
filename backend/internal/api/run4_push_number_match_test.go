@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -13,7 +14,7 @@ import (
 // on — the state in which a number-match challenge is issued.
 func pushMFAUser(t *testing.T, srv *Server, name, password, deviceName string) (userID, deviceID, deviceSecret string) {
 	t.Helper()
-	u, err := srv.users.Create(name, password, users.RoleUser)
+	u, err := srv.users.Create(context.Background(), name, password, users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create user: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestPushNumberMatchAtTheHTTPLayer(t *testing.T) {
 // nothing should imply otherwise.
 func TestLoginOmitsMatchDigitsForTOTPOnlyUser(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("sage", "pw-sage-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "sage", "pw-sage-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create user: %v", err)
 	}

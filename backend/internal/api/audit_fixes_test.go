@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -19,7 +20,7 @@ func TestDeviceAuthRejectedAfterDeactivation(t *testing.T) {
 	// last active admin (see users.guardNotLastActiveAdmin), and the seeded
 	// admin this test used to borrow is exactly that. The subject here is the
 	// device path honoring deactivation, not the admin-count invariant.
-	owner, err := srv.users.Create("deactivation-subject", "deactivation-subject-pass", users.RoleUser)
+	owner, err := srv.users.Create(context.Background(), "deactivation-subject", "deactivation-subject-pass", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -67,7 +68,7 @@ func TestForeignDeviceIDIsAConflict(t *testing.T) {
 	victimID := all[0].ID
 	victimDeviceID, _ := pairNativeDevice(t, srv, victimID, "victim-device")
 
-	attacker, err := srv.users.Create("attacker", "attacker-pass-123", users.RoleUser)
+	attacker, err := srv.users.Create(context.Background(), "attacker", "attacker-pass-123", users.RoleUser)
 	if err != nil {
 		t.Fatalf("create attacker: %v", err)
 	}
@@ -229,7 +230,7 @@ func TestSweepDeviceIndexDropsResidueButKeepsLiveAndInFlight(t *testing.T) {
 // flag must be enforced server-side, not merely surfaced to the client.
 func TestMustChangePasswordBlocksOtherEndpoints(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("mcp-user", "initial-pass-123", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "mcp-user", "initial-pass-123", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

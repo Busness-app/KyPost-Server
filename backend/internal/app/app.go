@@ -84,7 +84,7 @@ func Run(args []string) error {
 	}
 
 	configDir := config.ConfigDir()
-	usersStore, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
+	usersStore, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		return fmt.Errorf("load users store: %w", err)
 	}

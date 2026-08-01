@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,7 @@ func TestBootstrapAdminSeedsAUsableAccount(t *testing.T) {
 		t.Fatalf("no password in %s:\n%s", bootstrapPasswordFile, pwBody)
 	}
 
-	store, err := users.LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := users.LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
@@ -46,7 +47,7 @@ func TestBootstrapAdminSeedsAUsableAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByUsername(admin): %v", err)
 	}
-	if !users.VerifyPassword(u, password) {
+	if ok, _ := users.VerifyPassword(context.Background(), u, password); !ok {
 		t.Fatal("the generated password does not verify against the seeded hash")
 	}
 	if !u.MustChangePassword {

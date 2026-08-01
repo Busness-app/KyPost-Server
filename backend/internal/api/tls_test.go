@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -301,7 +302,7 @@ func TestTLSTerminationDrivesSecureCookieWithoutProxyTrust(t *testing.T) {
 	ts.StartTLS()
 	defer ts.Close()
 
-	u, err := srv.users.Create("tls-user", "correct-horse-battery-staple", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "tls-user", "correct-horse-battery-staple", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

@@ -1,6 +1,9 @@
 package users
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestDeviceSecretRoundTrips(t *testing.T) {
 	const secret = "9f8e7d6c5b4a39281706f5e4d3c2b1a0ffeeddccbbaa9988"
@@ -8,13 +11,13 @@ func TestDeviceSecretRoundTrips(t *testing.T) {
 	if stored == secret {
 		t.Fatal("HashDeviceSecret returned the secret unchanged")
 	}
-	if !VerifyDeviceSecret(stored, secret) {
+	if ok, _ := VerifyDeviceSecret(context.Background(), stored, secret); !ok {
 		t.Fatal("VerifyDeviceSecret rejected the secret it just hashed")
 	}
-	if VerifyDeviceSecret(stored, secret+"x") {
+	if ok, _ := VerifyDeviceSecret(context.Background(), stored, secret+"x"); ok {
 		t.Fatal("VerifyDeviceSecret accepted a wrong secret")
 	}
-	if VerifyDeviceSecret(stored, "") {
+	if ok, _ := VerifyDeviceSecret(context.Background(), stored, ""); ok {
 		t.Fatal("VerifyDeviceSecret accepted an empty secret")
 	}
 }
@@ -24,22 +27,22 @@ func TestVerifyDeviceSecretStillAcceptsLegacyScryptHashes(t *testing.T) {
 	// Rejecting those would silently unpair every phone on every existing
 	// install on upgrade.
 	const secret = "legacy-device-secret"
-	legacy, err := HashPassword(secret)
+	legacy, err := HashPassword(context.Background(), secret)
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
-	if !VerifyDeviceSecret(legacy, secret) {
+	if ok, _ := VerifyDeviceSecret(context.Background(), legacy, secret); !ok {
 		t.Fatal("VerifyDeviceSecret rejected a legacy scrypt hash; every already-paired device would be unpaired by the upgrade")
 	}
-	if VerifyDeviceSecret(legacy, "wrong") {
+	if ok, _ := VerifyDeviceSecret(context.Background(), legacy, "wrong"); ok {
 		t.Fatal("VerifyDeviceSecret accepted a wrong secret against a legacy hash")
 	}
 }
 
 func TestVerifyDeviceSecretRejectsMalformedTaggedHash(t *testing.T) {
 	for _, stored := range []string{"sha256:", "sha256:zzzz", "sha256:abcd"} {
-		if VerifyDeviceSecret(stored, "anything") {
-			t.Errorf("VerifyDeviceSecret(%q) accepted a malformed hash", stored)
+		if ok, _ := VerifyDeviceSecret(context.Background(), stored, "anything"); ok {
+			t.Errorf("VerifyDeviceSecret(context.Background(), %q) accepted a malformed hash", stored)
 		}
 	}
 }
@@ -57,18 +60,18 @@ func TestVerifyScryptHashRejectsAbsurdCostParameters(t *testing.T) {
 		"n not a power of two": "scrypt$16385$8$1$c2FsdHNhbHQ=$aGFzaGhhc2g=",
 	}
 	for name, encoded := range cases {
-		if verifyScryptHash(encoded, "anything") {
+		if ok, _ := verifyScryptHash(context.Background(), encoded, "anything"); ok {
 			t.Errorf("%s: verifyScryptHash accepted it", name)
 		}
 	}
 }
 
 func TestVerifyScryptHashStillAcceptsTheHashesWeMint(t *testing.T) {
-	h, err := HashPassword("correct horse battery staple")
+	h, err := HashPassword(context.Background(), "correct horse battery staple")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
-	if !verifyScryptHash(h, "correct horse battery staple") {
+	if ok, _ := verifyScryptHash(context.Background(), h, "correct horse battery staple"); !ok {
 		t.Fatal("the cost bounds rejected a hash HashPassword just produced")
 	}
 }

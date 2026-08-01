@@ -10,6 +10,7 @@
 package api
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -120,9 +121,15 @@ func (s *Server) syntheticLoginSalt(username string) string {
 // checked, never the request: the derivation salt is public, so letting a caller
 // choose "check this as a password" against a derived-auth account would let
 // them authenticate with a value computed from the salt alone.
-func verifyAccountCredential(u users.User, password, authSecret string) bool {
+//
+// The (bool, error) split is the caller's cue: an error means the credential
+// was NOT checked (the derivation slots were saturated, or the client hung up),
+// so the caller must answer 503 and must not spend a lockout strike. Folding it
+// into false would report overload as "wrong password" and, on the flows that
+// take a strike, lock the account out of its own remediation during a spike.
+func verifyAccountCredential(ctx context.Context, u users.User, password, authSecret string) (bool, error) {
 	if u.UsesDerivedAuth() {
-		return users.VerifyAuthSecret(u, authSecret)
+		return users.VerifyAuthSecret(ctx, u, authSecret)
 	}
-	return users.VerifyPassword(u, password)
+	return users.VerifyPassword(ctx, u, password)
 }

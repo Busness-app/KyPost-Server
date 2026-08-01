@@ -35,7 +35,7 @@ func changePassword(t *testing.T, srv *Server, u users.User, ip, oldPassword, ne
 // against an endpoint that answers definitively.
 func TestPasswordChangeLockoutBoundsCurrentCredentialGuessing(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("victim", "correct-horse-battery-staple", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "victim", "correct-horse-battery-staple", users.RoleUser)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestPasswordChangeLockoutBoundsCurrentCredentialGuessing(t *testing.T) {
 func TestPasswordChangeLockoutIsKeyedOnUserAndAddress(t *testing.T) {
 	srv := newTestServer(t)
 	const password = "correct-horse-battery-staple"
-	u, err := srv.users.Create("victim", password, users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "victim", password, users.RoleUser)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestPasswordChangeLockoutIsKeyedOnUserAndAddress(t *testing.T) {
 func TestPasswordChangeSuccessClearsTheStrikes(t *testing.T) {
 	srv := newTestServer(t)
 	const password = "correct-horse-battery-staple"
-	u, err := srv.users.Create("fumbler", password, users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "fumbler", password, users.RoleUser)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -132,13 +132,13 @@ func TestPasswordChangeSuccessClearsTheStrikes(t *testing.T) {
 // turns the endpoint into a password reset for anyone holding a cookie.
 func TestPasswordChangeFirstLoginSpendsNoStrike(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("newcomer", "temporary-issued-password", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "newcomer", "temporary-issued-password", users.RoleUser)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	// An admin-set temporary password, which is how a real account arrives at
 	// MustChangePassword.
-	u, err = srv.users.SetPassword(u.ID, "temporary-issued-password", true)
+	u, err = srv.users.SetPassword(context.Background(), u.ID, "temporary-issued-password", true)
 	if err != nil {
 		t.Fatalf("SetPassword: %v", err)
 	}

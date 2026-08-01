@@ -32,7 +32,15 @@ func (p *Poller) recheckWKDDomains() {
 		return
 	}
 	store := p.wkdStore
-	for _, c := range store.List() {
+	claims, err := store.List()
+	if err != nil {
+		// Nothing to re-check against: a claims file that will not read is a
+		// state problem an operator has to see, not a quiet no-op behind a
+		// stale in-memory copy.
+		p.log.Error("wkd recheck: read claims failed", "error", err.Error())
+		return
+	}
+	for _, c := range claims {
 		// Only re-check claims that are due; a claim checked more
 		// recently than recheckWKDInterval is left alone.
 		if c.LastCheckedAt != "" {

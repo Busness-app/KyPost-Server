@@ -66,7 +66,7 @@ func (s *Server) handleUsersCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	u, err := s.users.Create(req.Username, req.Password, role)
+	u, err := s.users.Create(r.Context(), req.Username, req.Password, role)
 	if err != nil {
 		if errors.Is(err, users.ErrUsernameTaken) {
 			http.Error(w, "username already in use", http.StatusConflict)
@@ -124,7 +124,7 @@ func (s *Server) handleUsersResetPassword(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	u, err := s.users.SetPassword(id, req.Password, true)
+	u, err := s.users.SetPassword(r.Context(), id, req.Password, true)
 	if err != nil {
 		writeUserStoreError(w, err)
 		return
@@ -241,6 +241,15 @@ func parseRole(raw string) (users.Role, error) {
 }
 
 func writeUserStoreError(w http.ResponseWriter, err error) {
+	// Create and SetPassword both derive scrypt, so both can be shed. 503, not
+	// "user store error": nothing was written and the caller should retry, which
+	// a 500 does not say. These are admin-only endpoints, but the derivation
+	// slots are shared with every login on the instance — an admin creating an
+	// account during a burst waits behind them, or is told to come back.
+	if errors.Is(err, users.ErrKDFBusy) {
+		writeKDFBusy(w)
+		return
+	}
 	if errors.Is(err, users.ErrNotFound) {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return

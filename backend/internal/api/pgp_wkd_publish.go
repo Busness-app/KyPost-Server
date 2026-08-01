@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"kypost-server/backend/internal/pgpdiscovery"
 	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
+
+	"github.com/ProtonMail/gopenpgp/v3/crypto"
 )
 
 // wkdClaimResponse is the POST /api/pgp/wkd/domains response: the created
@@ -49,7 +50,15 @@ func (s *Server) handleWKDDomains(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		claims := store.List()
+		// A failed re-read is reported, not papered over with a stale cache:
+		// an admin looking at this list is deciding whether their domains are
+		// published, and a list that silently predates a corrupt claims file
+		// answers that question wrongly.
+		claims, err := store.List()
+		if err != nil {
+			http.Error(w, "failed to read wkd claims", http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"domains": claims,
 		})
@@ -108,9 +117,14 @@ func (s *Server) handleWKDDomainVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	claims, err := store.List()
+	if err != nil {
+		http.Error(w, "failed to read wkd claims", http.StatusInternalServerError)
+		return
+	}
 	var claim wkdpublish.Claim
 	found := false
-	for _, c := range store.List() {
+	for _, c := range claims {
 		if c.Domain == domain {
 			claim = c
 			found = true
@@ -244,7 +258,16 @@ func hostDomain(host string) string {
 // WKD lookups for every other user on the same instance.
 func (s *Server) lookupPublishedKey(domain, hu string) ([]byte, bool) {
 	store, err := s.wkdPublishStore()
-	if err != nil || !store.VerifiedDomains()[domain] {
+	if err != nil {
+		return nil, false
+	}
+	// Fail closed on a refresh error, not back onto whatever this process last
+	// managed to read. This is the authorization step for a PUBLIC, unauthenticated
+	// endpoint: "may this instance serve keys for this domain at all". An
+	// unreadable claims file means the answer is currently unknown, and unknown
+	// has to serve nothing.
+	verified, err := store.VerifiedDomains()
+	if err != nil || !verified[domain] {
 		return nil, false
 	}
 	users, err := s.users.List()
