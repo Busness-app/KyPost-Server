@@ -257,9 +257,25 @@ test("ipBucket returns a bucket only for something that is actually an address",
   assert.equal(ipBucket("203.0.113.7"), "203.0.113.7");
   assert.equal(ipBucket("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::/64");
   assert.equal(ipBucket("2001:db8::1%eth0"), "2001:db8:0:0::/64");
+  assert.equal(ipBucket("::1"), "0:0:0:0::/64"); // what wrangler dev sends
+  assert.equal(ipBucket("1:2:3:4:5:6:7::"), "1:2:3:4::/64"); // "::" for exactly one group
   // Anything unusable must bucket to "", which is what makes handleRegister
-  // refuse rather than mint an unconstrained key.
-  for (const bad of ["", "   ", "unknown", "203.0.113.999", "not:an:address", "::ffff:garbage"]) {
+  // refuse rather than mint an unconstrained key. The IPv6 forms below are the
+  // ones that look plausible enough to be padded into a bucket: too few hextets
+  // with no "::" to justify them, too many, two compression markers, or a group
+  // that is not hex at all.
+  for (const bad of [
+    "",
+    "   ",
+    "unknown",
+    "203.0.113.999",
+    "not:an:address",
+    "2001:db8:1",
+    "2001:db8:1:2:3:4:5:6:7",
+    "1:2:3:4:5:6:7:8::",
+    "1::2::3",
+    "::ffff:garbage",
+  ]) {
     assert.equal(ipBucket(bad), "", `expected no bucket for ${JSON.stringify(bad)}`);
   }
 });

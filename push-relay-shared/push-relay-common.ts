@@ -169,16 +169,25 @@ export function ipBucket(ip: string): string {
   const [head, tail, extra] = addr.split("::");
   const headGroups = head ? head.split(":").filter((g) => g !== "") : [];
   const tailGroups = tail ? tail.split(":").filter((g) => g !== "") : [];
-  const missing = 8 - (headGroups.length + tailGroups.length);
-  const groups =
-    tail === undefined
-      ? headGroups
-      : [...headGroups, ...Array(Math.max(0, missing)).fill("0"), ...tailGroups];
-  // Every group is validated, not just the four that make the prefix: an address
-  // whose low half is junk is not an address, and checking only the prefix let
-  // "::ffff:garbage" through as a bucket shared with everything else that pads
-  // to zeros.
-  if (extra !== undefined || groups.length > 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/i.test(g))) {
+  const compressed = tail !== undefined;
+  const written = headGroups.length + tailGroups.length;
+  const groups = compressed
+    ? [...headGroups, ...Array(Math.max(0, 8 - written)).fill("0"), ...tailGroups]
+    : headGroups;
+  // Three checks, and all three have let something through on their own:
+  //
+  //   - one "::" at most ("1::2::3" is not an address);
+  //   - the right number of written hextets — exactly 8 uncompressed, at most 7
+  //     when "::" is present, since it stands for one or more omitted groups.
+  //     Without this, "2001:db8:1" zero-padded into a perfectly plausible
+  //     bucket despite being three hextets and no compression marker;
+  //   - every group is hex, not just the four that make the prefix. Checking
+  //     only the prefix let "::ffff:garbage" through as a bucket it then shared
+  //     with everything else that pads to zeros.
+  if (extra !== undefined || (compressed ? written > 7 : written !== 8)) {
+    return "";
+  }
+  if (!groups.every((g) => /^[0-9a-f]{1,4}$/i.test(g))) {
     return "";
   }
   return [0, 1, 2, 3].map((i) => (groups[i] ?? "0").toLowerCase()).join(":") + "::/64";
