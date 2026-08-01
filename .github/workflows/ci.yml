@@ -103,11 +103,11 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
       # Run all non-api backend tests in parallel. This includes processor,
-      # users, pgpmail, contacts, state, rules, mailmsg, adapters, relay, and
+      # users, pgpmail, contacts, state, rules, mailmsg, adapters, and
       # utility packages. These can safely run together and complete in ~4-5 minutes.
       # Maintain this package list if new packages are added to internal/.
       - name: go test -race (all packages except api)
-        run: go test -race -count=1 -timeout=20m ./internal/adapters/... ./internal/captcha/... ./internal/config/... ./internal/contacts/... ./internal/httplog/... ./internal/mailmsg/... ./internal/mfa/... ./internal/pgpdiscovery/... ./internal/pgpmail/... ./internal/processor/... ./internal/relay/... ./internal/rules/... ./internal/state/... ./internal/users/...
+        run: go test -race -count=1 -timeout=20m ./internal/adapters/... ./internal/app/... ./internal/captcha/... ./internal/config/... ./internal/contacts/... ./internal/cryptutil/... ./internal/fsutil/... ./internal/groups/... ./internal/health/... ./internal/logging/... ./internal/mailcache/... ./internal/mailmsg/... ./internal/mfa/... ./internal/netguard/... ./internal/ollamaupdate/... ./internal/pgpautocrypt/... ./internal/pgpdiscovery/... ./internal/pgpmail/... ./internal/processor/... ./internal/redaction/... ./internal/retry/... ./internal/rules/... ./internal/sendas/... ./internal/state/... ./internal/totp/... ./internal/users/... ./internal/wkdpublish/...
 
   frontend:
     name: ci-frontend
