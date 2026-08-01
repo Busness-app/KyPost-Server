@@ -7,6 +7,9 @@ name: kypost-server
 
 services:
   kypost-server:
+    # Release installs pull this image; `build` stays so a checkout can still
+    # be built locally for development or before the first published release.
+    image: ${KYPOST_IMAGE:-ghcr.io/yoshiofthewire/kypost-server}:${KYPOST_VERSION:-stable}
     build: .
     container_name: KyPost-Server
 

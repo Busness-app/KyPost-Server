@@ -38,7 +38,7 @@ import (
 
 // Server holds the HTTP surface and its process-wide state.
 //
-// LOCK ORDER: cfgMu before sessMu before userMu before ollamaMu. Never the
+// LOCK ORDER: cfgMu before sessMu before userMu before ollamaMu before serverMu. Never the
 // reverse. Enforced by TestLockOrderIsRespected, which reads this package's
 // source and fails on a function that takes one while holding a higher-ranked
 // one — directly, or through any call chain inside this package. Adding a mutex
@@ -152,6 +152,8 @@ type Server struct {
 	globalStore  *state.Store
 	ollamaMu     sync.Mutex
 	ollamaStatus ollamaVersionStatus
+	serverMu     sync.Mutex
+	serverStatus serverVersionStatus
 
 	// Per-user resources, lazily created and cached. userMu also guards the
 	// subscriberID -> userID index used by the unauthenticated native
@@ -416,6 +418,7 @@ func (s *Server) routesAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/users/{id}/clear-mfa", s.withAdmin(s.handleUsersClearMFA))
 	mux.HandleFunc("POST /api/classifier/test", s.withAdmin(s.handleClassifierTest))
 	mux.HandleFunc("GET /api/ollama/version", s.withAuth(s.handleOllamaVersion))
+	mux.HandleFunc("GET /api/server/version", s.withAdmin(s.handleServerVersion))
 	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("PUT /api/tuning", s.withAuth(s.handleTuning))
 	mux.HandleFunc("GET /api/labels/preferences", s.withAuth(s.handleLabelPreferences))
