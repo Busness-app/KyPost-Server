@@ -252,7 +252,8 @@ KyPost applies multiple defense layers to protect against common web attacks.
 CSP is configured per CAPTCHA provider to block script injection and limit the capabilities an attacker can use if HTML sanitization fails. Directives:
 
 - **script-src:** `'self'` plus provider-specific origins only (e.g., `challenges.cloudflare.com` for Turnstile, `cdn.jsdelivr.net` for Friendly Captcha). **Never `'unsafe-inline'` or `'unsafe-eval'`.**
-- **style-src:** `'self'`, `'unsafe-inline'` (for the Quill editor's inline styles), and Google Fonts.
+- **style-src:** `'self'` and `'unsafe-inline'` (for the Quill editor's inline styles). No third-party origin.
+- **font-src:** `'self'` and `data:`. The webfonts are served from this origin out of the app bundle, not from Google Fonts — an install with no CAPTCHA configured, or on the self-hosted `pow` provider, makes no cross-origin request at all.
 - **img-src/media-src:** Allows remote content (shown after user opt-in per message) and data URIs.
 - **object-src:** `'none'` (blocks Flash, PDF plugins, etc.).
 - **frame-ancestors:** `'none'` (prevents clickjacking).
