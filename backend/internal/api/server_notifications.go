@@ -96,7 +96,12 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 			http.Error(w, "failed to persist notification subscription", http.StatusInternalServerError)
 			return
 		}
-		count := len(store.ListNotificationSubscriptions())
+		subs, err := store.ListNotificationSubscriptionsStrict()
+		if err != nil {
+			http.Error(w, "failed to read notification subscriptions", http.StatusServiceUnavailable)
+			return
+		}
+		count := len(subs)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "subscriptions": count})
 	case http.MethodDelete:
 		var payload struct {
@@ -116,7 +121,12 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 			http.Error(w, "failed to remove notification subscription", http.StatusInternalServerError)
 			return
 		}
-		count := len(store.ListNotificationSubscriptions())
+		subs, err := store.ListNotificationSubscriptionsStrict()
+		if err != nil {
+			http.Error(w, "failed to read notification subscriptions", http.StatusServiceUnavailable)
+			return
+		}
+		count := len(subs)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "subscriptions": count})
 	}
 }
@@ -150,7 +160,11 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	subs := store.ListNotificationSubscriptions()
+	subs, err := store.ListNotificationSubscriptionsStrict()
+	if err != nil {
+		http.Error(w, "failed to read notification subscriptions", http.StatusServiceUnavailable)
+		return
+	}
 	sent := 0
 	failed := 0
 	removed := 0
@@ -173,7 +187,11 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		removed = outcome.Removed
 	}
 
-	nativeDevices := store.ListNativeDevices()
+	nativeDevices, err := store.ListNativeDevicesStrict()
+	if err != nil {
+		http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+		return
+	}
 	nativeSent := 0
 	nativeFailed := 0
 	nativeRemoved := 0
@@ -211,7 +229,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		"sent":                sent,
 		"failed":              failed,
 		"removedStale":        removed,
-		"activeSubscriptions": len(store.ListNotificationSubscriptions()),
+		"activeSubscriptions": len(subs),
 		"nativeDevices":       len(nativeDevices),
 		"nativeSent":          nativeSent,
 		"nativeFailed":        nativeFailed,
@@ -425,7 +443,11 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	// Resolve the canonical device ID by token: the upsert may have merged
 	// this registration into an existing row (same token + platform), whose
 	// ID wins over whatever the request carried.
-	devices := store.ListNativeDevices()
+	devices, err := store.ListNativeDevicesStrict()
+	if err != nil {
+		http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+		return
+	}
 	registeredDeviceID := device.DeviceID
 	for i := len(devices) - 1; i >= 0; i-- {
 		if strings.TrimSpace(devices[i].PushToken) == deviceToken && devices[i].Platform == device.Platform {
@@ -469,7 +491,11 @@ func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.
 	}
 	switch r.Method {
 	case http.MethodGet:
-		devices := store.ListNativeDevices()
+		devices, err := store.ListNativeDevicesStrict()
+		if err != nil {
+			http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+			return
+		}
 		redacted := make([]state.NativeDevice, len(devices))
 		for i, d := range devices {
 			redacted[i] = d.Redacted()
@@ -502,7 +528,12 @@ func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.
 			delete(s.deviceIndex, deviceID)
 			s.userMu.Unlock()
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
+		devices, err := store.ListNativeDevicesStrict()
+		if err != nil {
+			http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(devices)})
 	}
 }
 
@@ -543,7 +574,11 @@ func (s *Server) handleNotificationNativeUnpair(w http.ResponseWriter, r *http.R
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
 		return
 	}
-	devices := store.ListNativeDevices()
+	devices, err := store.ListNativeDevicesStrict()
+	if err != nil {
+		http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+		return
+	}
 	removed := 0
 	for _, device := range devices {
 		if strings.TrimSpace(device.DeviceID) == "" {
@@ -561,7 +596,12 @@ func (s *Server) handleNotificationNativeUnpair(w http.ResponseWriter, r *http.R
 			s.userMu.Unlock()
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(store.ListNativeDevices())})
+	devices, err = store.ListNativeDevicesStrict()
+	if err != nil {
+		http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "devices": len(devices)})
 }
 
 // handleNotificationNativeDeregister lets a paired device remove itself —
@@ -643,7 +683,11 @@ func (s *Server) handleNotificationNativePull(w http.ResponseWriter, r *http.Req
 			after = parsed
 		}
 	}
-	notifications, cursor := store.PullNotificationsAfter(after)
+	notifications, cursor, err := store.PullNotificationsAfterStrict(after)
+	if err != nil {
+		http.Error(w, "failed to read notifications", http.StatusServiceUnavailable)
+		return
+	}
 	if notifications == nil {
 		notifications = []state.PullNotification{}
 	}

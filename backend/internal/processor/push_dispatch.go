@@ -34,7 +34,10 @@ type WebPushOutcome struct {
 // be loaded — per-subscription dispatch failures are reflected in the
 // returned outcome, not as an error.
 func SendWebPush(store *state.Store, publicKey, privateKeyPath string, ttlSeconds int, payloadBytes []byte) (WebPushOutcome, error) {
-	subs := store.ListNotificationSubscriptions()
+	subs, err := store.ListNotificationSubscriptionsStrict()
+	if err != nil {
+		return WebPushOutcome{}, err
+	}
 	if len(subs) == 0 {
 		return WebPushOutcome{}, nil
 	}
@@ -209,7 +212,11 @@ func sendWithRetry(ctx context.Context, dispatcher *NativePushDispatcher, device
 // store. See SendNativePushToDevices for the delivery semantics; this is a
 // thin wrapper that targets every device in store.
 func SendNativePush(ctx context.Context, dispatcher *NativePushDispatcher, healthSvc *health.Service, store *state.Store, message NativePushMessage, onDeviceError func(device state.NativeDevice, platform string, err error)) (NativePushOutcome, error) {
-	return SendNativePushToDevices(ctx, dispatcher, healthSvc, store, store.ListNativeDevices(), message, onDeviceError)
+	devices, err := store.ListNativeDevicesStrict()
+	if err != nil {
+		return NativePushOutcome{}, err
+	}
+	return SendNativePushToDevices(ctx, dispatcher, healthSvc, store, devices, message, onDeviceError)
 }
 
 // SendNativePushToDevices dispatches message to exactly the devices given (a

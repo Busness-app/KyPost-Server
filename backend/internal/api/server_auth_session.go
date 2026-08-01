@@ -336,6 +336,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// may use. A push-enabled challenge additionally fans a notification out to
 	// the user's approver devices (asynchronously — see dispatchPushChallenge).
 	if u.TOTPEnabled || u.PushMFAEnabled {
+		if u.PushMFAEnabled {
+			store, err := s.userStore(u.ID)
+			if err != nil {
+				http.Error(w, "failed to open user state", http.StatusServiceUnavailable)
+				return
+			}
+			if _, err := mfaApproverDevices(store); err != nil {
+				http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+				return
+			}
+		}
 		ch, err := s.mfaChallenges.Create(u.ID)
 		if err != nil {
 			http.Error(w, "session creation failed", http.StatusInternalServerError)
@@ -850,7 +861,10 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// otherwise keep full mailbox access and — since every device registers
 	// MFAApprover=true — a standing second factor. The caller's own session is
 	// preserved.
-	s.revokeAllUserCredentialsExcept(u, currentSessionToken(r))
+	if err := s.revokeAllUserCredentialsExcept(u, currentSessionToken(r)); err != nil {
+		http.Error(w, "password changed but credential revocation failed; retry immediately", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

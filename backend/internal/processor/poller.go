@@ -1113,7 +1113,11 @@ func (p *Poller) maybeSendPushNotification(uc userCtx, msg imapadapter.Message, 
 		return
 	}
 
-	subs := uc.store.ListNotificationSubscriptions()
+	subs, err := uc.store.ListNotificationSubscriptionsStrict()
+	if err != nil {
+		p.log.Error("failed to list notification subscriptions", "user_id", uc.id, "error", err.Error())
+		return
+	}
 	if len(subs) == 0 {
 		p.log.Info(
 			"new-email push notification skipped",
@@ -1186,7 +1190,11 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 		return
 	}
 
-	devices := uc.store.ListNativeDevices()
+	devices, err := uc.store.ListNativeDevicesStrict()
+	if err != nil {
+		p.log.Error("failed to list native devices", "user_id", uc.id, "error", err.Error())
+		return
+	}
 	if len(devices) == 0 {
 		return
 	}

@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,7 +56,15 @@ func Latest(ctx context.Context, releasesURL string, minAge time.Duration) (stri
 		Prerelease  bool      `json:"prerelease"`
 		PublishedAt time.Time `json:"published_at"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	const maxReleaseResponseBytes = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxReleaseResponseBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) > maxReleaseResponseBytes {
+		return "", fmt.Errorf("github releases response exceeds %d bytes", maxReleaseResponseBytes)
+	}
+	if err := json.Unmarshal(body, &releases); err != nil {
 		return "", err
 	}
 

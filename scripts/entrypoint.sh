@@ -1,6 +1,26 @@
 #!/bin/sh
 set -eu
 
+# Docker applies KYPOST_BIND on the host side, so validate the published
+# address before starting the cleartext listener. A remote proxy must either
+# encrypt this hop or explicitly acknowledge the risk.
+#
+# Unset falls through to the refusal on purpose. This cannot see the real
+# publish address (that is `-p`, on the host), so it is an acknowledgement gate,
+# not a boundary — and an operator who runs the image outside compose and never
+# says how it is reached is exactly who the gate is for. Do not add an empty
+# arm here to make a bare `docker run` quieter; teach the caller to pass
+# KYPOST_BIND, the way .github/workflows/ci.yml does.
+case "${KYPOST_BIND:-}" in
+	127.*|::1|\[::1\]|localhost) ;;
+	*)
+		if [ -z "${TLS_CERT_FILE:-}" ] && [ -z "${TLS_KEY_FILE:-}" ] && [ "${ALLOW_INSECURE_HTTP:-}" != "true" ]; then
+			echo "refusing non-loopback cleartext HTTP; configure TLS_CERT_FILE/TLS_KEY_FILE or set ALLOW_INSECURE_HTTP=true" >&2
+			exit 1
+		fi
+		;;
+esac
+
 # All four data dirs, plus the model cache. The image creates these, but a
 # volume or bind mount can be mounted over any of them, and `set -e` means a
 # chown against a missing path below would abort the boot.

@@ -196,7 +196,12 @@ func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 			limit = v
 		}
 	}
-	writeJSON(w, http.StatusOK, store.Decisions(limit))
+	decisions, err := store.DecisionsStrict(limit)
+	if err != nil {
+		http.Error(w, "failed to read decisions", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, decisions)
 }
 
 func (s *Server) handleLabels(w http.ResponseWriter, r *http.Request) {

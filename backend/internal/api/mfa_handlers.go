@@ -38,7 +38,12 @@ func (s *Server) handleMFAStatus(w http.ResponseWriter, r *http.Request) {
 	// different, broader set on purpose.
 	deviceStatuses := []map[string]any{}
 	if store, err := s.userStore(ac.UserID); err == nil {
-		for _, d := range store.ListNativeDevices() {
+		devices, err := store.ListNativeDevicesStrict()
+		if err != nil {
+			http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+			return
+		}
+		for _, d := range devices {
 			// canApprove tells the UI whether this device's transport may carry
 			// a challenge at all, so it can explain the exclusion rather than
 			// offer a toggle that silently does nothing.
@@ -54,6 +59,9 @@ func (s *Server) handleMFAStatus(w http.ResponseWriter, r *http.Request) {
 			}
 			deviceStatuses = append(deviceStatuses, entry)
 		}
+	} else {
+		http.Error(w, "failed to open user state", http.StatusServiceUnavailable)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"totpEnabled":            u.TOTPEnabled,

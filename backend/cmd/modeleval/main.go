@@ -51,6 +51,19 @@ import (
 	"kypost-server/backend/internal/adapters/classifier"
 )
 
+const maxOllamaResponseBytes = 1 << 20
+
+func readOllamaResponse(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxOllamaResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxOllamaResponseBytes {
+		return nil, fmt.Errorf("ollama response exceeds %d bytes", maxOllamaResponseBytes)
+	}
+	return body, nil
+}
+
 // reasoningFamilies are model families that emit a separate reasoning channel.
 // Ollama 0.32.1 routes structured output into the "thinking" field for these
 // and leaves "response" EMPTY, which scores as a total failure while the model
@@ -503,7 +516,10 @@ func generate(ctx context.Context, client *http.Client, base, model, prompt stri
 	}
 	defer resp.Body.Close()
 
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := readOllamaResponse(resp.Body)
+	if err != nil {
+		return "", err
+	}
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
@@ -628,7 +644,10 @@ func pullModel(ctx context.Context, client *http.Client, base, model string) err
 		return err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := readOllamaResponse(resp.Body)
+	if err != nil {
+		return err
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
@@ -651,7 +670,8 @@ func unloadAll(ctx context.Context, client *http.Client, base string) {
 			Name string `json:"name"`
 		} `json:"models"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+	body, err := readOllamaResponse(resp.Body)
+	if err != nil || json.Unmarshal(body, &out) != nil {
 		return
 	}
 	for _, m := range out.Models {
@@ -690,7 +710,8 @@ func residentSize(ctx context.Context, client *http.Client, base, model string) 
 			Size int64  `json:"size"`
 		} `json:"models"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+	body, err := readOllamaResponse(resp.Body)
+	if err != nil || json.Unmarshal(body, &out) != nil {
 		return 0
 	}
 	for _, m := range out.Models {
