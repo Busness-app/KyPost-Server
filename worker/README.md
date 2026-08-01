@@ -182,9 +182,10 @@ The binding is **required**: `/send` and `/register` both return `503` without
 it, rather than silently falling back to the racy path. `/register` also returns
 `503` when the request carries no usable `CF-Connecting-IP`: with no address to
 bucket on there is no rate limit and no one-key-per-IP rule, and an
-unauthenticated endpoint that mints permanent keys does not run without them. Durable Objects are
-available on the Workers Free plan; the `[[migrations]]` block in
-`wrangler.toml.example` creates the class on first deploy.
+unauthenticated endpoint that mints permanent keys does not run without them.
+
+Durable Objects are available on the Workers Free plan; the `[[migrations]]`
+block in `wrangler.toml.example` creates the class on first deploy.
 
 ## Rate limiting
 

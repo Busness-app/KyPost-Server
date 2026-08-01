@@ -220,7 +220,7 @@ jobs:
 
       # No test framework and no install: node's own runner and type stripping.
       - name: claim-ownership interleavings
-        run: node --test push-relay-shared/relay-claims.test.ts
+        run: node --test push-relay-shared/relay-claims.test.mts
 
   docker:
     name: ci-docker

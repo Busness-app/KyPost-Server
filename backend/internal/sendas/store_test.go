@@ -245,8 +245,11 @@ func TestFindVerifiedByEmailCrossInstance(t *testing.T) {
 	}
 
 	// Before verification, s2 must not find it (record is still pending).
-	if _, ok, _ := s2.FindVerifiedByEmail("verified@example.com"); ok {
-		t.Error("FindVerifiedByEmail: must not match a pending record")
+	// The error is asserted at every call, not discarded: a read failure also
+	// reports ok=false, so ignoring it would let this whole test pass against a
+	// store that could not read anything at all.
+	if _, ok, err := s2.FindVerifiedByEmail("verified@example.com"); ok || err != nil {
+		t.Errorf("FindVerifiedByEmail: ok=%v err=%v, want no match and no error for a pending record", ok, err)
 	}
 
 	// s1 marks it verified and persists to disk.
@@ -257,7 +260,10 @@ func TestFindVerifiedByEmailCrossInstance(t *testing.T) {
 	// s2 must observe the change made by s1 on its next call, since
 	// FindVerifiedByEmail always refreshes from disk first — this is the
 	// property the mail-send authorization check depends on.
-	found, ok, _ := s2.FindVerifiedByEmail("VERIFIED@EXAMPLE.COM")
+	found, ok, err := s2.FindVerifiedByEmail("VERIFIED@EXAMPLE.COM")
+	if err != nil {
+		t.Fatalf("FindVerifiedByEmail: %v", err)
+	}
 	if !ok {
 		t.Fatal("FindVerifiedByEmail: expected to find record verified by a separate Store instance")
 	}
@@ -270,12 +276,12 @@ func TestFindVerifiedByEmailCrossInstance(t *testing.T) {
 	if _, err := s1.Create("user-1", "other@example.com", ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, ok, _ := s2.FindVerifiedByEmail("other@example.com"); ok {
-		t.Error("FindVerifiedByEmail: must not match a pending record")
+	if _, ok, err := s2.FindVerifiedByEmail("other@example.com"); ok || err != nil {
+		t.Errorf("FindVerifiedByEmail: ok=%v err=%v, want no match and no error for a pending record", ok, err)
 	}
 
-	if _, ok, _ := s2.FindVerifiedByEmail("nobody@example.com"); ok {
-		t.Error("FindVerifiedByEmail: must not match unknown email")
+	if _, ok, err := s2.FindVerifiedByEmail("nobody@example.com"); ok || err != nil {
+		t.Errorf("FindVerifiedByEmail: ok=%v err=%v, want no match and no error for an unknown email", ok, err)
 	}
 }
 

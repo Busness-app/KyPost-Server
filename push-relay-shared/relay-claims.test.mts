@@ -140,6 +140,19 @@ test("a claim under which nothing delivered is released once the last send settl
   assert.equal((await c.claimToken({ keyId: "key-b" })).owner, "key-b");
 });
 
+test("a claim written before this schema existed survives a failed send", async () => {
+  // What a coordinator instance looked like under the previous version: an
+  // owner, no confirmed flag, no in-flight count. That owner delivered — it was
+  // the only way to become one — so the first failed send after the deploy must
+  // not unpin it.
+  const c = coordinator();
+  await c.ctx.storage.put({ seeded: true, owner: "key-a" });
+
+  await c.claimToken({ keyId: "key-a" });
+  await c.settleToken("key-a", false);
+  assert.equal(owner(c), "key-a", "a deploy plus one failed send unpinned an existing claim");
+});
+
 test("a settle from a displaced key cannot disturb the current claim", async () => {
   const c = coordinator();
   await c.claimToken({ keyId: "key-a" });

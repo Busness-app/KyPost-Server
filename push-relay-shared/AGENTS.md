@@ -23,14 +23,14 @@ The Cloudflare Workers that deliver KyPost push notifications for every self-hos
 ## Work Guidance
 
 - Typechecking is the floor here, not the gate. Both ownership bugs found in review typechecked perfectly; what caught them was writing the interleaving down.
-- Anything touching claims, releases, key lifecycle, or rate limiting gets a case in `relay-claims.test.ts` expressed as an explicit ordering of concurrent operations.
+- Anything touching claims, releases, key lifecycle, or rate limiting gets a case in `relay-claims.test.mts` expressed as an explicit ordering of concurrent operations.
 - Prefer a coarse log reason (`token_claim_too_recent`) over an error string. These logs are operator-facing and must not carry credentials or upstream response bodies.
 
 ## Verification
 
 ```sh
 cd worker && npm ci && npm run typecheck       # and the same in worker-apns/
-node --test push-relay-shared/relay-claims.test.ts
+node --test push-relay-shared/relay-claims.test.mts
 ```
 
-Both run in CI as the `ci-relay` job. The test uses node's own runner and type stripping (Node >= 22.18) with no dependencies; it stubs `cloudflare:workers` through a module hook so the Durable Object can run outside workerd.
+Both run in CI as the `ci-relay` job. The test uses node's own runner and type stripping (Node >= 22.18) with no dependencies; it stubs `cloudflare:workers` through a module hook so the Durable Object can run outside workerd. The `.mts` extension is load-bearing: there is no `package.json` above this directory, so a `.ts` file would be ESM only by Node's syntax detection, and adding one later would silently turn the test into a parse error.

@@ -167,7 +167,13 @@ export class RelayCoordinator extends DurableObject {
       await this.ctx.storage.put({ [CONFIRMED_KEY]: true, [INFLIGHT_KEY]: inflight });
       return false;
     }
-    const confirmed = await this.ctx.storage.get<boolean>(CONFIRMED_KEY);
+    // Absent means this instance was written by the version of this class that
+    // had no confirmed flag, and its owner got there the only way that version
+    // allowed: by delivering. Defaulting to false would have let the first
+    // failed send after a deploy unpin every claim made before it — the exact
+    // spoofing gap this method exists to close. takeClaim always writes an
+    // explicit false, so absent can only mean "predates this code".
+    const confirmed = (await this.ctx.storage.get<boolean>(CONFIRMED_KEY)) ?? true;
     if (confirmed || inflight > 0) {
       await this.ctx.storage.put(INFLIGHT_KEY, inflight);
       return false;
