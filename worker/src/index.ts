@@ -11,9 +11,11 @@
  *   GET    /health          (public)                       -> liveness + config
  *   POST   /register        (public)                       -> self-issue a key
  *   POST   /send            (Bearer <per-server API key>)  -> deliver one push
- *   POST   /admin/keys      (Bearer ADMIN_SECRET)          -> mint an API key
- *   GET    /admin/keys      (Bearer ADMIN_SECRET)          -> list key metadata
- *   DELETE /admin/keys/{id} (Bearer ADMIN_SECRET)          -> revoke a key
+ *
+ * That is the whole surface. There is no admin API: listing and revoking keys
+ * is `wrangler kv key` against the API_KEYS namespace (see README), because an
+ * always-on bearer-secret endpoint on the public internet is a worse trade than
+ * a CLI command the maintainer runs a few times a year.
  *
  * Per-key controls:
  *   - Expiry:        keys may carry an expiresAt; expired keys are rejected.
@@ -25,9 +27,9 @@
  * X-Request-Id response header and in error bodies, plus one structured JSON
  * access log line (visible via `wrangler tail` / Workers Logs / Logpush).
  *
- * The API-key admin/registration endpoints, rate limiting, usage analytics,
- * and small crypto/HTTP helpers are shared with the APNs relay (worker-apns/)
- * — see ../../push-relay-shared/push-relay-common.ts.
+ * Self-registration, rate limiting, usage analytics, and small crypto/HTTP
+ * helpers are shared with the APNs relay (worker-apns/) — see
+ * ../../push-relay-shared/push-relay-common.ts.
  */
 
 import { FcmConfig, FcmMessage, sendFcmMessage } from "./fcm";

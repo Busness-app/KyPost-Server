@@ -24,8 +24,8 @@ RATE_LIMIT_PER_MINUTE = "10"  # display only; keep equal to PUSH_RATE_LIMITER.si
 # Public self-registration (POST /register). Set to "true" ONLY if you intend to
 # run an unauthenticated key-minting endpoint on the public internet: anyone who
 # can reach this Worker can then mint a key and spend your FCM quota. Left "false"
-# here so a copied-unchanged config is closed; mint keys via POST /admin/keys
-# instead, or flip this on deliberately. When open, self-hosted servers mint their
+# here so a copied-unchanged config is closed; there is no admin API to mint keys
+# with instead, so flip this on deliberately. When open, self-hosted servers mint their
 # own key with no maintainer involvement, and per-IP request rate is capped by the
 # REGISTER_RATE_LIMITER binding below (independent of PUSH_RATE_LIMITER, which
 # only governs /send).
@@ -60,19 +60,6 @@ type = "ratelimit"
 namespace_id = "1003"
 simple = { limit = 5, period = 60 }
 
-# Native per-IP minute-tier rate limiter for the /admin/keys endpoints. Bounds
-# how fast one address can guess ADMIN_SECRET, which is the credential that
-# mints and revokes every key this relay honours; constant-time comparison stops
-# the secret leaking a character at a time, it does not stop retrying. The
-# admin endpoints FAIL CLOSED (503) without this binding, like every other
-# control here — deploying new code against an older wrangler.toml takes admin
-# access down until this block is added, which is the intended direction to fail.
-[[unsafe.bindings]]
-name = "ADMIN_RATE_LIMITER"
-type = "ratelimit"
-namespace_id = "1005"
-simple = { limit = 20, period = 60 }
-
 # Analytics Engine dataset for per-key usage counters (off the KV write path).
 # Query lifetime totals per key via the Analytics Engine SQL API. Created on deploy.
 [[analytics_engine_datasets]]
@@ -83,9 +70,9 @@ dataset = "kypost_push_usage"
 #   FCM_CLIENT_EMAIL   - client_email from the Firebase service-account JSON
 #   FCM_PRIVATE_KEY    - private_key from the service-account JSON (PEM, keep the newlines)
 #   FCM_PROJECT_ID     - project_id from the service-account JSON
-#   ADMIN_SECRET       - random secret guarding the /admin/keys endpoints.
-#                        At least 32 characters, or the endpoints answer 401 to
-#                        everyone including you: `openssl rand -hex 32`.
+#
+# There is no ADMIN_SECRET: the relay has no admin API. Keys are listed and
+# revoked with `npx wrangler kv key` against API_KEYS — see the README.
 
 # Durable Object holding the two ownership rules KV cannot hold atomically:
 # device-token pinning (first key to deliver to a token owns it) and one active

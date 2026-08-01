@@ -1,7 +1,7 @@
 /**
  * Shared push-relay logic used by both Cloudflare Workers: the FCM relay
  * (worker/) and the APNs relay (worker-apns/). Everything below is identical
- * between them — API-key admin/registration endpoints, per-minute rate limiting,
+ * between them — self-registration, per-minute rate limiting,
  * usage analytics, and small crypto/HTTP helpers.
  *
  * Each worker keeps its own `Env` (extending CommonEnv with its
@@ -28,7 +28,6 @@ export interface AnalyticsEngineDatasetLike {
  */
 export interface CommonEnv {
   API_KEYS: KVNamespace;
-  ADMIN_SECRET: string;
   /**
    * Minute limit is ENFORCED by the PUSH_RATE_LIMITER binding (simple.limit in
    * wrangler.toml). This var is display-only (/health + 429 body) and must be kept
@@ -54,15 +53,6 @@ export interface CommonEnv {
    * minting many short-lived permanent keys from one address before rotating IPs.
    */
   REGISTER_RATE_LIMITER?: RateLimitBinding;
-  /**
-   * Per-IP minute-tier limiter for the /admin/keys endpoints (native binding,
-   * no KV writes). ADMIN_SECRET is compared in constant time, which stops the
-   * secret leaking a character at a time but does nothing about simply trying
-   * again: without this, the public Worker answered guesses as fast as an
-   * attacker could send them, forever. Checked BEFORE the comparison, so it caps
-   * guesses rather than merely reporting them.
-   */
-  ADMIN_RATE_LIMITER?: RateLimitBinding;
   /** Per-key usage counters, offloaded off the KV write path. */
   USAGE_ANALYTICS?: AnalyticsEngineDatasetLike;
   /**
@@ -81,7 +71,10 @@ export interface ApiKeyRecord {
   createdAt: string;
   /** ISO timestamp after which the key is rejected; null/absent = never expires. */
   expiresAt?: string | null;
-  /** How the key was issued: "admin" (via ADMIN_SECRET) or "self" (via /register). */
+  /**
+   * How the key was issued. Every key minted now is "self" (via /register);
+   * "admin" only appears on records left by the admin API that used to exist.
+   */
   source?: "admin" | "self";
   /** Client IP captured at self-registration, for auditing abuse. */
   registeredIp?: string | null;
@@ -101,26 +94,14 @@ export const DEFAULT_LIMIT_PER_MINUTE = 10;
 /**
  * Max stored label length. A label is an operator-facing name for one server,
  * not a payload; without a bound, public /register lets anyone persist
- * megabyte-sized strings into KV and into every /admin/keys listing.
+ * megabyte-sized strings into KV and into every operator's key listing.
  */
 export const MAX_LABEL_LENGTH = 64;
 
-/**
- * Minimum accepted length of ADMIN_SECRET. The /admin/keys endpoints mint and
- * revoke every key this relay honours, they are reachable by anyone on the
- * internet, and the only thing in front of them is this one string — so its
- * length is the entire work factor. `openssl rand -hex 32` (64 chars) is what
- * both READMEs tell you to use; this floor refuses the deployment that typed a
- * passphrase instead. Enforced at the auth check rather than at deploy time
- * because a Worker secret is set out-of-band by `wrangler secret put`, so there
- * is no deploy-time hook that can see it.
- */
-export const MIN_ADMIN_SECRET_LENGTH = 32;
-
 // ---- request body bounds ----------------------------------------------------
 //
-// Every endpoint here parses attacker-supplied JSON: /register and /admin/keys
-// take one short label, /send takes one notification. Without a ceiling read
+// Both endpoints that take a body parse attacker-supplied JSON: /register takes
+// one short label, /send takes one notification. Without a ceiling read
 // BEFORE the parse, `await request.json()` allocates whatever was sent — the
 // per-minute limiter caps how many requests a key may make, not how large each
 // one is, so one key at its quota could still make the relay materialize
@@ -131,7 +112,7 @@ export const MIN_ADMIN_SECRET_LENGTH = 32;
 
 /** Ceiling on a POST /send body. */
 export const MAX_SEND_BODY_BYTES = 16 * 1024;
-/** Ceiling on a POST /register or POST /admin/keys body (a label and an expiry). */
+/** Ceiling on a POST /register body (one label). */
 export const MAX_JSON_BODY_BYTES = 4 * 1024;
 
 /**
@@ -203,23 +184,6 @@ export function bearer(request: Request): string {
 }
 
 /**
- * Constant-time comparison for the admin secret. Always walks the longer of
- * the two strings' length rather than returning early on a length mismatch,
- * so response timing doesn't leak how many characters of the presented
- * value happened to match the configured secret's length.
- */
-export function timingSafeEqual(a: string, b: string): boolean {
-  const maxLen = Math.max(a.length, b.length);
-  let mismatch = a.length === b.length ? 0 : 1;
-  for (let i = 0; i < maxLen; i++) {
-    const ca = i < a.length ? a.charCodeAt(i) : 0;
-    const cb = i < b.length ? b.charCodeAt(i) : 0;
-    mismatch |= ca ^ cb;
-  }
-  return mismatch === 0;
-}
-
-/**
  * Buckets a client IP for anti-abuse keying: IPv4 unchanged, IPv6 collapsed to
  * its /64 prefix. A single IPv6 allocation is typically a /64 (2^64 addresses),
  * so keying on the full 128-bit address lets an attacker mint unlimited keys by
@@ -276,67 +240,6 @@ export function randomToken(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-export function requireAdmin(request: Request, env: CommonEnv): boolean {
-  const secret = (env.ADMIN_SECRET ?? "").trim();
-  if (secret.length < MIN_ADMIN_SECRET_LENGTH) {
-    // Covers unset, blank, and "short enough to guess" with one answer. See
-    // MIN_ADMIN_SECRET_LENGTH: a secret below the floor is treated as no secret,
-    // because a relay whose key-minting endpoint is guarded by a passphrase is
-    // not meaningfully guarded.
-    return false;
-  }
-  return timingSafeEqual(bearer(request), secret);
-}
-
-/**
- * Gate the /admin/keys endpoints: per-IP rate limit, THEN the secret comparison.
- *
- * Returns null when the caller is the admin, or the exact response to send back
- * when they are not. Every denial that is about the credential — no header, a
- * wrong secret, a secret below the length floor, a relay with no ADMIN_SECRET
- * set at all — is the same bare 401, so a guesser learns only "no", never "no,
- * but you are close" or "no, and this deployment is misconfigured".
- *
- * Fails CLOSED on a missing limiter binding and on a request with no usable
- * client address, for the same reason /send and /register do: "misconfigured"
- * and "absent" are indistinguishable from outside, and what is behind this door
- * is the ability to mint and revoke every key the relay honours. A missing or
- * throwing limiter comes back as the 429 (checkMinuteLimit answers "no" to
- * both), a missing client address as a 503. Both are distinguishable from the
- * 401 above, deliberately — they are statements about the relay, made before
- * any credential is looked at, so they tell an attacker nothing about the
- * secret.
- */
-export async function authorizeAdmin(request: Request, rc: RequestContext): Promise<Response | null> {
-  const { env } = rc;
-  const ip = ipBucket(request.headers.get("CF-Connecting-IP") ?? "");
-  if (!ip) {
-    rc.log({ level: "error", event: "admin.denied", reason: "no_client_ip" });
-    return fail(rc, 503, "admin endpoints are temporarily unavailable");
-  }
-  if (!(await checkMinuteLimit(env.ADMIN_RATE_LIMITER, rc, ip))) {
-    rc.log({ level: "warn", event: "admin.denied", reason: "rate_limited", ip });
-    const response = fail(rc, 429, "too many admin requests, try again later", {
-      window: "minute",
-      retryAfterSeconds: 60,
-    });
-    response.headers.set("Retry-After", "60");
-    return response;
-  }
-  if ((env.ADMIN_SECRET ?? "").trim().length < MIN_ADMIN_SECRET_LENGTH) {
-    // Logged separately from a wrong guess so the operator can tell "nobody has
-    // the secret" from "this deployment has no usable secret", which the
-    // response deliberately does not distinguish.
-    rc.log({ level: "error", event: "admin.denied", reason: "admin_secret_unusable" });
-    return fail(rc, 401, "unauthorized");
-  }
-  if (!requireAdmin(request, env)) {
-    rc.log({ level: "warn", event: "admin.denied", reason: "invalid_secret", ip });
-    return fail(rc, 401, "unauthorized");
-  }
-  return null;
 }
 
 export function isExpired(record: ApiKeyRecord, now: number): boolean {
@@ -598,7 +501,7 @@ export function recordUsageAnalytics(env: CommonEnv, record: ApiKeyRecord): void
   try {
     wae.writeDataPoint({
       indexes: [record.id],
-      blobs: [record.id, record.label, record.source ?? "admin"],
+      blobs: [record.id, record.label, record.source ?? "self"],
       doubles: [1],
     });
   } catch {
@@ -606,71 +509,47 @@ export function recordUsageAnalytics(env: CommonEnv, record: ApiKeyRecord): void
   }
 }
 
-// ---- /admin/keys -----------------------------------------------------------
-
-export type ExpiryResult = { ok: true; expiresAt: string | null } | { ok: false; error: string };
-
-/**
- * Resolve an optional expiry from the admin create body. An explicit ISO
- * `expiresAt` wins; otherwise `ttlDays` (a positive number) is added to now.
- * `expiresAt: null` means the key never expires.
- */
-export function resolveExpiry(body: { expiresAt?: unknown; ttlDays?: unknown }): ExpiryResult {
-  if (typeof body.expiresAt === "string" && body.expiresAt.trim()) {
-    const at = Date.parse(body.expiresAt.trim());
-    if (!Number.isFinite(at)) {
-      return { ok: false, error: "invalid expiresAt (expected an ISO 8601 timestamp)" };
-    }
-    return { ok: true, expiresAt: new Date(at).toISOString() };
-  }
-  if (body.ttlDays !== undefined && body.ttlDays !== null) {
-    const days = Number(body.ttlDays);
-    if (!Number.isFinite(days) || days <= 0) {
-      return { ok: false, error: "invalid ttlDays (expected a positive number)" };
-    }
-    return { ok: true, expiresAt: new Date(Date.now() + days * 86_400_000).toISOString() };
-  }
-  return { ok: true, expiresAt: null };
-}
+// ---- key minting ------------------------------------------------------------
 
 /**
  * Mint an API key, persist only its hash, and return the record plus the raw
- * key (which the caller returns to the client exactly once). Shared by the
- * admin endpoint and public self-registration.
+ * key (which the caller returns to the client exactly once).
+ *
+ * `/register` is the only caller: there is no admin API. Keys are therefore
+ * always self-issued and never expire, so neither is a parameter. `expiresAt`
+ * stays on the record (and `isExpired` stays on the read path) because keys
+ * minted by the admin endpoint that used to exist may still carry one.
  */
 export async function mintKey(
   env: CommonEnv,
   rc: RequestContext,
   opts: {
     label: string;
-    expiresAt: string | null;
-    source: "admin" | "self";
     registeredIp?: string | null;
     /**
      * Pre-generated key id. handleRegister needs the id BEFORE the record
      * exists, so it can reserve the IP first and persist nothing until that
-     * reservation succeeds. Defaults to a fresh uuid for every other caller.
+     * reservation succeeds.
      */
-    id?: string;
+    id: string;
   },
 ): Promise<{ record: ApiKeyRecord; key: string }> {
   const key = randomToken();
-  const id = opts.id ?? crypto.randomUUID();
   const record: ApiKeyRecord = {
-    id,
-    // Clamped here rather than at each call site so no minting path can store an
+    id: opts.id,
+    // Clamped here rather than at the call site so no minting path can store an
     // unbounded label (see MAX_LABEL_LENGTH).
     label: opts.label.slice(0, MAX_LABEL_LENGTH),
     enabled: true,
     createdAt: new Date().toISOString(),
-    expiresAt: opts.expiresAt,
-    source: opts.source,
+    expiresAt: null,
+    source: "self",
     registeredIp: opts.registeredIp ?? null,
   };
   const hash = await sha256Hex(key);
   await env.API_KEYS.put(KEY_PREFIX + hash, JSON.stringify(record));
-  await env.API_KEYS.put(KEY_INDEX_PREFIX + id, hash);
-  rc.log({ level: "info", event: "key.created", keyId: id, label: opts.label, source: opts.source, expiresAt: opts.expiresAt });
+  await env.API_KEYS.put(KEY_INDEX_PREFIX + opts.id, hash);
+  rc.log({ level: "info", event: "key.created", keyId: opts.id, label: record.label, source: "self" });
   return { record, key };
 }
 
@@ -847,25 +726,6 @@ export async function readSendPayload(request: Request): Promise<BodyResult<Send
   };
 }
 
-export async function handleAdminCreate(request: Request, rc: RequestContext): Promise<Response> {
-  const { env } = rc;
-  const parsed = await jsonObjectBody<{ label?: string; ttlDays?: unknown; expiresAt?: unknown }>(request);
-  if (!parsed.ok) {
-    return fail(rc, parsed.status, parsed.error);
-  }
-  const body = parsed.value;
-  const label = (typeof body.label === "string" ? body.label : "").trim() || "unnamed";
-
-  const expiry = resolveExpiry(body);
-  if (!expiry.ok) {
-    return fail(rc, 400, expiry.error);
-  }
-
-  const { record, key } = await mintKey(env, rc, { label, expiresAt: expiry.expiresAt, source: "admin" });
-  // The raw key is returned exactly once; only its hash is stored.
-  return json({ id: record.id, label: record.label, key, expiresAt: record.expiresAt }, 201);
-}
-
 // ---- /register (public self-service) ---------------------------------------
 
 /**
@@ -947,7 +807,7 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   // throwing coordinator (or a KV error) left an enabled key record behind that
   // the 500 response never handed to anyone — unusable, since the raw key only
   // ever travels in the response body, but still an orphan in KV and in every
-  // /admin/keys listing, mintable on repeat.
+  // KV listing, mintable on repeat.
   //
   // Reordering beats minting-then-rolling-back: a compensating revoke is another
   // write on the path that just failed, so it is exactly the write least likely
@@ -964,8 +824,8 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   const legacyKeyId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
   const priorId = await ipStub.claimRegistrationIp(keyId, legacyKeyId);
 
-  // Self-registered keys don't expire by default — they back long-lived servers.
-  const { record, key } = await mintKey(env, rc, { label, expiresAt: null, source: "self", registeredIp, id: keyId });
+  // Self-registered keys don't expire — they back long-lived servers.
+  const { record, key } = await mintKey(env, rc, { label, registeredIp, id: keyId });
 
   // The KV index is no longer the authority — it only seeds a coordinator
   // instance that has never been touched, and gives revokeKeyById something to
@@ -977,38 +837,6 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
     rc.log({ level: "info", event: "key.superseded", keyId: priorId, ip: registeredIp });
   }
   return json({ id: record.id, label: record.label, key, expiresAt: record.expiresAt }, 201);
-}
-
-export async function handleAdminList(rc: RequestContext): Promise<Response> {
-  const { env } = rc;
-  const now = Date.now();
-  const keys = [];
-  // KV list() returns one page (1,000 keys); follow the cursor to completion.
-  // Stopping at the first page silently hid active credentials from the operator
-  // doing the revoking, which is the one listing that has to be complete.
-  let cursor: string | undefined;
-  do {
-    const listed = await env.API_KEYS.list({ prefix: KEY_PREFIX, cursor });
-    cursor = listed.list_complete ? undefined : listed.cursor;
-    for (const entry of listed.keys) {
-      const record = await env.API_KEYS.get<ApiKeyRecord>(entry.name, "json");
-      if (!record) {
-        continue;
-      }
-      keys.push({
-        id: record.id,
-        label: record.label,
-        enabled: record.enabled,
-        createdAt: record.createdAt,
-        expiresAt: record.expiresAt ?? null,
-        expired: isExpired(record, now),
-        source: record.source ?? "admin",
-        registeredIp: record.registeredIp ?? null,
-        // Usage (send counts + last-seen) lives in Analytics Engine, not KV.
-      });
-    }
-  } while (cursor);
-  return json({ keys });
 }
 
 /**
@@ -1034,18 +862,9 @@ export async function revokeKeyById(env: CommonEnv, id: string): Promise<boolean
   return true;
 }
 
-export async function handleAdminRevoke(id: string, rc: RequestContext): Promise<Response> {
-  const revoked = await revokeKeyById(rc.env, id);
-  if (!revoked) {
-    return fail(rc, 404, "key not found");
-  }
-  rc.log({ level: "info", event: "key.revoked", keyId: id });
-  return json({ ok: true });
-}
-
 // ---- router / fetch wrapper -------------------------------------------------
 //
-// The two workers' routing (health/send/register/admin-keys dispatch) and their
+// The two workers' routing (health/send/register dispatch) and their
 // `export default { fetch(...) }` wrapper (request-id minting, structured access
 // logging, unhandled-error catch) are identical; only `/health`'s `configured`
 // flag and `/send`'s delivery logic are provider-specific.
@@ -1084,29 +903,14 @@ async function routeRelay<TEnv extends CommonEnv>(
     return handleRegister(request, rc);
   }
 
-  if (path === "/admin/keys") {
-    const denied = await authorizeAdmin(request, rc);
-    if (denied) {
-      return denied;
-    }
-    if (request.method === "POST") {
-      return handleAdminCreate(request, rc);
-    }
-    if (request.method === "GET") {
-      return handleAdminList(rc);
-    }
-    return fail(rc, 405, "method not allowed");
-  }
-
-  const revokeMatch = /^\/admin\/keys\/([^/]+)$/.exec(path);
-  if (revokeMatch && request.method === "DELETE") {
-    const denied = await authorizeAdmin(request, rc);
-    if (denied) {
-      return denied;
-    }
-    return handleAdminRevoke(decodeURIComponent(revokeMatch[1]), rc);
-  }
-
+  // No admin surface, deliberately. There used to be `/admin/keys` (mint, list,
+  // revoke) behind a bearer ADMIN_SECRET, and nothing called it: the Go server
+  // uses /register and /send, the mobile apps never touch the relay, and the
+  // endpoints existed only for the maintainer to curl. That made the highest
+  // value credential in the deployment — one that mints and revokes every key
+  // the relay honours — permanently guessable by anyone who found the hostname,
+  // to save a `wrangler kv key delete`. Deleting the door beat guarding it. Key
+  // management is now the CLI; see the READMEs.
   return fail(rc, 404, "not found");
 }
 

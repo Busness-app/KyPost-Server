@@ -38,12 +38,9 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(service acc
    npx wrangler secret put FCM_CLIENT_EMAIL   # "client_email"
    npx wrangler secret put FCM_PRIVATE_KEY    # "private_key" (full PEM, keep newlines)
    npx wrangler secret put FCM_PROJECT_ID     # "project_id"
-   npx wrangler secret put ADMIN_SECRET       # `openssl rand -hex 32` — see below
    ```
-   `ADMIN_SECRET` must be **at least 32 characters**. It is the only thing in
-   front of the endpoints that mint and revoke every key this relay honours, so
-   a shorter one is rejected outright: `/admin/keys` answers `401` to everybody,
-   including you, and logs `admin_secret_unusable`.
+   There is no `ADMIN_SECRET`: the relay has no admin API. See
+   [Managing keys](#managing-keys).
 4. Deploy:
    ```sh
    npx wrangler deploy
@@ -53,8 +50,9 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(service acc
 
 **Off by default.** `/register` is an unauthenticated key-minting endpoint, so it
 stays closed until you set `REGISTRATION_ENABLED = "true"` in `wrangler.toml` and
-redeploy. The shipped `wrangler.toml.example` leaves it `"false"`; until you flip
-it, issue keys with [`POST /admin/keys`](#issuing-a-key-manually-optional).
+redeploy. The shipped `wrangler.toml.example` leaves it `"false"`. There is no
+admin endpoint to mint keys with instead — with registration closed, the relay
+issues no keys at all, which is the point of the default.
 
 Once open, self-hosted servers get a key on their own — you don't issue anything. The Go
 backend does this automatically: on first start with `PUSH_RELAY_URL` set and no
@@ -74,55 +72,47 @@ re-registers and keeps working, and a single IP can't accumulate keys. Servers
 behind the same public IP therefore share one key slot (the latest wins).
 
 Self-registered keys never expire and are tagged `"source":"self"` (with the
-registering IP) in the admin list, so you can audit and revoke abusers. Abuse is
-further bounded by the per-key rolling rate limits and the `REGISTRATION_ENABLED
-= "false"` kill-switch. To cap how often one IP can churn keys, add a Cloudflare
-rate-limit rule on the `/register` route.
+registering IP bucket) in the stored record, so you can audit and revoke abusers
+— see [Managing keys](#managing-keys). Abuse is further bounded by the per-IP
+`REGISTER_RATE_LIMITER`, the per-key send limit, and the `REGISTRATION_ENABLED =
+"false"` kill-switch.
 
-## Issuing a key manually (optional)
+## Managing keys
 
-You can still mint keys yourself — e.g. to pre-provision a server or set an
-expiry:
+There is no admin API, and no admin credential. The relay used to serve
+`/admin/keys` (mint, list, revoke) behind a bearer secret, and nothing called it
+— the Go server uses `/register` and `/send`, the apps never touch the relay,
+and the endpoints existed so the maintainer could curl them. That made the
+highest-value credential in the deployment permanently guessable by anyone who
+found the hostname, to save the CLI commands below. The routes are gone.
 
-```sh
-curl -X POST https://<your-worker>.workers.dev/admin/keys \
-  -H "Authorization: Bearer $ADMIN_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"label":"alice-server"}'
-# -> {"id":"...","label":"alice-server","key":"<RAW KEY, shown only once>","expiresAt":null}
-```
-
-Optionally give the key an expiry — either a lifetime in days or an explicit
-ISO timestamp (an explicit `expiresAt` wins over `ttlDays`):
+Everything lives in the `API_KEYS` KV namespace under three prefixes: `key:<sha256
+of the raw key>` holds the record, `keyid:<id>` maps an id to that hash, and
+`ipkey:<bucket>` remembers which key an IP bucket currently holds.
 
 ```sh
--d '{"label":"alice-server","ttlDays":90}'
--d '{"label":"alice-server","expiresAt":"2027-01-01T00:00:00Z"}'
+NS=<your API_KEYS namespace id>       # from wrangler.toml
+
+# who has a key
+npx wrangler kv key list --namespace-id $NS --prefix "key:"
+npx wrangler kv key get  --namespace-id $NS "key:<hash>"
+# -> {"id":"…","label":"alice-server","enabled":true,"createdAt":"…",
+#     "expiresAt":null,"source":"self","registeredIp":"203.0.113.7"}
+
+# revoke one, by the id in that record
+HASH=$(npx wrangler kv key get --namespace-id $NS "keyid:<id>")
+npx wrangler kv key delete --namespace-id $NS "key:$HASH"
+npx wrangler kv key delete --namespace-id $NS "keyid:<id>"
+npx wrangler kv key delete --namespace-id $NS "ipkey:<registeredIp>"   # if it still names this id
 ```
 
-Give the self-hoster the raw `key` (out of band). They set on their server:
+Deleting the record is what revokes the key: `/send` looks the presented key up
+by hash on every request. It also releases that key's device-token claims for
+re-claiming, because a claim is only protected while its owner's key is still
+active — so the self-hoster can re-register and their devices come back.
 
-```
-PUSH_RELAY_URL=https://<your-worker>.workers.dev
-PUSH_RELAY_KEY=<the raw key>
-```
-
-List keys: `curl -H "Authorization: Bearer $ADMIN_SECRET" .../admin/keys`
-Revoke:    `curl -X DELETE -H "Authorization: Bearer $ADMIN_SECRET" .../admin/keys/<id>`
-
-`GET /admin/keys` returns per-key metadata and source:
-
-```json
-{ "keys": [ {
-  "id": "…", "label": "alice-server", "enabled": true,
-  "createdAt": "2026-07-04T…", "expiresAt": null, "expired": false,
-  "source": "self", "registeredIp": "203.0.113.7"
-} ] }
-```
-
-Send counts and last-seen are **not** here — they're recorded in Analytics Engine
-(see [Usage](#usage)). Expired keys stay listed (with `"expired": true`) until you
-revoke them, so you can see which keys lapsed.
+Send counts and last-seen are not in KV at all; they are in Analytics Engine
+(see [Usage](#usage)).
 
 ## Endpoints
 
@@ -131,9 +121,9 @@ revoke them, so you can see which keys lapsed.
 | GET    | `/health`         | none                   | Liveness + whether configured    |
 | POST   | `/register`       | none                   | Self-issue a per-server key      |
 | POST   | `/send`           | Bearer per-server key  | Deliver one push                 |
-| POST   | `/admin/keys`     | Bearer `ADMIN_SECRET`  | Mint a key (returns raw key once)|
-| GET    | `/admin/keys`     | Bearer `ADMIN_SECRET`  | List key metadata + last-used    |
-| DELETE | `/admin/keys/{id}`| Bearer `ADMIN_SECRET`  | Revoke a key                     |
+
+Three routes, and that is the entire surface — anything else is `404`, including
+the `/admin/keys` endpoints that used to be here.
 
 `POST /send` body:
 
@@ -230,18 +220,12 @@ with `{"error":"rate limit exceeded","window":"minute","limit":10,"retryAfterSec
 > pressure) once running on Workers Paid — see the `TODO(paid-tier)` in
 > `src/index.ts`.
 
-`POST /register` has its own per-IP limiter (`REGISTER_RATE_LIMITER`), and the
-`/admin/keys` endpoints have a third (`ADMIN_RATE_LIMITER`, `limit = 20`,
-per IP bucket). The admin one is checked **before** `ADMIN_SECRET` is compared,
-so it caps how fast an address can guess the secret rather than just recording
-that it did; constant-time comparison prevents leaking the secret a character at
-a time, it does nothing about simply trying again. Over the budget is `429` with
-a `Retry-After`, whether the presented secret was right or not.
+`POST /register` has its own per-IP limiter (`REGISTER_RATE_LIMITER`), bucketed
+on the IPv6 /64 so one allocation can't rotate addresses past it.
 
-All three fail **closed**: a missing binding refuses the request. If you deploy
-this Worker against a `wrangler.toml` copied before `ADMIN_RATE_LIMITER`
-existed, `/admin/keys` answers `429` until you add the block from
-`wrangler.toml.example` — add it and redeploy.
+Both fail **closed**: a missing binding refuses the request rather than waving it
+through, because "misconfigured" and "absent" are indistinguishable from outside
+and the failure mode of guessing is an open relay.
 
 ## Usage
 
@@ -255,8 +239,8 @@ SELECT blob1 AS key_id, sum(_sample_interval * double1) AS sends, max(timestamp)
 FROM kypost_push_usage GROUP BY key_id ORDER BY sends DESC
 ```
 
-The admin list no longer carries usage counts or `lastUsedAt` — that all lives in
-Analytics Engine now.
+Usage counts and `lastUsedAt` are not in KV, so the key records you read with
+`wrangler kv key get` don't carry them — this is the only place they live.
 
 ## Observability
 

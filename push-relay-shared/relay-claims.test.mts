@@ -34,15 +34,14 @@ registerHooks({
 const { RelayCoordinator } = await import("./relay-coordinator.ts");
 const {
   claimTokenForSend,
+  createRelayFetchHandler,
   settleToken,
   ipBucket,
-  authorizeAdmin,
   readSendPayload,
   MAX_SEND_BODY_BYTES,
   MAX_TOKEN_LENGTH,
   MAX_TITLE_LENGTH,
   MAX_DATA_ENTRIES,
-  MIN_ADMIN_SECRET_LENGTH,
   KEY_INDEX_PREFIX,
   KEY_PREFIX,
   BOUND_TOKEN_PREFIX,
@@ -394,85 +393,30 @@ test("clamping a text field never splits a surrogate pair", async () => {
   assert.equal(/[\ud800-\udbff]$/.test(accepted.value.title), false, "clamped mid-pair");
 });
 
-// ---- admin authentication ---------------------------------------------------
+// ---- no admin surface -------------------------------------------------------
 
-const ADMIN_SECRET = "s".repeat(MIN_ADMIN_SECRET_LENGTH);
+// The relay used to serve /admin/keys behind a bearer ADMIN_SECRET so the
+// maintainer could curl it. Nothing else ever called it, which made an
+// always-guessable credential that mints and revokes every key the relay
+// honours the price of saving a `wrangler kv key delete`. The routes are gone;
+// this is here so re-adding one is a deliberate act with a failing test in
+// front of it, not a quiet convenience.
+test("the admin routes are gone, for every method and with any credential", async () => {
+  const handler = createRelayFetchHandler({ configured: () => true, handleSend: async () => new Response("sent") });
+  const env = { API_KEYS: {}, ADMIN_SECRET: "s".repeat(64) };
+  const ctx = { waitUntil() {} };
 
-/** `ip: null` means the header is absent entirely, which is its own denial. */
-function adminRequest(secret, ip = "203.0.113.7") {
-  return new Request("https://relay.example/admin/keys", {
-    method: "GET",
-    headers: {
-      ...(secret ? { Authorization: "Bearer " + secret } : {}),
-      ...(ip === null ? {} : { "CF-Connecting-IP": ip }),
-    },
-  });
-}
-
-/** An admin limiter that allows `allowed` calls and refuses the rest. */
-function adminEnv(overrides = {}) {
-  let calls = 0;
-  const env = {
-    ADMIN_SECRET,
-    ADMIN_RATE_LIMITER: { async limit() { calls++; return { success: calls <= 2 }; } },
-    ...overrides,
-  };
-  return { env, calls: () => calls };
-}
-
-test("admin guesses are rate limited per IP, and the limit is checked before the secret", async () => {
-  const { env, calls } = adminEnv();
-  const rc = requestContext(env);
-
-  // Two guesses inside the budget: refused on the secret, as before.
-  assert.equal((await authorizeAdmin(adminRequest("wrong"), rc)).status, 401);
-  assert.equal((await authorizeAdmin(adminRequest("wrong"), rc)).status, 401);
-
-  // Third attempt is over the limiter's budget: refused as 429 without the
-  // secret ever being compared, which is what caps guessing rather than merely
-  // reporting it.
-  const limited = await authorizeAdmin(adminRequest("wrong"), rc);
-  assert.equal(limited.status, 429);
-  assert.equal(limited.headers.get("Retry-After"), "60");
-  assert.equal(calls(), 3);
-
-  // The correct secret is refused too while the bucket is empty — the check is
-  // in front of the comparison, so it cannot be skipped by guessing right.
-  assert.equal((await authorizeAdmin(adminRequest(ADMIN_SECRET), rc)).status, 429);
-});
-
-test("the admin endpoints fail closed without a limiter binding or a usable client IP", async () => {
-  // No binding: refused with the 429 checkMinuteLimit's "no" produces, exactly
-  // as /send is, rather than waved through because the limiter is absent.
-  const noLimiter = requestContext({ ADMIN_SECRET });
-  assert.equal((await authorizeAdmin(adminRequest(ADMIN_SECRET), noLimiter)).status, 429);
-
-  const { env } = adminEnv();
-  const rc = requestContext(env);
-  assert.equal((await authorizeAdmin(adminRequest(ADMIN_SECRET, null), rc)).status, 503);
-  assert.equal((await authorizeAdmin(adminRequest(ADMIN_SECRET, "unknown"), rc)).status, 503);
-
-  // Local dev without binding support opts out explicitly, same as /send.
-  const devRc = requestContext({ ADMIN_SECRET, RATELIMIT_FAIL_OPEN: "true" });
-  assert.equal(await authorizeAdmin(adminRequest(ADMIN_SECRET), devRc), null);
-});
-
-test("a secret below the length floor authenticates nobody, including its holder", async () => {
-  const short = "s".repeat(MIN_ADMIN_SECRET_LENGTH - 1);
-  for (const secret of [short, "", undefined]) {
-    const { env } = adminEnv({ ADMIN_SECRET: secret });
-    const rc = requestContext(env);
-    // Presenting the configured value itself is still refused: a relay whose
-    // key-minting endpoint is guarded by a passphrase is not guarded.
-    const denied = await authorizeAdmin(adminRequest(secret ?? ""), rc);
-    assert.equal(denied.status, 401);
-    // Byte-identical to a wrong guess against a good secret, so a prober cannot
-    // tell a misconfigured deployment from a well-configured one.
-    assert.equal(await denied.text(), await (await authorizeAdmin(adminRequest("wrong"), requestContext(adminEnv().env))).text());
+  for (const [method, path] of [
+    ["GET", "/admin/keys"],
+    ["POST", "/admin/keys"],
+    ["DELETE", "/admin/keys/some-id"],
+    ["PUT", "/admin/keys"],
+  ]) {
+    const request = new Request("https://relay.example" + path, {
+      method,
+      headers: { Authorization: "Bearer " + env.ADMIN_SECRET, "CF-Connecting-IP": "203.0.113.7" },
+    });
+    const response = await handler(request, env, ctx);
+    assert.equal(response.status, 404, `${method} ${path} answered ${response.status}`);
   }
-});
-
-test("the correct secret is authorized", async () => {
-  const { env } = adminEnv();
-  assert.equal(await authorizeAdmin(adminRequest(ADMIN_SECRET), requestContext(env)), null);
 });
