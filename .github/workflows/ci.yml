@@ -194,6 +194,34 @@ jobs:
       - name: build
         run: npm run build
 
+  relay:
+    name: ci-relay
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: frontend/.nvmrc
+
+      # The relay Workers hold the FCM/APNs credentials and enforce token
+      # ownership for every self-hosted server, and nothing in CI ran against
+      # them at all — not even a typecheck. Both bugs the test below covers
+      # (a rollback deleting ownership a concurrent send had earned, a takeover
+      # decided from a KV read that cannot see a key minted seconds ago)
+      # typechecked perfectly, so the typecheck is the floor, not the gate.
+      - name: typecheck (fcm relay)
+        working-directory: worker
+        run: npm ci && npm run typecheck
+
+      - name: typecheck (apns relay)
+        working-directory: worker-apns
+        run: npm ci && npm run typecheck
+
+      # No test framework and no install: node's own runner and type stripping.
+      - name: claim-ownership interleavings
+        run: node --test push-relay-shared/relay-claims.test.ts
+
   docker:
     name: ci-docker
     runs-on: ubuntu-latest

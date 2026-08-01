@@ -22,11 +22,11 @@
  * the "needs a strongly-consistent store (Durable Object)" that claimTokenForSend
  * previously only documented.
  *
- * Deliberately dumb: it stores an owner id and nothing else. Whether an owning
- * key is still *active* is a KV question (the key records live there), so the
- * caller answers it and comes back with a compare-and-swap (`takeoverFrom`)
- * rather than this class reaching into KV. That keeps the serialized section to
- * one storage read and one storage write.
+ * Nearly dumb: it stores an owner id plus the bookkeeping that makes releasing a
+ * claim safe (see settleToken). Whether an owning key is still *active* is a KV
+ * question (the key records live there), so the caller answers it and comes back
+ * with a compare-and-swap (`takeoverFrom`) rather than this class reaching into
+ * KV. That keeps the serialized section to a couple of storage operations.
  */
 
 import { DurableObject } from "cloudflare:workers";
@@ -34,6 +34,12 @@ import { DurableObject } from "cloudflare:workers";
 /** Storage keys inside one instance. The instance IS the token/IP, so these are fixed. */
 const OWNER_KEY = "owner";
 const SEEDED_KEY = "seeded";
+/** A send under the CURRENT claim actually delivered — see settleToken. */
+const CONFIRMED_KEY = "confirmed";
+/** Sends currently holding the current claim, so a rollback can't outrun one. */
+const INFLIGHT_KEY = "inflight";
+/** When the current claim was taken (ms epoch), for the caller's takeover guard. */
+const CLAIMED_AT_KEY = "claimedAt";
 
 export interface ClaimTokenOptions {
   /** The key attempting to claim. */
@@ -57,8 +63,13 @@ export interface ClaimTokenOptions {
 export interface ClaimTokenResult {
   /** Who owns the token after this call. Equal to keyId when the claim succeeded. */
   owner: string;
-  /** True when THIS call took ownership, so the caller knows whose claim to roll back. */
-  newlyClaimed: boolean;
+  /**
+   * When `owner` took the claim (ms epoch, 0 for a claim inherited from the
+   * legacy KV index). The caller refuses to take over a claim younger than KV's
+   * convergence window, because the "is the owner still active?" answer it would
+   * base the takeover on comes from KV — see claimTokenForSend.
+   */
+  claimedAt: number;
 }
 
 export class RelayCoordinator extends DurableObject {
@@ -69,42 +80,101 @@ export class RelayCoordinator extends DurableObject {
       return this.ctx.storage.get<string>(OWNER_KEY);
     }
     const owner = (legacyOwner ?? "").trim() || undefined;
-    await this.ctx.storage.put(owner ? { [SEEDED_KEY]: true, [OWNER_KEY]: owner } : { [SEEDED_KEY]: true });
+    // A seeded owner is CONFIRMED on arrival: it only exists because that key
+    // already delivered under the pre-Durable-Object KV scheme, and an
+    // unconfirmed claim is one that settleToken deletes after a single failed
+    // send. claimedAt stays 0 so the caller's young-claim guard, which exists
+    // for keys minted seconds ago, doesn't also protect an ancient claim.
+    await this.ctx.storage.put(
+      owner
+        ? { [SEEDED_KEY]: true, [OWNER_KEY]: owner, [CONFIRMED_KEY]: true, [CLAIMED_AT_KEY]: 0 }
+        : { [SEEDED_KEY]: true },
+    );
     return owner;
+  }
+
+  /** Takes the claim for keyId, resetting the per-claim bookkeeping. */
+  private async takeClaim(keyId: string): Promise<ClaimTokenResult> {
+    const claimedAt = Date.now();
+    // inflight resets to 1 (this send) rather than incrementing: any send still
+    // running against the displaced owner's claim can no longer touch this one,
+    // because settleToken acts only for the key that currently owns the token.
+    await this.ctx.storage.put({
+      [OWNER_KEY]: keyId,
+      [CLAIMED_AT_KEY]: claimedAt,
+      [CONFIRMED_KEY]: false,
+      [INFLIGHT_KEY]: 1,
+    });
+    return { owner: keyId, claimedAt };
   }
 
   /**
    * Claims a device token for keyId. Returns the owner after the call, which the
    * caller compares against keyId to decide allow/deny — the decision and the
    * write happen in one turn here, which is the whole point.
+   *
+   * Every allowed send — the one that creates the claim and every later one that
+   * rides it — is counted in, and MUST be counted back out with settleToken.
    */
   async claimToken(opts: ClaimTokenOptions): Promise<ClaimTokenResult> {
     const owner = await this.currentOwner(opts.legacyOwner);
     if (owner === undefined) {
-      await this.ctx.storage.put(OWNER_KEY, opts.keyId);
-      return { owner: opts.keyId, newlyClaimed: true };
+      return this.takeClaim(opts.keyId);
     }
     if (owner === opts.keyId) {
-      return { owner, newlyClaimed: false };
+      const inflight = (await this.ctx.storage.get<number>(INFLIGHT_KEY)) ?? 0;
+      await this.ctx.storage.put(INFLIGHT_KEY, inflight + 1);
+      return { owner, claimedAt: (await this.ctx.storage.get<number>(CLAIMED_AT_KEY)) ?? 0 };
     }
     if (opts.takeoverFrom && owner === opts.takeoverFrom) {
-      await this.ctx.storage.put(OWNER_KEY, opts.keyId);
-      return { owner: opts.keyId, newlyClaimed: true };
+      return this.takeClaim(opts.keyId);
     }
-    return { owner, newlyClaimed: false };
+    return { owner, claimedAt: (await this.ctx.storage.get<number>(CLAIMED_AT_KEY)) ?? 0 };
   }
 
   /**
-   * Releases a claim, but only the caller's own — a release is a rollback of a
-   * claim made moments earlier in the same request, and an unconditional delete
-   * would let a failed send unpin a token that a different key has since taken.
+   * Ends one send's use of the claim, and releases the claim when it turns out
+   * nothing was ever delivered under it. Returns true when the claim was
+   * released.
+   *
+   * This is the rollback, and `delivered` plus the in-flight count are what make
+   * it safe. The previous version released on the caller's word alone ("I created
+   * this claim and my send failed, delete it"), which identified the claim only
+   * by its owning key id — so two concurrent sends from one key, one failing and
+   * one succeeding, could have the failing one delete ownership that the
+   * successful one had just legitimately established, leaving the token free for
+   * a different key to claim and spoof pushes at that device.
+   *
+   * Here the claim survives if ANY send under it delivered (`confirmed`, sticky
+   * for the life of the claim) or if another send is still using it
+   * (`inflight`) — regardless of which of the two calls the runtime happens to
+   * schedule first. The bias is deliberate: a retained claim pins a token to a
+   * key that owns it anyway, while a wrongly released one is the spoofing gap.
+   *
+   * ponytail: a send that never settles (worker eviction mid-request) leaks its
+   * in-flight count and pins the token to that key for the life of the key. That
+   * is the safe direction, and revoking or expiring the key frees the token
+   * through the normal takeover path; an alarm-based sweep is the upgrade if
+   * that ever proves too sticky.
    */
-  async releaseToken(keyId: string): Promise<boolean> {
+  async settleToken(keyId: string, delivered: boolean): Promise<boolean> {
     const owner = await this.ctx.storage.get<string>(OWNER_KEY);
     if (owner !== keyId) {
+      return false; // displaced by a takeover, or already released
+    }
+    const inflight = Math.max(0, ((await this.ctx.storage.get<number>(INFLIGHT_KEY)) ?? 1) - 1);
+    if (delivered) {
+      await this.ctx.storage.put({ [CONFIRMED_KEY]: true, [INFLIGHT_KEY]: inflight });
       return false;
     }
-    await this.ctx.storage.delete(OWNER_KEY);
+    const confirmed = await this.ctx.storage.get<boolean>(CONFIRMED_KEY);
+    if (confirmed || inflight > 0) {
+      await this.ctx.storage.put(INFLIGHT_KEY, inflight);
+      return false;
+    }
+    // SEEDED_KEY deliberately stays: re-reading the legacy KV owner would let a
+    // token released as dead silently re-adopt the stale value.
+    await this.ctx.storage.delete([OWNER_KEY, CONFIRMED_KEY, INFLIGHT_KEY, CLAIMED_AT_KEY]);
     return true;
   }
 

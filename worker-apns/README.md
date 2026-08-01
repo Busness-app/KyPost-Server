@@ -153,6 +153,20 @@ automatically released for reclaiming if the owning key is later revoked,
 disabled, or expires — so rotating your key never permanently orphans your
 own devices, it just re-claims them on the next successful send.
 
+Two details that are load-bearing rather than tuning:
+
+- **A claim is only released when nothing was ever delivered under it.** A send
+  that fails rolls its claim back so a dead token or a transient outage doesn't
+  pin a device to a key that never reached it — but the coordinator, not the
+  failing request, decides. A second send from the same key that succeeded in
+  the meantime keeps the claim, because releasing it there would hand a device
+  you legitimately own to the next key that asks.
+- **A claim younger than 60 seconds is never taken over.** "Is the current
+  owner's key still active?" is answered from KV, which converges globally in
+  about a minute, so a key you registered seconds ago can read as deleted
+  elsewhere in the network. The only cost is that reclaiming a token whose key
+  you just revoked takes a minute.
+
 Ownership is held by the `RELAY_COORDINATOR` Durable Object, not by KV. "Is this
 token already claimed?" followed by "claim it" is a check-then-write, and KV is
 eventually consistent — two keys racing the first send to one token could both
@@ -162,7 +176,10 @@ one at a time, so the check and the write cannot be interleaved. The same object
 enforces one active self-registered key per IP on `/register`.
 
 The binding is **required**: `/send` and `/register` both return `503` without
-it, rather than silently falling back to the racy path. Durable Objects are
+it, rather than silently falling back to the racy path. `/register` also returns
+`503` when the request carries no usable `CF-Connecting-IP`: with no address to
+bucket on there is no rate limit and no one-key-per-IP rule, and an
+unauthenticated endpoint that mints permanent keys does not run without them. Durable Objects are
 available on the Workers Free plan; the `[[migrations]]` block in
 `wrangler.toml.example` creates the class on first deploy.
 

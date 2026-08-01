@@ -43,8 +43,8 @@ import {
   isExpired,
   json,
   recordUsageAnalytics,
-  releaseToken,
   resolveLimit,
+  settleToken,
   sha256Hex,
 } from "../../push-relay-shared/push-relay-common";
 
@@ -128,11 +128,17 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return response;
   }
 
-  const binding = await claimTokenForSend(rc, token, record.id);
-  if (!binding.allowed) {
-    rc.log({ level: "warn", event: "send.denied", reason: binding.logReason, keyId: record.id });
-    return fail(rc, binding.status, binding.reason);
+  const claim = await claimTokenForSend(rc, token, record.id);
+  if (!claim.allowed) {
+    rc.log({ level: "warn", event: "send.denied", reason: claim.logReason, keyId: record.id });
+    return fail(rc, claim.status, claim.reason);
   }
+  // Every path below settles the claim exactly once: the coordinator counts this
+  // send out again and releases the claim only if nothing ever delivered under
+  // it. Deferred, because none of it is on the caller's answer — and safe to
+  // defer, because an unsettled send still counts as in flight and so blocks a
+  // concurrent rollback either way.
+  const settle = (delivered: boolean) => rc.ctx.waitUntil(settleToken(rc, token, record.id, delivered));
 
   // Count the accepted send in Analytics Engine (off the KV write path).
   recordUsageAnalytics(env, record);
@@ -149,32 +155,27 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     result = await sendApnsMessage(config, env.APNS_TOKEN_CACHE, message);
   } catch (err) {
     // A thrown exception (e.g. a transient APNs auth failure) means delivery
-    // never happened, same as the result.stale/failure branches below — release
-    // a claim we made this request so it doesn't stay permanently bound to a key
-    // that never delivered.
-    if (binding.newlyClaimed) {
-      rc.ctx.waitUntil(releaseToken(rc, token, record.id));
-    }
+    // never happened, same as the result.stale/failure branches below — so the
+    // claim must not be confirmed by it.
+    settle(false);
     rc.log({ level: "error", event: "send.error", keyId: record.id, error: String((err as Error).message ?? err) });
     return fail(rc, 502, `relay send failed: ${(err as Error).message}`);
   }
 
   if (result.ok) {
-    // The token was already claimed for this key before delivery.
+    // Delivery under this claim: confirms it, so a concurrent send from this key
+    // that fails can no longer release the ownership this one just earned.
+    settle(true);
     rc.log({ level: "info", event: "send.ok", keyId: record.id });
     return json({ ok: true });
   }
   if (result.stale) {
-    // Dead token: roll back a claim we made this request so it doesn't linger.
-    if (binding.newlyClaimed) {
-      rc.ctx.waitUntil(releaseToken(rc, token, record.id));
-    }
+    // Dead token: nothing delivered, so a claim made this request goes back.
+    settle(false);
     rc.log({ level: "info", event: "send.stale", keyId: record.id, apnsStatus: result.status });
     return json({ stale: true, requestId: rc.requestId }, 410);
   }
-  if (binding.newlyClaimed) {
-    rc.ctx.waitUntil(releaseToken(rc, token, record.id));
-  }
+  settle(false);
   rc.log({ level: "error", event: "send.apns_failed", keyId: record.id, apnsStatus: result.status });
   return fail(rc, 502, `apns send failed: status=${result.status} response=${result.detail}`);
 }

@@ -124,10 +124,12 @@ When the user requests a durable behavior change, record it here or in the relev
 
 ## Child DOX Index
 
-- `backend/` — Go 1.26.4 classification engine, HTTP API, IMAP adapter, Ollama adapter, poller, config, state, health, logging, redaction; produces the `kypost-server` binary. See [backend/AGENTS.md](backend/AGENTS.md). Contains nested child: `backend/internal/adapters/`.
-- `frontend/` — React 18 / TypeScript SPA for config, monitoring, decision audit, and log streaming. See [frontend/AGENTS.md](frontend/AGENTS.md).
+- `backend/` — Go 1.26.5 classification engine, HTTP API, IMAP adapter, Ollama adapter, poller, config, state, health, logging, redaction; produces the `kypost-server` binary. See [backend/AGENTS.md](backend/AGENTS.md). Contains nested child: `backend/internal/adapters/`.
+- `frontend/` — React 19 / TypeScript SPA for config, monitoring, decision audit, and log streaming. See [frontend/AGENTS.md](frontend/AGENTS.md).
 - `scripts/` — Container initialization, process orchestration (supervisord), and Ollama model management. See [scripts/AGENTS.md](scripts/AGENTS.md).
 - `share/` — Persistent Ollama model blob cache bind-mounted from the host; never committed to git. See [share/AGENTS.md](share/AGENTS.md).
+- `push-relay-shared/` — The push relay: shared Cloudflare Worker logic (API-key issuance, rate limiting, device-token ownership) plus the `RelayCoordinator` Durable Object, and the contract for both provider Workers. See [push-relay-shared/AGENTS.md](push-relay-shared/AGENTS.md).
+- `worker/`, `worker-apns/` — The FCM and APNs deployments of that relay: per-provider `handleSend` plus wrangler config, everything else imported from `push-relay-shared/`. Governed by [push-relay-shared/AGENTS.md](push-relay-shared/AGENTS.md); they hold no rules of their own.
 
 # AI Governance v2 Ultra-Lite
 

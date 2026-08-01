@@ -150,15 +150,23 @@ export function timingSafeEqual(a: string, b: string): boolean {
  * its /64 prefix. A single IPv6 allocation is typically a /64 (2^64 addresses),
  * so keying on the full 128-bit address lets an attacker mint unlimited keys by
  * sourcing each request from a fresh address in their own allocation.
+ *
+ * Returns "" for anything that is not a syntactically valid address — including
+ * an empty string, a placeholder like "unknown", and the IPv4-mapped `::ffff:`
+ * form, whose /64 is 0:0:0:0 for every client on the internet and so is not a
+ * bucket at all. handleRegister treats "" as "no client address" and refuses to
+ * mint, which is the only safe answer for controls that are keyed on this.
  */
 export function ipBucket(ip: string): string {
   const trimmed = ip.trim();
   if (!trimmed.includes(":")) {
-    return trimmed; // IPv4 (or empty) — use as-is
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(trimmed) && trimmed.split(".").every((o) => Number(o) <= 255)
+      ? trimmed
+      : "";
   }
   // Strip any zone id and expand "::" to reconstruct the first four hextets.
   const addr = trimmed.split("%")[0];
-  const [head, tail] = addr.split("::");
+  const [head, tail, extra] = addr.split("::");
   const headGroups = head ? head.split(":").filter((g) => g !== "") : [];
   const tailGroups = tail ? tail.split(":").filter((g) => g !== "") : [];
   const missing = 8 - (headGroups.length + tailGroups.length);
@@ -166,8 +174,14 @@ export function ipBucket(ip: string): string {
     tail === undefined
       ? headGroups
       : [...headGroups, ...Array(Math.max(0, missing)).fill("0"), ...tailGroups];
-  const prefix = [0, 1, 2, 3].map((i) => (groups[i] ?? "0").toLowerCase());
-  return prefix.join(":") + "::/64";
+  // Every group is validated, not just the four that make the prefix: an address
+  // whose low half is junk is not an address, and checking only the prefix let
+  // "::ffff:garbage" through as a bucket shared with everything else that pads
+  // to zeros.
+  if (extra !== undefined || groups.length > 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/i.test(g))) {
+    return "";
+  }
+  return [0, 1, 2, 3].map((i) => (groups[i] ?? "0").toLowerCase()).join(":") + "::/64";
 }
 
 export async function sha256Hex(input: string): Promise<string> {
@@ -242,18 +256,43 @@ async function keyIsActive(env: CommonEnv, keyId: string): Promise<boolean> {
   return Boolean(record && record.enabled && !isExpired(record, Date.now()));
 }
 
-/** Releases token's claim (used to roll back a pre-send claim on a dead token). */
-export async function releaseToken(rc: RequestContext, token: string, keyId: string): Promise<void> {
+/**
+ * How long a claim is protected from takeover. keyIsActive answers "is the
+ * current owner's key still active?" out of KV, and KV converges globally in
+ * about a minute: a key minted seconds ago reads as ABSENT at a PoP that has not
+ * seen the write yet, which is indistinguishable from "deleted" and would hand
+ * that key's freshly claimed token to whoever asked next. The owner had to
+ * authenticate against KV to make the claim at all, so waiting out one
+ * convergence window is enough for the record that proves it to be visible
+ * everywhere. Only delays a legitimate takeover of a token whose owning key was
+ * revoked within the last minute.
+ */
+const CLAIM_TAKEOVER_GRACE_MS = 60_000;
+
+/**
+ * Ends one send's use of a token claim: `delivered` true after the push was
+ * actually accepted by the provider, false on every failure path. Mandatory
+ * after any allowed claimTokenForSend — the coordinator counts sends in and out,
+ * and a claim under which nothing ever delivered is released when the last one
+ * settles. See RelayCoordinator.settleToken for why the decision cannot be made
+ * out here.
+ */
+export async function settleToken(
+  rc: RequestContext,
+  token: string,
+  keyId: string,
+  delivered: boolean,
+): Promise<void> {
   const tokenHash = await sha256Hex(token);
   const stub = tokenCoordinator(rc.env, tokenHash);
   if (!stub) {
     return;
   }
-  await stub.releaseToken(keyId);
+  await stub.settleToken(keyId, delivered);
 }
 
 export type ClaimResult =
-  | { allowed: true; newlyClaimed: boolean }
+  | { allowed: true }
   // `status`/`logReason` travel with the denial so a misconfigured relay is not
   // reported to the caller as "that token belongs to someone else" — a 403 tells
   // a self-hoster their device is spoken for and to stop retrying, which is the
@@ -263,8 +302,8 @@ export type ClaimResult =
 /**
  * Claims token for keyId BEFORE delivery — claiming afterwards would let a
  * first-sender deliver a spoofed push ahead of the legitimate owner's claim.
- * `newlyClaimed` lets the caller release the claim if delivery reveals the token
- * is dead.
+ * Every allowed claim MUST be closed out with settleToken, which is what
+ * releases a claim whose send turned out never to deliver.
  *
  * The claim is a single serialized turn inside the token's RelayCoordinator, so
  * two keys racing the first send to one token can no longer both be told the
@@ -300,24 +339,29 @@ export async function claimTokenForSend(rc: RequestContext, token: string, keyId
 
   const first = await stub.claimToken({ keyId, legacyOwner });
   if (first.owner === keyId) {
-    return { allowed: true, newlyClaimed: first.newlyClaimed };
+    return { allowed: true };
   }
 
-  const denied = {
+  const denied = (logReason: string): ClaimResult => ({
     allowed: false,
     reason: "token is already bound to a different active api key",
     status: 403,
-    logReason: "token_bound_to_other_key",
-  } as const;
+    logReason,
+  });
+  // Ask the eventually consistent question only about a claim old enough for the
+  // answer to be trustworthy — see CLAIM_TAKEOVER_GRACE_MS.
+  if (Date.now() - first.claimedAt < CLAIM_TAKEOVER_GRACE_MS) {
+    return denied("token_claim_too_recent");
+  }
   if (await keyIsActive(env, first.owner)) {
-    return denied;
+    return denied("token_bound_to_other_key");
   }
 
   const takeover = await stub.claimToken({ keyId, takeoverFrom: first.owner });
   if (takeover.owner !== keyId) {
-    return denied; // someone else re-claimed it between the two calls
+    return denied("token_bound_to_other_key"); // re-claimed between the two calls
   }
-  return { allowed: true, newlyClaimed: takeover.newlyClaimed };
+  return { allowed: true };
 }
 
 // ---- per-key rate limits ---------------------------------------------------
@@ -562,11 +606,21 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   if (!registrationEnabled(env)) {
     return fail(rc, 403, "self-registration is disabled");
   }
-  const rawIp = request.headers.get("CF-Connecting-IP");
   // Bucket on the /64 for IPv6 so a single allocation can't defeat the per-IP
   // registration limit and one-key-per-IP rule by rotating source addresses.
-  const registeredIp = rawIp ? ipBucket(rawIp) : rawIp;
-  if (registeredIp && !(await checkMinuteLimit(env.REGISTER_RATE_LIMITER, rc, registeredIp))) {
+  const registeredIp = ipBucket(request.headers.get("CF-Connecting-IP") ?? "");
+  // No usable client address means no rate limit and no one-key-per-IP
+  // invariant, and both of those are the entire containment around an
+  // unauthenticated endpoint that mints permanent credentials. Minting anyway —
+  // which is what the previous `registeredIp && ...` guards did — turned a
+  // missing or unparseable header (a service binding, a preview environment, a
+  // platform change) into uncapped key minting. Same fail-closed reasoning as
+  // checkMinuteLimit and claimTokenForSend.
+  if (!registeredIp) {
+    rc.log({ level: "error", event: "register.denied", reason: "no_client_ip" });
+    return fail(rc, 503, "registration is temporarily unavailable");
+  }
+  if (!(await checkMinuteLimit(env.REGISTER_RATE_LIMITER, rc, registeredIp))) {
     rc.log({ level: "warn", event: "register.denied", reason: "rate_limited", ip: registeredIp });
     const response = fail(rc, 429, "too many registration attempts, try again later", {
       window: "minute",
@@ -582,8 +636,8 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   // one-active-key-per-IP invariant is unenforceable, and an unconstrained
   // permanent key on a public endpoint is the thing that invariant guards. Same
   // fail-closed reasoning as checkMinuteLimit and claimTokenForSend.
-  const ipStub = registeredIp ? registrationCoordinator(env, registeredIp) : null;
-  if (registeredIp && !ipStub) {
+  const ipStub = registrationCoordinator(env, registeredIp);
+  if (!ipStub) {
     rc.log({ level: "error", event: "register.denied", reason: "coordinator_binding_missing", ip: registeredIp });
     return fail(rc, 503, "registration is temporarily unavailable");
   }
@@ -601,30 +655,25 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   // unknown id as "already gone", the previous key is never revoked and keeps
   // working, and the next registration displaces the dangling id.
   const keyId = crypto.randomUUID();
-  let priorId: string | null = null;
-  if (registeredIp && ipStub) {
-    // Swap first, then revoke what the swap displaced. The other order is the
-    // race: two registrations can both read the same prior key and both believe
-    // they superseded it, leaving both of their own keys active. Here each
-    // registration is handed its own immediate predecessor, so N racers form a
-    // chain of N-1 revocations and exactly one key is left standing.
-    const legacyKeyId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
-    priorId = await ipStub.claimRegistrationIp(keyId, legacyKeyId);
-  }
+  // Swap first, then revoke what the swap displaced. The other order is the
+  // race: two registrations can both read the same prior key and both believe
+  // they superseded it, leaving both of their own keys active. Here each
+  // registration is handed its own immediate predecessor, so N racers form a
+  // chain of N-1 revocations and exactly one key is left standing.
+  const legacyKeyId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
+  const priorId = await ipStub.claimRegistrationIp(keyId, legacyKeyId);
 
   // Self-registered keys don't expire by default — they back long-lived servers.
   const { record, key } = await mintKey(env, rc, { label, expiresAt: null, source: "self", registeredIp, id: keyId });
 
-  if (registeredIp) {
-    // The KV index is no longer the authority — it only seeds a coordinator
-    // instance that has never been touched, and gives revokeKeyById something to
-    // tidy up. It is written after the swap and may lose a race with
-    // revokeKeyById's cleanup below; that costs nothing, because the coordinator
-    // holds the real answer and ignores the seed once set.
-    await env.API_KEYS.put(IP_INDEX_PREFIX + registeredIp, record.id);
-    if (priorId && (await revokeKeyById(env, priorId))) {
-      rc.log({ level: "info", event: "key.superseded", keyId: priorId, ip: registeredIp });
-    }
+  // The KV index is no longer the authority — it only seeds a coordinator
+  // instance that has never been touched, and gives revokeKeyById something to
+  // tidy up. It is written after the swap and may lose a race with
+  // revokeKeyById's cleanup below; that costs nothing, because the coordinator
+  // holds the real answer and ignores the seed once set.
+  await env.API_KEYS.put(IP_INDEX_PREFIX + registeredIp, record.id);
+  if (priorId && (await revokeKeyById(env, priorId))) {
+    rc.log({ level: "info", event: "key.superseded", keyId: priorId, ip: registeredIp });
   }
   return json({ id: record.id, label: record.label, key, expiresAt: record.expiresAt }, 201);
 }
