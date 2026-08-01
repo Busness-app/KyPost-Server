@@ -45,6 +45,13 @@ self-hosted Go server  --(Bearer per-server key)-->  this Worker  --(APNs provid
    npx wrangler secret put APNS_TOPIC       # Bundle ID, e.g. "com.urlxl.mail"
    npx wrangler secret put APNS_ENVIRONMENT # "production" or "sandbox" (use "sandbox" for debug/TestFlight builds)
    ```
+   `APNS_ENVIRONMENT` is parsed strictly. Unset means production; anything that
+   is neither `production` nor `sandbox` makes `/health` report
+   `configured: false` and `/send` answer 500, because a typo that silently
+   picked the sandbox host would make Apple reject every production device
+   token as `BadDeviceToken` — which this relay reports as a dead token, and
+   the backend acts on by unregistering the device.
+
    There is no `ADMIN_SECRET`: the relay has no admin API. See
    [Managing keys](#managing-keys).
 

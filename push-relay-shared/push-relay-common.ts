@@ -757,7 +757,22 @@ export function registrationEnabled(env: CommonEnv): boolean {
  * several permanent active keys, which is the quota abuse the invariant exists
  * to prevent. The coordinator swaps the IP's current key and returns the one it
  * displaced in a single serialized turn, so racing registrations form a chain
- * where each revokes its predecessor and exactly one key is left active.
+ * where each revokes its predecessor.
+ *
+ * That chain is claim-then-COMMIT, not claim alone. Minting happens outside the
+ * coordinator's turn, and the swap by itself left this hole:
+ *
+ *   1. A claims the IP and stalls before minting.
+ *   2. B claims it, is handed A as its predecessor, mints, and revokes A —
+ *      which does nothing, because A's key record does not exist yet.
+ *   3. A resumes and mints. Two permanently active keys for one IP, and the
+ *      revoke that was supposed to prevent it has already run.
+ *
+ * So after minting, every registration asks the coordinator whether it is still
+ * the IP's current registration (confirmRegistrationIp). A registration that was
+ * displaced while minting deletes the key it just made and hands out nothing —
+ * it is the only party that still can, since its successor already looked and
+ * found nothing there. Exactly one key survives any interleaving.
  */
 export async function handleRegister(request: Request, rc: RequestContext): Promise<Response> {
   const { env } = rc;
@@ -826,6 +841,23 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
 
   // Self-registered keys don't expire — they back long-lived servers.
   const { record, key } = await mintKey(env, rc, { label, registeredIp, id: keyId });
+
+  // Commit. Until this returns true the minted key has been handed to nobody,
+  // so deleting it costs nothing; after it, the key is this IP's registration.
+  if (!(await ipStub.confirmRegistrationIp(keyId))) {
+    // Displaced while minting. The successor's revoke ran against an id that
+    // had no record yet and did nothing, so this is the only place this key can
+    // still be cleaned up. Deleting it is a compensating write, but unlike the
+    // mint-then-rollback ordering rejected above it is on a path where nothing
+    // has failed — and if it somehow does fail, what is left behind is an
+    // orphan record that was never returned to anyone rather than a second
+    // usable key.
+    await revokeKeyById(env, keyId);
+    rc.log({ level: "warn", event: "register.superseded_while_minting", keyId, ip: registeredIp });
+    const response = fail(rc, 503, "registration is temporarily unavailable");
+    response.headers.set("Retry-After", "5");
+    return response;
+  }
 
   // The KV index is no longer the authority — it only seeds a coordinator
   // instance that has never been touched, and gives revokeKeyById something to
