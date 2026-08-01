@@ -1064,6 +1064,14 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 					if strings.HasPrefix(relPath, "assets/") {
 						w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 					}
+					// http.ServeContent falls back to mime.TypeByExtension,
+					// whose builtin table has no .woff2 and whose only other
+					// source is /etc/mime.types — absent from debian-slim. The
+					// self-hosted fonts would otherwise be sniffed and served
+					// as application/octet-stream.
+					if strings.HasSuffix(relPath, ".woff2") {
+						w.Header().Set("Content-Type", "font/woff2")
+					}
 					http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 					return
 				}

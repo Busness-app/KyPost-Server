@@ -92,6 +92,40 @@ func TestCSPNeverAllowsInlineOrWildcardScript(t *testing.T) {
 	}
 }
 
+// Fonts are served from this origin, so no provider may name an outside host in
+// style-src or font-src. The pair that used to be there — fonts.googleapis.com
+// and fonts.gstatic.com — cost every visitor a disclosure of their IP and
+// User-Agent to Google on the way to the login form, which is a strange thing
+// for a mail server to do. Exact-match the two directives rather than grepping
+// for the old hostnames: that catches any replacement CDN too.
+func TestCSPNamesNoThirdPartyFontOrigin(t *testing.T) {
+	for _, provider := range []captcha.Provider{
+		captcha.ProviderNone, captcha.ProviderPoW,
+		captcha.ProviderFriendly, captcha.ProviderTurnstile,
+	} {
+		policy := buildContentSecurityPolicy(provider)
+		want := map[string]string{
+			"style-src": "style-src 'self' 'unsafe-inline'",
+			"font-src":  "font-src 'self' data:",
+		}
+		found := map[string]bool{}
+		for _, directive := range strings.Split(policy, "; ") {
+			name, _, _ := strings.Cut(directive, " ")
+			if expected, ok := want[name]; ok {
+				found[name] = true
+				if directive != expected {
+					t.Errorf("provider %q: %s = %q, want %q", provider, name, directive, expected)
+				}
+			}
+		}
+		for name := range want {
+			if !found[name] {
+				t.Errorf("provider %q: policy has no %s directive:\n%s", provider, name, policy)
+			}
+		}
+	}
+}
+
 // The self-hosted proof-of-work provider needs no third-party origin, no
 // WASM, and no blob: worker — it is same-origin fetch plus crypto.subtle.
 // That is the main reason to choose it over Turnstile or Friendly Captcha, so
