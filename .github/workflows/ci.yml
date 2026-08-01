@@ -224,9 +224,15 @@ jobs:
       # supervisord config, an entrypoint whose chown fails, a missing runtime
       # dependency. It is also what makes the Dockerfile's HEALTHCHECK load
       # bearing rather than decorative.
+      #
+      # KYPOST_BIND is required, and this step is the caller that has to supply
+      # it — docker-compose.yml enforces it with `${KYPOST_BIND:?}` and never
+      # reaches the entrypoint empty, but a bare `docker run` does. Loopback,
+      # because no port is published here and the healthcheck runs inside the
+      # container. Do not answer a failure here by loosening the entrypoint.
       - name: container starts and reports healthy
         run: |
-          docker run -d --name kypost-ci kypost-server:ci
+          docker run -d --name kypost-ci -e KYPOST_BIND=127.0.0.1 kypost-server:ci
           for i in $(seq 1 90); do
             status="$(docker inspect -f '{{.State.Health.Status}}' kypost-ci 2>/dev/null || echo starting)"
             if [ "$status" = "healthy" ]; then
@@ -241,6 +247,20 @@ jobs:
           done
           echo "container never became healthy" >&2
           exit 1
+
+      # The other half of the step above: prove the gate still bites. Without
+      # this, "make the smoke test pass" and "delete the security check" are
+      # indistinguishable to CI, and the cheap way to fix a red build is to
+      # loosen the entrypoint. Exits in milliseconds — nothing boots.
+      - name: entrypoint refuses non-loopback cleartext
+        run: |
+          if docker run --rm -e KYPOST_BIND=0.0.0.0 kypost-server:ci 2>/tmp/guard.err; then
+            echo "entrypoint accepted a non-loopback cleartext bind" >&2
+            exit 1
+          fi
+          grep -q 'refusing non-loopback cleartext HTTP' /tmp/guard.err \
+            || { echo "refused, but not by the bind guard:" >&2; cat /tmp/guard.err >&2; exit 1; }
+          echo "guard refused 0.0.0.0 without TLS or ALLOW_INSECURE_HTTP"
 
       - name: container logs
         if: always()
