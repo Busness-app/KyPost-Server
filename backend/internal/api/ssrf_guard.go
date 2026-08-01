@@ -122,16 +122,27 @@ func newSSRFSafeHTTPClient(timeout time.Duration) *http.Client {
 			if len(via) >= 5 {
 				return errors.New("too many redirects")
 			}
-			// Refuse a downgrade to plaintext. ssrfSafeDialContext checks where
-			// each hop connects, but not how: a server reached over https could
-			// answer 302 to an http:// URL and Go would follow it happily,
-			// putting the user's CardDAV credentials on the wire in the clear
-			// for a passive observer. A redirect that lowers the protection the
-			// caller asked for is refused rather than followed.
-			if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
-				return fmt.Errorf("refusing redirect from https to %s", req.URL.Scheme)
+			if len(via) > 0 && !sameOrigin(via[0].URL, req.URL) {
+				return fmt.Errorf("refusing cross-origin redirect to %s", req.URL.Redacted())
 			}
 			return nil
 		},
 	}
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Hostname(), b.Hostname()) && effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return ""
 }

@@ -101,7 +101,9 @@ Optional for local development (outside Docker):
    > KyPost serves plain HTTP. The session cookie is marked `Secure` only when the
    > request demonstrably arrived over TLS, so on a bare `http://` deployment the
    > cookie is sent in the clear on every request. `http://` on localhost, for one
-   > machine, is fine.
+   > machine, is fine. Compose refuses a non-loopback cleartext bind unless you
+   > explicitly set `ALLOW_INSECURE_HTTP=true`; that escape hatch is for a
+   > deliberately trusted network, not a TLS substitute.
    >
    > `KYPOST_BIND` decides which interface port 5866 is published on, and it has
    > no default — compose will not start until you set it. An unproxied 5866 is

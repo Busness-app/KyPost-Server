@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -632,7 +633,12 @@ func (s *Server) sweepDeviceIndex() int {
 			unreadable[userID] = true
 			continue
 		}
-		for _, d := range store.ListNativeDevices() {
+		devices, err := store.ListNativeDevicesStrict()
+		if err != nil {
+			unreadable[userID] = true
+			continue
+		}
+		for _, d := range devices {
 			if id := strings.TrimSpace(d.DeviceID); id != "" {
 				live[id] = true
 			}
@@ -670,8 +676,8 @@ func (s *Server) sweepDeviceIndex() int {
 // here. The DAV cache has no per-user index (its keys are salted hashes of
 // username+password), so invalidation clears the whole map; that costs other
 // users at most one extra scrypt verification on their next sync.
-func (s *Server) revokeAllUserCredentials(u users.User) {
-	s.revokeAllUserCredentialsExcept(u, "")
+func (s *Server) revokeAllUserCredentials(u users.User) error {
+	return s.revokeAllUserCredentialsExcept(u, "")
 }
 
 // revokeAllUserCredentialsExcept is revokeAllUserCredentials with one session
@@ -679,9 +685,12 @@ func (s *Server) revokeAllUserCredentials(u users.User) {
 // and CardDAV exactly like the admin paths do, but logging the user out of the
 // tab they just changed their password in would be a surprising way to answer
 // "I secured my account".
-func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken string) {
+func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken string) error {
 	s.revokeUserSessions(u.ID, keepSessionToken)
-	s.revokeUserDevices(u.ID)
+	var errs []error
+	if err := s.revokeUserDevices(u.ID); err != nil {
+		errs = append(errs, err)
+	}
 	// Delete the credential, not just the cache entry. invalidateUser clears an
 	// in-memory verification cache, but the scrypt hash lives in carddav-auth.json,
 	// so readDAVPassword loaded it again on the next request and minted a fresh
@@ -689,8 +698,10 @@ func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken s
 	// admin clear-MFA and the self-service password change.
 	if err := os.Remove(s.userCardDAVAuthPath(u.ID)); err != nil && !os.IsNotExist(err) {
 		s.logger.Error("failed to revoke carddav credential", "user_id", u.ID, "error", err.Error())
+		errs = append(errs, fmt.Errorf("remove CardDAV credential: %w", err))
 	}
 	s.davCredentials.invalidateUser(u.Username)
+	return errors.Join(errs...)
 }
 
 // revokeUserDevices removes every paired native device for userID from both
@@ -699,21 +710,24 @@ func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken s
 // action that cuts off web sessions (see revokeUserSessions). Best-effort:
 // errors are logged, not fatal, so revocation of the primary credential still
 // succeeds.
-func (s *Server) revokeUserDevices(userID string) {
+func (s *Server) revokeUserDevices(userID string) error {
 	store, err := s.userStore(userID)
 	if err != nil {
-		s.logger.Error("failed to open store to revoke devices", "user_id", userID, "error", err.Error())
-		return
+		return fmt.Errorf("open device store: %w", err)
 	}
-	for _, dev := range store.ListNativeDevices() {
+	devices, err := store.ListNativeDevicesStrict()
+	if err != nil {
+		return err
+	}
+	for _, dev := range devices {
 		if _, err := store.RemoveNativeDevice(dev.DeviceID); err != nil {
-			s.logger.Error("failed to remove native device during revocation", "user_id", userID, "error", err.Error())
-			continue
+			return fmt.Errorf("remove native device %q: %w", dev.DeviceID, err)
 		}
 		s.userMu.Lock()
 		delete(s.deviceIndex, dev.DeviceID)
 		s.userMu.Unlock()
 	}
+	return nil
 }
 
 // rescanDeviceIndex rebuilds deviceID -> userID across every per-user store.
@@ -726,7 +740,11 @@ func (s *Server) rescanDeviceIndex() {
 		if err != nil {
 			continue
 		}
-		for _, d := range store.ListNativeDevices() {
+		devices, err := store.ListNativeDevicesStrict()
+		if err != nil {
+			continue
+		}
+		for _, d := range devices {
 			if id := strings.TrimSpace(d.DeviceID); id != "" {
 				next[id] = userID
 			}

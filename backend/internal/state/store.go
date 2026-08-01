@@ -298,6 +298,15 @@ func (s *Store) AddDecision(d Decision) error {
 // an append-ordered slice, so a row written later carrying an earlier
 // timestamp still came first. Preserved deliberately.
 func (s *Store) Decisions(limit int) []Decision {
+	decisions, err := s.DecisionsStrict(limit)
+	if err != nil {
+		slog.Error("state read failed", "field", "decisions", "dir", s.baseDir, "error", err.Error())
+		return []Decision{}
+	}
+	return decisions
+}
+
+func (s *Store) DecisionsStrict(limit int) ([]Decision, error) {
 	query := `SELECT message_id, sender, sent_to, subject, label, status, detail, at_utc
 	          FROM decisions ORDER BY id DESC`
 	args := []any{}
@@ -308,7 +317,7 @@ func (s *Store) Decisions(limit int) []Decision {
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		slog.Error("state read failed", "field", "decisions", "dir", s.baseDir, "error", err.Error())
-		return []Decision{}
+		return nil, err
 	}
 	defer rows.Close()
 	out := []Decision{}
@@ -316,11 +325,11 @@ func (s *Store) Decisions(limit int) []Decision {
 		var d Decision
 		if err := rows.Scan(&d.MessageID, &d.Sender, &d.SentTo, &d.Subject, &d.Label, &d.Status, &d.Detail, &d.AtUTC); err != nil {
 			slog.Error("state read failed", "field", "decisions", "dir", s.baseDir, "error", err.Error())
-			return out
+			return nil, err
 		}
 		out = append(out, d)
 	}
-	return out
+	return out, rows.Err()
 }
 
 // ---- subscriber id / delivery mode ----------------------------------------
@@ -418,6 +427,15 @@ func (s *Store) EnqueuePullNotification(n PullNotification) error {
 }
 
 func (s *Store) PullNotificationsAfter(after int64) ([]PullNotification, int64) {
+	notifications, cursor, err := s.PullNotificationsAfterStrict(after)
+	if err != nil {
+		slog.Error("state read failed", "field", "pullNotifications", "dir", s.baseDir, "error", err.Error())
+		return []PullNotification{}, cursor
+	}
+	return notifications, cursor
+}
+
+func (s *Store) PullNotificationsAfterStrict(after int64) ([]PullNotification, int64, error) {
 	var cursor int64
 	if raw, err := metaString(s.db, metaPullSeq); err == nil {
 		// Same as EnqueuePullNotification: unparseable means no cursor yet.
@@ -427,7 +445,7 @@ func (s *Store) PullNotificationsAfter(after int64) ([]PullNotification, int64) 
 		`SELECT seq, title, body, data, created_at FROM pull_notifications WHERE seq > ? ORDER BY seq`, after)
 	if err != nil {
 		slog.Error("state read failed", "field", "pullNotifications", "dir", s.baseDir, "error", err.Error())
-		return []PullNotification{}, cursor
+		return nil, cursor, err
 	}
 	defer rows.Close()
 	out := []PullNotification{}
@@ -435,35 +453,44 @@ func (s *Store) PullNotificationsAfter(after int64) ([]PullNotification, int64) 
 		var n PullNotification
 		var data string
 		if err := rows.Scan(&n.Seq, &n.Title, &n.Body, &data, &n.CreatedAt); err != nil {
-			return out, cursor
+			return nil, cursor, err
 		}
 		if data != "" && data != "null" {
 			_ = json.Unmarshal([]byte(data), &n.Data)
 		}
 		out = append(out, n)
 	}
-	return out, cursor
+	return out, cursor, rows.Err()
 }
 
 // ---- web push subscriptions ------------------------------------------------
 
 func (s *Store) ListNotificationSubscriptions() []NotificationSubscription {
+	subs, err := s.ListNotificationSubscriptionsStrict()
+	if err != nil {
+		slog.Error("state read failed", "field", "notifications", "dir", s.baseDir, "error", err.Error())
+		return []NotificationSubscription{}
+	}
+	return subs
+}
+
+func (s *Store) ListNotificationSubscriptionsStrict() ([]NotificationSubscription, error) {
 	rows, err := s.db.Query(
 		`SELECT endpoint, auth, p256dh, user_agent, updated_at FROM notifications ORDER BY seq`)
 	if err != nil {
 		slog.Error("state read failed", "field", "notifications", "dir", s.baseDir, "error", err.Error())
-		return []NotificationSubscription{}
+		return nil, err
 	}
 	defer rows.Close()
 	out := []NotificationSubscription{}
 	for rows.Next() {
 		var n NotificationSubscription
 		if err := rows.Scan(&n.Endpoint, &n.Auth, &n.P256DH, &n.UserAgent, &n.UpdatedAt); err != nil {
-			return out
+			return nil, err
 		}
 		out = append(out, n)
 	}
-	return out
+	return out, rows.Err()
 }
 
 func (s *Store) UpsertNotificationSubscription(sub NotificationSubscription) error {
@@ -524,21 +551,30 @@ func insertDevice(e execer, d NativeDevice, seq int) error {
 }
 
 func (s *Store) ListNativeDevices() []NativeDevice {
-	rows, err := s.db.Query(`SELECT ` + deviceColumns + ` FROM native_devices ORDER BY seq`)
+	devices, err := s.ListNativeDevicesStrict()
 	if err != nil {
 		slog.Error("state read failed", "field", "nativeDevices", "dir", s.baseDir, "error", err.Error())
 		return []NativeDevice{}
+	}
+	return devices
+}
+
+// ListNativeDevicesStrict distinguishes an empty device set from a failed read.
+func (s *Store) ListNativeDevicesStrict() ([]NativeDevice, error) {
+	rows, err := s.db.Query(`SELECT ` + deviceColumns + ` FROM native_devices ORDER BY seq`)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	out := []NativeDevice{}
 	for rows.Next() {
 		d, err := scanDevice(rows)
 		if err != nil {
-			return out
+			return nil, err
 		}
 		out = append(out, d)
 	}
-	return out
+	return out, rows.Err()
 }
 
 func (s *Store) GetNativeDevice(deviceID string) (NativeDevice, bool) {

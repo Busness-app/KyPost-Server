@@ -84,6 +84,8 @@ services:
       # private key into a distributable layer.
       TLS_CERT_FILE: ${TLS_CERT_FILE:-}
       TLS_KEY_FILE: ${TLS_KEY_FILE:-}
+      KYPOST_BIND: ${KYPOST_BIND:?set KYPOST_BIND in .env}
+      ALLOW_INSECURE_HTTP: ${ALLOW_INSECURE_HTTP:-}
       TZ: ${TZ:-America/New_York}
       SECRET_DIR: ${SECRET_DIR:-/kypost/private}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}

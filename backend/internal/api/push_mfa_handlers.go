@@ -21,8 +21,11 @@ import (
 // user has push 2FA enabled but no device carries the flag (e.g. devices paired
 // before the flag existed), every paired device is treated as an approver so a
 // legacy pairing keeps working without a migration.
-func approverDevices(store *state.Store) []state.NativeDevice {
-	all := store.ListNativeDevices()
+func approverDevices(store *state.Store) ([]state.NativeDevice, error) {
+	all, err := store.ListNativeDevicesStrict()
+	if err != nil {
+		return nil, err
+	}
 	approvers := make([]state.NativeDevice, 0, len(all))
 	for _, d := range all {
 		if d.MFAApprover {
@@ -30,9 +33,9 @@ func approverDevices(store *state.Store) []state.NativeDevice {
 		}
 	}
 	if len(approvers) > 0 {
-		return approvers
+		return approvers, nil
 	}
-	return all
+	return all, nil
 }
 
 // MFATransportEligible reports whether a device's push transport may carry an
@@ -58,15 +61,18 @@ func MFATransportEligible(d state.NativeDevice) bool {
 // the two rules separately and drifted apart, so a user whose only paired device
 // was UnifiedPush could turn push approval on, receive {"ok":true}, and then
 // never be sent a challenge.
-func mfaApproverDevices(store *state.Store) []state.NativeDevice {
-	candidates := approverDevices(store)
+func mfaApproverDevices(store *state.Store) ([]state.NativeDevice, error) {
+	candidates, err := approverDevices(store)
+	if err != nil {
+		return nil, err
+	}
 	eligible := make([]state.NativeDevice, 0, len(candidates))
 	for _, d := range candidates {
 		if MFATransportEligible(d) {
 			eligible = append(eligible, d)
 		}
 	}
-	return eligible
+	return eligible, nil
 }
 
 // handleMFAPushEnabled toggles push 2FA for the calling user. Enabling requires
@@ -102,9 +108,19 @@ func (s *Server) handleMFAPushEnabled(w http.ResponseWriter, r *http.Request) {
 		}
 		// Must match dispatchPushChallenge exactly, or we accept the setting and
 		// then silently never deliver a challenge.
-		if len(mfaApproverDevices(store)) == 0 {
+		eligible, err := mfaApproverDevices(store)
+		if err != nil {
+			http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+			return
+		}
+		if len(eligible) == 0 {
 			msg := "pair a device on the Notifications page before enabling push approval"
-			if len(approverDevices(store)) > 0 {
+			paired, err := approverDevices(store)
+			if err != nil {
+				http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+				return
+			}
+			if len(paired) > 0 {
 				// They have devices; every one is on an excluded transport.
 				// Saying so beats "pair a device" when they already did.
 				msg = "your paired devices cannot receive sign-in approvals: UnifiedPush delivery (used by the Linux client by default) is excluded because approval requests carry sign-in details and would cross an unencrypted public broker. Pair an Android or iOS device to use push approval."
@@ -219,16 +235,24 @@ func (s *Server) dispatchPushChallenge(userID, challengeID string, ctx loginCont
 	// mfaApproverDevices applies the transport rule too — the same call the
 	// enable gate makes, so the two cannot disagree about whether this user can
 	// receive a challenge.
-	filteredDevices := mfaApproverDevices(store)
+	filteredDevices, err := mfaApproverDevices(store)
+	if err != nil {
+		s.logger.Error("push mfa: list paired devices failed", "user_id", userID, "challenge_id", challengeID, "error", err.Error())
+		return
+	}
 	if len(filteredDevices) == 0 {
 		// Log it. A user reporting "the approval never arrives" previously left
 		// no trace at all, which made this indistinguishable from a relay
 		// outage or a dropped notification.
-		paired := len(approverDevices(store))
+		paired, err := approverDevices(store)
+		if err != nil {
+			s.logger.Error("push mfa: list paired devices failed", "user_id", userID, "challenge_id", challengeID, "error", err.Error())
+			return
+		}
 		s.logger.Info("push mfa: no eligible approver device, challenge not sent",
 			"user_id", userID,
 			"challenge_id", challengeID,
-			"paired_approver_devices", strconv.Itoa(paired),
+			"paired_approver_devices", strconv.Itoa(len(paired)),
 			"reason", "all paired devices are on transports excluded from MFA challenges (UnifiedPush)")
 		return
 	}
@@ -416,8 +440,13 @@ func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
 	// The device must be permitted to approve. Under the graceful default (no
 	// device flagged as approver) any paired device may approve; once any device
 	// is explicitly an approver, only approvers may.
+	devices, err := store.ListNativeDevicesStrict()
+	if err != nil {
+		http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)
+		return
+	}
 	hasApprover := false
-	for _, d := range store.ListNativeDevices() {
+	for _, d := range devices {
 		if d.MFAApprover {
 			hasApprover = true
 			break

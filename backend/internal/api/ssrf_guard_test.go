@@ -5,8 +5,23 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
+
+func TestSameOriginRejectsCrossOriginCardDAVRedirects(t *testing.T) {
+	origin, _ := url.Parse("https://dav.example:443/addressbook")
+	for _, raw := range []string{"https://attacker.example/", "http://dav.example/", "https://dav.example:8443/"} {
+		target, _ := url.Parse(raw)
+		if sameOrigin(origin, target) {
+			t.Fatalf("sameOrigin(%q) = true", raw)
+		}
+	}
+	target, _ := url.Parse("https://DAV.example/other")
+	if !sameOrigin(origin, target) {
+		t.Fatal("implicit HTTPS port and hostname case should preserve origin")
+	}
+}
 
 func TestValidateOutboundURLRejectsPrivateAndReservedTargets(t *testing.T) {
 	cases := []struct {

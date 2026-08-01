@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -101,8 +102,16 @@ func postSiteverify(ctx context.Context, client *http.Client, req *http.Request)
 	if resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("captcha: siteverify returned status %d", resp.StatusCode)
 	}
+	const maxSiteverifyResponseBytes = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSiteverifyResponseBytes+1))
+	if err != nil {
+		return false, fmt.Errorf("captcha: read siteverify response: %w", err)
+	}
+	if len(body) > maxSiteverifyResponseBytes {
+		return false, fmt.Errorf("captcha: siteverify response exceeds %d bytes", maxSiteverifyResponseBytes)
+	}
 	var out verifyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
 		return false, fmt.Errorf("captcha: decode siteverify response: %w", err)
 	}
 	return out.Success, nil
