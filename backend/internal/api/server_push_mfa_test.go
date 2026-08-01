@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,7 @@ func pairApproverDevice(t *testing.T, srv *Server, userID, deviceID string) (id,
 
 func TestPushEnableRequiresTOTP(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("nina", "pw-nina-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "nina", "pw-nina-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -36,7 +37,7 @@ func TestPushEnableRequiresTOTP(t *testing.T) {
 
 func TestPushEnableRequiresDevice(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("omar", "pw-omar-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "omar", "pw-omar-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -51,7 +52,7 @@ func TestPushEnableRequiresDevice(t *testing.T) {
 
 func TestPushEnableAndStatusAndDeviceToggle(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("pia", "pw-pia-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "pia", "pw-pia-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -263,11 +264,11 @@ func TestPushApprovalLifecycle(t *testing.T) {
 
 func TestPushRespondCrossUserRejected(t *testing.T) {
 	srv := newTestServer(t)
-	a, err := srv.users.Create("alice", "pw-alice-testpassword", users.RoleUser)
+	a, err := srv.users.Create(context.Background(), "alice", "pw-alice-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create alice: %v", err)
 	}
-	b, err := srv.users.Create("bob", "pw-bob-testpassword", users.RoleUser)
+	b, err := srv.users.Create(context.Background(), "bob", "pw-bob-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create bob: %v", err)
 	}
@@ -297,7 +298,7 @@ func TestPushRespondCrossUserRejected(t *testing.T) {
 // ResolvePush never ran and the challenge stays "pending".
 func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("tara", "pw-tara-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "tara", "pw-tara-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -338,7 +339,7 @@ func TestPushRespondRejectedWithoutPushEnabled(t *testing.T) {
 // prompts -- the fatigue surface the cap exists to close.
 func TestSecondLoginWithinWindowPushesAgainAndSupersedesTheFirst(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("uma", "pw-uma-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "uma", "pw-uma-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -385,7 +386,7 @@ func TestSecondLoginWithinWindowPushesAgainAndSupersedesTheFirst(t *testing.T) {
 // polling a challenge no device could answer.
 func TestLoginStopsOfferingPushWhenThrottled(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("ulf", "pw-ulf-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "ulf", "pw-ulf-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -445,7 +446,7 @@ func TestLoginStopsOfferingPushWhenThrottled(t *testing.T) {
 // cut off access, including any in-flight authentication attempt.
 func TestPushFinishRejectsAfterAdminClearsMFA(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("sam", "pw-sam-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "sam", "pw-sam-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

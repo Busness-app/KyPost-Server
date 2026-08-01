@@ -1,6 +1,7 @@
 package users
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -24,7 +25,7 @@ import (
 func newKeyMaterialStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}

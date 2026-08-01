@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base32"
@@ -176,7 +177,7 @@ func doJSONAuth(srv *Server, handler http.HandlerFunc, method, path string, payl
 
 func TestTOTPEnrollmentAndLoginFlow(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("erin", "pw-erin-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "erin", "pw-erin-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -230,7 +231,7 @@ func TestTOTPEnrollmentAndLoginFlow(t *testing.T) {
 // user can still retry the current step correctly).
 func TestTOTPPerAccountReplayGuard(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("ivy", "pw-ivy-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "ivy", "pw-ivy-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -295,7 +296,7 @@ func TestTOTPPerAccountReplayGuard(t *testing.T) {
 	// following genuine code can legitimately advance (ivy's recorded step
 	// above is already pinned near the edge of the ±1 skew window accepted
 	// by totp.Validate, since (c) deliberately used a next-step code).
-	v, err := srv.users.Create("jill", "pw-jill-testpassword", users.RoleUser)
+	v, err := srv.users.Create(context.Background(), "jill", "pw-jill-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create jill: %v", err)
 	}
@@ -355,7 +356,7 @@ func TestTOTPPerAccountReplayGuard(t *testing.T) {
 // guesses for the real, still-unknown current code.
 func TestTOTPReplayCountsTowardLockout(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("kate", "pw-kate-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "kate", "pw-kate-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -412,7 +413,7 @@ func TestTOTPReplayCountsTowardLockout(t *testing.T) {
 
 func TestTOTPAttemptLockout(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("frank", "pw-frank-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "frank", "pw-frank-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -458,7 +459,7 @@ func TestTOTPAttemptLockout(t *testing.T) {
 
 func TestRecoveryCodeSingleUse(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("grace", "pw-grace-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "grace", "pw-grace-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -494,7 +495,7 @@ func TestRecoveryCodeSingleUse(t *testing.T) {
 
 func TestMFAStatusAndDisable(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("heidi", "pw-heidi-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "heidi", "pw-heidi-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -541,7 +542,7 @@ func TestMFAStatusAndDisable(t *testing.T) {
 // against a login challenge in the same window.
 func TestTOTPConfirmCodeCannotReplayAgainstLoginChallenge(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("nora", "pw-nora-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "nora", "pw-nora-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

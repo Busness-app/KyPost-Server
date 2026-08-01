@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -53,7 +54,7 @@ func TestDAVCredentialPutSucceedsWithoutRevocation(t *testing.T) {
 // Active re-check on a cache hit does not cover this.
 func TestDAVPasswordRefusedImmediatelyAfterRevocation(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("dav-revoke", "dav-user-password-long", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "dav-revoke", "dav-user-password-long", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

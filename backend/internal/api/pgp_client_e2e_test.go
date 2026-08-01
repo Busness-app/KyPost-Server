@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +20,7 @@ import (
 
 func clientProtectedUser(t *testing.T, srv *Server) users.User {
 	t.Helper()
-	u, err := srv.users.Create("e2e-tester", "e2e-tester-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "e2e-tester", "e2e-tester-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestPGPBootstrapDescribesClientProtectedAccount(t *testing.T) {
 // not told to prompt for an unlock it has no envelope for.
 func TestPGPBootstrapDescribesLegacyAccount(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("legacy-tester", "legacy-tester-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "legacy-tester", "legacy-tester-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestPGPBootstrapDescribesLegacyAccount(t *testing.T) {
 // An account with no key at all must be distinguishable from both modes.
 func TestPGPBootstrapWithNoIdentity(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("nokey-tester", "nokey-tester-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "nokey-tester", "nokey-tester-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -163,7 +164,7 @@ func TestPGPBootstrapWithNoIdentity(t *testing.T) {
 // payload as well widens exposure for nothing.
 func TestPGPPayloadRefusesServerProtectedAccount(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("legacy-payload", "legacy-payload-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "legacy-payload", "legacy-payload-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

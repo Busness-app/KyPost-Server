@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"kypost-server/backend/internal/mailmsg"
+	"strconv"
 	"strings"
 
 	goimap "github.com/BrianLeishman/go-imap"
@@ -22,15 +23,24 @@ func emailContentSize(e *goimap.Email) int64 {
 // fetchAttachments pulls one message and returns its parsed attachments
 // (go-imap's GetEmails decodes MIME parts into Email.Attachments).
 //
-// Deliberately kept as a post-fetch-only check (no pre-fetch LARGER SEARCH
-// like ListUnreadInbox/GetMessageBodies): both of this method's callers
-// (ListAttachments, GetAttachment) are reached only from an HTTP handler
-// serving one explicit, user-clicked UID (see server.go's
-// serveAttachmentList/serveAttachmentDownload) — never from an unattended
-// batch pass over a mailbox an attacker could aim at a victim's routine
-// sync. The one-message blast radius here is the same whether the size
-// check runs before or after the fetch, so the extra SEARCH round trip
-// buys no additional protection worth the complexity.
+// The "UID <uid> LARGER <cap>" SEARCH runs BEFORE the fetch, the same
+// protocol-level bound ListUnreadInbox and FetchRawMessage use. This used to
+// be a post-fetch check only, on the argument that both callers serve one
+// explicit, user-clicked UID and so "the one-message blast radius is the same
+// whether the size check runs before or after the fetch". That last part was
+// simply false: before the fetch the blast radius is zero bytes, and after it
+// the entire message has already been requested, buffered, MIME-parsed and
+// base64-decoded into memory by go-imap — emailContentSize can then only
+// describe the allocation, not prevent it. Which UID is fetched is the user's
+// choice; how big the message at that UID is belongs to whoever sent it, and
+// the recipient merely opening a message with attachments is enough to spend
+// it (ReadPage loads the attachment list automatically).
+//
+// LARGER is evaluated against the server's own RFC822.SIZE, so an oversized
+// message's literal is never sent to us at all. The post-fetch
+// emailContentSize check is kept as defense-in-depth for what SEARCH cannot
+// bound: RFC822.SIZE is the stored size, while Email.Attachments holds decoded
+// content, and a server that reports the size wrongly is still a server.
 func (c *APIClient) fetchAttachments(ctx context.Context, mailbox string, uid int) ([]goimap.Attachment, error) {
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
@@ -49,6 +59,15 @@ func (c *APIClient) fetchAttachments(ctx context.Context, mailbox string, uid in
 	mailbox = strings.TrimSpace(mailbox)
 	if err := c.selectMailboxLocked(d, mailbox); err != nil {
 		return nil, err
+	}
+
+	sb := goimap.Search().UID(strconv.Itoa(uid)).Larger(int(mailmsg.MaxInboundMessageBytes))
+	oversizedUIDs, err := d.SearchUIDs(sb)
+	if err != nil {
+		return nil, fmt.Errorf("imap search oversized: %w", err)
+	}
+	if len(oversizedUIDs) > 0 {
+		return nil, mailmsg.ErrMessageTooLarge
 	}
 
 	emails, err := d.GetEmails(uid)

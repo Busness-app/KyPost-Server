@@ -57,13 +57,18 @@ func AtomicWriteFile(path string, payload []byte, perm os.FileMode) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
-	return syncDir(dir)
+	return SyncDir(dir)
 }
 
-// syncDir fsyncs a directory so a rename into it is durable. A failure to
-// open the directory read-only is not fatal on filesystems that don't allow
+// SyncDir fsyncs a directory so a rename or link into it is durable. A failure
+// to open the directory read-only is not fatal on filesystems that don't allow
 // it; a failed Sync on a directory we did open is.
-func syncDir(dir string) error {
+//
+// Exported because AtomicWriteFile is not the only way a file appears in a
+// directory: users.Store.createInitial links its temp file into place instead,
+// to get exclusive creation, and needs exactly the same durability step
+// afterwards.
+func SyncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return nil

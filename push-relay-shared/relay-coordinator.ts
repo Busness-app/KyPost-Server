@@ -216,11 +216,35 @@ export class RelayCoordinator extends DurableObject {
    * Records newKeyId as the one active key for this IP and returns whichever key
    * held it before, for the caller to revoke. Swap-and-return in one turn, so
    * concurrent registrations from one address serialize into a chain: each sees
-   * its immediate predecessor and revokes it, and exactly one key survives.
+   * its immediate predecessor and revokes it.
+   *
+   * The swap alone is NOT enough to leave one key standing, which is what this
+   * comment used to claim. The mint happens outside this turn, so a registration
+   * paused between the swap and the mint has nothing in KV for its successor to
+   * revoke — the successor's revoke is a no-op against an id that does not exist
+   * yet, and the pauser then mints a second permanently active key. Every caller
+   * must therefore come back through confirmRegistrationIp after minting.
    */
   async claimRegistrationIp(newKeyId: string, legacyKeyId?: string | null): Promise<string | null> {
     const prior = await this.currentOwner(legacyKeyId);
     await this.ctx.storage.put(OWNER_KEY, newKeyId);
     return prior === undefined || prior === newKeyId ? null : prior;
+  }
+
+  /**
+   * The commit half of claimRegistrationIp: reports whether keyId is STILL this
+   * IP's registration, now that its record exists in KV.
+   *
+   * False means a concurrent registration displaced it while it was minting. The
+   * successor already tried to revoke this id and found nothing, so nothing else
+   * will ever clean it up — the caller must delete the key it just minted and
+   * hand out nothing. That is the whole reason this exists: it is the only
+   * moment at which a superseded registration can still be told it lost.
+   *
+   * Deliberately a read, not a compare-and-delete. Clearing the owner here would
+   * unclaim the IP for the winner that legitimately holds it.
+   */
+  async confirmRegistrationIp(keyId: string): Promise<boolean> {
+    return (await this.ctx.storage.get<string>(OWNER_KEY)) === keyId;
   }
 }

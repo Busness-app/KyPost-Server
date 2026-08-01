@@ -70,7 +70,10 @@ dataset = "kypost_push_usage_apns"
 #   APNS_KEY_ID        - Key ID from Apple Developer portal
 #   APNS_TEAM_ID       - Team ID from Apple Developer portal
 #   APNS_TOPIC         - Bundle ID, e.g. "com.urlxl.mail"
-#   APNS_ENVIRONMENT   - "production" or "sandbox"
+#   APNS_ENVIRONMENT   - "production" or "sandbox" (unset means production).
+#                        Any other value is a configuration error, not a
+#                        default: /health reports configured=false and /send
+#                        refuses, rather than the relay guessing a host.
 #
 # There is no ADMIN_SECRET: the relay has no admin API. Keys are listed and
 # revoked with `npx wrangler kv key` against API_KEYS — see the README.

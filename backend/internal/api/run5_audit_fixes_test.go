@@ -27,7 +27,7 @@ import (
 // single IP.
 func TestLoginLockoutSurvivesUsernameCaseAndWhitespace(t *testing.T) {
 	srv := newTestServer(t)
-	if _, err := srv.users.Create("victim", "victim-real-password", users.RoleUser); err != nil {
+	if _, err := srv.users.Create(context.Background(), "victim", "victim-real-password", users.RoleUser); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestLoginLockoutSurvivesUsernameCaseAndWhitespace(t *testing.T) {
 func TestLoginLockoutStillScopedPerAccount(t *testing.T) {
 	srv := newTestServer(t)
 	for _, name := range []string{"alice", "bob"} {
-		if _, err := srv.users.Create(name, name+"-real-password-long", users.RoleUser); err != nil {
+		if _, err := srv.users.Create(context.Background(), name, name+"-real-password-long", users.RoleUser); err != nil {
 			t.Fatalf("Create %s: %v", name, err)
 		}
 	}
@@ -129,7 +129,7 @@ func TestCloseMailClientIgnoresNonClosers(t *testing.T) {
 // got 429 ("back off") where it needed 401 ("re-pair").
 func TestDeactivatedAccountDeviceAuthRefundsTheStrike(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("device-owner", "device-owner-password", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "device-owner", "device-owner-password", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestDeactivatedAccountDeviceAuthRefundsTheStrike(t *testing.T) {
 		t.Fatalf("userStore: %v", err)
 	}
 	secret := "device-secret-value"
-	hash, err := users.HashPassword(secret)
+	hash, err := users.HashPassword(context.Background(), secret)
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestDeactivatedAccountDeviceAuthRefundsTheStrike(t *testing.T) {
 // deactivation branch, not to device auth generally.
 func TestWrongDeviceSecretStillSpendsAStrike(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("device-owner2", "device-owner-password", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "device-owner2", "device-owner-password", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestWrongDeviceSecretStillSpendsAStrike(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userStore: %v", err)
 	}
-	hash, err := users.HashPassword("the-real-secret")
+	hash, err := users.HashPassword(context.Background(), "the-real-secret")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestWrongDeviceSecretStillSpendsAStrike(t *testing.T) {
 func TestUsernameMustBeASinglePathSegment(t *testing.T) {
 	srv := newTestServer(t)
 	for _, bad := range []string{"alice/bob", "..", ".", "a b", "alice:bob", "with\\slash", "", ".hidden", "-flag", "../etc"} {
-		if _, err := srv.users.Create(bad, "a-perfectly-fine-password", users.RoleUser); err == nil {
+		if _, err := srv.users.Create(context.Background(), bad, "a-perfectly-fine-password", users.RoleUser); err == nil {
 			t.Fatalf("Create(%q) was accepted; CardDAV builds URLs out of this", bad)
 		}
 	}
@@ -239,7 +239,7 @@ func TestUsernameMustBeASinglePathSegment(t *testing.T) {
 	// users.NormalizeUsername), so reusing one here would fail for the wrong
 	// reason.
 	for _, good := range []string{"alice", "Bob", "carol.dee", "erin_fay", "gil-hall", "user123", "9lives"} {
-		if _, err := srv.users.Create(good, "a-perfectly-fine-password", users.RoleUser); err != nil {
+		if _, err := srv.users.Create(context.Background(), good, "a-perfectly-fine-password", users.RoleUser); err != nil {
 			t.Fatalf("Create(%q) was rejected: %v", good, err)
 		}
 	}
@@ -315,7 +315,7 @@ func TestEveryAdvertisedPhotoTypeIsActuallyDecodable(t *testing.T) {
 // the process lifetime.
 func TestExpiredMFAChallengesAreSweptWithoutBeingAccessed(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("mfa-user", "mfa-user-password-x", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "mfa-user", "mfa-user-password-x", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestExpiredMFAChallengesAreSweptWithoutBeingAccessed(t *testing.T) {
 
 func TestMFAChallengeSweeperLeavesLiveChallengesAlone(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("mfa-user2", "mfa-user-password-x", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "mfa-user2", "mfa-user-password-x", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestPairingStillMintsTheSubscriberID(t *testing.T) {
 // CardDAV read/write for up to davCredentialTTL.
 func TestDAVCachedCredentialRejectedAfterDeactivation(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("dav-user", "dav-user-password-long", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "dav-user", "dav-user-password-long", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestDAVCachedCredentialRejectedAfterDeactivation(t *testing.T) {
 // read, not a second scrypt verification.
 func TestDAVCachedCredentialStillWorksForActiveAccount(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("dav-user2", "dav-user-password-long", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "dav-user2", "dav-user-password-long", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

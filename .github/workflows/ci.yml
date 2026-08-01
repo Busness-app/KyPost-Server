@@ -219,8 +219,10 @@ jobs:
         run: npm ci && npm run typecheck
 
       # No test framework and no install: node's own runner and type stripping.
-      - name: claim-ownership interleavings
-        run: node --test push-relay-shared/relay-claims.test.mts
+      # Files are listed explicitly rather than by directory: `node --test <dir>`
+      # walks it, and these directories have node_modules in them.
+      - name: relay behaviour
+        run: node --test push-relay-shared/relay-claims.test.mts worker-apns/src/apns-config.test.mts
 
   docker:
     name: ci-docker

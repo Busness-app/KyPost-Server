@@ -181,7 +181,14 @@ func (s *Server) handlePGPExportLegacyKey(w http.ResponseWriter, r *http.Request
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return
 	}
-	if !verifyAccountCredential(u, req.Password, req.AuthSecret) {
+	confirmed, err := verifyAccountCredential(r.Context(), u, req.Password, req.AuthSecret)
+	if err != nil {
+		// Nothing was checked, so the throttle strike goes back with it.
+		s.mfaLockout.cancelAttempt(ac.UserID)
+		writeKDFBusy(w)
+		return
+	}
+	if !confirmed {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}

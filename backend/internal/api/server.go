@@ -106,13 +106,7 @@ type Server struct {
 	// ~5us HMAC at 0.2 core-seconds: sixteen free requests emptied the bucket and
 	// denied sign-in to the whole instance, with no per-IP proxy rule able to
 	// restore it.
-	loginParamsLimiter *ipRateLimiter
-	// kdfSem bounds how many memory-hard derivations may run at once, process
-	// wide. Each scrypt at N=1<<17 allocates 128 MiB, and the per-IP lockouts
-	// bound guessing, not concurrency — so ~64 simultaneous unauthenticated
-	// CardDAV auth attempts could sum past the container memory limit and get
-	// the process OOM-killed. Sessions are in-memory, so that logs out everyone.
-	kdfSem                 chan struct{}
+	loginParamsLimiter     *ipRateLimiter
 	mfaPushLimiter         *mfaPushLimiter
 	sendAsCooldown         *cooldown
 	classifierTestCooldown *cooldown
@@ -297,7 +291,6 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		wkdLimiter:             newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
 		pushPollLimiter:        newIPRateLimiter(pushPollBurst, pushPollRefillPerSec),
 		loginParamsLimiter:     newIPRateLimiter(loginParamsBurst, loginParamsRefillPerSec),
-		kdfSem:                 make(chan struct{}, maxConcurrentKDF),
 		deviceRescan:           newIntervalGate(deviceRescanInterval),
 		mfaPushLimiter:         newMfaPushLimiter(),
 		sendAsCooldown:         newCooldown(sendAsVerificationCooldownFor),

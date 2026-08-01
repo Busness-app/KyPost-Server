@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -61,7 +62,7 @@ func TestCSRFTokenEndpointRequiresSession(t *testing.T) {
 // fix an embedding problem without anyone connecting it to CSRF.
 func TestSessionCookieStaysSameSiteLax(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("samesite-user", "pw-samesite-testpass", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "samesite-user", "pw-samesite-testpass", users.RoleUser)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}

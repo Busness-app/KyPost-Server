@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -14,8 +15,10 @@ import (
 )
 
 // bootstrapPasswordFile is where a generated first-run admin password is left
-// for the operator to read once.
-const bootstrapPasswordFile = "first-run-password.txt"
+// for the operator to read once. Aliased rather than redeclared: the standalone
+// bootstrap path in users.LoadOrMigrate writes the same file, and two spellings
+// of the name is how the two paths drifted apart in the first place.
+const bootstrapPasswordFile = users.BootstrapPasswordFile
 
 // BootstrapAdmin seeds admin.env with first-run admin credentials if no
 // account store exists yet. It is the `--mode bootstrap-admin` entry point,
@@ -62,7 +65,7 @@ func BootstrapAdmin() error {
 		}
 	}
 
-	hash, err := users.HashPassword(password)
+	hash, err := users.HashPassword(context.Background(), password)
 	if err != nil {
 		return fmt.Errorf("hash admin password: %w", err)
 	}
@@ -81,12 +84,9 @@ func BootstrapAdmin() error {
 		return nil
 	}
 
-	pwPath := filepath.Join(configDir, bootstrapPasswordFile)
-	body := fmt.Sprintf("username: %s\npassword: %s\n\n"+
-		"This password must be changed at first login. Delete this file once you have it.\n",
-		username, password)
-	if err := fsutil.AtomicWriteFile(pwPath, []byte(body), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", pwPath, err)
+	pwPath, err := users.WriteFirstRunPassword(configDir, username, password)
+	if err != nil {
+		return err
 	}
 
 	fmt.Println("Generated first-run admin credentials in the config volume")

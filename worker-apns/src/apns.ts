@@ -9,12 +9,20 @@ import { base64UrlEncode, base64UrlEncodeString, pemToDer } from "../../push-rel
 const APNS_PRODUCTION_HOST = "api.push.apple.com";
 const APNS_SANDBOX_HOST = "api.sandbox.push.apple.com";
 
+/**
+ * Which APNs host a send goes to. Only ever produced by parseApnsEnvironment,
+ * which is a parser rather than a cast: the two hosts do not accept each
+ * other's device tokens, and picking the wrong one is silent (see the
+ * host selection in sendApnsMessage).
+ */
+export type ApnsEnvironment = "production" | "sandbox";
+
 export interface ApnsConfig {
   authKey: string; // .p8 PEM contents
   keyId: string; // from Apple Developer portal
   teamId: string; // Team ID from Apple Developer portal
   topic: string; // bundle ID, e.g. "com.urlxl.mail"
-  environment: "production" | "sandbox";
+  environment: ApnsEnvironment;
 }
 
 export interface PushMessage {
@@ -140,7 +148,9 @@ export async function sendApnsMessage(
     };
   }
 
-  // APNs HTTP/2 request to /3/device/{token}
+  // APNs HTTP/2 request to /3/device/{token}. config.environment is an
+  // ApnsEnvironment, so "not production" really does mean sandbox here — when
+  // this read a raw string, any typo in APNS_ENVIRONMENT landed in this branch.
   const host = config.environment === "production" ? APNS_PRODUCTION_HOST : APNS_SANDBOX_HOST;
   const url = `https://${host}/3/device/${token}`;
 

@@ -107,13 +107,20 @@ func newToken() (string, error) {
 }
 
 // List returns all domain claims regardless of verification status.
-func (s *Store) List() []Claim {
+//
+// The error is the disk re-read's, and it is returned rather than dropped for
+// the reason spelled out on VerifiedDomains: the in-memory copy is a cache of
+// the file, and a caller handed a cache after the file stopped being readable
+// has no way to know which it got.
+func (s *Store) List() ([]Claim, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, err
+	}
 	out := make([]Claim, len(s.claims))
 	copy(out, s.claims)
-	return out
+	return out, nil
 }
 
 // Create records (or refreshes) a claim for domain. Re-claiming an existing
@@ -216,15 +223,27 @@ func (s *Store) Delete(domain string) (bool, error) {
 }
 
 // VerifiedDomains returns the set of domains with Verified == true.
-func (s *Store) VerifiedDomains() map[string]bool {
+//
+// The disk re-read's error is RETURNED, not dropped. This set is an
+// authorization answer — it is what decides whether this instance may serve a
+// user's public key at a domain's Web Key Directory (see
+// api.lookupPublishedKey) — and the claims slice behind it is only ever a
+// cache of the file. Swallowing the error meant that once the file became
+// unreadable or unparseable, every subsequent call kept answering from
+// whatever was cached before the damage, indefinitely and indistinguishably
+// from a healthy read. An authorization decision may fail, but it may not fail
+// open, so the failure has to be something the caller can see.
+func (s *Store) VerifiedDomains() (map[string]bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, err
+	}
 	out := map[string]bool{}
 	for _, c := range s.claims {
 		if c.Verified {
 			out[c.Domain] = true
 		}
 	}
-	return out
+	return out, nil
 }

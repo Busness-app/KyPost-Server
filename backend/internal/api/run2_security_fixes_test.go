@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -128,7 +129,7 @@ func TestNativeRegisterConcurrentSameDeviceIDOnlyOneOwnerWins(t *testing.T) {
 	srv := newTestServer(t)
 
 	aliceID := bootstrapAdminID(t, srv)
-	bob, err := srv.users.Create("bob", "correct-horse-battery", users.RoleUser)
+	bob, err := srv.users.Create(context.Background(), "bob", "correct-horse-battery", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create bob: %v", err)
 	}

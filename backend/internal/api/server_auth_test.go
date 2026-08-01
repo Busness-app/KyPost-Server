@@ -89,7 +89,7 @@ func TestLoginMeLogoutFlow(t *testing.T) {
 
 	// The bootstrap admin's password is unknown to this test (it's randomly
 	// generated), so create a fresh known-password user to exercise login.
-	u, err := srv.users.Create("alice", "correct-horse-battery", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "alice", "correct-horse-battery", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestSessionCookieSecureFlag(t *testing.T) {
 	// TLS-terminating proxy so X-Forwarded-Proto is honored below.
 	trustProxyCIDRsForTest(t, "192.0.2.0/24")
 	srv := newTestServer(t)
-	u, err := srv.users.Create("carol", "correct-horse-battery", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "carol", "correct-horse-battery", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestSessionCookieSecureFlag(t *testing.T) {
 // make even the correct password fail with 429 until the lockout expires.
 func TestHandleLoginLocksOutAfterThreeFailures(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("frank", "correct-horse-battery", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "frank", "correct-horse-battery", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -225,7 +225,7 @@ func (f fakeCaptchaVerifier) Verify(ctx context.Context, token, remoteIP string)
 // that accepts it must let the login through.
 func TestHandleLoginRequiresCaptchaWhenConfigured(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("grace", "correct-horse-battery", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "grace", "correct-horse-battery", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestHandleCaptchaConfigReportsDisabledByDefault(t *testing.T) {
 // matching header still succeeds.
 func TestCSRFProtectionOnCookieAuthedMutations(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("heidi", "old-password-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "heidi", "old-password-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestCSRFProtectionOnCookieAuthedMutations(t *testing.T) {
 // credential for CSRF to exploit.
 func TestCSRFProtectionSkipsRequestsWithoutSessionCookie(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("ivan", "pw-ivan-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "ivan", "pw-ivan-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestCSRFProtectionSkipsRequestsWithoutSessionCookie(t *testing.T) {
 
 func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("bob", "old-password-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "bob", "old-password-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if !users.VerifyPassword(got, "new-password-testpassword") {
+	if ok, _ := users.VerifyPassword(context.Background(), got, "new-password-testpassword"); !ok {
 		t.Fatalf("expected new password to verify")
 	}
 }
@@ -380,7 +380,7 @@ func TestChangePasswordRequiresCurrentPassword(t *testing.T) {
 func newTestServerWithUser(t *testing.T) (*Server, users.User) {
 	t.Helper()
 	srv := newTestServer(t)
-	u, err := srv.users.Create("session-tester", "session-tester-testpassword", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "session-tester", "session-tester-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestSessionSweeperReclaimsAbandonedSessions(t *testing.T) {
 // the extension still cannot breach the absolute lifetime cap.
 func TestSessionSlideIsQuantized(t *testing.T) {
 	srv := newTestServer(t)
-	u, err := srv.users.Create("slider", "correct-horse-battery-staple", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "slider", "correct-horse-battery-staple", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

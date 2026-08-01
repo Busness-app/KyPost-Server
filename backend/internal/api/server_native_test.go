@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -43,7 +44,7 @@ func newTestServer(t *testing.T) *Server {
 	})
 
 	configDir := t.TempDir()
-	usersStore, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
+	usersStore, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		t.Fatalf("users.LoadOrMigrate: %v", err)
 	}
@@ -129,7 +130,7 @@ func pairNativeDevice(t *testing.T, srv *Server, userID, deviceID string) (id, s
 	if err != nil {
 		t.Fatalf("randomToken: %v", err)
 	}
-	hash, err := users.HashPassword(raw)
+	hash, err := users.HashPassword(context.Background(), raw)
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
@@ -215,7 +216,7 @@ func TestNativeRegisterStoresDevice(t *testing.T) {
 	if devices[0].SecretHash == "" || devices[0].SecretHash == resp.DeviceSecret {
 		t.Fatalf("stored SecretHash = %q, want a non-empty hash distinct from the raw secret", devices[0].SecretHash)
 	}
-	if !users.VerifyDeviceSecret(devices[0].SecretHash, resp.DeviceSecret) {
+	if ok, _ := users.VerifyDeviceSecret(context.Background(), devices[0].SecretHash, resp.DeviceSecret); !ok {
 		t.Fatalf("stored SecretHash does not verify against the returned deviceSecret")
 	}
 }

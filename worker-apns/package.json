@@ -2,6 +2,7 @@
   "name": "kypost-push-relay-apns",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "Cloudflare Worker that delivers KyPost native push notifications to iOS devices via Apple Push Notification service (APNs).",
   "scripts": {
     "dev": "wrangler dev",

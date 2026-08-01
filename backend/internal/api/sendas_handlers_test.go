@@ -11,6 +11,7 @@ package api
 // still created correctly.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -184,7 +185,7 @@ func TestHandleSendAsCreateRateLimited(t *testing.T) {
 func TestHandleSendAsListScopedToCaller(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
-	other, err := srv.users.Create("other-sendas", "pw-other-testpassword", users.RoleUser)
+	other, err := srv.users.Create(context.Background(), "other-sendas", "pw-other-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create other user: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestHandleSendAsDeleteHappyPath(t *testing.T) {
 func TestHandleSendAsDeleteRejectsOtherUsersAlias(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
-	other, err := srv.users.Create("other-sendas-del", "pw-other-testpassword", users.RoleUser)
+	other, err := srv.users.Create(context.Background(), "other-sendas-del", "pw-other-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create other user: %v", err)
 	}

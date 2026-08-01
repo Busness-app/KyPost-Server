@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,7 +28,7 @@ func requirePermissionEnforcement(t *testing.T) {
 func newTestUsersStore(t *testing.T) *users.Store {
 	t.Helper()
 	configDir := t.TempDir()
-	store, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
+	store, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
@@ -142,7 +143,7 @@ func TestClearAllMFAIfRequested_PartialFailureDoesNotWriteMarker(t *testing.T) {
 	logger := newTestLogger(t)
 
 	configDir := t.TempDir()
-	store, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
+	store, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
@@ -188,7 +189,7 @@ func TestClearAllMFAIfRequested_AlreadyClearedUserNotReclearedOnRetry(t *testing
 	if err != nil {
 		t.Fatalf("FirstAdmin: %v", err)
 	}
-	other, err := store.Create("second-admin", "hunter22-hunter22", users.RoleAdmin)
+	other, err := store.Create(context.Background(), "second-admin", "hunter22-hunter22", users.RoleAdmin)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

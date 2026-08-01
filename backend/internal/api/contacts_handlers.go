@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -9,11 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/fsutil"
 	"kypost-server/backend/internal/pgpdiscovery"
 	"kypost-server/backend/internal/users"
+
+	"github.com/ProtonMail/gopenpgp/v3/crypto"
 )
 
 // contactPayload is the client-supplied subset of contacts.Contact — it omits
@@ -377,7 +379,16 @@ func (s *Server) handleContactsDAVPassword(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "failed to generate password", http.StatusInternalServerError)
 			return
 		}
-		hash, err := users.HashPassword(raw)
+		// Under the shared derivation slots, like every other scrypt on a
+		// request path. This one was the clearest hole: any authenticated
+		// session could POST here in a loop with no lockout and no cost, and
+		// each call allocated 128 MiB outside the ceiling that was supposed to
+		// bound exactly that.
+		hash, err := users.HashPassword(r.Context(), raw)
+		if errors.Is(err, users.ErrKDFBusy) {
+			writeKDFBusy(w)
+			return
+		}
 		if err != nil {
 			http.Error(w, "failed to store password", http.StatusInternalServerError)
 			return

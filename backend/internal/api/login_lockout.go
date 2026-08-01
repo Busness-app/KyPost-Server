@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strconv"
 	"sync"
@@ -303,7 +302,10 @@ func timingDummyHash() string {
 	// Derived outside the lock: holding it across a 128 MiB scrypt would
 	// serialize every concurrent unknown-username login behind one derivation.
 	// Two callers racing here both produce a valid hash at the same cost.
-	h, err := users.HashPassword("kypost-timing-equalization-dummy")
+	// context.Background(), not a request's: this hash is process-wide state
+	// derived once per cost setting, and abandoning it because one caller went
+	// away would make the next caller pay for it again.
+	h, err := users.HashPassword(context.Background(), "kypost-timing-equalization-dummy")
 	if err != nil {
 		// HashPassword only fails on a crypto/rand failure or invalid cost
 		// parameters, neither of which is recoverable or reachable in practice.
@@ -350,11 +352,15 @@ func warmLoginTimingHash() {
 // on BOTH paths and clears the flag either way, so the caller's deferred refund
 // becomes a no-op — taking the flag as a parameter is what stops a future call
 // site double-refunding and minting budget out of nothing.
-func (s *Server) chargeLoginKDF(ctx context.Context, held *loginBudget, work func() bool) (bool, error) {
+func (s *Server) chargeLoginKDF(ctx context.Context, held *loginBudget, work func(context.Context) bool) (bool, error) {
 	var ok bool
-	err := s.withKDFSlot(ctx, func() {
+	// The slot is taken HERE rather than left to the derivation inside work, so
+	// the stopwatch starts after the queue. users.WithKDFSlot hands back a
+	// context that already holds the slot, and the derivation work performs
+	// reuses it instead of queueing a second time.
+	err := users.WithKDFSlot(ctx, func(ctx context.Context) {
 		start := time.Now()
-		ok = work()
+		ok = work(ctx)
 		held.settle(loginKDFBilledSeconds(time.Since(start)) - loginKDFReserveSeconds)
 	})
 	if err != nil {
@@ -436,9 +442,13 @@ func (b *loginBudget) refund() { b.settle(-loginKDFReserveSeconds) }
 
 // equalizeLoginTiming verifies candidate against a throwaway scrypt hash so
 // the unknown-username (and inactive-account) login path costs the same as a
-// real wrong-password check.
-func equalizeLoginTiming(candidate string) {
-	users.VerifySecretHash(timingDummyHash(), candidate)
+// real wrong-password check. The result is discarded — it is the COST that
+// matters — but a shed slot is not: returning without deriving is the one
+// outcome the caller has to be able to tell apart, or the unknown-username
+// path becomes measurably cheaper than the known one under load.
+func equalizeLoginTiming(ctx context.Context, candidate string) error {
+	_, err := users.VerifySecretHash(ctx, timingDummyHash(), candidate)
+	return err
 }
 
 // Instance-wide login throttle and the per-IP lockout, both added because the
@@ -499,76 +509,20 @@ const (
 	loginParamsRefillPerSec = 1
 )
 
-// maxConcurrentKDF bounds simultaneous memory-hard derivations process-wide.
-// Each scrypt at N=1<<17 holds 128 MiB, so this caps peak KDF memory at roughly
-// maxConcurrentKDF*128 MiB regardless of how many callers arrive at once. The
-// per-IP lockouts bound how many attempts an address may make; nothing bounded
-// how many could be in flight together, which is what turns an auth endpoint
-// into an OOM primitive on a memory-limited container.
-const maxConcurrentKDF = 4
-
 // deviceRescanInterval is the floor between full device-index rebuilds.
 // Long enough that a flood of unknown device ids cannot drive them, short
 // enough that a device paired on another process shows up promptly.
 const deviceRescanInterval = 30 * time.Second
 
-// errKDFBusy means the derivation slots were saturated for longer than
-// kdfMaxQueueWait. Callers must shed — answer 503 with Retry-After — and must
-// not spend a lockout strike: the credential was never examined, so counting it
-// would let a load spike lock out the users trying to sign in through it.
-var errKDFBusy = errors.New("api: no derivation slot available")
+// The derivation slots themselves live in package users, next to the scrypt
+// call they bound — see users.WithKDFSlot and the file comment on users/kdf.go.
+// They used to live here as a Server field that every caller had to remember to
+// wrap itself, and half of them did not. errKDFBusy and kdfMaxQueueWait remain
+// as this package's names for the shed condition and the queue tolerance, so
+// the handlers below read the same as before.
+var errKDFBusy = users.ErrKDFBusy
 
-// kdfMaxQueueWait bounds how long a request may wait for a KDF slot. A var so
-// tests can shrink it; production always uses the value below.
-//
-// Capping concurrent derivations caps scrypt's memory, but an unbounded queue
-// replaces that with a backlog of goroutines and a drain time set by the
-// attacker: four slots at ~200 ms makes two thousand queued logins a hundred
-// seconds in which nobody can sign in, change a password, or reach CardDAV,
-// since all four paths share these slots. Neither ReadTimeout nor a client
-// hanging up unblocks a goroutine parked on a channel send.
-//
-// Shedding is the honest answer — the server cannot currently afford to check
-// this credential, which is a 503, not a 401. Sized at roughly ten derivations'
-// worth of queue.
-var kdfMaxQueueWait = 2 * time.Second
-
-// withKDFSlot runs fn holding one of the process-wide derivation slots,
-// abandoning the attempt if no slot comes free in kdfMaxQueueWait or the
-// caller's context is cancelled first.
-//
-// Every path that performs scrypt in response to a request must use it,
-// including authenticated ones: a session bounds who can ask, not how much memory
-// the asking costs. Current callers: chargeLoginKDF (login), the recovery code
-// check, the password change, and DAV basic auth.
-//
-// Returns errKDFBusy or ctx.Err() without running fn. A caller that ignores the
-// error reports "the server is overloaded" as "your password is wrong", which is
-// both a lie and a lockout. A nil semaphore (zero-value Server in tests) runs fn
-// directly.
-func (s *Server) withKDFSlot(ctx context.Context, fn func()) error {
-	if s.kdfSem == nil {
-		fn()
-		return nil
-	}
-	// Check cancellation before queueing: a client that has already gone away
-	// should not be given a slot ahead of one that is still waiting.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	timer := time.NewTimer(kdfMaxQueueWait)
-	defer timer.Stop()
-	select {
-	case s.kdfSem <- struct{}{}:
-		defer func() { <-s.kdfSem }()
-		fn()
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return errKDFBusy
-	}
-}
+func kdfMaxQueueWait() time.Duration { return users.KDFMaxQueueWait }
 
 // writeKDFBusy answers a shed derivation. 503 rather than 429: the caller did
 // nothing wrong and no per-caller budget was exceeded — this instance is out of
@@ -577,7 +531,7 @@ func writeKDFBusy(w http.ResponseWriter) {
 	// Derived from the queue tolerance rather than hardcoded: a caller told to
 	// come back sooner than the queue takes to drain just rejoins the same
 	// saturated queue.
-	retrySeconds := int(kdfMaxQueueWait.Seconds()) + 1
+	retrySeconds := int(kdfMaxQueueWait().Seconds()) + 1
 	w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
 	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 		"error":             "server is busy verifying credentials, try again shortly",

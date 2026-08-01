@@ -54,7 +54,7 @@ func postLogin(t *testing.T, srv *Server, body map[string]any) *httptest.Respons
 // measurement at all.
 func TestLoginParamsDoesNotRevealAccountExistence(t *testing.T) {
 	srv := newTestServer(t)
-	if _, err := srv.users.Create("realuser", "correct-horse-battery-staple", users.RoleUser); err != nil {
+	if _, err := srv.users.Create(context.Background(), "realuser", "correct-horse-battery-staple", users.RoleUser); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestLoginParamsDoesNotRevealAccountExistence(t *testing.T) {
 func TestLegacyAccountUpgradesToDerivedAuthOnLogin(t *testing.T) {
 	srv := newTestServer(t)
 	const pw = "correct-horse-battery-staple"
-	u, err := srv.users.Create("legacy-user", pw, users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "legacy-user", pw, users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -160,13 +160,13 @@ func TestLegacyAccountUpgradesToDerivedAuthOnLogin(t *testing.T) {
 func TestDerivedAuthRejectsCrossFormCredentials(t *testing.T) {
 	srv := newTestServer(t)
 	const pw = "correct-horse-battery-staple"
-	u, err := srv.users.Create("cross-form", pw, users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "cross-form", pw, users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	salt, iterations := loginParams(t, srv, "cross-form")
 	authSecret := deriveAuthSecretForTest(t, pw, salt, iterations)
-	if err := srv.users.UpgradeToDerivedAuth(u.ID, pw, authSecret, salt, iterations); err != nil {
+	if err := srv.users.UpgradeToDerivedAuth(context.Background(), u.ID, pw, authSecret, salt, iterations); err != nil {
 		t.Fatalf("UpgradeToDerivedAuth: %v", err)
 	}
 
@@ -179,26 +179,26 @@ func TestDerivedAuthRejectsCrossFormCredentials(t *testing.T) {
 	// salt alone yields it — PBKDF2 still needs the password — but because the
 	// two are different credentials for one account, and any call site that
 	// reached for the wrong verifier would silently accept the wrong one.
-	if users.VerifyPassword(converted, authSecret) {
+	if ok, _ := users.VerifyPassword(context.Background(), converted, authSecret); ok {
 		t.Error("VerifyPassword accepted the derived auth secret; the two credential forms must be " +
 			"strictly disjoint so no call site can mix them")
 	}
 	// And the real password must not verify either, now that the account has
 	// converted: PasswordHash no longer covers it.
-	if users.VerifyPassword(converted, pw) {
+	if ok, _ := users.VerifyPassword(context.Background(), converted, pw); ok {
 		t.Error("VerifyPassword accepted the plaintext password on a converted account")
 	}
 	// And a password must not be accepted as a derived secret.
-	if users.VerifyAuthSecret(converted, pw) {
+	if ok, _ := users.VerifyAuthSecret(context.Background(), converted, pw); ok {
 		t.Error("VerifyAuthSecret accepted the plaintext password")
 	}
 	// VerifyAuthSecret must refuse outright for a legacy account, so no call site
 	// can use it as a general-purpose check.
-	legacy, err := srv.users.Create("still-legacy", pw, users.RoleUser)
+	legacy, err := srv.users.Create(context.Background(), "still-legacy", pw, users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if users.VerifyAuthSecret(legacy, pw) {
+	if ok, _ := users.VerifyAuthSecret(context.Background(), legacy, pw); ok {
 		t.Error("VerifyAuthSecret returned true for a legacy account")
 	}
 }
@@ -208,7 +208,7 @@ func TestDerivedAuthRejectsCrossFormCredentials(t *testing.T) {
 func TestPasswordChangeCommitsCredentialAndRewrapTogether(t *testing.T) {
 	srv := newTestServer(t)
 	const oldPw = "correct-horse-battery-staple"
-	u, err := srv.users.Create("rewrap-user", oldPw, users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "rewrap-user", oldPw, users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestPasswordChangeCommitsCredentialAndRewrapTogether(t *testing.T) {
 	if after.LoginSalt != newSalt {
 		t.Errorf("LoginSalt = %q, want %q", after.LoginSalt, newSalt)
 	}
-	if !users.VerifyAuthSecret(after, newSecret) {
+	if ok, _ := users.VerifyAuthSecret(context.Background(), after, newSecret); !ok {
 		t.Error("the new derived credential does not verify")
 	}
 	// The envelope must have moved in the SAME write. If it lags, the key is
@@ -270,7 +270,7 @@ func TestPasswordChangeCommitsCredentialAndRewrapTogether(t *testing.T) {
 func TestPasswordChangeRefusesRewrapWithoutDerivedAuth(t *testing.T) {
 	srv := newTestServer(t)
 	const oldPw = "correct-horse-battery-staple"
-	u, err := srv.users.Create("mismatch-user", oldPw, users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "mismatch-user", oldPw, users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

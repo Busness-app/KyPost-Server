@@ -329,7 +329,7 @@ func newTestPollerWithUsers(t *testing.T) (*Poller, string) {
 	t.Helper()
 	p := newTestPollerForSendAs(t)
 	configDir := t.TempDir()
-	usersStore, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
+	usersStore, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		t.Fatalf("users.LoadOrMigrate: %v", err)
 	}

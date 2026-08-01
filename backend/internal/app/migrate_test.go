@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -39,7 +40,7 @@ func TestMigrateLegacySingleUserData(t *testing.T) {
 		t.Fatalf("write config.yaml: %v", err)
 	}
 
-	usersStore, err := users.LoadOrMigrate(configDir, filepath.Join(configDir, "admin.env"))
+	usersStore, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}

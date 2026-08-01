@@ -3,6 +3,7 @@
 package users
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
 	// testing, in a non-test file, solely for testing.Testing() in
 	// SetHashCostForTest. It reports whether this build is `go test` and pulls
 	// no test framework into the binary.
@@ -403,7 +405,7 @@ func (s *Store) invalidateCacheLocked() {
 // default admin if neither exists. There is no production data to preserve, so
 // a clean reset is an acceptable fallback for a missing or unparseable legacy
 // file.
-func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
+func LoadOrMigrate(ctx context.Context, configDir, legacyAdminEnvPath string) (*Store, error) {
 	path := filepath.Join(configDir, "users.json")
 	store := newStore(path)
 
@@ -433,7 +435,7 @@ func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
 			UpdatedAt:          now,
 		}
 		if u.PasswordHash == "" && admin["ADMIN_PASS"] != "" {
-			hash, err := HashPassword(admin["ADMIN_PASS"])
+			hash, err := HashPassword(ctx, admin["ADMIN_PASS"])
 			if err != nil {
 				return nil, err
 			}
@@ -455,7 +457,7 @@ func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	hash, err := HashPassword(randomPassword)
+	hash, err := HashPassword(ctx, randomPassword)
 	if err != nil {
 		return nil, err
 	}
@@ -479,15 +481,69 @@ func LoadOrMigrate(configDir, legacyAdminEnvPath string) (*Store, error) {
 		return nil, err
 	}
 	if won {
-		fmt.Fprintf(os.Stderr, "Generated first-run admin credentials\nUsername: %s\nPassword: %s\nPassword change is required on first login\n", u.Username, randomPassword)
+		// The password goes to a 0600 file, never to stderr. It used to be
+		// printed here, which is the same mistake app.BootstrapAdmin's doc
+		// comment exists to prevent, reached by the other door: run standalone
+		// under systemd (or any process manager, or CI) and stderr is the
+		// journal — centralized, retained, and readable by more people than
+		// the config directory. MustChangePassword narrows the window; it does
+		// not stop the password sitting in a log forever.
+		pwPath, werr := WriteFirstRunPassword(configDir, u.Username, randomPassword)
+		if werr != nil {
+			// Fatal, and it has to be: users.json now exists, so the next
+			// start will NOT re-bootstrap, and the only account on it has a
+			// random password that was never handed to anyone.
+			return nil, fmt.Errorf(
+				"created %s but could not hand over the generated admin password (%w); "+
+					"delete %s to bootstrap again, or set BOOTSTRAP_ADMIN_PASS",
+				path, werr, path)
+		}
+		fmt.Fprintf(os.Stderr,
+			"Generated first-run admin credentials\nUsername: %s\nPassword: written to %s (read it, then delete it)\n"+
+				"Password change is required on first login\n",
+			u.Username, pwPath)
 	}
 	return store, nil
 }
 
-// createInitial writes the very first users.json atomically and exclusively.
-// The api and daemon processes start at the same time on first boot; if the
-// other creates the file first, the loser adopts the winner's copy so both
-// agree on the admin's user ID.
+// BootstrapPasswordFile is where a generated first-run admin password is left
+// for the operator to read once, inside CONFIG_DIR.
+const BootstrapPasswordFile = "first-run-password.txt"
+
+// WriteFirstRunPassword hands a generated first-run admin password to the
+// operator through a 0600 file in configDir, and returns its path.
+//
+// One implementation for both bootstrap paths — the container's
+// `--mode bootstrap-admin` (app.BootstrapAdmin) and a standalone start that
+// finds no users.json (LoadOrMigrate above) — because they used to disagree:
+// the container wrote this file and the standalone path printed the password
+// to stderr. An operator following SECURITY.md's "the password is never
+// logged" had no way to tell which one they were running.
+func WriteFirstRunPassword(configDir, username, password string) (string, error) {
+	pwPath := filepath.Join(configDir, BootstrapPasswordFile)
+	body := fmt.Sprintf("username: %s\npassword: %s\n\n"+
+		"This password must be changed at first login. Delete this file once you have it.\n",
+		username, password)
+	if err := fsutil.AtomicWriteFile(pwPath, []byte(body), 0o600); err != nil {
+		return "", fmt.Errorf("write %s: %w", pwPath, err)
+	}
+	return pwPath, nil
+}
+
+// createInitial writes the very first users.json atomically, exclusively, and
+// durably. The api and daemon processes start at the same time on first boot;
+// if the other creates the file first, the loser adopts the winner's copy so
+// both agree on the admin's user ID.
+//
+// The two fsyncs are the same pair fsutil.AtomicWriteFile documents, and they
+// matter here for a reason that file cannot state: this is the ONLY copy of
+// the account whose ID everything else on the volume is about to be keyed to.
+// Exclusive creation was handled and durable creation was not, so a crash
+// between the link and the writeback lost users.json while the state written
+// alongside it survived — and the next boot would mint a DIFFERENT admin ID,
+// orphaning all of it. Link rather than Rename is what makes the creation
+// exclusive (Rename would clobber a file the other process just won), so
+// AtomicWriteFile cannot be reused wholesale; only its durability can.
 func (s *Store) createInitial(f usersFile) (won bool, err error) {
 	if f.Version == 0 {
 		f.Version = 1
@@ -514,6 +570,14 @@ func (s *Store) createInitial(f usersFile) (won bool, err error) {
 		_ = tmp.Close()
 		return false, err
 	}
+	// Before the link, or the link can reach the disk while the bytes behind it
+	// have not — leaving a users.json that exists and is empty, which is worse
+	// than one that is missing: the missing one re-bootstraps, the empty one
+	// fails to parse and the server will not start.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return false, err
+	}
 	if err := tmp.Close(); err != nil {
 		return false, err
 	}
@@ -521,6 +585,10 @@ func (s *Store) createInitial(f usersFile) (won bool, err error) {
 		if os.IsExist(err) {
 			return false, nil
 		}
+		return false, err
+	}
+	// After the link, or the link itself can be lost.
+	if err := fsutil.SyncDir(dir); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -710,7 +778,7 @@ func (s *Store) GetByUsername(username string) (User, error) {
 }
 
 // Create adds a new user with the given username/password/role.
-func (s *Store) Create(username, password string, role Role) (User, error) {
+func (s *Store) Create(ctx context.Context, username, password string, role Role) (User, error) {
 	if err := ValidateUsername(username); err != nil {
 		return User{}, err
 	}
@@ -732,7 +800,7 @@ func (s *Store) Create(username, password string, role Role) (User, error) {
 				return ErrUsernameTaken
 			}
 		}
-		hash, err := HashPassword(password)
+		hash, err := HashPassword(ctx, password)
 		if err != nil {
 			return err
 		}
@@ -825,11 +893,11 @@ func (s *Store) SetRole(id string, role Role) (User, error) {
 
 // SetPassword sets a new password. If requireChange is true the user must
 // change it again on next login (used for admin-initiated resets).
-func (s *Store) SetPassword(id, newPassword string, requireChange bool) (User, error) {
+func (s *Store) SetPassword(ctx context.Context, id, newPassword string, requireChange bool) (User, error) {
 	if err := ValidatePassword(newPassword); err != nil {
 		return User{}, err
 	}
-	hash, err := HashPassword(newPassword)
+	hash, err := HashPassword(ctx, newPassword)
 	if err != nil {
 		return User{}, err
 	}
@@ -1105,18 +1173,6 @@ func (s *Store) ReplaceRecoveryCodes(id string, recoveryHashes []string) (User, 
 // code fails to match, so a wrong attempt never bumps UpdatedAt.
 var errRecoveryCodeNoMatch = errors.New("recovery code no match")
 
-// KDFGuard wraps one memory-hard comparison so a caller can meter it.
-//
-// A recovery-code check is up to ten derivations; one concurrency slot held
-// across all ten owns that slot for seconds, and with four slots process-wide
-// four such checks stall every login. Guarding each comparison lets other work
-// interleave while never exceeding one derivation's memory per caller.
-//
-// Returning an error abandons the remaining comparisons and surfaces from
-// ConsumeRecoveryCode unchanged, so an overloaded server sheds rather than
-// queues. A nil guard runs the comparisons directly.
-type KDFGuard func(compare func()) error
-
 // ConsumeRecoveryCode verifies candidate against the user's stored recovery
 // hashes; on the first match it removes that hash (one-time use) and persists.
 // It returns matched=false with a nil error and no write when nothing matches.
@@ -1127,20 +1183,26 @@ type KDFGuard func(compare func()) error
 // on the hash string rather than an index keeps the removal correct if the list
 // changed while we were deriving.
 //
-// guard meters each comparison individually; see KDFGuard. Pass nil for
-// unmetered.
-func (s *Store) ConsumeRecoveryCode(id, candidate string, guard KDFGuard) (User, bool, error) {
+// Each comparison takes and releases a derivation slot INDIVIDUALLY, which is
+// why ctx is passed straight through to verifyScryptHash rather than the whole
+// loop running inside one WithKDFSlot. A check is up to ten derivations; one
+// slot held across all ten owns it for seconds, and with MaxConcurrentKDF
+// slots process-wide, that many such checks stall every login. Per-comparison
+// admission lets other work interleave while never exceeding one derivation's
+// memory per caller. Do NOT wrap a call to this in WithKDFSlot: it would
+// collapse the ten acquisitions back into one and reintroduce exactly that.
+//
+// A slot error abandons the remaining comparisons and surfaces unchanged, so an
+// overloaded server sheds rather than queues.
+func (s *Store) ConsumeRecoveryCode(ctx context.Context, id, candidate string) (User, bool, error) {
 	snapshot, err := s.Get(id)
 	if err != nil {
 		return User{}, false, err
 	}
 	matched := ""
 	for _, h := range snapshot.RecoveryCodesHash {
-		hit := false
-		compare := func() { hit = verifyScryptHash(h, candidate) }
-		if guard == nil {
-			compare()
-		} else if err := guard(compare); err != nil {
+		hit, err := verifyScryptHash(ctx, h, candidate)
+		if err != nil {
 			return User{}, false, err
 		}
 		// Short-circuit on the first match: the remaining hashes cannot also
@@ -1182,19 +1244,22 @@ func (s *Store) ConsumeRecoveryCode(id, candidate string, guard KDFGuard) (User,
 // credentials for the same account, and each verifier refusing the other's
 // accounts is what keeps them from becoming interchangeable by accident. See
 // VerifyAuthSecret for the mirror image.
-func VerifyPassword(u User, candidate string) bool {
+// A non-nil error means the credential was NOT examined (ErrKDFBusy, or ctx
+// cancelled); it never means "wrong". Callers must not spend a lockout strike
+// on it — see ErrKDFBusy.
+func VerifyPassword(ctx context.Context, u User, candidate string) (bool, error) {
 	if u.UsesDerivedAuth() {
-		return false
+		return false, nil
 	}
-	return verifyScryptHash(u.PasswordHash, candidate)
+	return verifyScryptHash(ctx, u.PasswordHash, candidate)
 }
 
 // VerifySecretHash checks a candidate secret against a scrypt-encoded hash
 // produced by HashPassword — the generic counterpart to VerifyPassword, for
 // secrets other than a User's login password (e.g. an app-specific CardDAV
 // password).
-func VerifySecretHash(encoded, candidate string) bool {
-	return verifyScryptHash(encoded, candidate)
+func VerifySecretHash(ctx context.Context, encoded, candidate string) (bool, error) {
+	return verifyScryptHash(ctx, encoded, candidate)
 }
 
 // deviceSecretPrefix tags the SHA-256 device-secret format so
@@ -1222,17 +1287,20 @@ func HashDeviceSecret(secret string) string {
 // HashDeviceSecret existed hold one, and rejecting them would silently unpair
 // every phone on every existing install. New registrations write the tagged
 // form, so that branch drains as devices re-pair.
-func VerifyDeviceSecret(stored, candidate string) bool {
+// The legacy branch derives scrypt and so takes a slot; the tagged branch is a
+// single SHA-256 and takes none. ctx is therefore only consulted on the legacy
+// path, and a busy-slot error there means "not checked", exactly as elsewhere.
+func VerifyDeviceSecret(ctx context.Context, stored, candidate string) (bool, error) {
 	encoded, ok := strings.CutPrefix(stored, deviceSecretPrefix)
 	if !ok {
-		return verifyScryptHash(stored, candidate)
+		return verifyScryptHash(ctx, stored, candidate)
 	}
 	want, err := hex.DecodeString(encoded)
 	if err != nil || len(want) != sha256.Size {
-		return false
+		return false, nil
 	}
 	got := sha256.Sum256([]byte(candidate))
-	return subtle.ConstantTimeCompare(got[:], want) == 1
+	return subtle.ConstantTimeCompare(got[:], want) == 1, nil
 }
 
 // Current scrypt cost parameters for newly written password hashes.
@@ -1315,7 +1383,11 @@ func SetHashCostForTest(n int) (restore func()) {
 
 // HashPassword produces a scrypt-encoded hash string in the same format
 // used historically by admin.env's ADMIN_PASS_HASH field.
-func HashPassword(password string) (string, error) {
+//
+// Holds one of the process-wide derivation slots for the duration, and returns
+// ErrKDFBusy if none comes free (see kdf.go). ctx is honoured while queueing,
+// so a caller whose client has gone away stops occupying the queue.
+func HashPassword(ctx context.Context, password string) (string, error) {
 	var (
 		n      = hashCostN
 		r      = scryptR
@@ -1326,7 +1398,15 @@ func HashPassword(password string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	hash, err := scrypt.Key([]byte(password), salt, n, r, p, keyLen)
+	var (
+		hash []byte
+		err  error
+	)
+	if slotErr := withKDFSlot(ctx, func() {
+		hash, err = scrypt.Key([]byte(password), salt, n, r, p, keyLen)
+	}); slotErr != nil {
+		return "", slotErr
+	}
 	if err != nil {
 		return "", err
 	}
@@ -1338,22 +1418,28 @@ func HashPassword(password string) (string, error) {
 	), nil
 }
 
-func verifyScryptHash(encoded, candidate string) bool {
+// verifyScryptHash reports whether candidate derives to encoded.
+//
+// The (bool, error) split is load-bearing: false means "wrong credential" and
+// an error means "not checked". Collapsing the second into the first is what
+// turns an overloaded server into a wrong-password answer, and then into a
+// lockout for whoever was trying to sign in through the spike.
+func verifyScryptHash(ctx context.Context, encoded, candidate string) (bool, error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "scrypt" {
-		return false
+		return false, nil
 	}
 	n, err := strconv.Atoi(parts[1])
 	if err != nil {
-		return false
+		return false, nil
 	}
 	r, err := strconv.Atoi(parts[2])
 	if err != nil {
-		return false
+		return false, nil
 	}
 	p, err := strconv.Atoi(parts[3])
 	if err != nil {
-		return false
+		return false, nil
 	}
 	// Bound the cost parameters: scrypt.Key allocates 128*r*N bytes of whatever it
 	// is told, and these come out of a file (users.json, per-user state.json, an
@@ -1362,25 +1448,34 @@ func verifyScryptHash(encoded, candidate string) bool {
 	// own check only rejects values far above this. The floor is
 	// MinVerifiableScryptN so hashes written before the cost was raised still
 	// verify; the ceiling is ~1 GB.
+	//
+	// This bound and the slot below answer different questions and both are
+	// needed: this one caps what ONE derivation may allocate, the slot caps how
+	// many may allocate at once.
 	if n < MinVerifiableScryptN || n > 1<<20 || n&(n-1) != 0 || r < 1 || r > 32 || p < 1 || p > 16 {
-		return false
+		return false, nil
 	}
 	salt, err := base64.StdEncoding.DecodeString(parts[4])
 	if err != nil {
-		return false
+		return false, nil
 	}
 	expected, err := base64.StdEncoding.DecodeString(parts[5])
 	if err != nil {
-		return false
+		return false, nil
 	}
 	if len(expected) == 0 {
-		return false
+		return false, nil
 	}
-	derived, err := scrypt.Key([]byte(candidate), salt, n, r, p, len(expected))
+	var derived []byte
+	if slotErr := withKDFSlot(ctx, func() {
+		derived, err = scrypt.Key([]byte(candidate), salt, n, r, p, len(expected))
+	}); slotErr != nil {
+		return false, slotErr
+	}
 	if err != nil {
-		return false
+		return false, nil
 	}
-	return subtle.ConstantTimeCompare(derived, expected) == 1
+	return subtle.ConstantTimeCompare(derived, expected) == 1, nil
 }
 
 // NeedsRehash reports whether a stored scrypt hash was written with cost
@@ -1422,15 +1517,18 @@ func NeedsRehash(encoded string) bool {
 //
 // MustChangePassword and every other field are left untouched: this is not a
 // password change, and it must be invisible to the user.
-func (s *Store) RehashPassword(id, verifiedCredential string) error {
+func (s *Store) RehashPassword(ctx context.Context, id, verifiedCredential string) error {
 	_, err := s.mutate(id, func(u *User) error {
 		// Whichever credential form this account stores. VerifyPassword refuses
 		// derived-auth accounts by design, so branching here is required, not
 		// defensive — without it the rehash upgrade would silently never run for a
 		// converted account.
-		ok := VerifyPassword(*u, verifiedCredential)
+		ok, err := VerifyPassword(ctx, *u, verifiedCredential)
 		if u.UsesDerivedAuth() {
-			ok = VerifyAuthSecret(*u, verifiedCredential)
+			ok, err = VerifyAuthSecret(ctx, *u, verifiedCredential)
+		}
+		if err != nil {
+			return err
 		}
 		if !ok {
 			return errors.New("refusing to rehash: candidate does not match the stored hash")
@@ -1438,7 +1536,7 @@ func (s *Store) RehashPassword(id, verifiedCredential string) error {
 		if !NeedsRehash(u.PasswordHash) {
 			return nil
 		}
-		hash, err := HashPassword(verifiedCredential)
+		hash, err := HashPassword(ctx, verifiedCredential)
 		if err != nil {
 			return err
 		}
@@ -1492,11 +1590,11 @@ func (u User) UsesDerivedAuth() bool {
 // plaintext password for a derived-auth account, or the reverse: treating a
 // derived secret as a password would let anyone who read the salt off the public
 // login-params endpoint authenticate with it.
-func VerifyAuthSecret(u User, candidate string) bool {
+func VerifyAuthSecret(ctx context.Context, u User, candidate string) (bool, error) {
 	if !u.UsesDerivedAuth() {
-		return false
+		return false, nil
 	}
-	return verifyScryptHash(u.PasswordHash, candidate)
+	return verifyScryptHash(ctx, u.PasswordHash, candidate)
 }
 
 // SetDerivedAuth replaces id's credential with a client-derived auth secret,
@@ -1504,8 +1602,8 @@ func VerifyAuthSecret(u User, candidate string) bool {
 // reproduce it. requireChange mirrors SetPassword's flag. The PGP-key envelope
 // is written in the same mutation when rewrapped is non-empty — see
 // SetDerivedAuthAndRewrapPGP.
-func (s *Store) SetDerivedAuth(id, authSecret, loginSalt string, iterations int, requireChange bool) (User, error) {
-	return s.SetDerivedAuthAndRewrapPGP(id, authSecret, loginSalt, iterations, requireChange, "")
+func (s *Store) SetDerivedAuth(ctx context.Context, id, authSecret, loginSalt string, iterations int, requireChange bool) (User, error) {
+	return s.SetDerivedAuthAndRewrapPGP(ctx, id, authSecret, loginSalt, iterations, requireChange, "")
 }
 
 // SetDerivedAuthAndRewrapPGP replaces id's credential AND, when rewrapped is
@@ -1518,7 +1616,7 @@ func (s *Store) SetDerivedAuth(id, authSecret, loginSalt string, iterations int,
 // has — permanently, since a later rewrap re-derives from the CURRENT password.
 // The only way back is deleting the identity and losing every message encrypted
 // to it.
-func (s *Store) SetDerivedAuthAndRewrapPGP(id, authSecret, loginSalt string, iterations int, requireChange bool, rewrapped string) (User, error) {
+func (s *Store) SetDerivedAuthAndRewrapPGP(ctx context.Context, id, authSecret, loginSalt string, iterations int, requireChange bool, rewrapped string) (User, error) {
 	if err := ValidateAuthSecret(authSecret); err != nil {
 		return User{}, err
 	}
@@ -1528,7 +1626,7 @@ func (s *Store) SetDerivedAuthAndRewrapPGP(id, authSecret, loginSalt string, ite
 	if iterations < MinLoginIterations {
 		return User{}, fmt.Errorf("login iterations must be at least %d", MinLoginIterations)
 	}
-	hash, err := HashPassword(authSecret)
+	hash, err := HashPassword(ctx, authSecret)
 	if err != nil {
 		return User{}, err
 	}
@@ -1566,7 +1664,7 @@ const MinLoginIterations = 100_000
 // call site fails closed rather than pinning the account to a caller-supplied
 // secret. A no-op for an account that has already upgraded, so a racing second
 // login cannot downgrade it.
-func (s *Store) UpgradeToDerivedAuth(id, verifiedPassword, authSecret, loginSalt string, iterations int) error {
+func (s *Store) UpgradeToDerivedAuth(ctx context.Context, id, verifiedPassword, authSecret, loginSalt string, iterations int) error {
 	if err := ValidateAuthSecret(authSecret); err != nil {
 		return err
 	}
@@ -1576,7 +1674,7 @@ func (s *Store) UpgradeToDerivedAuth(id, verifiedPassword, authSecret, loginSalt
 	if iterations < MinLoginIterations {
 		return fmt.Errorf("login iterations must be at least %d", MinLoginIterations)
 	}
-	hash, err := HashPassword(authSecret)
+	hash, err := HashPassword(ctx, authSecret)
 	if err != nil {
 		return err
 	}
@@ -1584,7 +1682,11 @@ func (s *Store) UpgradeToDerivedAuth(id, verifiedPassword, authSecret, loginSalt
 		if u.UsesDerivedAuth() {
 			return nil
 		}
-		if !VerifyPassword(*u, verifiedPassword) {
+		ok, verr := VerifyPassword(ctx, *u, verifiedPassword)
+		if verr != nil {
+			return verr
+		}
+		if !ok {
 			return errors.New("refusing to upgrade auth derivation: password does not match")
 		}
 		u.PasswordHash = hash

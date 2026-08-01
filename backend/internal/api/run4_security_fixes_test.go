@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -140,7 +141,7 @@ func TestConcurrentDeactivationCannotRemoveLastAdmin(t *testing.T) {
 		if adminA.ID == "" {
 			t.Fatal("precondition: expected a seeded active admin")
 		}
-		adminB, err := srv.users.Create("second-admin", "second-admin-testpassword", users.RoleAdmin)
+		adminB, err := srv.users.Create(context.Background(), "second-admin", "second-admin-testpassword", users.RoleAdmin)
 		if err != nil {
 			t.Fatalf("Create second admin: %v", err)
 		}

@@ -158,7 +158,7 @@ If `clientIp` is a loopback or bridge address (e.g., `172.17.0.1`), every user s
 
 ### Secret Handling
 
-- **Bootstrap password:** On first start, KyPost writes the generated admin password to `first-run-password.txt` (mode `600`) in the config volume. Read it and delete it immediately. Logs are unrotated by default and readable by anything with Docker socket access—the password is never logged.
+- **Bootstrap password:** On first start, KyPost writes the generated admin password to `first-run-password.txt` (mode `600`) in the config volume. Read it and delete it immediately. Logs are unrotated by default and readable by anything with Docker socket access—the password is never logged. This holds for both bootstrap paths: the container's `--mode bootstrap-admin` step and a server started directly against an empty config directory. If the file cannot be written, startup fails rather than falling back to printing the password.
 - **IMAP credentials:** Stored encrypted at `/kypost/private/imap-config.key` (master key) and per-user encrypted payloads. The key does not rotate; compromise of the key compromises all encrypted credentials.
 - **TOTP secrets:** Master key at `/kypost/private/totp-secret.key`. Same rotation caveat.
 - **Pairing secret:** `/kypost/private/pairing.key` (generated on first start). Must be identical across replicas if you run multiple.
@@ -168,7 +168,7 @@ All of these live in `/kypost/private`. **Back up this volume separately and sto
 
 ### First Run & Bootstrap
 
-- Bootstrap credentials are written to a file on first run, not logged.
+- Bootstrap credentials are written to a file on first run, not logged. Running the binary directly (systemd, CI, a bare host) takes the same path as the container: the password goes to `first-run-password.txt`, and only its *path* is printed.
 - You can pass `BOOTSTRAP_ADMIN_PASS` on the first run to avoid the file write (you already have the password).
 - You can also pass `BOOTSTRAP_ADMIN_USER` to name the initial admin (default: `admin`).
 - The bootstrap account starts on the password-change screen and cannot access anything else until you change it.

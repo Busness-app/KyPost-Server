@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -68,7 +69,7 @@ func TestDeleteDeviceDoesNotEvictAnotherUsersIndexEntry(t *testing.T) {
 		t.Fatalf("no bootstrap user: %v", err)
 	}
 	owner := all[0]
-	attacker, err := srv.users.Create("evictor", "evictor-testpassword", users.RoleUser)
+	attacker, err := srv.users.Create(context.Background(), "evictor", "evictor-testpassword", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

@@ -22,8 +22,9 @@ func TestCreateAndList(t *testing.T) {
 	if c.Token == "" || c.Verified {
 		t.Fatal("new claim must have a token and be unverified")
 	}
-	if got := s.List(); len(got) != 1 {
-		t.Fatalf("List len = %d", len(got))
+	got, err := s.List()
+	if err != nil || len(got) != 1 {
+		t.Fatalf("List = %d claims, err=%v", len(got), err)
 	}
 }
 
@@ -40,8 +41,8 @@ func TestReclaimRefreshesTokenAndResetsVerified(t *testing.T) {
 	if second.Verified {
 		t.Fatal("re-claim should reset Verified")
 	}
-	if len(s.List()) != 1 {
-		t.Fatal("re-claim must not duplicate the domain")
+	if claims, err := s.List(); err != nil || len(claims) != 1 {
+		t.Fatalf("re-claim must not duplicate the domain: %d claims, err=%v", len(claims), err)
 	}
 }
 
@@ -52,7 +53,10 @@ func TestSetVerifiedAndVerifiedDomains(t *testing.T) {
 	if err := s.SetVerified("example.com", true, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	vd := s.VerifiedDomains()
+	vd, err := s.VerifiedDomains()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !vd["example.com"] || vd["other.org"] {
 		t.Fatalf("VerifiedDomains = %v", vd)
 	}
@@ -65,7 +69,7 @@ func TestDelete(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("delete: ok=%v err=%v", ok, err)
 	}
-	if len(s.List()) != 0 {
-		t.Fatal("claim not removed")
+	if claims, err := s.List(); err != nil || len(claims) != 0 {
+		t.Fatalf("claim not removed: %d claims, err=%v", len(claims), err)
 	}
 }

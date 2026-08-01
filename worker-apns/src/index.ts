@@ -30,13 +30,16 @@
  * ../../push-relay-shared/push-relay-common.ts.
  */
 
-import { ApnsConfig, PushMessage, sendApnsMessage } from "./apns";
+// Types are imported with `import type` throughout this file so the module
+// links under a plain type-stripping loader (node --test, which is what runs
+// apns-config.test.mts) and not only under wrangler's bundler, which infers
+// which named imports were types and elides them.
+import type { ApnsConfig, ApnsEnvironment, PushMessage } from "./apns";
+import { sendApnsMessage } from "./apns";
+import type { ApiKeyRecord, CommonEnv, RequestContext } from "../../push-relay-shared/push-relay-common";
 import {
-  ApiKeyRecord,
-  CommonEnv,
   DEFAULT_LIMIT_PER_MINUTE,
   KEY_PREFIX,
-  RequestContext,
   bearer,
   checkMinuteLimit,
   claimTokenForSend,
@@ -61,23 +64,53 @@ export interface Env extends CommonEnv {
   APNS_ENVIRONMENT: string;
 }
 
-function apnsConfig(env: Env): ApnsConfig {
-  return {
-    authKey: env.APNS_AUTH_KEY ?? "",
-    keyId: (env.APNS_KEY_ID ?? "").trim(),
-    teamId: (env.APNS_TEAM_ID ?? "").trim(),
-    topic: (env.APNS_TOPIC ?? "").trim(),
-    environment: ((env.APNS_ENVIRONMENT ?? "").trim().toLowerCase() as "production" | "sandbox") || "production",
-  };
+/**
+ * Parse APNS_ENVIRONMENT, or return null if it names neither host.
+ *
+ * A parser rather than the `as "production" | "sandbox"` cast this used to be.
+ * The cast asserted a validation that never ran, and the `|| "production"`
+ * after it only caught the empty string — so `APNS_ENVIRONMENT=prodution`
+ * stayed "prodution", failed the `=== "production"` test in sendApnsMessage,
+ * and quietly sent every production device token to the sandbox. Apple answers
+ * those with 400 BadDeviceToken, isStaleResponse reads that as a dead token,
+ * and the backend unregisters the device: one typo silently unregistered every
+ * iOS device the relay served, with /health still reporting "configured".
+ *
+ * Unset means production, which is the deployment a self-hoster who never sets
+ * the variable wants. Anything else is a configuration failure, not a default —
+ * a relay that cannot tell which Apple host it is for must not guess.
+ */
+export function parseApnsEnvironment(raw: string | undefined): ApnsEnvironment | null {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (value === "") {
+    return "production";
+  }
+  return value === "production" || value === "sandbox" ? value : null;
+}
+
+/**
+ * The relay's APNs configuration, or null if it is unusable. Null covers a
+ * missing credential AND an unparseable APNS_ENVIRONMENT, so both reach
+ * /health's `configured` flag and /send's refusal by the same route — the
+ * environment check used to sit outside apnsConfigured entirely, which is what
+ * let a misconfigured relay report itself healthy.
+ */
+function apnsConfig(env: Env): ApnsConfig | null {
+  const environment = parseApnsEnvironment(env.APNS_ENVIRONMENT);
+  const keyId = (env.APNS_KEY_ID ?? "").trim();
+  const teamId = (env.APNS_TEAM_ID ?? "").trim();
+  const topic = (env.APNS_TOPIC ?? "").trim();
+  // Presence is checked on the trimmed value; the key itself is passed through
+  // untrimmed, since pemToDer does its own normalization.
+  const authKey = env.APNS_AUTH_KEY ?? "";
+  if (environment === null || !authKey.trim() || !keyId || !teamId || !topic) {
+    return null;
+  }
+  return { authKey, keyId, teamId, topic, environment };
 }
 
 function apnsConfigured(env: Env): boolean {
-  return Boolean(
-    (env.APNS_AUTH_KEY ?? "").trim() &&
-    (env.APNS_KEY_ID ?? "").trim() &&
-    (env.APNS_TEAM_ID ?? "").trim() &&
-    (env.APNS_TOPIC ?? "").trim(),
-  );
+  return apnsConfig(env) !== null;
 }
 
 // ---- /send -----------------------------------------------------------------
@@ -111,7 +144,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   const token = payload.token;
 
   const config = apnsConfig(env);
-  if (!apnsConfigured(env)) {
+  if (!config) {
     rc.log({ level: "error", event: "send.misconfigured", keyId: record.id });
     return fail(rc, 500, "relay not configured");
   }

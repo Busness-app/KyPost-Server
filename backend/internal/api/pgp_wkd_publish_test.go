@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,11 +12,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"kypost-server/backend/internal/pgpdiscovery"
 	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
+
+	"github.com/ProtonMail/gopenpgp/v3/crypto"
 )
+
+// wkdVerifiedDomains is Store.VerifiedDomains with its read error asserted
+// away. These tests are about which domains end up verified, not about whether
+// the claims file reads — the error exists so lookupPublishedKey cannot mistake
+// a stale cache for a fresh answer, and a test that swallowed it would be
+// making exactly that mistake.
+func wkdVerifiedDomains(t *testing.T, s *wkdpublish.Store) map[string]bool {
+	t.Helper()
+	vd, err := s.VerifiedDomains()
+	if err != nil {
+		t.Fatalf("VerifiedDomains: %v", err)
+	}
+	return vd
+}
 
 // doWKDRoute drives a request through the server's real route table
 // (srv.routes()) rather than calling a handler directly, so it exercises
@@ -154,7 +170,7 @@ func TestWKDDomainVerifyDoesNotUnpublishOnTransientDNSError(t *testing.T) {
 		t.Fatalf("verify response should surface a checkError hint on transient failure: %+v", verifyResp)
 	}
 
-	if !store.VerifiedDomains()["example.com"] {
+	if !wkdVerifiedDomains(t, store)["example.com"] {
 		t.Fatal("a transient DNS error on Verify must not unpublish an already-verified domain")
 	}
 }
@@ -165,7 +181,7 @@ func TestWKDDomainVerifyDoesNotUnpublishOnTransientDNSError(t *testing.T) {
 func TestWKDDomainManagementRequiresAdmin(t *testing.T) {
 	srv := newTestServer(t)
 	srv.mustBootstrapUserID(t)
-	regular, err := srv.users.Create("regular-wkd", "regular-password", users.RoleUser)
+	regular, err := srv.users.Create(context.Background(), "regular-wkd", "regular-password", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create regular user: %v", err)
 	}
@@ -209,7 +225,7 @@ func TestWKDDomainClaimIsInstanceScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wkdPublishStore: %v", err)
 	}
-	if !store.VerifiedDomains()["example.com"] {
+	if !wkdVerifiedDomains(t, store)["example.com"] {
 		t.Fatalf("expected example.com to be verified in the instance store")
 	}
 
@@ -460,7 +476,7 @@ func TestLookupPublishedKeySkipsCorruptKeyContinuesToNextUser(t *testing.T) {
 		t.Fatalf("SetVerified: %v", err)
 	}
 
-	validUser, err := srv.users.Create("valid-wkd-user", "initial-pass-123", users.RoleUser)
+	validUser, err := srv.users.Create(context.Background(), "valid-wkd-user", "initial-pass-123", users.RoleUser)
 	if err != nil {
 		t.Fatalf("Create valid user: %v", err)
 	}
@@ -537,5 +553,66 @@ func TestWKDServedAliasKeyIsAcceptedByDiscovery(t *testing.T) {
 	}
 	if _, err := validateDiscoveredKey(armored, "alice@other.example"); err != nil {
 		t.Fatalf("served key rejected for the alias it was served under: %v", err)
+	}
+}
+
+// TestWKDServingFailsClosedOnUnreadableClaims covers the fail-OPEN that
+// Store.VerifiedDomains returning an error exists to close.
+//
+// The claims slice behind VerifiedDomains is a cache of wkd-domains.json, and
+// the disk re-read's error used to be discarded (`_ = s.refreshFromDiskLocked()`).
+// So a process that had already read a verified claim kept answering from that
+// cache once the file stopped being readable — indefinitely, and
+// indistinguishably from a healthy read. This is the authorization gate on a
+// public, unauthenticated endpoint: it decides whether this instance may serve
+// a user's key at a domain's Web Key Directory at all. It may fail; it may not
+// fail open.
+//
+// The pre-damage 200 is what makes the post-damage 404 mean something: it
+// proves the address, the key, the hash and the claim were all correct, so the
+// only thing that changed is the unreadable file.
+func TestWKDServingFailsClosedOnUnreadableClaims(t *testing.T) {
+	srv := newTestServer(t)
+	adminID := srv.mustBootstrapUserID(t)
+	writeUnreachableSMTPIMAPConfig(t, srv, adminID, "alice@example.com")
+	seedVerifiedSendAs(t, srv, adminID, "alice@example.com")
+	seedUserPGPKey(t, srv, adminID, "alice@example.com")
+
+	store, err := srv.wkdPublishStore()
+	if err != nil {
+		t.Fatalf("wkdPublishStore: %v", err)
+	}
+	if _, err := store.Create("example.com"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetVerified("example.com", true, time.Now()); err != nil {
+		t.Fatalf("SetVerified: %v", err)
+	}
+
+	hu := wkdHashLocalPart("alice")
+	path := "/.well-known/openpgpkey/example.com/hu/" + hu
+	if r := doRaw(t, srv, http.MethodGet, path, "", nil); r.Code != http.StatusOK {
+		t.Fatalf("precondition: expected the key to be served, status %d body=%s", r.Code, r.Body.String())
+	}
+
+	// Corrupt the file the claim lives in, leaving the store's warm in-memory
+	// copy exactly as it was. This stands in for any read failure — a truncated
+	// write, a damaged volume, a permissions change — all of which reach
+	// VerifiedDomains as the same refresh error.
+	claimsPath := filepath.Join(srv.stateDir, "wkd-domains.json")
+	if err := os.WriteFile(claimsPath, []byte("{ this is not the claims file"), 0o600); err != nil {
+		t.Fatalf("corrupt claims file: %v", err)
+	}
+
+	if r := doRaw(t, srv, http.MethodGet, path, "", nil); r.Code != http.StatusNotFound {
+		t.Fatalf("published a key from a cached claim after the claims file became unreadable: status %d", r.Code)
+	}
+
+	// The admin list must report the breakage rather than present the stale
+	// cache as current: an admin reading it is deciding whether their domains
+	// are published, and a confident wrong answer is the worst outcome.
+	listRec := doWKDRoute(srv, adminID, http.MethodGet, "/api/pgp/wkd/domains", "")
+	if listRec.Code != http.StatusInternalServerError {
+		t.Fatalf("admin list served stale claims instead of surfacing the read failure: status %d", listRec.Code)
 	}
 }

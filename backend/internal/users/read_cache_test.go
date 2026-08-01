@@ -1,6 +1,7 @@
 package users
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -8,7 +9,7 @@ import (
 func newCacheTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestReadCacheSeesAnotherProcessWrite(t *testing.T) {
 	// A dedicated account: the store refuses to demote or deactivate the last
 	// active admin (guardNotLastActiveAdmin), and the seeded admin is exactly
 	// that. The subject here is cache freshness, not that guard.
-	subject, err := store.Create("victor", "correct-horse-battery-staple", RoleUser)
+	subject, err := store.Create(context.Background(), "victor", "correct-horse-battery-staple", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestReadCacheInvalidatedByOwnWrite(t *testing.T) {
 
 	if _, err := store.Deactivate(admin.ID); err != nil {
 		// The last-active-admin guard may refuse; use a second account instead.
-		u, cerr := store.Create("someone-else", "correct-horse-battery-staple", RoleUser)
+		u, cerr := store.Create(context.Background(), "someone-else", "correct-horse-battery-staple", RoleUser)
 		if cerr != nil {
 			t.Fatalf("Create: %v", cerr)
 		}
@@ -128,7 +129,7 @@ func TestReadCacheInvalidatedByOwnWrite(t *testing.T) {
 func TestListDoesNotMutateTheCache(t *testing.T) {
 	store, _ := newCacheTestStore(t)
 	for _, name := range []string{"zoe", "adam", "mildred"} {
-		if _, err := store.Create(name, "correct-horse-battery-staple", RoleUser); err != nil {
+		if _, err := store.Create(context.Background(), name, "correct-horse-battery-staple", RoleUser); err != nil {
 			t.Fatalf("Create(%s): %v", name, err)
 		}
 	}
@@ -165,7 +166,7 @@ func TestListDoesNotMutateTheCache(t *testing.T) {
 // cloned.
 func TestGetReturnsADeepCopy(t *testing.T) {
 	store, _ := newCacheTestStore(t)
-	u, err := store.Create("dana", "correct-horse-battery-staple", RoleUser)
+	u, err := store.Create(context.Background(), "dana", "correct-horse-battery-staple", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

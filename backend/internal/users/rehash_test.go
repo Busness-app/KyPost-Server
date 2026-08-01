@@ -1,6 +1,7 @@
 package users
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 // written with. 16384 was scrypt's 2009 interactive figure — the floor of
 // current guidance, not a target.
 func TestHashPasswordUsesCurrentCost(t *testing.T) {
-	hash, err := HashPassword("correct-horse-battery-staple")
+	hash, err := HashPassword(context.Background(), "correct-horse-battery-staple")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
@@ -26,7 +27,7 @@ func TestHashPasswordUsesCurrentCost(t *testing.T) {
 		t.Errorf("scryptN = %d, want %d", scryptN, 1<<17)
 	}
 	// And it must still verify.
-	if !verifyScryptHash(hash, "correct-horse-battery-staple") {
+	if ok, _ := verifyScryptHash(context.Background(), hash, "correct-horse-battery-staple"); !ok {
 		t.Error("a freshly written hash does not verify")
 	}
 }
@@ -67,12 +68,12 @@ func TestNeedsRehashOnlyUpgrades(t *testing.T) {
 // stronger hash, nothing else touched.
 func TestRehashPasswordUpgradesInPlace(t *testing.T) {
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
 	const pw = "correct-horse-battery-staple"
-	u, err := store.Create("upgrade-me", pw, RoleUser)
+	u, err := store.Create(context.Background(), "upgrade-me", pw, RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestRehashPasswordUpgradesInPlace(t *testing.T) {
 		t.Fatal("planted hash does not report as needing a rehash")
 	}
 
-	if err := store.RehashPassword(u.ID, pw); err != nil {
+	if err := store.RehashPassword(context.Background(), u.ID, pw); err != nil {
 		t.Fatalf("RehashPassword: %v", err)
 	}
 
@@ -109,7 +110,7 @@ func TestRehashPasswordUpgradesInPlace(t *testing.T) {
 	if NeedsRehash(after.PasswordHash) {
 		t.Errorf("hash still at the old cost after rehash: %q", after.PasswordHash)
 	}
-	if !VerifyPassword(after, pw) {
+	if ok, _ := VerifyPassword(context.Background(), after, pw); !ok {
 		t.Error("the password no longer verifies after the rehash — this locks the user out")
 	}
 	if after.PasswordHash == before.PasswordHash {
@@ -129,17 +130,17 @@ func TestRehashPasswordUpgradesInPlace(t *testing.T) {
 // to set the password to an arbitrary string.
 func TestRehashPasswordRefusesAWrongCandidate(t *testing.T) {
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
 	const pw = "correct-horse-battery-staple"
-	u, err := store.Create("no-takeover", pw, RoleUser)
+	u, err := store.Create(context.Background(), "no-takeover", pw, RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := store.RehashPassword(u.ID, "attacker-chosen-password"); err == nil {
+	if err := store.RehashPassword(context.Background(), u.ID, "attacker-chosen-password"); err == nil {
 		t.Fatal("RehashPassword accepted a candidate that does not match the stored hash")
 	}
 
@@ -147,10 +148,10 @@ func TestRehashPasswordRefusesAWrongCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if VerifyPassword(after, "attacker-chosen-password") {
+	if ok, _ := VerifyPassword(context.Background(), after, "attacker-chosen-password"); ok {
 		t.Fatal("the account's password was replaced by the rejected candidate")
 	}
-	if !VerifyPassword(after, pw) {
+	if ok, _ := VerifyPassword(context.Background(), after, pw); !ok {
 		t.Error("the original password stopped working")
 	}
 }

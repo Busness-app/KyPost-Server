@@ -1,17 +1,18 @@
 package users
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
 
 func TestSetAndClearPGPIdentity(t *testing.T) {
 	dir := t.TempDir()
-	store, err := LoadOrMigrate(dir, filepath.Join(dir, "admin.env"))
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
 	if err != nil {
 		t.Fatalf("LoadOrMigrate: %v", err)
 	}
-	u, err := store.Create("erin", "pw-erin-testpassword", RoleUser)
+	u, err := store.Create(context.Background(), "erin", "pw-erin-testpassword", RoleUser)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

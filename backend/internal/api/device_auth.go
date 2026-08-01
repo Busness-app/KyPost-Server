@@ -78,7 +78,13 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 	if !okDev {
 		return "", state.NativeDevice{}, false, 0
 	}
-	if !users.VerifyDeviceSecret(dev.SecretHash, deviceSecret) {
+	// A legacy (pre-HashDeviceSecret) device secret still verifies through
+	// scrypt, so this can shed. Both outcomes deny the request here; the
+	// difference is that a shed one must not be cached as a failure, which is
+	// what cancelAttempt below already arranges for the other correct-secret
+	// paths.
+	okSecret, err := users.VerifyDeviceSecret(r.Context(), dev.SecretHash, deviceSecret)
+	if err != nil || !okSecret {
 		return "", state.NativeDevice{}, false, 0
 	}
 	// Deactivation must revoke device access immediately, exactly as

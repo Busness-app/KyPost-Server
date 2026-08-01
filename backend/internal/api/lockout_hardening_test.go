@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -91,7 +92,7 @@ func TestDAVAuthSuccessClearsLockoutHistory(t *testing.T) {
 		t.Fatalf("no test user available: %v", err)
 	}
 	u := all[0]
-	hash, err := users.HashPassword("dav-app-password")
+	hash, err := users.HashPassword(context.Background(), "dav-app-password")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
