@@ -55,22 +55,24 @@ RUN apt-get update \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& useradd -m -s /bin/bash kypost
 
-WORKDIR /opt/kypost
-COPY --from=backend-builder /app/bin/kypost-server /usr/local/bin/kypost-server
-COPY --from=frontend-builder /frontend/dist /opt/kypost/frontend
-COPY TUNING.md /opt/kypost/TUNING.md
-COPY supervisord.conf /etc/supervisord.conf
-COPY scripts /opt/kypost/scripts
-
-RUN chmod +x /opt/kypost/scripts/*.sh
-
 # Pinned release tarball verified against its published SHA-256. Never replace
 # this with `curl https://ollama.com/install.sh | sh`: that is unpinned remote
 # code execution at build time from a host this project does not control, and it
 # makes builds non-reproducible.
 #
 # Bumped by .github/workflows/ollama-bump.yml, which only advances to a release
-# that has been public for at least 3 days.
+# that has been public for at least 3 days. That workflow locates these two
+# lines by anchored regex — `^ARG OLLAMA_VERSION=` and `^ARG OLLAMA_SHA256=` —
+# and asserts exactly one match each, so keep them at column 0 and keep them
+# unique. Where they sit in the stage does not matter to it; this does:
+#
+# This block belongs ABOVE the COPY instructions, not below them. It produces a
+# 1.68 GB layer, and Docker invalidates every layer after a changed one — so
+# with it underneath, any frontend or backend edit rebuilt Ollama and made
+# buildx re-upload the whole 1.68 GB to the Actions cache on `cache-to`. That
+# turned a 2-6 minute ci-docker into a 16 minute one on the first PR that
+# touched the frontend. Nothing here depends on the COPYs; the apt step above
+# is what supplies curl, ca-certificates, zstd and tar.
 ARG OLLAMA_VERSION=0.32.5
 ARG OLLAMA_SHA256=f7d6bdbcf71b83aa8670c4e7dc4b6936c0952fcf8b114eaf6a11cbadb9684214
 RUN curl -fsSL -o /tmp/ollama.tar.zst \
@@ -79,6 +81,15 @@ RUN curl -fsSL -o /tmp/ollama.tar.zst \
 	&& tar -C /usr/local -xaf /tmp/ollama.tar.zst \
 	&& rm /tmp/ollama.tar.zst \
 	&& ollama --version
+
+WORKDIR /opt/kypost
+COPY --from=backend-builder /app/bin/kypost-server /usr/local/bin/kypost-server
+COPY --from=frontend-builder /frontend/dist /opt/kypost/frontend
+COPY TUNING.md /opt/kypost/TUNING.md
+COPY supervisord.conf /etc/supervisord.conf
+COPY scripts /opt/kypost/scripts
+
+RUN chmod +x /opt/kypost/scripts/*.sh
 
 ENV CONFIG_DIR=/kypost/config
 ENV SECRET_DIR=/kypost/private

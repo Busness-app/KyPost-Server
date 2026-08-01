@@ -23,7 +23,11 @@ import (
 //     the Friendly Captcha widget and its WASM proof-of-work
 //   - the self-hosted 'pow' provider needs nothing: same-origin fetch plus
 //     crypto.subtle. Pinned by TestCSPAddsNothingForSelfHostedPoW.
-//   - fonts.googleapis.com / fonts.gstatic.com: the fonts index.html loads
+//   - no font or stylesheet origin at all: Space Grotesk and IBM Plex Mono are
+//     served from this origin out of the Vite bundle. fonts.googleapis.com and
+//     fonts.gstatic.com used to be named here, which meant every session
+//     disclosed its IP and User-Agent to Google before login. Do not put them
+//     back — TestCSPNamesNoThirdPartyFontOrigin fails if you do.
 //   - style-src 'unsafe-inline': the Quill compose editor's inline style
 //     attributes. Sanitized email HTML carries none — see emailHtml.ts.
 //   - img-src/media-src https: http: data:: remote email content, shown only
@@ -52,10 +56,10 @@ func buildContentSecurityPolicy(provider captcha.Provider) string {
 	directives := []string{
 		"default-src 'self'",
 		"script-src " + strings.Join(scriptSrc, " "),
-		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+		"style-src 'self' 'unsafe-inline'",
 		"img-src 'self' data: https: http:",
 		"media-src 'self' data: https: http:",
-		"font-src 'self' data: https://fonts.gstatic.com",
+		"font-src 'self' data:",
 		"connect-src " + strings.Join(connectSrc, " "),
 	}
 	if len(frameSrc) > 0 {
@@ -96,8 +100,10 @@ const permissionsPolicy = "accelerometer=(), autoplay=(), camera=(), display-cap
 //
 // Cross-Origin-Embedder-Policy is deliberately NOT set. require-corp would give
 // full cross-origin isolation, and it would also break every third-party
-// subresource the CSP allows on purpose — the Turnstile frame, the Friendly
-// Captcha WASM bundle from jsDelivr, Google Fonts. Buying isolation by breaking
+// subresource the CSP allows on purpose — the Turnstile frame and the Friendly
+// Captcha WASM bundle from jsDelivr. (Google Fonts was on that list until the
+// fonts moved into the bundle, so an install running the self-hosted 'pow'
+// provider now loads nothing cross-origin at all.) Buying isolation by breaking
 // the CAPTCHA that guards the login form is the wrong trade; revisit if those
 // origins ever serve CORP headers.
 func withSecurityHeaders(next http.Handler, policy string) http.Handler {
