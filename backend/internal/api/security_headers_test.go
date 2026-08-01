@@ -36,16 +36,9 @@ func TestSecurityHeadersOnAllResponses(t *testing.T) {
 			t.Errorf("CSP missing directive %q; got %q", directive, csp)
 		}
 	}
-	// Google Fonts is loaded unconditionally by index.html; the email read view
-	// needs remote images once the user opts in.
-	for _, allowance := range []string{
-		"https://fonts.googleapis.com",
-		"https://fonts.gstatic.com",
-		"img-src 'self' data: https: http:",
-	} {
-		if !strings.Contains(csp, allowance) {
-			t.Errorf("CSP missing required allowance %q; got %q", allowance, csp)
-		}
+	// The email read view needs remote images once the user opts in.
+	if allowance := "img-src 'self' data: https: http:"; !strings.Contains(csp, allowance) {
+		t.Errorf("CSP missing required allowance %q; got %q", allowance, csp)
 	}
 	// run-4 hardening note 1 changed this deliberately. Both CAPTCHA origins
 	// used to be asserted here unconditionally, which is what the header
@@ -54,12 +47,18 @@ func TestSecurityHeadersOnAllResponses(t *testing.T) {
 	// handed script execution on this origin to anything publishable there.
 	// This test server configures no provider, so neither may appear.
 	// buildContentSecurityPolicy's own tests cover the enabled cases.
+	//
+	// The two Google Fonts hosts joined them once the fonts moved into the
+	// bundle: a default install must now reach no third-party origin at all.
+	// TestCSPNamesNoThirdPartyFontOrigin is the stricter form of that.
 	for _, forbidden := range []string{
 		"https://challenges.cloudflare.com",
 		"https://cdn.jsdelivr.net",
+		"https://fonts.googleapis.com",
+		"https://fonts.gstatic.com",
 	} {
 		if strings.Contains(csp, forbidden) {
-			t.Errorf("CSP names %q with no CAPTCHA provider configured; got %q", forbidden, csp)
+			t.Errorf("CSP names third-party origin %q; got %q", forbidden, csp)
 		}
 	}
 
