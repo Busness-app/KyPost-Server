@@ -643,7 +643,8 @@ checkout, apply the current `stable` image with health-gated rollback:
 
 The script resolves `stable` to an immutable digest, verifies its GitHub build
 attestation with `gh attestation verify`, and preserves that exact digest for
-rollback. It requires Docker Buildx and the GitHub CLI (`gh`); it fails closed
+rollback. It requires Docker Compose v2, Docker Buildx, and the GitHub CLI
+(`gh`), and checks for each up front; it fails closed
 when either verification or the health check fails. To stay on a specific
 release instead, set `KYPOST_VERSION=0.2.0` in `.env` before running it.
 

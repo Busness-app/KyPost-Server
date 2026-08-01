@@ -33,6 +33,11 @@ log() {
 
 command -v docker >/dev/null || { echo "docker is required on the host" >&2; exit 69; }
 command -v flock >/dev/null || { echo "flock is required on the host" >&2; exit 69; }
+# Both are Docker plugins rather than separate binaries, so `command -v docker`
+# says nothing about whether they are present. Check them here instead of
+# failing several steps later inside a Compose or registry call.
+docker compose version >/dev/null 2>&1 || { echo "docker compose (Compose v2) is required on the host" >&2; exit 69; }
+docker buildx version >/dev/null 2>&1 || { echo "docker buildx is required to resolve the image digest" >&2; exit 69; }
 cd -- "$repo_dir"
 exec 9>"$repo_dir/.kypost-update.lock"
 if ! flock -n 9; then
@@ -48,7 +53,7 @@ fi
 image="${images[0]}"
 image_repo="${image%:*}"
 if [[ "$image_repo" != "$official_image" ]]; then
-  echo "automatic updates only support the official image: $official_image" >&2
+  echo "this updater only supports the official image: $official_image" >&2
   exit 65
 fi
 previous_id="$(docker compose images -q kypost-server | head -n 1)"
@@ -56,7 +61,7 @@ previous_image=""
 if [[ -n "$previous_id" ]]; then
   previous_image="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$previous_id" | grep -m1 "^${official_image}@sha256:" || true)"
   if [[ -z "$previous_image" ]]; then
-    echo "current image has no immutable official digest; update it manually before enabling automatic updates" >&2
+    echo "current image has no immutable official digest, so there is no rollback target; update this install with 'git pull --ff-only && docker compose up --build -d' and use published images afterwards" >&2
     exit 65
   fi
 fi

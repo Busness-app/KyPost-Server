@@ -11,7 +11,9 @@ cat >"$tmp_dir/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 state="${FAKE_DOCKER_STATE:?}"
-if [[ "$1 ${2:-} ${3:-}" == "compose config --images" ]]; then
+if [[ "$1 ${2:-}" == "compose version" || "$1 ${2:-}" == "buildx version" ]]; then
+  echo "fake"
+elif [[ "$1 ${2:-} ${3:-}" == "compose config --images" ]]; then
   echo "ghcr.io/yoshiofthewire/kypost-server:stable"
 elif [[ "$1 ${2:-} ${3:-}" == "compose images -q" ]]; then
   echo "sha256:previous"
