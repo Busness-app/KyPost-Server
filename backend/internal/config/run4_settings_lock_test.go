@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -109,3 +110,30 @@ func TestUpdateUserSettingsDoesNotPersistOnMutateError(t *testing.T) {
 type errSentinel struct{}
 
 func (errSentinel) Error() string { return "mutate failed" }
+
+// A settings file that exists but cannot be parsed is not a first run. Treating
+// it as one meant the next preference PUT started from defaults and then
+// overwrote the document — silently resetting notification mode, keywords and
+// the contentPreview opt-out, and destroying the evidence in the same write.
+func TestUpdateUserSettingsRefusesToOverwriteAnUnparseableFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	corrupt := []byte("notifications: [this is not\n  a settings document\n")
+	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := UpdateUserSettings(path, func(s *UserSettings) error {
+		s.Labels.AutoApplyEnabled = true
+		return nil
+	}); err == nil {
+		t.Fatal("UpdateUserSettings accepted an unparseable settings file")
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != string(corrupt) {
+		t.Fatalf("the unparseable file was overwritten:\n%s", got)
+	}
+}

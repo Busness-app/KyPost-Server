@@ -603,8 +603,11 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	var activeRules []rules.Rule
 	if err != nil {
 		p.log.Error("failed to open user rules store, skipping rule evaluation", "user_id", u.ID, "error", err.Error())
-	} else {
-		activeRules = rulesStore.List()
+	} else if activeRules, err = rulesStore.List(); err != nil {
+		// Same answer as a store that won't open: rules move, mark as spam and
+		// delete, so a list this cycle cannot confirm is not one to act on.
+		p.log.Error("failed to read user rules, skipping rule evaluation", "user_id", u.ID, "error", err.Error())
+		activeRules = nil
 	}
 
 	uc := userCtx{
@@ -1033,6 +1036,10 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		if isAICreditsExhaustedError(err) {
 			p.flagAICreditsExhausted()
 		}
+		// Surfaced in /api/health without touching Healthy: a model that never
+		// installed (the container's pull can fail while everything else comes
+		// up fine) otherwise showed up nowhere an operator looks.
+		p.health.RecordClassifierFailure()
 		// Wrapped so the caller (tickUser, via shouldMarkProcessedOnError)
 		// can tell a classifier failure apart from rule/IMAP errors and gate
 		// MarkProcessed on isPermanentClassifierError instead of always
@@ -1041,6 +1048,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	}
 	// A successful classification means the classifier has credits again; clear any flag.
 	p.clearAICreditsExhausted()
+	p.health.RecordClassifierSuccess()
 	// No sender and no subject. This logger writes to the instance-wide app.log that
 	// GET /api/logs serves to ANY admin, so anything here leaves one user's
 	// correspondence metadata readable by an account that is not theirs. Sender and

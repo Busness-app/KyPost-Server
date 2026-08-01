@@ -1,6 +1,10 @@
 package rules
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestStore_CreateUpdateDelete(t *testing.T) {
 	dir := t.TempDir()
@@ -89,7 +93,7 @@ func TestStore_ListSortedByOrder_CrossInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New (second instance): %v", err)
 	}
-	list := s2.List()
+	list, _ := s2.List()
 	if len(list) != 3 {
 		t.Fatalf("List() len = %d, want 3", len(list))
 	}
@@ -124,11 +128,40 @@ func TestStore_Reorder(t *testing.T) {
 		t.Fatalf("Reorder: %v", err)
 	}
 
-	list := s.List()
+	list, _ := s.List()
 	want := []string{"c", "a", "b"}
 	for i, r := range list {
 		if r.Name != want[i] {
 			t.Errorf("List()[%d].Name = %q, want %q", i, r.Name, want[i])
 		}
+	}
+}
+
+// Rules move, mark as spam and delete. A read failure that returns the last
+// good in-memory list keeps applying rules the user may have deleted, against
+// real mail, for as long as the file stays unreadable — so List reports it and
+// its callers skip evaluation instead.
+func TestListFailsClosedOnAnUnreadableFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Upsert(Rule{Name: "delete everything", Enabled: true}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if list, err := s.List(); err != nil || len(list) != 1 {
+		t.Fatalf("List() = %v, %v; want the seeded rule", list, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "rules.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	list, err := s.List()
+	if err == nil {
+		t.Fatalf("List() returned %d cached rules and no error after the file went bad", len(list))
+	}
+	if list != nil {
+		t.Fatalf("List() returned rules alongside an error: %v", list)
 	}
 }

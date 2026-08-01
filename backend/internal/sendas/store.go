@@ -121,17 +121,27 @@ func (s *Store) ListVerified() []Alias {
 // send to authorize a From address — the API and daemon are separate
 // processes, so a verification recorded by one must be visible to the other
 // on the very next call.
-func (s *Store) FindVerifiedByEmail(email string) (Alias, bool) {
+//
+// The refresh error is returned rather than swallowed, unlike the listing
+// readers above: this one is an authorization decision. Ignoring it answered
+// from whatever this process last managed to read, so an alias deleted from a
+// file that has since become unreadable or corrupt kept authorizing sends from
+// an address the account no longer owns. The caller must fail the send, not
+// fall through to the "not a verified alias" branch — that would report a
+// storage fault as a permissions answer.
+func (s *Store) FindVerifiedByEmail(email string) (Alias, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return Alias{}, false, fmt.Errorf("read send-as aliases: %w", err)
+	}
 	needle := strings.ToLower(email)
 	for _, a := range s.aliases {
 		if a.Status == "verified" && strings.ToLower(a.Email) == needle {
-			return a, true
+			return a, true, nil
 		}
 	}
-	return Alias{}, false
+	return Alias{}, false, nil
 }
 
 // Get returns an alias record by ID regardless of status.

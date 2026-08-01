@@ -64,14 +64,23 @@ func (s *Store) persistLocked() error {
 }
 
 // List returns all rules, sorted by Order for stable evaluation/UI ordering.
-func (s *Store) List() []Rule {
+//
+// The refresh error is returned, not swallowed. Rule actions include move,
+// spam and delete, and the poller and the manual backfill both run this list
+// against real mail: a swallowed read failure kept applying whatever this
+// process last managed to load, so a rule the user had deleted went on deleting
+// their messages for as long as rules.json stayed unreadable. Callers must skip
+// evaluation on an error rather than act on a list they cannot confirm.
+func (s *Store) List() ([]Rule, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, fmt.Errorf("read rules: %w", err)
+	}
 	out := make([]Rule, len(s.rules))
 	copy(out, s.rules)
 	sort.Slice(out, func(i, j int) bool { return out[i].Order < out[j].Order })
-	return out
+	return out, nil
 }
 
 // Get returns a rule by ID.

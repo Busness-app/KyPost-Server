@@ -436,7 +436,7 @@ func TestRulesReorder(t *testing.T) {
 		t.Fatalf("reorder status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
-	list := store.List()
+	list, _ := store.List()
 	if len(list) != 2 || list[0].Name != "b" || list[1].Name != "a" {
 		t.Fatalf("expected [b, a] after reorder, got %+v", list)
 	}
@@ -494,7 +494,7 @@ func TestRulesUpdatePreservesOrder(t *testing.T) {
 		t.Fatalf("expected updated rule's Order to remain 1, got %d", updated.Order)
 	}
 
-	list := store.List()
+	list, _ := store.List()
 	if len(list) != 2 {
 		t.Fatalf("expected 2 rules, got %d", len(list))
 	}

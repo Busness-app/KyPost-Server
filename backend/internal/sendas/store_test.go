@@ -1,6 +1,8 @@
 package sendas
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -243,7 +245,7 @@ func TestFindVerifiedByEmailCrossInstance(t *testing.T) {
 	}
 
 	// Before verification, s2 must not find it (record is still pending).
-	if _, ok := s2.FindVerifiedByEmail("verified@example.com"); ok {
+	if _, ok, _ := s2.FindVerifiedByEmail("verified@example.com"); ok {
 		t.Error("FindVerifiedByEmail: must not match a pending record")
 	}
 
@@ -255,7 +257,7 @@ func TestFindVerifiedByEmailCrossInstance(t *testing.T) {
 	// s2 must observe the change made by s1 on its next call, since
 	// FindVerifiedByEmail always refreshes from disk first — this is the
 	// property the mail-send authorization check depends on.
-	found, ok := s2.FindVerifiedByEmail("VERIFIED@EXAMPLE.COM")
+	found, ok, _ := s2.FindVerifiedByEmail("VERIFIED@EXAMPLE.COM")
 	if !ok {
 		t.Fatal("FindVerifiedByEmail: expected to find record verified by a separate Store instance")
 	}
@@ -268,11 +270,11 @@ func TestFindVerifiedByEmailCrossInstance(t *testing.T) {
 	if _, err := s1.Create("user-1", "other@example.com", ""); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, ok := s2.FindVerifiedByEmail("other@example.com"); ok {
+	if _, ok, _ := s2.FindVerifiedByEmail("other@example.com"); ok {
 		t.Error("FindVerifiedByEmail: must not match a pending record")
 	}
 
-	if _, ok := s2.FindVerifiedByEmail("nobody@example.com"); ok {
+	if _, ok, _ := s2.FindVerifiedByEmail("nobody@example.com"); ok {
 		t.Error("FindVerifiedByEmail: must not match unknown email")
 	}
 }
@@ -407,4 +409,37 @@ func TestListAndListVerified(t *testing.T) {
 	}
 
 	_ = pending
+}
+
+// The From-address check on every send goes through here. A swallowed read
+// error answered from whatever this process last loaded, so an alias deleted
+// from a file that has since become unreadable went on authorizing sends from
+// an address the account no longer owns.
+func TestFindVerifiedByEmailFailsClosedOnAnUnreadableFile(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	alias, err := s.Create("user-1", "alias@example.com", "Alias")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.MarkVerified(alias.ID); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	if _, ok, err := s.FindVerifiedByEmail("alias@example.com"); !ok || err != nil {
+		t.Fatalf("FindVerifiedByEmail = %v, %v; want the verified alias", ok, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "send_as_aliases.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	found, ok, err := s.FindVerifiedByEmail("alias@example.com")
+	if err == nil {
+		t.Fatalf("FindVerifiedByEmail authorized %q from cache after the file went bad", found.Email)
+	}
+	if ok {
+		t.Fatal("FindVerifiedByEmail reported a match alongside an error")
+	}
 }

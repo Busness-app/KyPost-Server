@@ -222,6 +222,14 @@ func SaveUserSettings(path string, s UserSettings) error {
 // sections the caller does not touch keep their intended defaults instead of
 // being written as false/empty. Nothing is persisted if mutate returns an
 // error.
+//
+// A read that FAILS is not a missing file and must not be treated as one.
+// LoadUserSettings already answers "no file yet" with the defaults, so every
+// error left here is a real one — an unreadable file, or YAML that no longer
+// parses — and starting from defaults after one meant the next preference PUT
+// silently reset notification mode, keywords and the contentPreview privacy
+// opt-out, then overwrote the only copy of the document that would have shown
+// what they were.
 func UpdateUserSettings(path string, mutate func(*UserSettings) error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir user settings dir: %w", err)
@@ -229,7 +237,7 @@ func UpdateUserSettings(path string, mutate func(*UserSettings) error) error {
 	return fsutil.WithFileLock(path, func() error {
 		s, err := LoadUserSettings(path)
 		if err != nil {
-			s = DefaultUserSettings()
+			return fmt.Errorf("load user settings: %w", err)
 		}
 		if err := mutate(&s); err != nil {
 			return err
