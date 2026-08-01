@@ -64,10 +64,12 @@ export interface ClaimTokenResult {
   /** Who owns the token after this call. Equal to keyId when the claim succeeded. */
   owner: string;
   /**
-   * When `owner` took the claim (ms epoch, 0 for a claim inherited from the
-   * legacy KV index). The caller refuses to take over a claim younger than KV's
-   * convergence window, because the "is the owner still active?" answer it would
-   * base the takeover on comes from KV — see claimTokenForSend.
+   * When `owner` took the claim (ms epoch). The caller refuses to take over a
+   * claim younger than KV's convergence window, because the "is the owner still
+   * active?" answer it would base the takeover on comes from KV — see
+   * claimTokenForSend. A claim whose age is unknown (adopted from the legacy KV
+   * index, or written before this field existed) is stamped on first sight and
+   * so counts as fresh once — see RelayCoordinator.claimedAt.
    */
   claimedAt: number;
 }
@@ -83,14 +85,40 @@ export class RelayCoordinator extends DurableObject {
     // A seeded owner is CONFIRMED on arrival: it only exists because that key
     // already delivered under the pre-Durable-Object KV scheme, and an
     // unconfirmed claim is one that settleToken deletes after a single failed
-    // send. claimedAt stays 0 so the caller's young-claim guard, which exists
-    // for keys minted seconds ago, doesn't also protect an ancient claim.
+    // send. It is stamped as claimed NOW for the reason in claimedAt() below.
     await this.ctx.storage.put(
       owner
-        ? { [SEEDED_KEY]: true, [OWNER_KEY]: owner, [CONFIRMED_KEY]: true, [CLAIMED_AT_KEY]: 0 }
+        ? { [SEEDED_KEY]: true, [OWNER_KEY]: owner, [CONFIRMED_KEY]: true, [CLAIMED_AT_KEY]: Date.now() }
         : { [SEEDED_KEY]: true },
     );
     return owner;
+  }
+
+  /**
+   * When the current claim was taken, stamping one that has no timestamp.
+   *
+   * A claim without one was either adopted from the legacy KV index or written
+   * by an earlier version of this class, and in both cases its real age is
+   * simply unknown — the KV index carries no timestamp, and the earlier schema
+   * stored none. Reading that as 0 ("ancient") is a guess in the unsafe
+   * direction: the caller's takeover guard exists because a key minted seconds
+   * ago reads as ABSENT in KV, and an unknown-age claim can be seconds old
+   * across exactly the deploy that introduces this bookkeeping. Unknown is
+   * therefore treated as fresh, which costs at most one convergence window of
+   * delay on a legitimate takeover, once per token.
+   *
+   * The stamp is PERSISTED rather than computed per call. Returning a new
+   * Date.now() each time would keep every legacy claim permanently inside its
+   * own grace window and make it un-takeover-able forever.
+   */
+  private async claimedAt(): Promise<number> {
+    const stored = await this.ctx.storage.get<number>(CLAIMED_AT_KEY);
+    if (typeof stored === "number") {
+      return stored;
+    }
+    const now = Date.now();
+    await this.ctx.storage.put(CLAIMED_AT_KEY, now);
+    return now;
   }
 
   /** Takes the claim for keyId, resetting the per-claim bookkeeping. */
@@ -124,12 +152,12 @@ export class RelayCoordinator extends DurableObject {
     if (owner === opts.keyId) {
       const inflight = (await this.ctx.storage.get<number>(INFLIGHT_KEY)) ?? 0;
       await this.ctx.storage.put(INFLIGHT_KEY, inflight + 1);
-      return { owner, claimedAt: (await this.ctx.storage.get<number>(CLAIMED_AT_KEY)) ?? 0 };
+      return { owner, claimedAt: await this.claimedAt() };
     }
     if (opts.takeoverFrom && owner === opts.takeoverFrom) {
       return this.takeClaim(opts.keyId);
     }
-    return { owner, claimedAt: (await this.ctx.storage.get<number>(CLAIMED_AT_KEY)) ?? 0 };
+    return { owner, claimedAt: await this.claimedAt() };
   }
 
   /**

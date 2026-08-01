@@ -24,11 +24,17 @@ type Status struct {
 	NativePushLastSuccess string `json:"nativePushLastSuccessUtc,omitempty"`
 
 	// Classification health, on the same terms as native push: independent of
-	// Healthy, because a container whose model never installed still serves mail
+	// Healthy, because a server that cannot classify still delivers mail
 	// perfectly well and restarting it every five minutes (which is what flipping
-	// Healthy does) fixes nothing. This is the signal that the configured model is
-	// actually usable — a model pull that failed at startup otherwise showed up
-	// nowhere except a log line nobody was watching.
+	// Healthy does) fixes nothing.
+	//
+	// It reports that classify attempts are FAILING, whatever the cause — the
+	// configured model missing or still downloading, Ollama unreachable, an
+	// upstream error, credits exhausted (which also raises the more specific flag
+	// above). Read it as "labels are not being applied right now", not as a
+	// model-install status. It exists because a model pull that failed at startup
+	// showed up nowhere except a log line nobody was watching; every other cause
+	// happens to need the same signal.
 	//
 	// No error text: the reason a classify call failed can carry an upstream
 	// response body, and this struct is served to admins over /api/health.

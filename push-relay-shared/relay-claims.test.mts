@@ -166,11 +166,45 @@ test("a claim inherited from the legacy KV index survives a failed send", async 
   const c = coordinator();
   const first = await c.claimToken({ keyId: "key-b", legacyOwner: "key-a" });
   assert.equal(first.owner, "key-a");
-  assert.equal(first.claimedAt, 0, "a legacy claim must not look young to the takeover guard");
 
   await c.claimToken({ keyId: "key-a" });
   await c.settleToken("key-a", false);
   assert.equal(owner(c), "key-a", "one failed send wiped a claim earned before the coordinator existed");
+});
+
+// A claim with no recorded age is stamped on first sight rather than read as
+// ancient. The KV index carries no timestamp and the previous schema stored
+// none, so "unknown" spans the deploy that introduces this field — during which
+// a legacy claim really can be seconds old, made by a key KV has not converged
+// on yet. That is the case the takeover guard exists for.
+test("a claim of unknown age counts as fresh, once, and its stamp does not slide", async () => {
+  for (const seed of [
+    async (c) => {
+      await c.claimToken({ keyId: "key-b", legacyOwner: "key-a" }); // adopted from KV
+    },
+    async (c) => {
+      await c.ctx.storage.put({ seeded: true, owner: "key-a" }); // written by the older schema
+    },
+  ]) {
+    const c = coordinator();
+    await seed(c);
+
+    const first = await c.claimToken({ keyId: "key-b" });
+    assert.equal(first.owner, "key-a");
+    assert.ok(Date.now() - first.claimedAt < 1_000, `unknown age read as ancient: ${first.claimedAt}`);
+
+    // Persisted, not recomputed: a stamp that moved with every call would keep
+    // the claim inside its own grace window forever.
+    const again = await c.claimToken({ keyId: "key-b" });
+    assert.equal(again.claimedAt, first.claimedAt, "the stamp slid on a second call");
+  }
+});
+
+test("a legacy claim is not taken over on a KV read that may not have converged", async () => {
+  const env = relayEnv(new Map([[BOUND_TOKEN_PREFIX + (await tokenHash()), "key-a"]]));
+  const denied = await claimTokenForSend(requestContext(env), "device-token", "key-b");
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.logReason, "token_claim_too_recent");
 });
 
 // ---- takeover --------------------------------------------------------------
