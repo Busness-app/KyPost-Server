@@ -32,10 +32,11 @@ func TestAdminRoutesRejectNonAdmin(t *testing.T) {
 	admin, regular := newTestUsers(t, srv)
 
 	adminOnly := map[string]http.HandlerFunc{
-		"GET /api/logs":      srv.withAdmin(srv.handleLogs),
-		"GET /api/logs/list": srv.withAdmin(srv.handleLogsList),
-		"GET /api/users":     srv.withAdmin(srv.handleUsersList),
-		"POST /api/users":    srv.withAdmin(srv.handleUsersCreate),
+		"GET /api/logs":           srv.withAdmin(srv.handleLogs),
+		"GET /api/logs/list":      srv.withAdmin(srv.handleLogsList),
+		"GET /api/server/version": srv.withAdmin(srv.handleServerVersion),
+		"GET /api/users":          srv.withAdmin(srv.handleUsersList),
+		"POST /api/users":         srv.withAdmin(srv.handleUsersCreate),
 		// A non-admin must not be able to reach handleConfig's PUT branch at
 		// all (see server_config_test.go for the full, more direct
 		// regression: a non-admin PUT that previously succeeded and could

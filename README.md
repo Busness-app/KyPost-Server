@@ -627,6 +627,47 @@ Persistence behavior:
 - `docker compose up --build` keeps the named volumes.
 - `docker compose down -v` removes the named volumes and the stored app data.
 
+## Updating KyPost
+
+KyPost checks GitHub releases hourly. When a newer KyPost release is found, it
+emails the primary admin once and shows the update in Configuration >
+Application. The container reports availability but never controls Docker on
+its host.
+
+Published releases are available from GitHub Container Registry. From the
+checkout, apply the current `stable` image with health-gated rollback:
+
+```bash
+./scripts/update-host.sh
+```
+
+The script resolves `stable` to an immutable digest, verifies its GitHub build
+attestation with `gh attestation verify`, and preserves that exact digest for
+rollback. It requires Docker Buildx and the GitHub CLI (`gh`); it fails closed
+when either verification or the health check fails. To stay on a specific
+release instead, set `KYPOST_VERSION=0.2.0` in `.env` before running it.
+
+An install still running a locally built image has no published immutable
+digest, so the updater refuses it rather than guessing at a rollback target.
+Update that install from source with `git pull --ff-only && docker compose up
+--build -d`, then use published-image updates going forward.
+
+Automatic updates are opt-in and require a systemd host. Run this from the
+checkout to install a daily timer (03:15 local time plus up to one hour of
+jitter). It enables systemd lingering for the Docker-operating user so the
+timer continues after logout and reboot; if that needs approval, run the
+printed `sudo loginctl enable-linger <user>` command once and rerun it:
+
+```bash
+./scripts/install-auto-update.sh
+```
+
+Disable it with `systemctl --user disable --now kypost-update.timer`. The timer
+runs as the Docker-operating user and uses the same host-side updater, not code
+inside the container. On systems without systemd, schedule
+`./scripts/update-host.sh --auto` with
+`KYPOST_AUTO_UPDATE=true` in the scheduler environment.
+
 ## Troubleshooting
 
 ### Ollama or model issues

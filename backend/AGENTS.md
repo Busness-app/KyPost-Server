@@ -120,6 +120,7 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 | `POST /api/inbox/actions` | yes | Bulk inbox actions: `delete`, `archive`, `spam`, `read`, `move` by `messageIds[]`, optional `mailbox`, and `targetMailbox` for `move`; actions execute in the selected mailbox, and `archive` moves to `Archive/<email sent year>` (fallback received year/current year) and creates folder if needed |
 | `GET /api/logs?file=<name>.log&lines=<n>` | admin | Log tail |
 | `GET /api/logs/list` | admin | Log file inventory |
+| `GET /api/server/version` | admin | Cached installed/latest KyPost release comparison for the Settings update card; never performs a live GitHub request |
 | `POST /api/classifier/test` | yes | Classify a test email |
 | `GET\|POST\|DELETE /api/imap/config` | yes | Caller's encrypted IMAP credentials plus optional SMTP host/port override used by `/api/mail/send` |
 | `POST /api/imap/test` | yes | Live IMAP connectivity check (falls back to caller's stored config) |
@@ -206,7 +207,7 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 - Keep adapter packages free of direct state mutation; they communicate via interfaces and channels defined in `processor/`
 - PII redaction must be applied before any text is sent to Ollama
 - Do not add dependencies outside the go.mod without explicit approval
-- **Cutting a release**: bump `serverVersion` in `internal/api/server_version.go` in the same commit as the tag, and publish the GitHub release with a dotted-numeric tag (`v0.2.0`, not `v0.2-alpha`). Every install polls this repo's releases hourly and emails its admin once per newly-seen release; a tag that is not dotted-numeric fails the comparison closed and no one is told, and a `serverVersion` left behind mails everyone about a release they are already running
+- **Cutting a release**: bump `serverVersion` in `internal/api/server_version.go` in the same commit as the tag, and publish the GitHub release with a dotted-numeric tag (`v0.2.0`, not `v0.2-alpha`). The release-image workflow publishes immutable `0.2.0` plus moving `stable` GHCR images; the host updater resolves stable to a digest and verifies the GitHub attestation before deployment. Every install polls this repo's releases hourly, emails its admin once per newly-seen release, and shows the cached result in Settings; a tag that is not dotted-numeric fails the comparison closed and no one is told, and a `serverVersion` left behind mails everyone about a release they are already running
 
 ## Verification
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -30,6 +31,33 @@ func TestCheckForServerUpdateNotifiesOncePerRelease(t *testing.T) {
 	}
 	if notify {
 		t.Fatal("checkForServerUpdate should already have consumed the notify transition for 99.0.0")
+	}
+}
+
+func TestServerVersionStatusAndEndpoint(t *testing.T) {
+	srv := newTestServer(t)
+	serveReleases(t, `[{"tag_name":"v99.0.0","published_at":"`+
+		time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)+`"}]`)
+	srv.checkForServerUpdate(context.Background())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/server/version", nil)
+	authRequest(srv, req)
+	rec := httptest.NewRecorder()
+	srv.withAdmin(srv.handleServerVersion)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		InstalledVersion string `json:"installedVersion"`
+		LatestVersion    string `json:"latestVersion"`
+		UpgradeAvailable bool   `json:"upgradeAvailable"`
+		CheckedAt        string `json:"checkedAt"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.InstalledVersion != serverVersion || got.LatestVersion != "99.0.0" || !got.UpgradeAvailable || got.CheckedAt == "" {
+		t.Fatalf("unexpected status: %+v", got)
 	}
 }
 

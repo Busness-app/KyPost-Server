@@ -39,6 +39,13 @@ import {
   type IMAPForm
 } from "./config/settings";
 
+type ServerVersionResponse = {
+  installedVersion: string;
+  latestVersion: string;
+  upgradeAvailable: boolean;
+  checkedAt?: string;
+  error?: string;
+};
 
 export function ConfigPage() {
   const testPrompt = "Email Address: test@example.com Subject Line: Classifier connectivity test Return only the label Updates";
@@ -54,6 +61,8 @@ export function ConfigPage() {
   const [labelsFromImap, setLabelsFromImap] = useState<string[]>([]);
   const [configStatus, setConfigStatus] = useState("");
   const [selectedTheme, setSelectedTheme] = useState<ThemeName>(getStoredTheme());
+  const [serverVersion, setServerVersion] = useState<ServerVersionResponse | null>(null);
+  const [serverVersionError, setServerVersionError] = useState("");
 
   const [imapStatus, setImapStatus] = useState<IMAPConfigStatus | null>(null);
   const [imapForm, setImapForm] = useState<IMAPForm>({
@@ -204,7 +213,19 @@ export function ConfigPage() {
       // WKD domain management is admin-only on the backend (s.withAdmin) —
       // skip the fetch entirely for non-admins rather than let it 403.
       if (isAdmin) {
-        loaders.push(refreshWKDDomains().catch(() => undefined));
+        loaders.push(
+          refreshWKDDomains().catch(() => undefined),
+          getJSON<ServerVersionResponse>("/api/server/version")
+            .then((status) => {
+              if (!cancelled) {
+                setServerVersion(status);
+                setServerVersionError("");
+              }
+            })
+            .catch(() => {
+              if (!cancelled) setServerVersionError("Version check has not completed yet.");
+            })
+        );
       }
       await Promise.all(loaders);
     };
@@ -668,6 +689,29 @@ export function ConfigPage() {
           <div className="config-actions">
             <button type="button" onClick={saveTheme}>Apply Theme</button>
             <button type="button" onClick={saveConfig}>Save Configuration</button>
+          </div>
+          <div className="config-card" style={{ marginTop: 16 }}>
+            <h3>KyPost Updates</h3>
+            {serverVersion ? (
+              <>
+                <p>Installed version: {serverVersion.installedVersion || "unknown"}</p>
+                {serverVersion.error ? (
+                  <p className="notice notice-error">{serverVersion.error}</p>
+                ) : serverVersion.upgradeAvailable ? (
+                  <p className="notice notice-warning">
+                    Version {serverVersion.latestVersion} is available. The primary admin has been emailed.
+                  </p>
+                ) : (
+                  <p className="config-muted">You&apos;re running the latest available KyPost version.</p>
+                )}
+                {serverVersion.checkedAt ? <p className="config-muted">Last checked: {new Date(serverVersion.checkedAt).toLocaleString()}</p> : null}
+              </>
+            ) : (
+              <p className="config-muted">{serverVersionError || "Checking for updates..."}</p>
+            )}
+            <p className="config-muted">
+              Update from the host with <code>./scripts/update-host.sh</code>. To enable automatic updates, install the optional systemd timer described in the documentation.
+            </p>
           </div>
         </div>
       ) : null}

@@ -38,6 +38,7 @@ scripts/node_modules/
 
 # Local runtime artifacts
 kypost/
+.kypost-update.lock
 share/ollama/models/
 *.pid
 

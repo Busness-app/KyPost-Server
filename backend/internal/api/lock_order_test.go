@@ -28,6 +28,7 @@ var lockRank = map[string]int{
 	"sessMu":   2,
 	"userMu":   3,
 	"ollamaMu": 4,
+	"serverMu": 5,
 }
 
 // TestLockOrderIsRespected enforces lockRank across the package, including
