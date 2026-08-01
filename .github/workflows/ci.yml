@@ -32,13 +32,9 @@ concurrency:
 # standard. Dependabot keeps these current — see .github/dependabot.yml.
 
 jobs:
-  backend:
-    name: ci-backend
+  backend-api:
+    name: ci-backend-api
     runs-on: ubuntu-latest
-    # The api package alone takes 7-8 minutes under -race, and users another 4.
-    # 25 leaves headroom without inheriting GitHub's 6-hour default, which is
-    # what a genuinely hung test would otherwise burn before anyone noticed. It
-    # is also the outer bound the -timeout below sits inside.
     timeout-minutes: 25
     defaults:
       run:
@@ -62,62 +58,55 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      # Run via `go run`, not golangci-lint-action. The action installs a
-      # prebuilt binary, and golangci-lint refuses to lint a module whose Go
-      # version is newer than the one it was itself built with:
-      #
-      #   can't load config: the Go language version (go1.24) used to build
-      #   golangci-lint is lower than the targeted Go version (1.26.4)
-      #
-      # This module targets 1.26.4, so the action failed instantly on a
-      # toolchain mismatch that has nothing to do with the code. `go run`
-      # compiles the linter with the same toolchain setup-go just installed
-      # from go.mod, so the two can never disagree — and it keeps working
-      # across future Go bumps without anyone remembering to touch this file.
-      #
-      # Pinned, not @latest: this is a program executing against the source
-      # tree, held to the same standard as everything else here. Dependabot
-      # does not track `go run` versions, so bumping it is manual — that is
-      # the trade for a gate that cannot spuriously break.
       - name: golangci-lint
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
 
-      # gofmt and go vet are a floor, not a security review. This server holds
-      # users' PGP private keys and IMAP credentials; a known-vulnerable
-      # dependency reaching main unremarked is not an acceptable failure mode.
-      #
-      # Pinned for the same reason golangci-lint above is, and the Dockerfile
-      # refuses `curl | sh`: @latest is remote code fetched at build time from a
-      # source this repo does not control, executed against the tree with the
-      # workflow's token, undoing the SHA-pinning of every action here. The
-      # vulnerability database is fetched fresh at run time regardless, so this
-      # pin does not stale the results — it only fixes which code does the
-      # checking.
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
-      # -race matters more than usual here: this codebase runs the api and the
-      # poller as goroutines in "all" mode and as two processes under
-      # supervisord, and several stores are shared between them.
-      #
-      # -count=1 is not optional. Without it `go test` serves cached results
-      # for unchanged packages, which is exactly how internal/app stayed
-      # locally green for days while failing here on every push.
-      #
-      # -timeout is set because go test's default is 10 minutes PER TEST BINARY
-      # and internal/api honestly needs more than that here: it is dominated by
-      # scrypt, and -race on a shared runner has had it at 7-9 minutes with the
-      # figure moving with whatever else the host is doing. Twice that put it
-      # over, and the run died with `panic: test timed out after 10m0s` while
-      # the named running test was one second old — nothing hung, the budget
-      # was simply wrong.
-      #
-      # 20m, not "off" and not the job's 25: a hung test must still hit a Go
-      # timeout, because that panic dumps every goroutine's stack and is the
-      # only artifact that says WHERE it hung. Letting timeout-minutes kill the
-      # job instead trades that for a truncated log.
-      - name: go test -race
-        run: go test -race -count=1 -timeout=20m ./...
+      # internal/api package tests run serially due to global hashCostN state
+      # managed by TestMain. This job runs only the api package tests, which
+      # take 7-8 minutes dominated by scrypt derivations at production cost.
+      - name: go test -race (api package only)
+        run: go test -race -count=1 -timeout=20m ./internal/api/...
+
+  backend-other:
+    name: ci-backend-other
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      # Run all non-api backend tests in parallel. This includes processor,
+      # users, pgpmail, contacts, state, rules, mailmsg, adapters, and
+      # utility packages. These can safely run together and complete in ~4-5 minutes.
+      - name: go test -race (all packages except api)
+        run: go list ./... | grep -v "^kypost-server/backend/internal/api$" | xargs go test -race -count=1 -timeout=20m
 
   frontend:
     name: ci-frontend
