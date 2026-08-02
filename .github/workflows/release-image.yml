@@ -24,19 +24,22 @@ permissions:
 
 jobs:
   publish:
-    # The server compares dotted numeric versions, so refuse an image tag that
-    # cannot be reported correctly to installed operators.
-    if: startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/kypost-server
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.release.tag_name }}
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
+      # First step, before the checkout: this reads nothing but the tag name,
+      # and a bad tag should cost nothing to reject.
+      #
+      # The server compares dotted numeric versions, so refuse an image tag
+      # that cannot be reported correctly to installed operators. This used to
+      # be a job-level `if: startsWith(tag_name, 'v')`, which does not refuse
+      # anything — it skips the job, and a skipped job is green. A release
+      # tagged `1.0.0` or `release-1.0.0` therefore existed with no image and
+      # no failure anyone would notice. Every release in this repository is a
+      # server release, so there is no tag namespace this job should sit out;
+      # the only correct answers are "published" and "red".
       - name: Validate release version
         id: version
         env:
@@ -44,11 +47,17 @@ jobs:
         run: |
           set -euo pipefail
           version="${TAG#v}"
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "release tag must be v<major>.<minor>.<patch>, got: $TAG" >&2
+          if [ "$version" = "$TAG" ] || ! printf '%s' "$version" \
+            | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::release tag must be v<major>.<minor>.<patch>, got: $TAG" >&2
             exit 1
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       # Refuse to publish a tag the code does not agree with.
       #
@@ -209,7 +218,8 @@ jobs:
           set -euo pipefail
           gh attestation verify "oci://${IMAGE_NAME}@${DIGEST}" --repo "$REPO"
 
-      # :stable must only ever move FORWARD.
+      # :stable must only ever move FORWARD, and only to a release operators
+      # opted into.
       #
       # Concurrency serializes runs but does not order them by version. Patching
       # an old branch (v0.9.1 published after v1.0.0 already shipped) is a normal
@@ -223,8 +233,33 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.value }}
           REPO: ${{ github.repository }}
+          # GitHub's `published` activity type fires for prereleases too, so
+          # this job runs for them and must decide what that means.
+          PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
           set -euo pipefail
+
+          # THIS release's own prerelease flag, checked before anything else.
+          #
+          # The version comparison below excludes prereleases from the list it
+          # compares against and then adds $VERSION back unconditionally — so
+          # the one release whose prerelease flag was never consulted was this
+          # one. A prerelease tagged with a plain numeric version (the flag is
+          # a checkbox, independent of the tag, and `v0.3.0-rc` is rejected by
+          # the validation step above — so a prerelease that reaches this point
+          # is tagged exactly like a stable one) compared as the newest thing
+          # in the repository and moved :stable onto itself. That is the
+          # failure this whole step exists to prevent, arriving through the
+          # door it left open.
+          #
+          # The immutable version tag is already published at this point, which
+          # is correct: testers pull v0.3.0 by name. Only :stable is withheld.
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "::notice::${VERSION} is a prerelease; publishing the version tag but leaving :stable where it is"
+            echo "move=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Every published, non-draft, non-prerelease dotted-numeric release.
           # Drafts and prereleases are excluded because operators following
           # :stable did not opt into them.

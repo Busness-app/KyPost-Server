@@ -177,10 +177,16 @@ export function fail(
  * configuration by sending deliberately broken sends and reading the errors.
  *
  * The caller gets a stable, coarse failure plus the request id, which is what
- * they can act on (retry, or quote the id to the operator). The provider status
- * stays in the structured log as a bare number; the body is not logged either,
- * because these logs are operator-facing and must not carry upstream response
- * bodies (see push-relay-shared/AGENTS.md).
+ * they can act on (retry, or quote the id to the operator).
+ *
+ * The provider's status and its reason clipped to 200 characters DO go to the
+ * structured log, at each worker's `send.fcm_failed` / `send.apns_failed`. That
+ * is a deliberate, bounded exception to "no upstream bodies in logs" — since
+ * isStaleResponse stopped retiring devices on the 400s that name a token, that
+ * log line is the only place an operator learns the relay is misconfigured
+ * rather than the phones being dead. Its terms are written down in
+ * push-relay-shared/AGENTS.md; the distinction this function enforces is
+ * caller-facing versus operator-facing, not logged versus unlogged.
  */
 export function failDelivery(rc: RequestContext): Response {
   return fail(rc, 502, "push delivery failed");

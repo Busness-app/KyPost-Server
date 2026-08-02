@@ -58,6 +58,44 @@ non-prerelease version.
   database contention into lost work. The message is now kept for retry and the
   poll tick is reported as failed so the database problem is visible.
 
+- **A prerelease can no longer take over `:stable`.** GitHub's `published`
+  release event fires for prereleases too, and while the promotion step
+  excluded prereleases from the versions it compared against, it added the
+  release being published back unconditionally — so the one release whose
+  prerelease flag was never checked was the current one. Publishing a
+  prerelease tagged with a plain `v<major>.<minor>.<patch>` (the flag is a
+  checkbox, independent of the tag) compared as newest and moved `:stable` onto
+  it, upgrading every install that follows that tag to code nobody released.
+  The immutable version tag is still published, so testers can pull it by name.
+
+- **A malformed release tag now fails the release instead of skipping it.** The
+  version check was a job-level `if:`, which does not refuse anything — it
+  skips the job, and a skipped job is green. A release tagged `1.0.0` or
+  `release-1.0.0` produced no image and no failure. Tag validation now runs as
+  the first step, before the checkout that consumes the tag.
+
+- **Contact import accepts the upload the browser actually sends.** The
+  frontend posts `multipart/form-data`; the handler read the raw request body
+  into the vCard decoder. That did not fail loudly — the decoder reported
+  "no BEGIN field found" for the MIME boundary and part headers and then
+  decoded every card correctly — so every successful import in the UI reported
+  "Imported N contacts. (2 errors)". Multipart uploads are now parsed properly,
+  raw vCard bodies are still accepted, and an over-limit upload is refused with
+  413 rather than silently truncated mid-card and reported as a partial
+  success.
+
+- **The relay no longer logs Google's OAuth response body.** A failed
+  service-account token exchange interpolated the whole upstream body into an
+  error string that the worker logged as `send.error`. It now reports the
+  status and the RFC 6749 error enum — which is the actual diagnostic, since
+  `invalid_client` means `FCM_CLIENT_EMAIL` is wrong and `invalid_grant` means
+  `FCM_PRIVATE_KEY` is wrong or the clock has drifted — validated against a
+  narrow pattern so the field cannot carry free text. The success-path
+  `JSON.parse` is guarded for the same reason: V8 quotes the first ten
+  characters of its input back in the `SyntaxError` message, and on a 200 that
+  input is the access token. Pinned by
+  `worker/src/fcm-oauth-redaction.test.mts`.
+
 ### Added
 
 - `GET /api/status` reports `deferredMessages` and `oldestDeferredUtc`:
@@ -86,6 +124,14 @@ non-prerelease version.
 - Corrected the persistent-state paths. The README told operators that mailbox
   state lived in `state.json` and `decisions.json`; it has lived in `state.db`
   since the SQLite migration.
+
+- Recorded the one exception to the relay's "no upstream response bodies in
+  logs" rule. `send.fcm_failed` and `send.apns_failed` carry the provider's
+  reason clipped to 200 characters, deliberately: since `isStaleResponse`
+  stopped retiring devices on the 400s that name a token, that log line is the
+  only way an operator learns `FCM_PROJECT_ID` or `APNS_TOPIC` is wrong rather
+  than the phones being dead. The rule and the code had disagreed silently;
+  `push-relay-shared/AGENTS.md` now states the exception and its limits.
 
 ## Upgrade and rollback
 

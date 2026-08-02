@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -115,8 +116,86 @@ func (s *Server) handleContactsExport(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxContactImportBytes bounds the vCard payload of one import.
+const maxContactImportBytes = 10 << 20
+
+// multipartEnvelopeAllowance is the slack added to the wire ceiling to cover a
+// multipart boundary and part headers (a few hundred bytes). Without it the
+// documented 10 MiB limit is a lie for the only client that exists: a 10 MiB
+// .vcf wrapped in a form is over the wire limit by the size of its own framing.
+const multipartEnvelopeAllowance = 8 << 10
+
+// readContactImportBody returns the vCard bytes of an import request, along
+// with the HTTP status to report if it fails.
+//
+// It accepts both shapes the endpoint actually receives. The browser sends
+// multipart/form-data (frontend/src/api/contacts.ts builds a FormData with a
+// "file" part), and reading that body directly into the vCard decoder does not
+// fail loudly — the decoder skips the boundary and Content-Disposition lines,
+// returning "no BEGIN field found" for each, then decodes every card
+// correctly. So the contacts imported and the user was told
+// "Imported N contacts. (2 errors)" every single time, on every successful
+// import, with no way to tell that from a real parse failure. No test caught
+// it because the tests here post raw vCard text, which is the one shape no
+// browser sends.
+//
+// Raw bodies are still accepted: `curl --data-binary @contacts.vcf` against the
+// endpoint README documents is reasonable, and it is what the bounded-loop
+// tests exercise.
+//
+// The ceiling is http.MaxBytesReader, not io.LimitReader. LimitReader is
+// indistinguishable from a body that simply ended: an oversized upload was
+// truncated mid-card and imported as a partial success, so the operator was
+// told the import worked while contacts went missing. MaxBytesReader makes the
+// read fail instead, which is reportable as 413.
+func readContactImportBody(w http.ResponseWriter, r *http.Request) ([]byte, int, error) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	isMultipart := err == nil && strings.HasPrefix(mediaType, "multipart/")
+
+	ceiling := int64(maxContactImportBytes)
+	if isMultipart {
+		ceiling += multipartEnvelopeAllowance
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, ceiling)
+
+	if !isMultipart {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, contactImportReadStatus(err), errors.New("failed to read import")
+		}
+		return raw, http.StatusOK, nil
+	}
+
+	// maxMemory is the full ceiling, so ParseMultipartForm never spills a temp
+	// file to disk: MaxBytesReader has already capped the body below it.
+	if err := r.ParseMultipartForm(ceiling); err != nil {
+		return nil, contactImportReadStatus(err), errors.New("import upload is too large or malformed")
+	}
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		return nil, http.StatusBadRequest, errors.New(`import upload must carry a "file" part`)
+	}
+	defer file.Close()
+
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		return nil, contactImportReadStatus(err), errors.New("failed to read import")
+	}
+	return raw, http.StatusOK, nil
+}
+
+// contactImportReadStatus maps a body-read failure to a status, so "you sent
+// too much" is not reported as "your file is malformed".
+func contactImportReadStatus(err error) int {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
+}
+
 // handleContactsImport imports contacts in vCard format into the caller's own
-// address book from a multipart file upload.
+// address book, from either a multipart file upload or a raw vCard body.
 func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 	store, err := s.contactsFor(r)
 	if err != nil {
@@ -129,17 +208,14 @@ func (s *Server) handleContactsImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit to 10 MB for import file
-	limitedBody := io.LimitReader(r.Body, 10<<20)
-
 	// go-vcard unfolds continuation lines with `l += ...` inside a loop, which
 	// is quadratic in the number of folds. The byte and card caps do not bound
 	// folds WITHIN one card, so a single card made of continuation lines turned
 	// a 10 MiB upload into minutes of memcpy on a shared, CPU-limited box.
 	// Buffer and pre-scan: cheap next to what it prevents.
-	raw, err := io.ReadAll(limitedBody)
+	raw, status, err := readContactImportBody(w, r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed to read import"})
+		writeJSON(w, status, map[string]any{"error": err.Error()})
 		return
 	}
 	if err := checkVCardFolding(raw); err != nil {
