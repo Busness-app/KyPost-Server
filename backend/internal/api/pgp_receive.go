@@ -3,6 +3,7 @@ package api
 import (
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/contacts"
+	"kypost-server/backend/internal/mailmsg"
 	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/users"
 )
@@ -18,7 +19,12 @@ type pgpDecryptResult struct {
 	// a multipart/encrypted envelope carries no readable text part, so without
 	// this the plaintext inside would inherit "plain" and an HTML message would
 	// render as escaped source.
-	BodyMode          string
+	BodyMode string
+	// Attachments are the files inside the ciphertext. The inbox paths only
+	// need HasAttachments, but the attachment endpoints serve these directly —
+	// the outer message has just the armored payload as its single part, so
+	// this is the only place the real files exist.
+	Attachments       []mailmsg.Attachment
 	HasAttachments    bool
 	Signed            bool
 	Verified          bool
@@ -77,6 +83,7 @@ func (s *Server) decryptPGPPayload(userID, payload string) pgpDecryptResult {
 	out := pgpDecryptResult{
 		Body:              body,
 		BodyMode:          mode,
+		Attachments:       attachments,
 		HasAttachments:    len(attachments) > 0,
 		Signed:            result.Signed,
 		Verified:          result.Verified,

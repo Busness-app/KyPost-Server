@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router";
 import { processEmailHtml } from "../lib/emailHtml";
 import { EmailBodyFrame } from "./read/EmailBodyFrame";
+import { EncryptionCell } from "./read/EncryptionCell";
 import { displayBody } from "./read/body";
 import { firstAddressFromText, listAddressesFromText } from "../lib/addressText";
 import { isFlaggedPhishing } from "../lib/phishing";
@@ -1057,6 +1058,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                 <table className="inbox-table">
                   <thead>
                     <tr>
+                      <th className="inbox-col-heading inbox-col-lock" aria-label="Encrypted" />
                       <th className="inbox-col-heading">Subject</th>
                       <th className="inbox-col-heading inbox-desktop-col">Sender</th>
                       <th className="inbox-col-heading inbox-col-time inbox-desktop-col">Time</th>
@@ -1078,6 +1080,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           onClick={() => void openEmailDetails(item)}
                           style={{ cursor: "pointer" }}
                         >
+                          <EncryptionCell email={item} local={decrypted[item.messageId]} clientProtected={isClientProtected()} />
                           <td className="inbox-cell">
                             <button
                               type="button"
@@ -1202,6 +1205,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                         aria-label="Select all emails in page"
                       />
                     </th>
+                    <th className="inbox-col-heading inbox-col-lock" aria-label="Encrypted" />
                     <th className="inbox-col-heading">
                       <button type="button" onClick={() => updateSort("subject")} className="inbox-sort-button">
                         {sortLabel("subject", "Subject")}
@@ -1265,6 +1269,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           aria-label={`Select email ${item.subject || item.messageId}`}
                         />
                       </td>
+                      <EncryptionCell email={item} local={decrypted[item.messageId]} clientProtected={isClientProtected()} />
                       <td className="inbox-cell">
                         {swipeState?.showHint ? (
                           <span
@@ -1284,21 +1289,6 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           }}
                           className={`inbox-subject-button ${isRead ? "" : "inbox-subject-unread"}`}
                         >
-                          {/*
-                            Marked only when the row yields nothing readable without a further
-                            step: a client-protected message needs the vault unlocked, and a
-                            failed decrypt never opens at all. A server-decrypted message reads
-                            normally, so marking it would put a symbol on most rows of a
-                            server-mode mailbox for no actionable reason — the reader badge
-                            already says who decrypted it.
-                          */}
-                          {item.pgpEncrypted && !decrypted[item.messageId] ? (
-                            item.pgpDecryptError ? (
-                              <span className="inbox-attachment-icon" title={`Could not decrypt: ${item.pgpDecryptError}`} aria-label="Encrypted, could not be decrypted">⚠ </span>
-                            ) : !item.body ? (
-                              <span className="inbox-attachment-icon" title="Encrypted — unlock your PGP key to read" aria-label="Encrypted, locked">🔒 </span>
-                            ) : null
-                          ) : null}
                           {item.hasAttachments ? <span className="inbox-attachment-icon" title="Has attachments" aria-label="Has attachments">📎 </span> : null}
                           {item.subject || "(no subject)"}
                         </button>

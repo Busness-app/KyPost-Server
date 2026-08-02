@@ -12,7 +12,101 @@ non-prerelease version.
 
 ## Unreleased — 0.2.0
 
+### Added
+
+- **The inbox has an encryption column.** Every encrypted message now carries a
+  padlock in its own column, in both the inbox and search results, whether or
+  not it opened — previously the marking lived inside the Subject cell and
+  appeared only when a message could not be read without a further step, so a
+  message the server decrypted successfully looked exactly like one that
+  arrived in the clear. A failed decrypt keeps the padlock and tints it rather
+  than switching to a second symbol, so the column reads as "padlock or
+  nothing" at a glance.
+
+### Changed
+
+- **Encrypted mail no longer goes to the classifier.** A PGP-encrypted message
+  has no readable body — the poller never decrypts, and the payload is detected
+  precisely *because* no MIME part rendered — so every one of them spent an
+  Ollama call on an empty body, handed the model the sender and (for
+  third-party PGP/MIME without protected headers) the real subject, and was
+  then retired unlabeled into Uncategorized. Such a message is now tagged with
+  the account's default label and skips the model. It is deliberately not given
+  an `Encrypted` keyword: IMAP keywords are stored on the mail server in the
+  clear, so that would hand whoever runs that server an index of which messages
+  are worth attacking while looking like a security feature — and the published
+  contract says keywords are a sorting hint, never a security boundary.
+
 ### Fixed
+
+- **Encrypted Sent copies no longer lose their BCC recipients.** The copy was
+  built by encrypting the delivered message, which omits `Bcc` on purpose so no
+  recipient can see who else received it — and `SaveSent` ignores the draft's
+  recipient fields entirely once it has raw bytes to append. So an encrypted
+  send recorded no blind recipients while a plaintext one recorded them
+  normally. The copy is now built from its own source that carries them.
+
+- **The attachment listing looks inside real encrypted mail, not just test
+  mail.** It required a message to have exactly one MIME part before treating it
+  as an envelope, which no real encrypted message satisfies: the MIME parser
+  files the ciphertext under both attachments and inlines, so it arrives listed
+  twice. The check now asks whether every part is one an envelope could carry.
+
+- **An ordinary message carrying an encrypted file is no longer mistaken for an
+  encrypted message.** Detection accepted any bodyless message with an armored
+  attachment, so `document.pgp` sent alongside a spreadsheet skipped
+  classification, suppressed its own notification preview and showed a padlock.
+  Every part must now be one a PGP/MIME envelope could contain.
+
+- **Downloading an encrypted file returns that file.** The download endpoint
+  decrypted anything whose bytes began with a PGP armor header, with no check
+  that the message was an envelope, and then re-indexed into the decrypted
+  contents — so clicking `archive.pgp` in a message that also had other
+  attachments returned something from inside it, or a 404, for a file the
+  listing said was there. Both endpoints now apply the same test.
+
+- **A Sent copy that could not be encrypted now says so.** When encryption of
+  the copy fails, the send still succeeds and the copy is stored readable
+  rather than lost — but that outcome reached only the server log, so a user who
+  ticked "encrypt" could not tell it from the one they asked for. It now comes
+  back as a warning on the send. (A sender who has no key of their own is not a
+  failure and warns about nothing.)
+
+- **An attachment-only encrypted message no longer tells you to unlock a key.**
+  The inbox padlock read "unlock your PGP key to read" whenever an encrypted
+  message had no text body — including one the server had already decrypted
+  whose plaintext was attachments only, where there is nothing to unlock. The
+  locked state now requires client-protected custody, which is the only kind
+  that has a vault.
+
+- **An encrypted message's sender and subject no longer reach FCM or APNs.**
+  Native push travels to the relay Worker and on to Google or Apple in
+  cleartext at every hop, and a third-party PGP/MIME message that does not use
+  protected headers carries its real subject in the clear — so turning on
+  Content Preview was shipping the subject of end-to-end encrypted mail through
+  two third parties, invisibly. Both are now withheld for encrypted messages
+  whatever that setting says. Web push is unchanged: RFC 8291 encrypts those
+  payloads to the browser's own subscription keys, so Content Preview remains
+  the user's call there.
+
+- **The Sent folder now shows that an encrypted message was encrypted.** A
+  server-custody encrypted send delivered ciphertext but appended its Sent copy
+  as cleartext, rebuilt from the request. The web reader derives its "PGP:
+  encrypted" badge by sniffing the stored message, so an encrypted send and a
+  plain one rendered identically in Sent — with no indicator on either — and the
+  plaintext and real subject of every encrypted message sat on the IMAP store
+  regardless. The copy is now encrypted to the sender's own key, matching what
+  the client-custody path has done since run-4. A sender who has no key of their
+  own (encrypting to recipients never required one) keeps the previous plaintext
+  copy: there is nothing to encrypt it to.
+
+- **Attachments on encrypted mail are readable again.** The attachment endpoints
+  served a message's outer MIME parts, which for PGP/MIME is only the armored
+  payload — so an encrypted message with a file attached listed `encrypted.asc`,
+  and downloading it produced armor instead of the file. Both endpoints now look
+  inside the ciphertext when the server holds a key that opens it. Unencrypted
+  mail is unaffected and still costs a single fetch; a client-protected account
+  still receives the untouched ciphertext, since the server cannot read it.
 
 - **Transient failures no longer discard mail-processing work.** A keyword
   write, rule action, or state write that failed after its own retries used to
