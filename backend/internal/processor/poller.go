@@ -640,6 +640,19 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		// delete, so a list this cycle cannot confirm is not one to act on.
 		p.log.Error("failed to read user rules, skipping rule evaluation", "user_id", u.ID, "error", err.Error())
 		activeRules = nil
+	} else {
+		// rules.json predates ValidateRule and is a plain file in the user's
+		// state directory, so the API's write boundaries cannot be the only
+		// gate — see rules.FilterRunnable. An unexecutable rule skipped here
+		// with one log line per tick is the alternative to it failing on every
+		// matching message, which the error taxonomy below treats as retryable
+		// and therefore defers each of them for the full maxDeferralAttempts
+		// window before retiring them unlabelled.
+		var rejected []string
+		activeRules, rejected = rules.FilterRunnable(activeRules)
+		for _, why := range rejected {
+			p.log.Error("skipping unexecutable rule", "user_id", u.ID, "reason", why)
+		}
 	}
 
 	uc := userCtx{
@@ -710,6 +723,12 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	// unclamped write here retires exactly the messages these branches meant to
 	// keep. See imapadapter.ClampCheckpoint.
 	var deferredIDs []string
+	// ledgerErr records that the deferral counter could not be written for at
+	// least one message this tick. The tick's own work still completes — the
+	// checkpoint clamp below is the part that matters — but the tick is
+	// reported as failed so a state-store outage reaches health instead of
+	// showing up only as mail that quietly stopped being processed.
+	var ledgerErr error
 	for i, msg := range messages {
 		seen, err := store.Seen(msg.ID)
 		if err != nil {
@@ -770,14 +789,30 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 				attempts, cerr := store.RecordDeferral(msg.ID)
 				switch {
 				case cerr != nil:
-					// Unable to count attempts means unable to enforce the cap.
-					// Retire rather than open a deferral nothing can ever close:
-					// an unbounded hold on the checkpoint stops this mailbox
-					// making progress at all, which is worse than losing the
-					// retry for one message.
-					p.log.Error("cannot count deferral attempts; retiring message rather than deferring it unboundedly",
+					// Fail CLOSED: the message stays deferred and the checkpoint
+					// stays below it, exactly as if the counter had been written.
+					//
+					// This used to retire the message, reasoning that a counter
+					// which cannot be written cannot enforce the cap, and an
+					// uncappable deferral holds the checkpoint forever. The
+					// premise is right and the conclusion does not follow:
+					// retiring is RecordProcessedDecision, another write to the
+					// same state.Store that just failed, and the Seen() read at
+					// the top of this loop fails too. A state store broken enough
+					// to lose RecordDeferral cannot retire the message either —
+					// it advances the checkpoint past unfinished mail with
+					// neither the label nor the audit row. So retiring bought no
+					// progress and paid for it in lost mail.
+					//
+					// Held below alongside the rest of this tick's deferrals, and
+					// surfaced by failing the tick (see ledgerErr) so an operator
+					// sees a state-store outage rather than a quiet backlog.
+					p.log.Error("cannot count deferral attempts; holding message for retry and failing the tick",
 						"user_id", u.ID, "message_id", msg.ID, "error", cerr.Error())
-					retire = true
+					deferredIDs = append(deferredIDs, msg.ID)
+					if ledgerErr == nil {
+						ledgerErr = fmt.Errorf("deferral ledger unwritable: %w", cerr)
+					}
 				case attempts >= maxDeferralAttempts:
 					p.log.Error("deferral limit reached; retiring message",
 						"user_id", u.ID, "message_id", msg.ID,
@@ -855,7 +890,10 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	}); err != nil {
 		p.log.Error("failed to record poll tick", "user_id", u.ID, "error", err.Error())
 	}
-	return nil
+	// Returned last, after the checkpoint clamp and the tick record: the work
+	// this tick did do is real and must be persisted. What the error changes is
+	// only the tick's reported outcome — see tick's usersFailed accounting.
+	return ledgerErr
 }
 
 // classifierErr marks an error returned by classifyWithRetry so tickUser's
