@@ -146,8 +146,11 @@ type Server struct {
 	// classifier and globalStore back the Ollama version/update-check block on the
 	// Prompt Tuning page and its admin-notification email. classifier is nil until
 	// SetClassifier is called (see app.go); globalStore is the install-wide (not
-	// per-user) state.Store rooted at stateDir itself, used only to dedupe the
-	// upgrade-available email to one per newly-seen upstream release.
+	// per-user) state.Store rooted at stateDir itself, used to dedupe the
+	// upgrade-available email to one per newly-seen upstream release, and to read
+	// the daemon process's published health report (health.MergeDaemonReport) —
+	// which is the same store the daemon writes it to, since both processes are
+	// rooted at the same state directory.
 	classifier   *classifier.HTTPClient
 	globalStore  *state.Store
 	ollamaMu     sync.Mutex
@@ -251,9 +254,17 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 
 	globalStore, err := state.New(stateDir)
 	if err != nil {
-		// Only the Ollama-update-notification dedup relies on this; losing it
-		// just means a possible duplicate email, never a reason to fail startup.
-		logger.Error("failed to open global state store; ollama update emails may repeat", "error", err.Error())
+		// Two things ride on this store, and neither is a reason to refuse to
+		// start: the Ollama-update-notification dedup (losing it means a
+		// possible duplicate email) and reading the daemon's published health
+		// report for /api/health (losing it means the endpoint reports only
+		// this process's own half again, as it did before health/daemon.go).
+		//
+		// Deliberately not fatal to health either. Making /api/health fail on a
+		// store this process could not open would take an otherwise-serving API
+		// offline for a fault no restart fixes, and the loud error here is the
+		// signal for that fault.
+		logger.Error("failed to open global state store; ollama update emails may repeat and /api/health cannot see the daemon", "error", err.Error())
 		globalStore = nil
 	}
 
@@ -903,8 +914,34 @@ func (s *Server) StartMfaPushLimiterSweeper(ctx context.Context) {
 	}
 }
 
+// handleHealth serves this process's health, overlaid with the daemon's.
+//
+// The overlay is the whole point. Under supervisord the poller is a different
+// process with its own in-memory health.Service, so the classifier and
+// native-push flags served here were the API's own — permanently false, because
+// nothing in the API process classifies mail or sends a push. A container whose
+// poller had been dead for a week answered this endpoint with "healthy" and
+// rendered "Working" on the health page. See health.MergeDaemonReport.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	st := s.health.GetStatus()
+	// Merged unconditionally, including when there is no store to read from.
+	//
+	// A nil globalStore means state.New failed at startup for the very
+	// directory the daemon keeps its checkpoints and per-user state in, so
+	// "this process cannot see the daemon" is exactly as true then as when the
+	// daemon has stopped writing — and skipping the overlay would answer
+	// "healthy" on it, which is the failure this endpoint was changed to stop
+	// telling. MergeDaemonReport already reads an empty report as unhealthy, so
+	// failing closed is just handing it the empty one.
+	//
+	// The blast radius of doing so is a 503 here and a red container
+	// healthcheck. Nothing restarts on it: monitorHealth (app.go) watches the
+	// in-memory status, not this merged one.
+	raw := ""
+	if s.globalStore != nil {
+		raw = s.globalStore.DaemonHealth()
+	}
+	st = health.MergeDaemonReport(st, raw, time.Now())
 	status := http.StatusOK
 	if !st.Healthy {
 		status = http.StatusServiceUnavailable
@@ -988,7 +1025,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Classifier admission depth. Without this the only symptom of a backlog
 	// the model cannot drain is mail that quietly classifies late — the poll
 	// tick reports success either way, and the health check only watches IMAP.
-	if s.classifier != nil {
+	//
+	// Reported only when this process is the one doing the classifying. Under
+	// supervisord it is not: `--mode server` builds its own classifier client
+	// for the version check (ollama_version.go) and never classifies a message
+	// with it, so its queue is structurally empty and publishing it renders a
+	// permanent "0 queued, 0 in flight" over whatever the daemon is actually
+	// struggling with. An absent field is a UI that shows nothing; a zero is a
+	// UI that shows "fine".
+	if s.classifier != nil && s.poller != nil {
 		resp["classifier"] = s.classifier.Stats()
 	}
 

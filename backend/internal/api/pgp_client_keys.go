@@ -53,6 +53,12 @@ type clientIdentityRequest struct {
 	PublicKey string `json:"publicKey"`
 	Wrapped   string `json:"wrapped"`
 	Source    string `json:"source"`
+
+	// Step-up credential, required only when this REPLACES an existing identity
+	// (pgp_stepup.go). Both forms are accepted because a client-protected
+	// account never sends its password to this server — see login_params.go.
+	Password   string `json:"password,omitempty"`
+	AuthSecret string `json:"authSecret,omitempty"`
 }
 
 // handlePGPIdentityClient stores an identity whose private half the browser
@@ -72,6 +78,13 @@ func (s *Server) handlePGPIdentityClient(w http.ResponseWriter, r *http.Request)
 	var req clientIdentityRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxWrappedKeyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	// Replacing an EXISTING identity needs the account credential, not just the
+	// session: the new public key outlives the session, gets published through
+	// WKD and Autocrypt, and redirects every future correspondent to it. First
+	// -time setup is not gated — see pgp_stepup.go.
+	if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
 		return
 	}
 	wrapped := strings.TrimSpace(req.Wrapped)
@@ -125,6 +138,10 @@ func (s *Server) handlePGPRewrapKey(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Wrapped string `json:"wrapped"`
+		// Step-up credential. Always required here: rewrapping presupposes an
+		// identity to rewrap, so this endpoint is never first-time setup.
+		Password   string `json:"password,omitempty"`
+		AuthSecret string `json:"authSecret,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxWrappedKeyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -132,6 +149,12 @@ func (s *Server) handlePGPRewrapKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.Wrapped) == "" {
 		http.Error(w, "wrapped private key is required", http.StatusBadRequest)
+		return
+	}
+	// A stolen session could otherwise overwrite the envelope with a blob whose
+	// contents nobody can check — the server cannot open it by design — leaving
+	// the owner locked out of every message ever encrypted to them.
+	if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
 		return
 	}
 	if _, err := s.users.RewrapPGPPrivateKey(ac.UserID, strings.TrimSpace(req.Wrapped)); err != nil {
@@ -170,29 +193,18 @@ func (s *Server) handlePGPExportLegacyKey(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	// Shared with the PGP step-up gates (pgp_stepup.go): same throttle, same
+	// two credential forms, same answers. This endpoint set the standard the
+	// others now meet, and one implementation of it is one place for it to be
+	// got right.
+	if !s.confirmAccountCredential(w, r, ac.UserID, req.Password, req.AuthSecret) {
+		return
+	}
 	u, err := s.users.Get(ac.UserID)
 	if err != nil {
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return
 	}
-	// Rate-limit against the same per-account throttle the MFA path uses, so
-	// this cannot become an unmetered password oracle.
-	if allowed, _ := s.mfaLockout.tryAttempt(ac.UserID); !allowed {
-		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
-		return
-	}
-	confirmed, err := verifyAccountCredential(r.Context(), u, req.Password, req.AuthSecret)
-	if err != nil {
-		// Nothing was checked, so the throttle strike goes back with it.
-		s.mfaLockout.cancelAttempt(ac.UserID)
-		writeKDFBusy(w)
-		return
-	}
-	if !confirmed {
-		http.Error(w, "invalid credentials", http.StatusUnauthorized)
-		return
-	}
-	s.mfaLockout.recordSuccess(ac.UserID)
 
 	if u.PGPProtection() == users.PGPProtectionClient {
 		http.Error(w, "this key is already client-protected", http.StatusConflict)

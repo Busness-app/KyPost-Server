@@ -233,7 +233,14 @@ export function SecurityPage() {
       const name = selfContact?.fn?.trim() || session.bootstrap?.displayName || "KyPost user";
       const generated = await generateIdentity(name, addresses[0], addresses.slice(1));
       const wrapped = await wrapPrivateKey(generated.armoredPrivateKey, password);
-      const id = await storeClientPGPIdentity(generated.armoredPublicKey, JSON.stringify(wrapped), "generated");
+      // The same password is the step-up credential: replacing an existing
+      // identity needs the account password, not just a session.
+      const id = await storeClientPGPIdentity(
+        generated.armoredPublicKey,
+        JSON.stringify(wrapped),
+        "generated",
+        password
+      );
       // Hold the fresh key for this page so the user is not immediately asked
       // to unlock a key they just made.
       unlockWithArmoredKey(generated.armoredPrivateKey);
@@ -293,7 +300,12 @@ export function SecurityPage() {
     try {
       const exported = await exportLegacyPGPKey(migratePassword);
       const wrapped = await wrapPrivateKey(exported.privateKey, migratePassword);
-      const id = await storeClientPGPIdentity(exported.publicKey, JSON.stringify(wrapped), "imported");
+      const id = await storeClientPGPIdentity(
+        exported.publicKey,
+        JSON.stringify(wrapped),
+        "imported",
+        migratePassword
+      );
       unlockWithArmoredKey(exported.privateKey);
       setPgpIdentity(id);
       setMigrateOpen(false);
@@ -362,7 +374,12 @@ export function SecurityPage() {
       // secret to remember rather than two.
       const imported = await importIdentity(pgpImportKey, pgpImportPassphrase);
       const wrapped = await wrapPrivateKey(imported.armoredPrivateKey, password);
-      const id = await storeClientPGPIdentity(imported.armoredPublicKey, JSON.stringify(wrapped), "imported");
+      const id = await storeClientPGPIdentity(
+        imported.armoredPublicKey,
+        JSON.stringify(wrapped),
+        "imported",
+        password
+      );
       unlockWithArmoredKey(imported.armoredPrivateKey);
       setPgpIdentity(id);
       setPgpImportOpen(false);
@@ -381,10 +398,21 @@ export function SecurityPage() {
     if (!window.confirm("Delete your PGP identity? Mail encrypted to you will no longer be readable.")) {
       return;
     }
+    // The account password, not just the confirmation. This is the one action
+    // on this page that cannot be undone by any later one — a stolen session
+    // could otherwise make every message ever encrypted to this key unreadable,
+    // permanently, in a single request.
+    const password = window.prompt(
+      "Enter your account password to confirm deleting your PGP identity.\n\n" +
+        "This cannot be undone: mail already encrypted to this key stays unreadable."
+    );
+    if (!password) {
+      return;
+    }
     setPgpBusy(true);
     setPgpStatus("");
     try {
-      await deletePGPIdentity();
+      await deletePGPIdentity(password);
       setPgpIdentity(null);
       setPgpStatus("PGP identity deleted.");
     } catch (e) {

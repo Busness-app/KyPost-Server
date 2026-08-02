@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -111,8 +114,8 @@ func TestEncryptedSentCopyStillOpensWithTheSendersKey(t *testing.T) {
 
 // Encrypting to recipients does not require a key of your own — handleMailSend
 // only insists on one for signing. Such a sender has nothing to encrypt a Sent
-// copy to, so there is no copy to make, and the caller falls back to today's
-// plaintext one rather than losing the copy entirely.
+// copy to, so there is no copy to make. The caller then saves NOTHING; see
+// TestSentCopyIsSkippedEntirelyWhenTheSenderHasNoKey.
 func TestEncryptedSentCopySkippedWhenTheSenderHasNoKey(t *testing.T) {
 	copyBytes, err := encryptedSentCopy([]byte("From: a@b\r\nSubject: x\r\n\r\nbody"), "", nil)
 	if err != nil {
@@ -126,12 +129,15 @@ func TestEncryptedSentCopySkippedWhenTheSenderHasNoKey(t *testing.T) {
 func TestSentCopyDraftAppendsTheEncryptedCopyVerbatim(t *testing.T) {
 	const ciphertext = "From: alice@example.com\r\nSubject: [Encrypted] Email Sent by KyPost\r\n\r\n-----BEGIN PGP MESSAGE-----\r\nx\r\n-----END PGP MESSAGE-----\r\n"
 
-	draft := sentCopyDraftForSend(
-		mailRequest{Subject: "Quarterly numbers", Body: "revenue fell 40%", Mode: "plain"},
+	draft, save := sentCopyDraftForSend(
+		mailRequest{Encrypt: true, Subject: "Quarterly numbers", Body: "revenue fell 40%", Mode: "plain"},
 		[]string{"bob@example.com"}, []string{"carol@example.com"}, []string{"dave@example.com"},
 		[]byte(ciphertext),
 	)
 
+	if !save {
+		t.Fatal("a ciphertext copy was not saved")
+	}
 	if string(draft.Raw) != ciphertext {
 		t.Fatalf("the ciphertext was not appended verbatim:\n%s", draft.Raw)
 	}
@@ -201,17 +207,78 @@ func TestEncryptedSentCopyKeepsBCC(t *testing.T) {
 }
 
 func TestSentCopyDraftKeepsPlaintextWhenThereIsNoEncryptedCopy(t *testing.T) {
-	draft := sentCopyDraftForSend(
+	draft, save := sentCopyDraftForSend(
 		mailRequest{Subject: "Lunch", Body: "one o'clock", Mode: "plain"},
 		[]string{"bob@example.com"}, nil, nil,
 		nil,
 	)
 
+	if !save {
+		t.Fatal("an unencrypted send lost its Sent copy")
+	}
 	if len(draft.Raw) != 0 {
 		t.Fatal("an unencrypted send produced a Raw draft")
 	}
 	if draft.Subject != "Lunch" || draft.Body != "one o'clock" {
 		t.Fatalf("the plaintext copy lost its content: %+v", draft)
+	}
+}
+
+// The core guarantee: a send the user asked to encrypt never APPENDs cleartext.
+//
+// The Sent copy does not go to this server — it is APPENDed to the account's
+// IMAP host, which is somebody else's machine. "The server holds this account's
+// key anyway, so a readable copy reveals nothing new" was the old justification
+// and it does not cover the party that actually receives the artifact. The
+// client-custody path (sentCopyDraft, pgp_send_client.go) has always refused
+// this; this is the same refusal on the server-custody path.
+func TestSentCopyDraftRefusesPlaintextForAnEncryptedSend(t *testing.T) {
+	_, save := sentCopyDraftForSend(
+		mailRequest{Encrypt: true, Subject: "Quarterly numbers", Body: "revenue fell 40%", Mode: "plain"},
+		[]string{"bob@example.com"}, nil, nil,
+		nil,
+	)
+
+	if save {
+		t.Fatal("an encrypted send fell back to appending its cleartext to the Sent folder")
+	}
+}
+
+// The response has to carry the skip, not just the server log. sentSaved:false
+// is what the composer renders, and it is the only machine-readable signal that
+// a message the user encrypted has no copy in Sent.
+func TestFinishMailSendReportsAnUnsavedEncryptedCopy(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/mail/send", nil)
+	// No recipients: SMTP is skipped by finishMailSend's empty-recipient guard,
+	// which isolates the Sent-copy decision. Encrypt with a nil sentCopy is the
+	// state sentCopyForSend produces when it cannot encrypt one.
+	srv.finishMailSend(rec, r, userID,
+		"127.0.0.1", 1, "127.0.0.1:1", "user", "pw",
+		"alice@example.com",
+		[]string{"bob@example.com"}, nil, nil,
+		nil, nil,
+		mailRequest{Encrypt: true, Subject: "Quarterly numbers", Body: "revenue fell 40%", Mode: "plain"},
+		nil, "copy warning", nil)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		SentSaved bool   `json:"sentSaved"`
+		Warning   string `json:"warning"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (body=%s)", err, rec.Body.String())
+	}
+	if resp.SentSaved {
+		t.Fatal("reported sentSaved:true for an encrypted send whose copy was never written")
+	}
+	if !strings.Contains(resp.Warning, "copy warning") {
+		t.Fatalf("the reason did not reach the sender: %q", resp.Warning)
 	}
 }
 
@@ -268,10 +335,10 @@ func TestSentCopyForEncryptedSendIsEncryptedToTheAccountKey(t *testing.T) {
 	}
 }
 
-// The degrade to a plaintext Sent copy must reach the person who ticked
-// "encrypt". A log line on the server is not an answer to a user, and the whole
-// point of the fallback is that the send still succeeds — so without a warning
-// the outcome is indistinguishable from the one they asked for.
+// Losing the Sent copy must reach the person who ticked "encrypt". A log line
+// on the server is not an answer to a user, and the send itself still succeeded
+// — so without a warning the outcome is indistinguishable from the one they
+// asked for, just with a missing copy they may not notice for weeks.
 func TestSentCopyWarnsWhenItCannotBeEncrypted(t *testing.T) {
 	srv := newTestServer(t)
 
@@ -286,17 +353,26 @@ func TestSentCopyWarnsWhenItCannotBeEncrypted(t *testing.T) {
 		t.Fatal("a copy was produced for an account that could not be read")
 	}
 	if warning == "" {
-		t.Fatal("the Sent copy fell back to plaintext without telling the sender")
+		t.Fatal("the Sent copy was dropped without telling the sender")
 	}
-	if !strings.Contains(strings.ToLower(warning), "plain text") {
+	// It must say the copy was NOT SAVED. The old wording said it was saved in
+	// plain text, which is the behaviour this replaced.
+	if !strings.Contains(strings.ToLower(warning), "not saved") {
 		t.Fatalf("warning does not say what happened: %q", warning)
+	}
+	if strings.Contains(strings.ToLower(warning), "plain text") {
+		t.Fatalf("warning still describes the plaintext fallback: %q", warning)
 	}
 }
 
-// A sender with no key of their own has not suffered a failure: encrypting to
-// recipients never required one. Warning here would cry wolf on every send by
-// an account that has never generated a key.
-func TestSentCopyDoesNotWarnWhenTheSenderHasNoKey(t *testing.T) {
+// A sender with no key of their own has not suffered a failure — encrypting to
+// recipients never required one — but the consequence is the same and is not
+// something they can be left to discover: no Sent copy exists for this message.
+//
+// This is the path the old code was silent on. It returned no warning AND kept
+// a cleartext copy, so the one case that produced plaintext with no signal
+// anywhere was also the most common one: any account that never generated a key.
+func TestSentCopyIsSkippedEntirelyWhenTheSenderHasNoKey(t *testing.T) {
 	srv := newTestServer(t)
 	all, err := srv.users.List()
 	if err != nil || len(all) == 0 {
@@ -310,8 +386,13 @@ func TestSentCopyDoesNotWarnWhenTheSenderHasNoKey(t *testing.T) {
 	if copyBytes != nil {
 		t.Fatal("a copy was encrypted for an account with no key")
 	}
-	if warning != "" {
-		t.Fatalf("warned about a keyless account, which is not a failure: %q", warning)
+	if warning == "" {
+		t.Fatal("no Sent copy was saved and the sender was not told")
+	}
+	// The remedy differs from the failure case above — generate a key — so the
+	// wording has to differ too.
+	if !strings.Contains(strings.ToLower(warning), "no pgp key") {
+		t.Fatalf("warning does not name the cause: %q", warning)
 	}
 }
 

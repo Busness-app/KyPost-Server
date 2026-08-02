@@ -52,9 +52,19 @@ func isArmoredPGPMessage(content []byte) bool {
 // Requiring EVERY part to be envelope-typed is what keeps an ordinary message
 // carrying an encrypted file out: document.pgp next to report.xlsx has a part
 // no envelope could contain, so it is left alone and its attachments are served
-// as themselves. This matches imap.pgpEnvelopePayload, which makes the same
-// judgement on content for the inbox listing — change one, change both, or a
-// message shows a padlock in the list and refuses to open its attachments.
+// as themselves. This matches imap.pgpEnvelopePayload, the CANDIDATE half of
+// the inbox listing's test — change one, change both, or a message shows a
+// padlock in the list and refuses to open its attachments.
+//
+// Deliberately NOT the other half. The inbox listing confirms a candidate
+// against the message's real root Content-Type (imap/pgp_root_header.go),
+// because the padlock and the classification skip are decided from it and a
+// forged shape must not earn either. Here the confirmation is on CONTENT
+// instead, further down: a false positive is fetched and then rejected by
+// isArmoredPGPMessage, and if it somehow were not, the payload is a blob this
+// server cannot decrypt and the path falls back to the outer parts. Both roads
+// end at "serve what is actually there", so paying for a second header fetch on
+// every attachment listing would buy nothing.
 //
 // A cheap prefilter on metadata already in hand. Without it, confirming a
 // message is encrypted would mean fetching its first part on every attachment

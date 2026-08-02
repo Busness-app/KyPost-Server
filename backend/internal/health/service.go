@@ -1,6 +1,7 @@
 package health
 
 import (
+	"slices"
 	"sync"
 	"time"
 )
@@ -40,6 +41,15 @@ type Status struct {
 	// response body, and this struct is served to admins over /api/health.
 	ClassifierFailing   bool   `json:"classifierFailing"`
 	ClassifierFailingAt string `json:"classifierFailingAt,omitempty"`
+
+	// Cross-process liveness. Under supervisord the poller runs as a separate
+	// process with its own Service, so everything above that only the daemon
+	// observes reaches the API through a stored DaemonReport (daemon.go).
+	// DaemonHeartbeatUTC is when it last reported; DaemonStale means it has
+	// stopped, and unlike the two subsystem flags it DOES flip Healthy —
+	// nothing this server exists to do happens without the poller.
+	DaemonHeartbeatUTC string `json:"daemonHeartbeatUtc,omitempty"`
+	DaemonStale        bool   `json:"daemonStale,omitempty"`
 }
 
 type Service struct {
@@ -70,9 +80,26 @@ func NewService() *Service {
 	return &Service{status: Status{Healthy: true, LastCheckUTC: now}}
 }
 
+// Status carries a slice, so passing one across this boundary in either
+// direction shares its backing array unless it is copied. SetStatus and
+// GetStatus both clone FailureReason for that reason, exactly as users.clone()
+// does for RecoveryCodesHash on the account cache.
+//
+// It is not theoretical. Two concurrent /api/health requests each take a Status
+// out of GetStatus and append a reason to it (health.MergeDaemonReport); with a
+// shared array that is two goroutines writing the same slot, which the race
+// detector flags and the memory model does not define. It stayed hidden because
+// every live caller passes a single string literal — len == cap, so append
+// allocates rather than sharing — and `MarkUnhealthy(reasons...)` with a real
+// slice, which passes the caller's array through variadically, is all it takes
+// to lose that accident.
+
 func (s *Service) SetStatus(st Status) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Cloned on the way IN so the Service does not keep a handle on a slice its
+	// caller still owns and may reuse.
+	st.FailureReason = slices.Clone(st.FailureReason)
 	if st.Healthy {
 		s.unhealthySince = nil
 		st.UnhealthyFor = 0
@@ -99,6 +126,10 @@ func (s *Service) GetStatus() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.status
+	// Cloned on the way OUT so no two readers — and no reader and the Service —
+	// ever hold the same array. Fixed here rather than only at the one caller
+	// that appends, because every future caller inherits it.
+	st.FailureReason = slices.Clone(st.FailureReason)
 	if s.unhealthySince != nil {
 		st.UnhealthyFor = int64(time.Since(*s.unhealthySince).Seconds())
 	}

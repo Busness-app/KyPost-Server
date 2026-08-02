@@ -127,7 +127,7 @@ jobs:
           # ci-docker job was skipped, must not read as a pass. A job added to
           # ci.yml and not added here is simply not part of the release gate,
           # which is a visible omission rather than a silent one.
-          required="ci-backend-api ci-backend-other ci-frontend ci-relay ci-docker"
+          required="ci-backend-api ci-backend-other ci-frontend ci-relay ci-scripts ci-docker"
 
           # filter=latest asks the API for the most recent run per check name,
           # so a re-run supersedes what it replaced. It is currently also the

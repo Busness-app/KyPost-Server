@@ -25,6 +25,9 @@ func (c *APIClient) FetchHeaderFields(ctx context.Context, uids []int, fields ..
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Answered before connecting. Asking for the headers of no messages is a
+	// no-op, and dialing IMAP to perform it would make an empty caller slice
+	// cost a connection.
 	if len(uids) == 0 {
 		return map[int][]string{}, nil
 	}
@@ -32,6 +35,17 @@ func (c *APIClient) FetchHeaderFields(ctx context.Context, uids []int, fields ..
 	d, err := c.ensureConnectedLocked()
 	if err != nil {
 		return nil, err
+	}
+	return fetchHeaderFieldsLocked(d, uids, fields...)
+}
+
+// fetchHeaderFieldsLocked is FetchHeaderFields without the lock or the
+// connection setup, for callers already inside an operation holding opMu with a
+// dialer in hand — the PGP/MIME root-header check runs in the middle of a body
+// fetch and would otherwise deadlock on the mutex it is already holding.
+func fetchHeaderFieldsLocked(d *goimap.Dialer, uids []int, fields ...string) (map[int][]string, error) {
+	if len(uids) == 0 {
+		return map[int][]string{}, nil
 	}
 
 	var uidsStr strings.Builder

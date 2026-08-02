@@ -124,6 +124,22 @@ services:
       - ${OLLAMA_MODELS_HOST_DIR:-./share/ollama/models}:/kypost/ollama-models
     restart: unless-stopped
 
+    # Docker's default is 10 seconds from SIGTERM to SIGKILL, and this container
+    # has four supervised processes to unwind behind one signal: supervisord
+    # stops the API (which drains in-flight HTTP for up to 20s — app.go's
+    # shutdownTimeout) and the daemon (which cancels the poll tick and waits for
+    # the IMAP, SMTP and state writes underneath it to return) before Ollama
+    # unloads a model. Ten seconds cut across all of that, so an ordinary
+    # `docker compose up -d` on a new image could SIGKILL a state write —
+    # duplicate sends and half-written bookkeeping from a routine update.
+    #
+    # 90s is a ceiling, not a delay: a clean stop takes seconds, and this is
+    # only what Docker is willing to wait before losing patience. It has to
+    # exceed supervisord's own stopwaitsecs (supervisord.conf) plus the time
+    # supervisord takes to walk its programs, or the outer deadline fires first
+    # and the inner ones never get to matter.
+    stop_grace_period: 90s
+
     # This container runs an LLM in-process with the mail server. Without a
     # cap, the kernel's OOM killer arbitrates between Ollama and the API under
     # memory pressure and picks whichever has the larger RSS — usually Ollama,

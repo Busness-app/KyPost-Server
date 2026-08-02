@@ -347,7 +347,7 @@ Common variables:
 - `IMAP_CONFIG_KEY_FILE` (default `$SECRET_DIR/imap-config.key`)
 - `TOTP_SECRET_KEY_FILE` (default `$SECRET_DIR/totp-secret.key`)
 - `SERVER_BASE_URL` (optional. Recommended for mobile pairing. KyPost embeds this public URL as `srv` in the QR code and uses it to build `reg`.)
-- `PAIRING_SECRET` (optional. HMAC secret for pickup links, PGP QR key exchange and mobile pairing tokens. Generated automatically on first start and persisted at `PAIRING_SECRET_FILE` — set it only if several replicas must share one secret, and use `openssl rand -base64 32` if you do.)
+- `PAIRING_SECRET` (optional. HMAC secret for pickup links, PGP QR key exchange and mobile pairing tokens. Generated automatically on first start and persisted at `PAIRING_SECRET_FILE` — set it only if several replicas must share one secret, and use `openssl rand -base64 32` if you do. A value shorter than 32 bytes is refused and those three features stay disabled, with the reason logged. Bytes, not characters, because the value is used as the HMAC key verbatim; for the ASCII `openssl rand -base64 32` produces they are the same number.)
 - `PAIRING_SECRET_FILE` (default `$SECRET_DIR/pairing.key`)
 - `PUSH_RELAY_URL` (optional. Base URL of the central push relay Worker that delivers Android native push to FCM. Must be `https://` — the relay key travels on every request — except for loopback.)
 - `PUSH_RELAY_KEY` (per-server API key from the relay operator. Set it together with `PUSH_RELAY_URL` to enable Android native push.)

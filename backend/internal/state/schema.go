@@ -231,4 +231,8 @@ const (
 	metaLastPollTick        = "last_poll_tick"
 	metaCheckpointHeldSince = "checkpoint_held_since"
 	metaLastCleanup         = "last_cleanup_at"
+	// The daemon's own subsystem health, written here because the API process
+	// cannot see the daemon process's in-memory health.Service. See
+	// health/daemon.go.
+	metaDaemonHealth = "daemon_health"
 )

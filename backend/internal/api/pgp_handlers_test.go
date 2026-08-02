@@ -82,6 +82,7 @@ func TestPGPIdentityGenerateThenGetThenDelete(t *testing.T) {
 	srv.imapConfigKeyPath = filepath.Join(t.TempDir(), "imap-config.key")
 	all, _ := srv.users.List()
 	userID := all[0].ID
+	password := stepUpPassword(t, srv, userID)
 	if err := writeIMAPConfigPayload(srv.userIMAPConfigPath(userID), srv.imapConfigKeyPath, imapConfigPayload{
 		Host: "imap.example.com", Port: 993, Username: "alice@example.com", Password: "pw",
 		Mailbox: "INBOX", UpdatedAt: "test",
@@ -135,7 +136,10 @@ func TestPGPIdentityGenerateThenGetThenDelete(t *testing.T) {
 		t.Fatalf("fingerprint mismatch: got %s want %s", getResp.Fingerprint, genResp.Fingerprint)
 	}
 
-	delReq := httptest.NewRequest(http.MethodDelete, "/api/pgp/identity", nil)
+	// Deleting an existing identity is step-up gated (pgp_stepup.go), so this
+	// carries the account password the way the UI now does.
+	delBody, _ := json.Marshal(map[string]string{"password": password})
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/pgp/identity", bytes.NewReader(delBody))
 	authRequest(srv, delReq)
 	delRec := httptest.NewRecorder()
 	srv.withAuth(srv.handlePGPIdentity)(delRec, delReq)
@@ -154,6 +158,7 @@ func TestPGPIdentityGenerateThenGetThenDelete(t *testing.T) {
 
 func TestPGPIdentityImportWithPassphrase(t *testing.T) {
 	srv := newTestServer(t)
+	password := stepUpPassword(t, srv, srv.mustBootstrapUserID(t))
 
 	keyGen := crypto.PGP().KeyGeneration().AddUserId("Import Test", "import-test@example.com").New()
 	key, err := keyGen.GenerateKey()
@@ -188,9 +193,13 @@ func TestPGPIdentityImportWithPassphrase(t *testing.T) {
 		t.Fatalf("unexpected import response: %+v", resp)
 	}
 
+	// The account now HAS an identity (imported above), so replacing it is
+	// step-up gated. The password is supplied so this still tests what it is
+	// named for — the passphrase on the key file, not the account credential.
 	badBody, _ := json.Marshal(map[string]string{
 		"armoredPrivateKey": armoredLocked,
 		"passphrase":        "wrong",
+		"password":          password,
 	})
 	badReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/import", bytes.NewReader(badBody))
 	authRequest(srv, badReq)

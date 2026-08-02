@@ -27,6 +27,21 @@ func (s *Server) handlePGPIdentityGenerate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
+	// Generating over an EXISTING identity replaces it, which is the same
+	// irreversible act as deleting it — the old key is gone and everything
+	// encrypted to it with it. Gated on the same terms (pgp_stepup.go); a first
+	// generation, which is what this endpoint is normally for, is not.
+	var req struct {
+		Password   string `json:"password,omitempty"`
+		AuthSecret string `json:"authSecret,omitempty"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+	}
+	if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
+		return
+	}
+
 	u, err := s.users.Get(ac.UserID)
 	if err != nil {
 		http.Error(w, "failed to load user", http.StatusInternalServerError)
@@ -88,6 +103,10 @@ func (s *Server) handlePGPIdentityImport(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		ArmoredPrivateKey string `json:"armoredPrivateKey"`
 		Passphrase        string `json:"passphrase"`
+		// Step-up credential, required only when this replaces an existing
+		// identity — see pgp_stepup.go.
+		Password   string `json:"password,omitempty"`
+		AuthSecret string `json:"authSecret,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -95,6 +114,9 @@ func (s *Server) handlePGPIdentityImport(w http.ResponseWriter, r *http.Request)
 	}
 	if strings.TrimSpace(req.ArmoredPrivateKey) == "" {
 		http.Error(w, "armoredPrivateKey is required", http.StatusBadRequest)
+		return
+	}
+	if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
 		return
 	}
 
@@ -160,10 +182,28 @@ func (s *Server) handlePGPIdentity(w http.ResponseWriter, r *http.Request) {
 			Expired:     status.Expired,
 		})
 	case http.MethodDelete:
+		// The most destructive operation in this file, and the only one that
+		// cannot be undone by any later action: mail already encrypted to this
+		// key stays unreadable once the key is gone. A session alone is not
+		// enough — see pgp_stepup.go.
+		var req struct {
+			Password   string `json:"password,omitempty"`
+			AuthSecret string `json:"authSecret,omitempty"`
+		}
+		// An empty body is fine and stays a 401 rather than a 400: an account
+		// with no identity has nothing to delete and nothing to confirm, and one
+		// that does gets the credential prompt from requirePGPStepUp.
+		if r.Body != nil {
+			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+		}
+		if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
+			return
+		}
 		if _, err := s.users.ClearPGPIdentity(ac.UserID); err != nil {
 			http.Error(w, "failed to delete pgp identity", http.StatusInternalServerError)
 			return
 		}
+		s.logger.Info("pgp identity deleted", "user_id", ac.UserID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -185,22 +185,28 @@ func IsPGPEnvelopePartType(mimeType string) bool {
 // PGP/MIME envelope, and "" when it is an ordinary message that merely carries
 // an encrypted file.
 //
-// The distinction cannot be made the correct way here. RFC 3156 puts it in the
-// root Content-Type (`multipart/encrypted; protocol="application/pgp-encrypted"`),
-// and goimap's Email struct does not carry the root headers at all — it exposes
-// Subject, addresses, Text, HTML and Attachments, and nothing else. The version
-// part that would also identify the message lands in enmime's OtherParts, which
-// goimap discards before we see it. So this reconstructs the judgement from what
-// survives: EVERY part must be a plausible envelope part, and at least one must
-// be armored ciphertext.
+// This is the CHEAP CANDIDATE TEST, not the answer. RFC 3156 puts the fact in
+// the root Content-Type (`multipart/encrypted;
+// protocol="application/pgp-encrypted"`), and goimap's Email struct does not
+// carry root headers at all — it exposes Subject, addresses, Text, HTML and
+// Attachments, and nothing else. The version part that would also identify the
+// message lands in enmime's OtherParts, which goimap discards before we see it.
+// So this reconstructs a first approximation from what survives: EVERY part must
+// be a plausible envelope part, and at least one must be armored ciphertext.
 //
-// Requiring every part is what separates the two cases. A bodyless message
+// Requiring every part is what separates the obvious cases. A bodyless message
 // carrying document.pgp alongside report.xlsx has a part that no envelope could
 // contain, so it is ordinary mail with an encrypted file in it and is left
 // alone. A single armored octet-stream attachment on a bodyless message is
-// genuinely indistinguishable from an envelope without the root Content-Type,
-// and is still treated as one; that is the residual false positive, and it is a
-// limit of the IMAP library rather than of this test.
+// genuinely indistinguishable from an envelope BY PARTS ALONE, and this returns
+// it — which is why nothing decides encryption status on this test by itself.
+//
+// The residual false positive is a forgery a sender can aim for deliberately,
+// so it is closed by the root header rather than accepted: callers pass the
+// candidates this identifies to collectPGPEnvelopes (pgp_root_header.go), which
+// fetches the real Content-Type and decides. The header was never unavailable,
+// only unparsed by the library — one header-only FETCH for the rare candidate
+// buys the correct test.
 //
 // Note the part count is deliberately NOT checked. enmime files the ciphertext
 // part under both Attachments and Inlines (it has an inline disposition and a
@@ -227,6 +233,33 @@ func pgpEnvelopePayload(attachments []goimap.Attachment) string {
 	}
 	return payload
 }
+
+// How much of a mailbox one ListUnreadInbox call is allowed to materialise.
+//
+// go-imap buffers and MIME-decodes every message in a GetEmails call before
+// returning any of it, so the peak cost of a poll tick is a page in flight plus
+// what has already accumulated for the caller. These three numbers are what
+// stops that peak from being a function of how much unread mail is waiting.
+//
+// unreadFetchPageSize is a memory bound, not a throughput knob: worst case a
+// page is unreadFetchPageSize x mailmsg.MaxInboundMessageBytes (16 x 25 MiB =
+// 400 MiB) held at once inside GetEmails, against the 8 GiB the API, the daemon
+// and Ollama share in docker-compose.yml. Ordinary mail is kilobytes, so in
+// practice a page is a few hundred KiB and the cost of paging is round trips.
+//
+// unreadFetchByteBudget bounds what accumulates ACROSS pages, since the caller
+// receives every message in one slice. maxUnreadMessagesPerCall bounds the same
+// thing by count, for a backlog of many small messages that would never reach
+// the byte budget but would still be a slice with no ceiling on it.
+//
+// Exceeding either stops the fetch, not the poll: UIDs are walked in ascending
+// order, so everything unreached stays above the returned checkpoint and the
+// next tick continues from there.
+const (
+	unreadFetchPageSize      = 16
+	unreadFetchByteBudget    = 192 << 20
+	maxUnreadMessagesPerCall = 200
+)
 
 // armoredMessagePrefix and armoredSignaturePrefix open the two armored blocks
 // this package identifies. Kept as byte slices because every check runs against
@@ -448,6 +481,12 @@ func (c *APIClient) ensureCredentialsFromStoredConfigLocked() error {
 	}
 
 	plain, err := decryptStoredPayload(raw, keyPath)
+	if errors.Is(err, cryptutil.ErrNotEncrypted) {
+		// Name the remedy: an operator who hits this needs to know it is
+		// fixable and how, or the daemon just looks broken.
+		return fmt.Errorf("%s is not encrypted (written before encryption-at-rest, or corrupt); "+
+			"re-save your IMAP/SMTP settings to rewrite it encrypted: %w", configPath, err)
+	}
 	if err != nil {
 		return fmt.Errorf("decrypt imap config: %w", err)
 	}
@@ -483,20 +522,27 @@ func (c *APIClient) ensureCredentialsFromStoredConfigLocked() error {
 	return nil
 }
 
+// decryptStoredPayload decrypts the stored per-user IMAP config, returning
+// cryptutil.ErrNotEncrypted when the file is not an encryption envelope.
+//
+// It does NOT fall back to treating the file as plaintext. That fallback lived
+// here, and the reason it is gone is the reason it was removed from
+// cryptutil.OpenBytes: it made encryption-at-rest optional and unenforced for
+// whichever process still had a copy. This was that process. The API's own
+// reader (mailmsg.ReadIMAPConfigPayload) already refused, so a legacy plaintext
+// config produced a daemon that polled mail happily from credentials sitting in
+// cleartext on disk while the settings page reported the file unreadable — the
+// two halves of one system disagreeing about whether the password was
+// protected. Failing here loses nothing (the file is untouched) and the remedy
+// is to re-save the IMAP settings once.
+//
+// It uses cryptutil.OpenBytes rather than open-coding ParseEnvelope/LoadKey so
+// there is one implementation of this decision left to drift.
 func decryptStoredPayload(raw []byte, keyPath string) ([]byte, error) {
-	env, ok := cryptutil.ParseEnvelope(raw)
-	if !ok {
-		// Backward-compatibility with plaintext credentials.
-		return raw, nil
-	}
-
-	// imap never creates the master key — only the api process does; a
-	// missing key here is an error, not a reason to generate a new one.
-	key, err := cryptutil.LoadKey(keyPath)
-	if err != nil {
-		return nil, err
-	}
-	return cryptutil.Open(env, key)
+	// OpenBytes uses LoadKey, not LoadOrCreateKey: imap never originates the
+	// master key — only the api process does — so a missing key here is an
+	// error, not a reason to generate a new one.
+	return cryptutil.OpenBytes(raw, keyPath)
 }
 
 // overviewFromEmail builds an Overview from a go-imap *Email, parsing IMAP
@@ -645,21 +691,114 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 	if err != nil {
 		return nil, "", fmt.Errorf("imap search oversized: %w", err)
 	}
-	toFetch, tooLarge := partitionUIDsBySize(filtered, oversizedUIDs)
+	out, maxUID, err := collectUnreadPages(ctx, filtered, minUID, func(page []int) ([]Message, int64, int, error) {
+		return c.fetchUnreadPage(ctx, d, page, oversizedUIDs)
+	})
+	if err != nil {
+		return nil, "", err
+	}
 
-	out := make([]Message, 0, len(filtered))
+	next := sinceCheckpoint
+	if maxUID > minUID {
+		next = strconv.Itoa(maxUID)
+	}
+	return out, next, nil
+}
+
+// unreadPageFetcher fetches one page of UIDs, returning its messages, the
+// decoded bytes they account for, and the highest UID it handled.
+type unreadPageFetcher func(page []int) ([]Message, int64, int, error)
+
+// collectUnreadPages walks uids in ascending order in bounded pages, stopping
+// once the fetch has reached its byte or count budget. It returns what was
+// fetched and the highest UID covered by it.
+//
+// This used to be one GetEmails call over every unread UID past the checkpoint,
+// which made the peak memory of a poll tick a function of how much unread mail
+// was waiting: go-imap fully buffers and MIME-decodes each message, each is
+// bounded at 25 MiB (mailmsg.MaxInboundMessageBytes) and nothing bounded the
+// count. A few hundred large messages — a backlog after downtime, a mailing
+// list, a spam flood — is enough to exceed docker-compose.yml's 8 GiB, which
+// the API, the daemon and Ollama share. The poller's rate limit does not help:
+// it is applied per message during PROCESSING, long after the fetch has already
+// materialised everything.
+//
+// Ascending order is what makes stopping early safe, and it is the only reason
+// this is correct rather than merely bounded. Every UID not reached is strictly
+// greater than maxUID, so the checkpoint the caller derives covers exactly what
+// was emitted, and the next tick resumes at the boundary. Fetching the same
+// UIDs in any other order would advance the checkpoint over messages that were
+// never returned — mail silently skipped, which is worse than the OOM this
+// prevents.
+//
+// Split from ListUnreadInbox to be testable: this package has no live or fake
+// *goimap.Dialer, so a fetcher callback is the only seam through which the
+// paging and its budget can be driven directly, the same reason
+// partitionUIDsBySize is a free function.
+func collectUnreadPages(ctx context.Context, uids []int, minUID int, fetch unreadPageFetcher) ([]Message, int, error) {
+	out := make([]Message, 0, min(len(uids), maxUnreadMessagesPerCall))
 	maxUID := minUID
+	var fetchedBytes int64
 
-	// Oversized UIDs: only a cheap GetOverviews FETCH (flags + envelope, no
-	// body/attachments) — their Text/HTML/Attachments are never fetched.
+	for start := 0; start < len(uids); start += unreadFetchPageSize {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		end := min(start+unreadFetchPageSize, len(uids))
+		page, pageBytes, pageMaxUID, err := fetch(uids[start:end])
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, page...)
+		fetchedBytes += pageBytes
+		if pageMaxUID > maxUID {
+			maxUID = pageMaxUID
+		}
+
+		// Checked AFTER the page rather than before the next one, so a mailbox
+		// that fits in a single page behaves exactly as it did.
+		//
+		// Nothing is logged here: this package has no logger, and the signal
+		// already exists where an operator looks for it — the poller logs the
+		// per-tick "fetched" count, and a checkpoint that advances by a bounded
+		// amount each tick is what a draining backlog looks like.
+		if fetchedBytes >= unreadFetchByteBudget || len(out) >= maxUnreadMessagesPerCall {
+			break
+		}
+	}
+	return out, maxUID, nil
+}
+
+// fetchUnreadPage fetches one bounded page of UIDs for ListUnreadInbox,
+// returning the messages, the decoded bytes they account for, and the highest
+// UID it handled.
+//
+// The split into oversized and normal happens per page rather than once for the
+// whole batch, so an oversized message costs a cheap GetOverviews FETCH (flags
+// and envelope, no body or attachments) in whichever page it falls into and
+// never reaches the buffering GetEmails call.
+//
+// Every UID it is given is accounted for in the returned maxUID — including
+// oversized ones, which the poller rejects and notifies about rather than
+// processing (see handleMessage), and which must therefore not be re-fetched
+// every tick. A UID whose FETCH returned nothing is skipped but still counted:
+// it was considered, and holding the checkpoint below a message the server
+// declines to return would stall every later message behind it forever.
+func (c *APIClient) fetchUnreadPage(ctx context.Context, d *goimap.Dialer, uids []int, oversizedUIDs []int) ([]Message, int64, int, error) {
+	toFetch, tooLarge := partitionUIDsBySize(uids, oversizedUIDs)
+
+	out := make([]Message, 0, len(uids))
+	maxUID := 0
+	var fetchedBytes int64
+
 	if len(tooLarge) > 0 {
 		overviews, err := d.GetOverviews(tooLarge...)
 		if err != nil {
-			return nil, "", fmt.Errorf("imap fetch overviews: %w", err)
+			return nil, 0, 0, fmt.Errorf("imap fetch overviews: %w", err)
 		}
 		for _, uid := range tooLarge {
 			if err := ctx.Err(); err != nil {
-				return nil, "", err
+				return nil, 0, 0, err
 			}
 			ov := overviewFromEmail(uid, overviews[uid])
 			out = append(out, Message{
@@ -673,32 +812,49 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 				AtUTC:    ov.AtUTC,
 				TooLarge: true,
 			})
-			// maxUID advances past this UID the same as any other
-			// successfully-handled message, so the poller (which rejects
-			// and notifies instead of processing it — see handleMessage)
-			// doesn't refetch it every tick.
 			if uid > maxUID {
 				maxUID = uid
 			}
 		}
 	}
 
-	// Everything else: the normal full-body fetch.
+	// Everything else: the normal full-body fetch. Bounded to this page, which
+	// is what keeps go-imap's buffering off the mailbox's total size.
 	var emails map[int]*goimap.Email
 	if len(toFetch) > 0 {
+		var err error
 		emails, err = d.GetEmails(toFetch...)
 		if err != nil {
-			return nil, "", fmt.Errorf("imap fetch emails: %w", err)
+			return nil, 0, 0, fmt.Errorf("imap fetch emails: %w", err)
 		}
 	}
+	// Which of these are really PGP/MIME envelopes, decided against each
+	// message's root Content-Type rather than the shape of its attachments —
+	// see pgp_root_header.go. One header-only FETCH for the few candidates,
+	// after the bodies are in hand because only a bodyless message can qualify.
+	inboxBodyText := make(map[int]string, len(toFetch))
+	for _, uid := range toFetch {
+		if e := emails[uid]; e != nil {
+			body, _ := inboxBodies(e)
+			inboxBodyText[uid] = body
+		}
+	}
+	envelopes := collectPGPEnvelopes(d, emails, inboxBodyText)
+
 	for _, uid := range toFetch {
 		if err := ctx.Err(); err != nil {
-			return nil, "", err
+			return nil, 0, 0, err
 		}
 		e := emails[uid]
 		if e == nil {
+			// Considered but not returned by the server. Counted in maxUID
+			// anyway — see the doc comment.
+			if uid > maxUID {
+				maxUID = uid
+			}
 			continue
 		}
+		fetchedBytes += emailContentSize(e)
 		ov := overviewFromEmail(uid, e)
 		// Defense-in-depth: the message could have grown between the
 		// SEARCH above and this fetch (new mail arriving mid-poll, a
@@ -735,23 +891,20 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 			Body:           body,
 			BodyHTML:       bodyHTML,
 			HasAttachments: len(e.Attachments) > 0,
-			// Guarded on an empty body for the same reason ListUnreadMessages
-			// is: a readable body means the armored block is an attachment on
-			// an ordinary message, not the message itself. inboxBodies falls
-			// back to the HTML part, so an empty body here means neither part
-			// rendered.
-			PGPEncrypted: body == "" && pgpEnvelopePayload(e.Attachments) != "",
+			// Confirmed against the root Content-Type, not inferred from the
+			// attachments: a bodyless message carrying one armored .pgp file is
+			// indistinguishable from a real envelope by parts alone, and this
+			// flag decides whether the poller skips classification — so the
+			// weaker test was something a sender could aim at deliberately.
+			// collectPGPEnvelopes already applied the bodyless requirement.
+			PGPEncrypted: envelopes[uid].Payload != "",
 		})
 		if uid > maxUID {
 			maxUID = uid
 		}
 	}
 
-	next := sinceCheckpoint
-	if maxUID > minUID {
-		next = strconv.Itoa(maxUID)
-	}
-	return out, next, nil
+	return out, fetchedBytes, maxUID, nil
 }
 
 func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limit int) ([]UnreadMessage, error) {
@@ -793,6 +946,18 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 		return nil, fmt.Errorf("imap fetch emails: %w", err)
 	}
 
+	// Root-Content-Type confirmation for whichever of these look like PGP/MIME
+	// envelopes — the reader derives its padlock from this, and the attachment
+	// shape alone is forgeable. See pgp_root_header.go.
+	clientBodyText := make(map[int]string, len(uids))
+	for _, uid := range uids {
+		if e := emails[uid]; e != nil {
+			body, _ := clientBody(e)
+			clientBodyText[uid] = body
+		}
+	}
+	envelopes := collectPGPEnvelopes(d, emails, clientBodyText)
+
 	out := make([]UnreadMessage, 0, len(uids))
 	for i := len(uids) - 1; i >= 0; i-- {
 		if err := ctx.Err(); err != nil {
@@ -825,7 +990,7 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 			HasAttachments: len(e.Attachments) > 0,
 		}
 		if body == "" {
-			if payload := pgpEnvelopePayload(e.Attachments); payload != "" {
+			if payload := envelopes[uid].Payload; payload != "" {
 				msg.PGPEncryptedPayload = payload
 				msg.HasAttachments = false
 			}
@@ -1019,6 +1184,17 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 			return nil, fmt.Errorf("imap fetch emails: %w", err)
 		}
 	}
+	// See pgp_root_header.go: envelope status comes from the message's real root
+	// Content-Type, with the attachment shape used only to pick candidates.
+	bodyText := make(map[int]string, len(toFetch))
+	for _, uid := range toFetch {
+		if e := emails[uid]; e != nil {
+			body, _ := clientBody(e)
+			bodyText[uid] = body
+		}
+	}
+	envelopes := collectPGPEnvelopes(d, emails, bodyText)
+
 	for _, uid := range toFetch {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -1037,7 +1213,7 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 		body, bodyMode := clientBody(e)
 		content := MessageContent{Body: body, BodyMode: bodyMode, HasAttachments: len(e.Attachments) > 0}
 		if body == "" {
-			if payload := pgpEnvelopePayload(e.Attachments); payload != "" {
+			if payload := envelopes[uid].Payload; payload != "" {
 				content.PGPEncryptedPayload = payload
 				content.HasAttachments = false
 			}

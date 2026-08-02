@@ -221,6 +221,52 @@ jobs:
             worker/src/fcm-oauth-redaction.test.mts \
             worker/src/fcm-stale.test.mts
 
+  scripts:
+    name: ci-scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # scripts/ is the supported install and update path — the thing a
+      # self-hoster runs against a live deployment — and nothing in CI touched
+      # it. update-host.test.sh already existed and covered the two outcomes
+      # that matter (a no-op update, and a failed update that rolls back), so
+      # the gap was not "no test", it was "the test was never run".
+      #
+      # These scripts have no runtime dependency to install: the updater test
+      # fakes docker and gh with shell stubs on PATH.
+      #
+      # Syntax only, not shellcheck. A lint gate whose current result is unknown
+      # is a gate that goes red on the commit that adds it, and the job's value
+      # here is the updater test rather than style enforcement. Adding
+      # shellcheck is a separate change that starts by fixing what it reports.
+      - name: shell syntax
+        run: |
+          shopt -s nullglob
+          for f in scripts/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: update-host self-check
+        run: scripts/update-host.test.sh
+
+      # The model installer's failure paths, with ollama and sleep stubbed out.
+      # Its previous version gave up and exited, which supervisord could not
+      # distinguish from success — so the behaviour worth testing is that it
+      # keeps retrying rather than that it eventually pulls something.
+      - name: pull-ollama-model self-check
+        run: scripts/pull-ollama-model.test.sh
+
+      # Compose is what the updater drives, so a compose file that no longer
+      # parses breaks the update path regardless of whether the image builds.
+      # The required variables are supplied here only to let interpolation
+      # resolve — `${KYPOST_BIND:?}` aborts config parsing when unset.
+      - name: compose config
+        env:
+          KYPOST_BIND: 127.0.0.1
+        run: docker compose config --quiet
+
   docker:
     name: ci-docker
     runs-on: ubuntu-latest
@@ -274,6 +320,36 @@ jobs:
           done
           echo "container never became healthy" >&2
           exit 1
+
+      # "Healthy" is now a stronger claim than it was, and this step is what
+      # keeps it honest.
+      #
+      # /api/health used to answer for the API process alone, so a container
+      # whose daemon was dead still reported healthy — the smoke test above
+      # passed on an image that could not poll mail. The daemon now publishes a
+      # heartbeat that the endpoint requires (health/daemon.go), which this
+      # asserts directly rather than trusting the aggregate flag.
+      #
+      # Deliberately NOT asserting that the model is installed. Pulling it takes
+      # a multi-gigabyte download from an external registry at container start,
+      # which would make every CI run depend on that registry being up and fast.
+      # The model's absence is not silent any more, which was the actual defect:
+      # the installer retries indefinitely instead of giving up, and a missing
+      # model surfaces as classifierFailing on this endpoint.
+      - name: daemon is reporting its own health
+        run: |
+          set -eu
+          body="$(docker exec kypost-ci sh -c 'curl -fsS "http://127.0.0.1:${WEB_PORT}/api/health"')"
+          echo "$body"
+          if ! printf '%s' "$body" | grep -q '"daemonHeartbeatUtc"'; then
+            echo "no daemon heartbeat: the poller is not reporting" >&2
+            exit 1
+          fi
+          if printf '%s' "$body" | grep -q '"daemonStale":true'; then
+            echo "daemon heartbeat is stale in a container that just started" >&2
+            exit 1
+          fi
+          echo "daemon heartbeat present and fresh"
 
       # The other half of the step above: prove the gate still bites. Without
       # this, "make the smoke test pass" and "delete the security check" are

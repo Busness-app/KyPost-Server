@@ -77,11 +77,12 @@ func TestPairingSecretDiffersBetweenInstalls(t *testing.T) {
 func TestPairingSecretEnvOverridesTheGeneratedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pairing.key")
-	t.Setenv("PAIRING_SECRET", "operator-chosen-shared-secret")
+	const shared = "operator-chosen-shared-secret-that-is-long-enough"
+	t.Setenv("PAIRING_SECRET", shared)
 
 	secret := resolvePairingSecret(path, nil)
 
-	if secret != "operator-chosen-shared-secret" {
+	if secret != shared {
 		t.Fatalf("secret = %q, want the operator's value", secret)
 	}
 	// And it must not have written a file that a later unset-env boot would
@@ -92,10 +93,62 @@ func TestPairingSecretEnvOverridesTheGeneratedFile(t *testing.T) {
 }
 
 func TestPairingSecretEnvIsTrimmed(t *testing.T) {
-	t.Setenv("PAIRING_SECRET", "  padded-secret  ")
+	const padded = "padded-secret-long-enough-to-be-accepted"
+	t.Setenv("PAIRING_SECRET", "  "+padded+"  ")
 
-	if got := resolvePairingSecret(filepath.Join(t.TempDir(), "pairing.key"), nil); got != "padded-secret" {
+	if got := resolvePairingSecret(filepath.Join(t.TempDir(), "pairing.key"), nil); got != padded {
 		t.Fatalf("secret = %q, want it trimmed", got)
+	}
+}
+
+// The gap the generated default did not close: an operator who sets the
+// variable by hand. One weak string signs pickup links, device pairing tokens
+// AND PGP QR key exchange, so guessing it forges all three.
+//
+// Refused rather than silently replaced with the generated file secret: a
+// multi-replica deployment that quietly fell back would have each replica
+// signing with a different key, and links would verify or not depending on
+// which one answered — an intermittent failure that is far harder to diagnose
+// than a feature that is off and logs why.
+func TestPairingSecretRefusesAWeakOperatorValue(t *testing.T) {
+	for _, weak := range []string{"hunter2", "changeme", strings.Repeat("a", minPairingSecretLength-1)} {
+		t.Run(weak[:min(len(weak), 12)], func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "pairing.key")
+			t.Setenv("PAIRING_SECRET", weak)
+
+			got := resolvePairingSecret(path, nil)
+
+			if got != "" {
+				t.Fatalf("secret = %q, want empty so every consumer fails closed", got)
+			}
+			// And it must not have quietly generated one instead — see above.
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("a rejected env secret fell back to generating a file (err=%v)", err)
+			}
+		})
+	}
+}
+
+// The boundary, from both sides, so the check cannot drift into rejecting the
+// value the server generates for itself.
+func TestPairingSecretAcceptsExactlyTheMinimumLength(t *testing.T) {
+	t.Setenv("PAIRING_SECRET", strings.Repeat("k", minPairingSecretLength))
+
+	if got := resolvePairingSecret(filepath.Join(t.TempDir(), "pairing.key"), nil); got == "" {
+		t.Fatalf("a secret of exactly the minimum length (%d) was rejected", minPairingSecretLength)
+	}
+}
+
+// The generated secret must clear the bar it imposes on operators, or an
+// upgrade turns the feature off on installs that never touched the variable.
+func TestGeneratedPairingSecretClearsItsOwnMinimum(t *testing.T) {
+	t.Setenv("PAIRING_SECRET", "")
+
+	secret := resolvePairingSecret(filepath.Join(t.TempDir(), "pairing.key"), nil)
+
+	if len(secret) < minPairingSecretLength {
+		t.Fatalf("generated secret is %d characters, below the %d minimum it enforces", len(secret), minPairingSecretLength)
 	}
 }
 
