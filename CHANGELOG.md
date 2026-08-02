@@ -39,6 +39,46 @@ non-prerelease version.
 
 ### Fixed
 
+- **Encrypted Sent copies no longer lose their BCC recipients.** The copy was
+  built by encrypting the delivered message, which omits `Bcc` on purpose so no
+  recipient can see who else received it — and `SaveSent` ignores the draft's
+  recipient fields entirely once it has raw bytes to append. So an encrypted
+  send recorded no blind recipients while a plaintext one recorded them
+  normally. The copy is now built from its own source that carries them.
+
+- **The attachment listing looks inside real encrypted mail, not just test
+  mail.** It required a message to have exactly one MIME part before treating it
+  as an envelope, which no real encrypted message satisfies: the MIME parser
+  files the ciphertext under both attachments and inlines, so it arrives listed
+  twice. The check now asks whether every part is one an envelope could carry.
+
+- **An ordinary message carrying an encrypted file is no longer mistaken for an
+  encrypted message.** Detection accepted any bodyless message with an armored
+  attachment, so `document.pgp` sent alongside a spreadsheet skipped
+  classification, suppressed its own notification preview and showed a padlock.
+  Every part must now be one a PGP/MIME envelope could contain.
+
+- **Downloading an encrypted file returns that file.** The download endpoint
+  decrypted anything whose bytes began with a PGP armor header, with no check
+  that the message was an envelope, and then re-indexed into the decrypted
+  contents — so clicking `archive.pgp` in a message that also had other
+  attachments returned something from inside it, or a 404, for a file the
+  listing said was there. Both endpoints now apply the same test.
+
+- **A Sent copy that could not be encrypted now says so.** When encryption of
+  the copy fails, the send still succeeds and the copy is stored readable
+  rather than lost — but that outcome reached only the server log, so a user who
+  ticked "encrypt" could not tell it from the one they asked for. It now comes
+  back as a warning on the send. (A sender who has no key of their own is not a
+  failure and warns about nothing.)
+
+- **An attachment-only encrypted message no longer tells you to unlock a key.**
+  The inbox padlock read "unlock your PGP key to read" whenever an encrypted
+  message had no text body — including one the server had already decrypted
+  whose plaintext was attachments only, where there is nothing to unlock. The
+  locked state now requires client-protected custody, which is the only kind
+  that has a vault.
+
 - **An encrypted message's sender and subject no longer reach FCM or APNs.**
   Native push travels to the relay Worker and on to Google or Apple in
   cleartext at every hop, and a third-party PGP/MIME message that does not use
@@ -48,6 +88,25 @@ non-prerelease version.
   whatever that setting says. Web push is unchanged: RFC 8291 encrypts those
   payloads to the browser's own subscription keys, so Content Preview remains
   the user's call there.
+
+- **The Sent folder now shows that an encrypted message was encrypted.** A
+  server-custody encrypted send delivered ciphertext but appended its Sent copy
+  as cleartext, rebuilt from the request. The web reader derives its "PGP:
+  encrypted" badge by sniffing the stored message, so an encrypted send and a
+  plain one rendered identically in Sent — with no indicator on either — and the
+  plaintext and real subject of every encrypted message sat on the IMAP store
+  regardless. The copy is now encrypted to the sender's own key, matching what
+  the client-custody path has done since run-4. A sender who has no key of their
+  own (encrypting to recipients never required one) keeps the previous plaintext
+  copy: there is nothing to encrypt it to.
+
+- **Attachments on encrypted mail are readable again.** The attachment endpoints
+  served a message's outer MIME parts, which for PGP/MIME is only the armored
+  payload — so an encrypted message with a file attached listed `encrypted.asc`,
+  and downloading it produced armor instead of the file. Both endpoints now look
+  inside the ciphertext when the server holds a key that opens it. Unencrypted
+  mail is unaffected and still costs a single fetch; a client-protected account
+  still receives the untouched ciphertext, since the server cannot read it.
 
 - **Transient failures no longer discard mail-processing work.** A keyword
   write, rule action, or state write that failed after its own retries used to

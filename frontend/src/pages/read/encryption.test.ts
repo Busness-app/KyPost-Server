@@ -34,8 +34,27 @@ describe("encryptionState", () => {
 
   // pgpEncrypted with no body and no error is the client-protected wire shape:
   // the server cannot decrypt for this account and does not pretend to.
-  it("marks an undecryptable-yet message as locked", () => {
-    expect(encryptionState({ ...base, pgpEncrypted: true })).toBe("locked");
+  it("marks an undecryptable-yet message as locked under client custody", () => {
+    expect(encryptionState({ ...base, pgpEncrypted: true }, undefined, true)).toBe("locked");
+  });
+
+  // The same shape under SERVER custody means something else entirely: the
+  // server already decrypted it and the plaintext had no text part, which is
+  // what an attachment-only encrypted message looks like. Calling that locked
+  // told the reader to unlock a key they do not have and cannot be asked for.
+  it("does not claim a server-decrypted attachment-only message is locked", () => {
+    expect(encryptionState({ ...base, pgpEncrypted: true, hasAttachments: true }, undefined, false)).toBe("encrypted");
+  });
+
+  // Default is server custody, the common case.
+  it("defaults to server custody when the caller says nothing", () => {
+    expect(encryptionState({ ...base, pgpEncrypted: true })).toBe("encrypted");
+  });
+
+  // A failed decrypt is still a failure under either custody.
+  it("reports a client-custody failure as failed, not locked", () => {
+    const failed = { ...decrypted, body: "", error: "wrong passphrase" };
+    expect(encryptionState({ ...base, pgpEncrypted: true }, failed, true)).toBe("failed");
   });
 
   it("marks a message this browser has decrypted as encrypted", () => {

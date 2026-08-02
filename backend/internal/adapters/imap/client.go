@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"os"
 	"sort"
 	"strconv"
@@ -53,9 +54,10 @@ type Message struct {
 	// ListUnreadInbox fetches every unread message in one batch, and one oversized
 	// message must not fail the batch or block checkpoint progress.
 	TooLarge bool
-	// PGPEncrypted reports that this message is RFC 3156 multipart/encrypted,
-	// detected the same content-based way as UnreadMessage.PGPEncryptedPayload
-	// (pgpDetectPayload sniffing the armor header). Only the fact is carried,
+	// PGPEncrypted reports that this message is an RFC 3156 multipart/encrypted
+	// envelope, decided by pgpEnvelopePayload — the same test that fills
+	// UnreadMessage.PGPEncryptedPayload, so the poller and the reader cannot
+	// disagree about which messages are encrypted. Only the fact is carried,
 	// not the ciphertext: the poller never decrypts, so the payload itself
 	// would be dead weight in a struct that the rule engine and the phishing
 	// scan both read.
@@ -150,19 +152,87 @@ type MessageContent struct {
 	PGPProtectedSubject string
 }
 
-// pgpDetectPayload scans attachments for an armored OpenPGP message — the
-// RFC 3156 multipart/encrypted data part, which enmime always classifies as an
-// attachment (its application/octet-stream type matches enmime's attachment rule
-// regardless of Content-Disposition). Detection is content-based
-// (pgpcrypto.IsPGPMessage sniffs the armor header) rather than MIME-type-based,
-// so it also picks up encrypted mail from any other PGP/MIME sender.
-func pgpDetectPayload(attachments []goimap.Attachment) string {
-	for _, a := range attachments {
-		if pgpcrypto.IsPGPMessage(string(a.Content)) {
-			return string(a.Content)
+// PGPEnvelopePartTypes are the MIME types a part of an RFC 3156
+// multipart/encrypted message can have: the application/pgp-encrypted version
+// part, and the application/octet-stream ciphertext part. Exported because
+// internal/api applies the same test to the attachment listing, and the two
+// must agree about what an encrypted message is — see pgpEnvelopePayload.
+var PGPEnvelopePartTypes = []string{"application/pgp-encrypted", "application/octet-stream"}
+
+// IsPGPEnvelopePartType reports whether a MIME type could belong to a PGP/MIME
+// envelope. An empty or unparseable type counts: a part with no declared type
+// is still judged on its content by the callers of this.
+func IsPGPEnvelopePartType(mimeType string) bool {
+	trimmed := strings.TrimSpace(mimeType)
+	if trimmed == "" {
+		return true
+	}
+	mediaType, _, err := mime.ParseMediaType(trimmed)
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	for _, allowed := range PGPEnvelopePartTypes {
+		if mediaType == allowed {
+			return true
 		}
 	}
-	return ""
+	return false
+}
+
+// pgpEnvelopePayload returns the armored ciphertext when the WHOLE message is a
+// PGP/MIME envelope, and "" when it is an ordinary message that merely carries
+// an encrypted file.
+//
+// The distinction cannot be made the correct way here. RFC 3156 puts it in the
+// root Content-Type (`multipart/encrypted; protocol="application/pgp-encrypted"`),
+// and goimap's Email struct does not carry the root headers at all — it exposes
+// Subject, addresses, Text, HTML and Attachments, and nothing else. The version
+// part that would also identify the message lands in enmime's OtherParts, which
+// goimap discards before we see it. So this reconstructs the judgement from what
+// survives: EVERY part must be a plausible envelope part, and at least one must
+// be armored ciphertext.
+//
+// Requiring every part is what separates the two cases. A bodyless message
+// carrying document.pgp alongside report.xlsx has a part that no envelope could
+// contain, so it is ordinary mail with an encrypted file in it and is left
+// alone. A single armored octet-stream attachment on a bodyless message is
+// genuinely indistinguishable from an envelope without the root Content-Type,
+// and is still treated as one; that is the residual false positive, and it is a
+// limit of the IMAP library rather than of this test.
+//
+// Note the part count is deliberately NOT checked. enmime files the ciphertext
+// part under both Attachments and Inlines (it has an inline disposition and a
+// filename), and goimap concatenates the two, so a real encrypted message
+// arrives here with the SAME part listed twice. Any rule of the form
+// "exactly one attachment" rejects real encrypted mail.
+func pgpEnvelopePayload(attachments []goimap.Attachment) string {
+	payload := ""
+	for _, a := range attachments {
+		if !IsPGPEnvelopePartType(a.MimeType) {
+			return ""
+		}
+		if pgpcrypto.IsPGPMessage(string(a.Content)) {
+			if payload == "" {
+				payload = string(a.Content)
+			}
+			continue
+		}
+		// A part of an envelope type that is not ciphertext is only allowed if
+		// it is the version part, whose whole body is "Version: 1".
+		if !isPGPVersionPart(a) {
+			return ""
+		}
+	}
+	return payload
+}
+
+// isPGPVersionPart matches the RFC 3156 control part. goimap normally drops it
+// (enmime files it under OtherParts), so this exists for the servers that
+// present it as an attachment rather than as an assumption that they do not.
+func isPGPVersionPart(a goimap.Attachment) bool {
+	body := strings.ToLower(strings.TrimSpace(string(a.Content)))
+	return strings.HasPrefix(body, "version:")
 }
 
 // pgpDetectSignature scans attachments for an armored OpenPGP detached signature
@@ -629,7 +699,7 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 			// an ordinary message, not the message itself. inboxBodies falls
 			// back to the HTML part, so an empty body here means neither part
 			// rendered.
-			PGPEncrypted: body == "" && pgpDetectPayload(e.Attachments) != "",
+			PGPEncrypted: body == "" && pgpEnvelopePayload(e.Attachments) != "",
 		})
 		if uid > maxUID {
 			maxUID = uid
@@ -714,7 +784,7 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 			HasAttachments: len(e.Attachments) > 0,
 		}
 		if body == "" {
-			if payload := pgpDetectPayload(e.Attachments); payload != "" {
+			if payload := pgpEnvelopePayload(e.Attachments); payload != "" {
 				msg.PGPEncryptedPayload = payload
 				msg.HasAttachments = false
 			}
@@ -926,7 +996,7 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 		body, bodyMode := clientBody(e)
 		content := MessageContent{Body: body, BodyMode: bodyMode, HasAttachments: len(e.Attachments) > 0}
 		if body == "" {
-			if payload := pgpDetectPayload(e.Attachments); payload != "" {
+			if payload := pgpEnvelopePayload(e.Attachments); payload != "" {
 				content.PGPEncryptedPayload = payload
 				content.HasAttachments = false
 			}

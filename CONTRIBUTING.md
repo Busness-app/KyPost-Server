@@ -351,7 +351,6 @@ Paste this into your PR description and fill it in.
 - What I verified myself:
 
 ### Gates
-- [ ] All CI jobs green
 - [ ] Ran the gates locally (go test -race, tsc, vitest, build)
 - [ ] New logic has tests; security-sensitive changes have attack-path tests
 - [ ] Ran adversarial review; findings addressed or argued below

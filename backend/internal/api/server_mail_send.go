@@ -253,6 +253,112 @@ func buildPGPDeliveries(msg []byte, plan pgpRecipientPlan, signer *pgpmail.Ident
 	return deliveries, nil
 }
 
+// encryptedSentCopy wraps an outbound message as a PGP/MIME copy encrypted to
+// the sender's own key, for the Sent folder. Returns nil (and no error) when
+// there is no key to encrypt to.
+//
+// Encrypting to recipients does not require a key of your own — handleMailSend
+// only insists on one for signing — so selfArmoredPubKey is genuinely optional
+// and its absence is not a failure. The caller keeps today's plaintext copy in
+// that case; there is nothing better available.
+//
+// Passing the same signer used for the deliveries keeps the copy's signature
+// state matching what went out, so the reader does not report a signed message
+// as unsigned in Sent.
+func encryptedSentCopy(msg []byte, selfArmoredPubKey string, signer *pgpmail.Identity) ([]byte, error) {
+	if strings.TrimSpace(selfArmoredPubKey) == "" {
+		return nil, nil
+	}
+	// EncryptMIME moves the real Subject inside the ciphertext as a protected
+	// header and leaves OuterPlaceholderSubject outside, exactly as it does for
+	// the deliveries — so the stored copy hides the same things the wire
+	// message does.
+	return pgpmail.EncryptMIME(msg, []string{selfArmoredPubKey}, signer)
+}
+
+// sentCopyForSend returns the PGP/MIME Sent copy for this send, or nil to keep
+// the plaintext one.
+//
+// Only an encrypted send gets a wrapped copy. Wrapping an unencrypted one would
+// lock the sender out of an outbox they never asked to protect, and would put a
+// "PGP: encrypted" badge on a message that went out in the clear — the same
+// misreporting this fixes, pointing the other way.
+//
+// Every failure degrades to the plaintext copy rather than dropping it: unlike
+// the client-custody path (sentCopyDraft), a server-custody account's key is
+// one this server holds anyway, so a readable copy is not a broken promise —
+// just a worse outcome than the one we were aiming for, and losing the record
+// of a message you sent is worse still.
+//
+// It is not a SILENT degrade. The second return is a warning for the send
+// response, because the user asked for encryption and a log line they will
+// never read is not their answer. Two other things surface it: the copy carries
+// no padlock in the Sent column (read/encryption.ts) while the recipient's
+// delivery was ciphertext, and the log line records why.
+//
+// A sender with no key of their own is not a failure and warns about nothing:
+// encrypting to recipients never required one, so there is simply nothing to
+// encrypt a copy to, and the plaintext copy is the only copy available.
+func (s *Server) sentCopyForSend(userID string, msg []byte, req mailRequest, signer *pgpmail.Identity) ([]byte, string) {
+	if !req.Encrypt {
+		return nil, ""
+	}
+	const warning = "This message was sent encrypted, but the copy saved to your Sent folder could not be encrypted and is stored in plain text."
+	u, err := s.users.Get(userID)
+	if err != nil {
+		s.logger.Error("sent copy left unencrypted: cannot read account", "error", err.Error())
+		return nil, warning
+	}
+	copyBytes, err := encryptedSentCopy(msg, u.PGPPublicKey, signer)
+	if err != nil {
+		s.logger.Error("sent copy left unencrypted: encrypt failed", "error", err.Error())
+		return nil, warning
+	}
+	if copyBytes == nil {
+		// No key of this account's own. Nothing failed.
+		return nil, ""
+	}
+	return copyBytes, ""
+}
+
+// joinWarnings combines the send warnings into the single response.warning
+// field, dropping empties. A send can produce more than one (undelivered BCC
+// ciphertexts plus an unencrypted Sent copy) and the user needs both.
+func joinWarnings(warnings ...string) string {
+	kept := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		if strings.TrimSpace(w) != "" {
+			kept = append(kept, w)
+		}
+	}
+	return strings.Join(kept, " ")
+}
+
+// sentCopyDraftForSend decides what finishMailSend APPENDs to Sent: the
+// already-wrapped ciphertext verbatim when there is one, otherwise the message
+// rebuilt from the request as before.
+//
+// Verbatim matters. Rebuilding from Subject/Body would wrap a complete
+// PGP/MIME message in a fresh envelope — no reader would decrypt it — and
+// would need the real Subject, the value the encryption exists to hide. This
+// mirrors sentCopyDraft on the client-custody path (pgp_send_client.go).
+//
+// Recipient lists stay in the clear either way: the Sent folder listing is
+// unusable without them, and SMTP already carried them.
+func sentCopyDraftForSend(req mailRequest, toList, ccList, bccList []string, encryptedCopy []byte) imapadapter.DraftMessage {
+	draft := imapadapter.DraftMessage{To: toList, CC: ccList, BCC: bccList}
+	if len(encryptedCopy) > 0 {
+		draft.Subject = pgpmail.OuterPlaceholderSubject
+		draft.Raw = encryptedCopy
+		return draft
+	}
+	draft.Subject = req.Subject
+	draft.Body = req.Body
+	draft.Mode = req.Mode
+	draft.Attachments = req.Attachments
+	return draft
+}
+
 // resolveMailFrom decides the From header value handleMailSend should use,
 // given the account's own IMAP username (accountAddr — already sanitized
 // and confirmed non-empty by the caller) and the client-requested From
@@ -372,6 +478,31 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		Autocrypt:   autocryptHeader,
 	}.Build()
 
+	// The Sent copy is built from its own source because msg deliberately omits
+	// BCC — a delivered message must not name its blind recipients — while a
+	// stored copy is the only record the sender has of who they sent to.
+	// mailmsg.Message.Build writes Bcc as a header for exactly this case, and
+	// the plaintext Sent copy has always carried it. Encrypting msg instead
+	// would have dropped it: pgpmail preserves Bcc on the outer envelope
+	// (envelopeHeaderOrder) but cannot invent a header the input never had, and
+	// SaveSent ignores DraftMessage.BCC whenever Raw is set, so the recipient
+	// list travels in these bytes or not at all.
+	//
+	// Bcc stays on the outer envelope rather than moving inside the ciphertext,
+	// matching To and Cc: the Sent listing is unreadable without recipients,
+	// and pgpmail's protected headers are deliberately Subject-only.
+	sentCopySource := mailmsg.Message{
+		From:        headerFrom,
+		To:          toList,
+		CC:          ccList,
+		BCC:         bccList,
+		Subject:     req.Subject,
+		Body:        req.Body,
+		Mode:        req.Mode,
+		Attachments: req.Attachments,
+		Autocrypt:   autocryptHeader,
+	}.Build()
+
 	var signer *pgpmail.Identity
 	if req.Sign || req.Encrypt {
 		u, uerr := s.users.Get(ac.UserID)
@@ -415,7 +546,8 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			msg = signed
 		}
 		recipients := append(append(append([]string{}, toList...), ccList...), bccList...)
-		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, recipients, msg, req, "", nil)
+		// Nothing was encrypted, so the Sent copy stays readable.
+		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, recipients, msg, req, nil, "", nil)
 		return
 	}
 
@@ -478,8 +610,16 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			extraWarning = fmt.Sprintf("failed to deliver a pickup link to %d of %d recipient(s)", failed, total)
 		}
 		// Passing no recipients is safe — finishMailSend skips SMTP on an empty
-		// list and still saves the plaintext Sent copy.
-		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req, extraWarning, nil) {
+		// list and still saves the Sent copy.
+		//
+		// That copy is encrypted like any other on this path even though the
+		// delivery was pickup links rather than PGP: the sender ticked encrypt,
+		// and the client-custody path wraps its copy the same way regardless of
+		// how many recipients turned out to be keyless. Leaving this one case
+		// readable would make the Sent folder's meaning depend on the
+		// recipients' key coverage, which the sender cannot see from there.
+		sentCopy, copyWarning := s.sentCopyForSend(ac.UserID, sentCopySource, req, encryptSigner(signer, req.Sign))
+		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req, sentCopy, joinWarnings(extraWarning, copyWarning), nil) {
 			return
 		}
 		return
@@ -510,7 +650,14 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	// hard error — the keyed recipients above already have the message, so
 	// there is nothing to retry wholesale — but "best effort" no longer means
 	// "silent". What failed is counted and travels back as response.warning.
-	s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, mainRecipients, mainCiphertext, req, "", func() string {
+	// msg is still the cleartext build here — buildPGPDeliveries encrypted per
+	// recipient without touching it — so this wraps the same content the
+	// recipients got, to the sender's own key.
+	sentCopy, copyWarning := s.sentCopyForSend(ac.UserID, sentCopySource, req, encryptSigner(signer, req.Sign))
+
+	// copyWarning rides in as extraWarning; finishMailSend appends whatever the
+	// follow-on deliveries report, so the sender gets both.
+	s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, mainRecipients, mainCiphertext, req, sentCopy, copyWarning, func() string {
 		bccFailed := 0
 		for _, delivery := range bccDeliveries {
 			if err := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, delivery.Recipients, delivery.Ciphertext); err != nil {
@@ -578,16 +725,23 @@ func encryptSigner(signer *pgpmail.Identity, sign bool) *pgpmail.Identity {
 }
 
 // finishMailSend sends msg over SMTP to recipients and best-effort saves it
-// to the Sent folder (as plaintext — see the plan's Global Constraints on
-// why the Sent copy isn't PGP-wrapped), writing the JSON response. Returns
-// false if the send itself failed (response already written), so callers
-// with follow-up work (e.g. pickup notifications) know not to proceed.
+// to the Sent folder, writing the JSON response. Returns false if the send
+// itself failed (response already written), so callers with follow-up work
+// (e.g. pickup notifications) know not to proceed.
+//
+// sentCopy is the PGP/MIME copy to append instead of rebuilding the message
+// from req — nil for an unencrypted send, and for an encrypted one whose
+// sender has no key of their own (see sentCopyForSend). An encrypted send used
+// to append the rebuilt plaintext unconditionally, which left the cleartext and
+// real subject of every encrypted message on the IMAP store and gave the reader
+// nothing to derive its "PGP: encrypted" badge from — so the Sent folder showed
+// an encrypted send exactly like a cleartext one.
 //
 // extraWarning is folded into the response's warning field alongside any
 // save-to-Sent warning generated here — the all-keyless opt-in path uses it
 // to report partial pickup-notification failures the caller would otherwise
 // never see; every other caller passes "".
-func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest, extraWarning string, afterPrimary func() string) bool {
+func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest, sentCopy []byte, extraWarning string, afterPrimary func() string) bool {
 	s.logger.Info("mail send requested", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "recipientCount", strconv.Itoa(len(recipients)))
 
 	if len(recipients) > 0 {
@@ -620,15 +774,7 @@ func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, 
 	}
 	sentSaved := true
 	if mailClient, mailErr := s.userMailClient(userID); mailErr == nil {
-		if err := mailClient.SaveSent(r.Context(), imapadapter.DraftMessage{
-			To:          toList,
-			CC:          ccList,
-			BCC:         bccList,
-			Subject:     req.Subject,
-			Body:        req.Body,
-			Mode:        req.Mode,
-			Attachments: req.Attachments,
-		}); err != nil {
+		if err := mailClient.SaveSent(r.Context(), sentCopyDraftForSend(req, toList, ccList, bccList, sentCopy)); err != nil {
 			sentSaved = false
 			if warning != "" {
 				warning += "; "

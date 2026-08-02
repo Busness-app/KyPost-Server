@@ -17,9 +17,21 @@ import type { DecryptedView, InboxEmail } from "./types";
  * A failed decrypt keeps the same padlock rather than a second symbol, tinted
  * to mark it. That row is the one that misleads without a marking: the subject
  * reads like ordinary mail and the body will never open.
+ *
+ * clientProtected is the account's custody mode and is required, not optional,
+ * because it is what an empty body MEANS — locked under client custody,
+ * decrypted-to-attachments-only under server custody. See encryptionState.
  */
-export function EncryptionCell({ email, local }: { email: InboxEmail; local?: DecryptedView }) {
-  const state = encryptionState(email, local);
+export function EncryptionCell({
+  email,
+  local,
+  clientProtected
+}: {
+  email: InboxEmail;
+  local?: DecryptedView;
+  clientProtected: boolean;
+}) {
+  const state = encryptionState(email, local, clientProtected);
   if (state === "none") {
     return <td className="inbox-cell inbox-col-lock" />;
   }

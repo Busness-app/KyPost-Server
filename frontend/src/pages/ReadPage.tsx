@@ -1080,7 +1080,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           onClick={() => void openEmailDetails(item)}
                           style={{ cursor: "pointer" }}
                         >
-                          <EncryptionCell email={item} local={decrypted[item.messageId]} />
+                          <EncryptionCell email={item} local={decrypted[item.messageId]} clientProtected={isClientProtected()} />
                           <td className="inbox-cell">
                             <button
                               type="button"
@@ -1269,7 +1269,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           aria-label={`Select email ${item.subject || item.messageId}`}
                         />
                       </td>
-                      <EncryptionCell email={item} local={decrypted[item.messageId]} />
+                      <EncryptionCell email={item} local={decrypted[item.messageId]} clientProtected={isClientProtected()} />
                       <td className="inbox-cell">
                         {swipeState?.showHint ? (
                           <span

@@ -35,7 +35,7 @@ func (s *Server) finishForTest(t *testing.T, userID string, recipients []string,
 		[]string{"bob@example.com"}, nil, []string{"carol@example.com"},
 		recipients, msg,
 		mailRequest{Subject: "hi", Body: "hello", Mode: "plain"},
-		"", afterPrimary)
+		nil, "", afterPrimary)
 	return rec
 }
 
