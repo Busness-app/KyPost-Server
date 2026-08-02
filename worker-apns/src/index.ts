@@ -174,12 +174,15 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   const budget = await checkDailyBudget(rc);
   if (!budget.allowed) {
     rc.log({ level: "warn", event: "send.denied", reason: "daily_budget", keyId: record.id, window: "day" });
+    // Computed once: the body hint and the header must name the same instant,
+    // and two calls can straddle a second boundary.
+    const retryAfter = secondsUntilUTCMidnight();
     const response = fail(rc, 429, "relay daily budget exhausted", {
       window: "day",
       limit: budget.limit,
-      retryAfterSeconds: secondsUntilUTCMidnight(),
+      retryAfterSeconds: retryAfter,
     });
-    response.headers.set("Retry-After", String(secondsUntilUTCMidnight()));
+    response.headers.set("Retry-After", String(retryAfter));
     return response;
   }
 

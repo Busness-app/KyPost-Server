@@ -99,6 +99,16 @@
   // The button is also why the /blob endpoint is a POST: a gesture stops the
   // scanners that run scripts, and the method stops the ones that only
   // prefetch. Neither covers the other.
+  if (!revealEl) {
+    // The button comes from clientSealedPickupPage in the same repo, so this is
+    // markup drift rather than a user-facing case. It still cannot be left to
+    // throw: an uncaught TypeError here would leave the recipient staring at
+    // the "can be read once" text with no button, no error, and no idea the
+    // page is dead — for a message they get one chance at.
+    fail("This page did not load correctly. Ask the sender to resend the message.");
+    return;
+  }
+
   revealEl.addEventListener("click", function () {
     revealEl.disabled = true;
     revealEl.hidden = true;

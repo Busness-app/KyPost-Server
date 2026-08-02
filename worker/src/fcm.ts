@@ -109,13 +109,17 @@ async function getAccessToken(config: FcmConfig, cache: KVNamespace): Promise<st
  * authentication secret, not just a push token, so the account loses push 2FA
  * and has to pair again by hand. Nothing on the server side undoes it.
  *
- * The rule is therefore status AND reason, never a substring on its own:
- * FCM v1 reports a retired token as HTTP 404 `NOT_FOUND` with errorCode
- * `UNREGISTERED`. Anything else — `INVALID_ARGUMENT` from a token belonging to
- * another Firebase project, `SENDER_ID_MISMATCH`, an auth failure, a proxy's
- * HTML error page that happens to contain the word — is a delivery failure,
- * which costs a retry and a red relay health status instead of a fleet of
- * unpaired devices.
+ * The rule is therefore status AND the STRUCTURED reason, never a substring on
+ * its own: FCM v1 reports a retired token as HTTP 404 with a
+ * `google.firebase.fcm.v1.FcmError` detail whose errorCode is `UNREGISTERED`.
+ * Anything else — `INVALID_ARGUMENT` from a token belonging to another Firebase
+ * project, `SENDER_ID_MISMATCH`, an auth failure, a proxy's HTML error page
+ * that happens to contain the word — is a delivery failure, which costs a retry
+ * and a red relay health status instead of a fleet of unpaired devices.
+ *
+ * An unparseable body at the right status is likewise NOT a verdict. Failing
+ * that way means a genuinely dead token goes unpruned and wastes sends until
+ * the device is removed some other way, which is the recoverable direction.
  *
  * This mirrors isRelayStaleResponse in processor/native_sender.go, which was
  * narrowed for exactly this reason: matching "four substrings anywhere in an
@@ -127,8 +131,23 @@ export function isStaleResponse(status: number, response: string): boolean {
   if (status !== 404) {
     return false;
   }
-  const lower = response.toLowerCase();
-  return lower.includes("unregistered") || lower.includes("notregistered");
+  // The structured errorCode, not a substring of the body. "404 and the word
+  // appears somewhere" would still let a proxy's error page or a message
+  // quoting the request retire a live device, which is the whole shape being
+  // avoided — a body we cannot parse is not a verdict about anything.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(response);
+  } catch {
+    return false;
+  }
+  const details = (parsed as { error?: { details?: unknown } })?.error?.details;
+  if (!Array.isArray(details)) {
+    return false;
+  }
+  return details.some(
+    (detail) => (detail as { errorCode?: unknown } | null)?.errorCode === "UNREGISTERED",
+  );
 }
 
 /**

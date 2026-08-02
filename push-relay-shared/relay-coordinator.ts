@@ -274,6 +274,20 @@ export class RelayCoordinator extends DurableObject {
    * loop would otherwise push the count arbitrarily far past the limit, which
    * changes nothing while the day lasts but makes the counter useless as a
    * report of what was actually spent.
+   *
+   * The get-then-put below needs no transaction() or blockConcurrencyWhile().
+   * It reads like a lost-update race and is reported as one, so: input gates
+   * make it safe. While a storage operation is outstanding the runtime delivers
+   * no new events to the object, so two concurrent sends cannot both observe
+   * the same `used`. Cloudflare's own "Rules of Durable Objects" gives exactly
+   * this shape — `const value = await storage.get("count"); await
+   * storage.put("count", value + 1)` — as the canonical example of code that is
+   * safe because of gating.
+   *
+   * What breaks that guarantee is non-storage I/O: an `await fetch(...)` between
+   * the read and the write opens the gate and lets another request interleave.
+   * There is deliberately none here, and adding one would silently reintroduce
+   * the race this comment says does not exist. Keep this method storage-only.
    */
   async spendDailyBudget(limit: number, now: number): Promise<{ allowed: boolean; used: number; day: string }> {
     const day = new Date(now).toISOString().slice(0, 10);

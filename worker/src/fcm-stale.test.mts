@@ -77,3 +77,31 @@ test("a 404 that is not about registration does not delete a device", () => {
   // about the token at all.
   assert.equal(isStaleResponse(404, "<html><title>404 Not Found</title></html>"), false);
 });
+
+test("a 404 needs the structured errorCode, not the word somewhere in the body", () => {
+  // The status is right and the word is present, but nothing in the response
+  // actually says UNREGISTERED about this token. Matching on the substring
+  // would let a proxy's error page, or a message quoting the request, retire a
+  // live device — the same "substrings anywhere in the body" shape the backend
+  // already rejected in isRelayStaleResponse.
+  assert.equal(isStaleResponse(404, "not found: unregistered sender project"), false);
+  assert.equal(isStaleResponse(404, JSON.stringify({ error: { message: "unregistered" } })), false);
+  // Malformed JSON at the right status is not a verdict either.
+  assert.equal(isStaleResponse(404, "{unregistered"), false);
+});
+
+test("the errorCode is read from the structured details, wherever it sits", () => {
+  // Only the documented shape counts, but it must count regardless of what
+  // else Google puts alongside it.
+  const body = JSON.stringify({
+    error: {
+      code: 404,
+      status: "NOT_FOUND",
+      details: [
+        { "@type": "type.googleapis.com/google.rpc.BadRequest" },
+        { "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError", errorCode: "UNREGISTERED" },
+      ],
+    },
+  });
+  assert.equal(isStaleResponse(404, body), true);
+});
