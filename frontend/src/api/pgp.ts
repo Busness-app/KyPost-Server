@@ -1,5 +1,5 @@
 import { getJSON, postJSON, putJSON, deleteJSON } from "./client";
-import { deriveCredential } from "./auth";
+import { credentialFields, deriveCredential } from "./auth";
 
 export type PGPIdentity = {
   fingerprint: string;
@@ -46,15 +46,13 @@ export function getPGPIdentity(): Promise<PGPIdentity> {
  * Autocrypt, so every future correspondent encrypts to it. Deleting the
  * identity is worse and cannot be undone at all.
  *
- * Both credential forms are sent because the server picks which one to check
- * from what the ACCOUNT stores, not from what arrives — see lib/authSecret.ts.
- * Omit `password` entirely (pass "") for a first-time setup, which the server
- * does not gate: there is no key to redirect and none to strand.
+ * credentialFields sends only the form the account can verify. Omit `password`
+ * entirely (pass "") for a first-time setup, which the server does not gate:
+ * there is no key to redirect and none to strand.
  */
-async function stepUp(password: string): Promise<{ password?: string; authSecret?: string }> {
+async function stepUp(password: string): Promise<Record<string, string>> {
   if (!password) return {};
-  const { authSecret } = await deriveCredential("", password);
-  return { password, authSecret };
+  return credentialFields(await deriveCredential("", password));
 }
 
 export async function generatePGPIdentity(password = ""): Promise<PGPIdentity> {
@@ -244,17 +242,14 @@ export async function rewrapPGPPrivateKey(wrapped: string, password: string): Pr
  * One-time migration: hands a legacy server-held key back so the browser can
  * rewrap it. Requires the account password, not just a session.
  */
-// Sends both credential forms because the server picks which one to check based
-// on what the ACCOUNT stores, not on what arrives — see lib/authSecret.ts. The
-// derivation parameters come from the caller's own session, so no username is
-// needed here.
+// credentialFields sends only the form the account can verify. The derivation
+// parameters come from the caller's own session, so no username is needed here.
 export async function exportLegacyPGPKey(
   password: string
 ): Promise<{ privateKey: string; publicKey: string }> {
-  const { authSecret } = await deriveCredential("", password);
+  const credential = await deriveCredential("", password);
   return postJSON<{ privateKey: string; publicKey: string }>("/api/pgp/identity/export-legacy", {
-    password,
-    authSecret
+    ...credentialFields(credential)
   });
 }
 

@@ -7,7 +7,7 @@
 // be transmitted.
 
 import { getJSON, postJSON } from "./client";
-import { defaultIterations, deriveAuthSecret, type LoginParams } from "../lib/authSecret";
+import { deriveAuthSecret, type LoginParams } from "../lib/authSecret";
 
 /**
  * Fetches this username's derivation parameters.
@@ -27,10 +27,9 @@ export async function getLoginParams(username: string): Promise<LoginParams> {
 /**
  * The fields to send when proving an account password.
  *
- * `password` is still populated because an account that has not been converted
- * yet authenticates with it, and the server picks based on what the ACCOUNT
- * stores rather than on what arrives. Once converted, the server ignores it —
- * and a future release can stop sending it entirely.
+ * `password` is retained locally for legacy-account callers; credentialFields
+ * selects exactly one field for the wire request so a derived-auth password
+ * never reaches the server.
  */
 export type Credential = {
   password: string;
@@ -39,19 +38,16 @@ export type Credential = {
   loginIterations: number;
 };
 
+/** Send only the credential form the account can verify. */
+export function credentialFields(credential: Credential, prefix = ""): Record<string, string> {
+  return credential.authSecret
+    ? { [`${prefix}${prefix ? "AuthSecret" : "authSecret"}`]: credential.authSecret }
+    : { [`${prefix}${prefix ? "Password" : "password"}`]: credential.password };
+}
+
 /** Derives the credential fields for username/password. */
 export async function deriveCredential(username: string, password: string): Promise<Credential> {
-  let params: LoginParams;
-  try {
-    params = await getLoginParams(username);
-  } catch {
-    // A failed handshake must not silently fall back to sending only the
-    // password — that would quietly restore the behaviour this exists to
-    // remove. Derive against the default work factor with an empty salt so the
-    // request still carries an auth secret; the server will reject it if the
-    // account has converted, and the user retries.
-    params = { salt: "", iterations: defaultIterations() };
-  }
+  const params: LoginParams = await getLoginParams(username);
   if (!params.salt) {
     return { password, authSecret: "", loginSalt: "", loginIterations: params.iterations };
   }
@@ -85,9 +81,8 @@ export async function deriveNewCredential(
  * already exists. Throws on any failure; the caller shows the message.
  *
  * `code` is a TOTP code, or a one-time recovery code in its place, and is
- * ignored by the server for an account without TOTP. Both credential forms go
- * up because the server picks which to check from what the ACCOUNT stores — see
- * lib/authSecret.ts.
+ * ignored by the server for an account without TOTP. credentialFields selects
+ * the account's one valid credential form — see lib/authSecret.ts.
  *
  * This authorises nothing on its own. It answers "is the person at this
  * keyboard the account owner, right now", which is what a screen full of key
@@ -95,6 +90,6 @@ export async function deriveNewCredential(
  * screen re-verify for themselves regardless.
  */
 export async function reauthenticate(password: string, code: string): Promise<void> {
-  const { authSecret } = await deriveCredential("", password);
-  await postJSON("/api/auth/step-up", { password, authSecret, code });
+  const credential = await deriveCredential("", password);
+  await postJSON("/api/auth/step-up", { ...credentialFields(credential), code });
 }

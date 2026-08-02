@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { loadPGPSession, rewrappedEnvelopeFor } from "../lib/pgpSession";
-import { deriveCredential, deriveNewCredential } from "../api/auth";
+import { credentialFields, deriveCredential, deriveNewCredential } from "../api/auth";
 import { defaultIterations, newLoginSalt } from "../lib/authSecret";
 import { toErrorMessage } from "../api/client";
 import { useNavigate } from "react-router";
@@ -127,6 +127,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
     setBusy(true);
     setStatus("");
     try {
+      const credential = await deriveCredential(username, password);
       const res = await postJSON<{
         ok?: boolean;
         mustChangePassword?: boolean;
@@ -137,7 +138,9 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         pushRetryAfterSeconds?: number;
       }>("/api/auth/login", {
         username,
-        ...(await deriveCredential(username, password)),
+        ...credentialFields(credential),
+        loginSalt: credential.loginSalt,
+        loginIterations: credential.loginIterations,
         captchaToken: captchaToken || undefined
       });
       if (res.mfaRequired && res.challengeId) {
@@ -298,8 +301,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       const rewrappedPgpKey = await rewrappedEnvelopeFor(currentPassword, newPassword);
 
       await postJSON<{ ok: boolean }>("/api/auth/password", {
-        oldPassword: currentPassword,
-        oldAuthSecret: oldCredential.authSecret,
+        ...credentialFields(oldCredential, "old"),
         newAuthSecret,
         newLoginSalt: salt,
         newIterations: iterations,

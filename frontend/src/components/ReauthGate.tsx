@@ -77,6 +77,13 @@ export function ReauthGate({ what, children }: Props) {
     };
   }, [confirmed]);
 
+  useEffect(() => {
+    if (!confirmed) return;
+    const remaining = Math.max(0, confirmedAt + CONFIRMATION_WINDOW_MS - Date.now());
+    const timer = window.setTimeout(() => window.location.reload(), remaining);
+    return () => window.clearTimeout(timer);
+  }, [confirmed]);
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (busy) return;

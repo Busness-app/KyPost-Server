@@ -43,6 +43,24 @@ function renderGate(username = "gwen") {
 }
 
 describe("ReauthGate", () => {
+  it("refreshes the page when confirmation expires", async () => {
+    const timers = vi.spyOn(window, "setTimeout");
+    renderGate();
+
+    await userEvent.type(screen.getByLabelText("Account password"), "hunter2");
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await vi.waitFor(() => expect(screen.getByText("secret settings")).toBeTruthy());
+
+    const refresh = timers.mock.calls.find(([, delay]) => Number(delay) >= 4 * 60_000)?.[0];
+    expect(refresh).toEqual(expect.any(Function));
+    const reload = vi.fn();
+    vi.stubGlobal("window", { ...window, location: { reload } });
+    (refresh as () => void)();
+    expect(reload).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+    timers.mockRestore();
+  });
+
   it("hides the page until the step-up succeeds", async () => {
     renderGate();
     expect(screen.queryByText("secret settings")).toBeNull();

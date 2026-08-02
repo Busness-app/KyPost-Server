@@ -2,7 +2,7 @@ import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router";
 import QRCode from "qrcode";
 import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
-import { deriveCredential } from "../api/auth";
+import { credentialFields, deriveCredential } from "../api/auth";
 import {
   getPGPIdentity,
   generatePGPIdentity,
@@ -621,11 +621,10 @@ export function SecurityPage() {
       // The password is required to ENABLE, not just to disable: enrolling a
       // factor the account owner does not hold is at least as consequential as
       // removing one, and a later password change does not undo it.
-      const { authSecret } = await deriveCredential("", confirmPassword);
+      const credential = await deriveCredential("", confirmPassword);
       const res = await postJSON<ConfirmResponse>("/api/mfa/totp/confirm", {
         code: confirmCode.trim(),
-        password: confirmPassword,
-        authSecret
+        ...credentialFields(credential)
       });
       setRecoveryCodes(res.recoveryCodes);
       setSavedAcknowledged(false);
@@ -645,12 +644,11 @@ export function SecurityPage() {
     setBusy(true);
     setMessage("");
     try {
-      // Both forms: the server checks whichever the account stores. Derived
+      // credentialFields sends only the form the account stores. Derived
       // against the caller's own session parameters — see api/auth.ts.
-      const { authSecret } = await deriveCredential("", disablePassword);
+      const credential = await deriveCredential("", disablePassword);
       await postJSON<{ ok: boolean }>("/api/mfa/totp/disable", {
-        password: disablePassword,
-        authSecret
+        ...credentialFields(credential)
       });
       setShowDisable(false);
       setDisablePassword("");
