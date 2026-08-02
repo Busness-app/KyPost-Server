@@ -912,11 +912,9 @@ func shouldMarkProcessedOnError(err error) bool {
 	if errors.As(err, &cerr) {
 		return isPermanentClassifierError(cerr.err)
 	}
+	// Retryable defers; everything else retires.
 	var rerr *retryableErr
-	if errors.As(err, &rerr) {
-		return false
-	}
-	return true
+	return !errors.As(err, &rerr)
 }
 
 // maxDeferralAttempts caps how many consecutive ticks may defer one message
