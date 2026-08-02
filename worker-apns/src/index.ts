@@ -166,13 +166,35 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return response;
   }
 
-  // Relay-wide day tier, in the same window and for the same reason as the
-  // minute tier above: before the claim, because the claim is a durable write.
-  // The minute limiter buckets per key, so it bounds how fast one key sends and
-  // nothing about how much the relay spends in total — which, with self-issued
-  // keys, is the number an operator's APNs quota actually cares about.
+  const claim = await claimTokenForSend(rc, token, record.id);
+  if (!claim.allowed) {
+    rc.log({ level: "warn", event: "send.denied", reason: claim.logReason, keyId: record.id });
+    return fail(rc, claim.status, claim.reason);
+  }
+  // Every path below settles the claim exactly once: the coordinator counts this
+  // send out again and releases the claim only if nothing ever delivered under
+  // it. Deferred, because none of it is on the caller's answer — and safe to
+  // defer, because an unsettled send still counts as in flight and so blocks a
+  // concurrent rollback either way.
+  const settle = (delivered: boolean) => rc.ctx.waitUntil(settleToken(rc, token, record.id, delivered));
+
+  // Relay-wide day tier, AFTER the claim rather than before it.
+  //
+  // The budget bounds what this relay spends against the operator's APNs
+  // quota, so only a request that is going to reach APNs may draw from it. A
+  // request refused at the claim above never does — and charging it was an
+  // amplification, not a conservative rounding: any holder of any valid key
+  // could spend the entire day on tokens they do not own, deliver nothing, and
+  // leave every legitimate self-hoster refused until UTC midnight. That turns a
+  // cost ceiling into a cheap outage, which is the reverse of the trade it is
+  // here to make.
+  //
+  // Settled as undelivered on refusal, which releases the claim this request
+  // just took — the same close-out every other post-claim failure path uses, and
+  // the reason taking the claim first costs nothing.
   const budget = await checkDailyBudget(rc);
   if (!budget.allowed) {
+    settle(false);
     rc.log({ level: "warn", event: "send.denied", reason: "daily_budget", keyId: record.id, window: "day" });
     // Computed once: the body hint and the header must name the same instant,
     // and two calls can straddle a second boundary.
@@ -185,18 +207,6 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     response.headers.set("Retry-After", String(retryAfter));
     return response;
   }
-
-  const claim = await claimTokenForSend(rc, token, record.id);
-  if (!claim.allowed) {
-    rc.log({ level: "warn", event: "send.denied", reason: claim.logReason, keyId: record.id });
-    return fail(rc, claim.status, claim.reason);
-  }
-  // Every path below settles the claim exactly once: the coordinator counts this
-  // send out again and releases the claim only if nothing ever delivered under
-  // it. Deferred, because none of it is on the caller's answer — and safe to
-  // defer, because an unsettled send still counts as in flight and so blocks a
-  // concurrent rollback either way.
-  const settle = (delivered: boolean) => rc.ctx.waitUntil(settleToken(rc, token, record.id, delivered));
 
   // Count the accepted send in Analytics Engine (off the KV write path).
   recordUsageAnalytics(env, record);

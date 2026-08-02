@@ -75,19 +75,34 @@ jobs:
           # which is a visible omission rather than a silent one.
           required="ci-backend-api ci-backend-other ci-frontend ci-relay ci-docker"
 
+          # filter=latest asks the API for the most recent run per check name,
+          # so a re-run supersedes what it replaced. It is currently also the
+          # default, and is named anyway: the previous form read whichever
+          # matching row happened to come last in the response and called it the
+          # newest, which is not something the API promises — under pagination,
+          # or a change of default, that silently becomes "an older success
+          # outranks the failed re-run that replaced it", in the one direction
+          # this gate must never fail.
           runs="$(gh api --paginate \
-            "repos/${REPO}/commits/${sha}/check-runs?per_page=100" \
+            "repos/${REPO}/commits/${sha}/check-runs?filter=latest&per_page=100" \
             --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "none")"')"
           echo "check runs for this commit:"
           printf '%s\n' "${runs:-<none>}"
 
           missing=""
           for job in $required; do
-            # A job may legitimately have several runs (a re-run). Require the
-            # most recent one to be a completed success.
-            conclusion="$(printf '%s\n' "$runs" | awk -F'\t' -v j="$job" '$1 == j && $2 == "completed" { c = $3 } END { print c }')"
-            if [ "$conclusion" != "success" ]; then
-              missing="${missing} ${job}(${conclusion:-absent})"
+            # Strict rather than "pick one and judge it": every row carrying this
+            # job's name must be a completed success. With filter=latest there is
+            # exactly one, so this is the same question asked in the shape that
+            # cannot be answered wrongly if that ever stops being true.
+            rows="$(printf '%s\n' "$runs" | awk -F'\t' -v j="$job" '$1 == j { print $2 "/" $3 }')"
+            if [ -z "$rows" ]; then
+              missing="${missing} ${job}(absent)"
+              continue
+            fi
+            bad="$(printf '%s\n' "$rows" | grep -v '^completed/success$' || true)"
+            if [ -n "$bad" ]; then
+              missing="${missing} ${job}($(printf '%s' "$bad" | tr '\n' ','))"
             fi
           done
 
