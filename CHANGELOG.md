@@ -14,6 +14,12 @@ non-prerelease version.
 
 ### Added
 
+- **Client-protected PGP identities can be backed up and restored.** Security
+  now downloads a browser-encrypted recovery file and displays its separate
+  secret once. Restoring decrypts locally, verifies the existing fingerprint,
+  and uploads only a new account-password-wrapped envelope; the server never
+  receives the recovery secret or plaintext private key.
+
 - **The inbox has an encryption column.** Every encrypted message now carries a
   padlock in its own column, in both the inbox and search results, whether or
   not it opened — previously the marking lived inside the Subject cell and

@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CorruptEnvelopeError,
+  createRecoveryBackup,
   WrongPasswordError,
   VaultLockedError,
   isUnlocked,
   lock,
   parseEnvelope,
   requireUnlockedKey,
+  restoreRecoveryBackup,
   unlock,
   unlockWithArmoredKey,
   unwrapPrivateKey,
@@ -83,6 +85,40 @@ describe("keyVault wrapping", () => {
     await expect(
       unwrapPrivateKey({ v: 1, kdf: "PBKDF2-SHA256", iterations: 1, salt: "", iv: "", ciphertext: "" } as never, PASSWORD)
     ).rejects.toThrow(/Unsupported/);
+  });
+
+  it(
+    "round-trips a recovery backup and rejects a wrong secret",
+    async () => {
+      const created = await createRecoveryBackup(SECRET, "ABCD1234", "PUBLIC");
+      expect(created.secret).toMatch(/^([A-F0-9]{4}-){7}[A-F0-9]{4}$/);
+      const restored = await restoreRecoveryBackup(JSON.stringify(created.backup), created.secret);
+      expect(restored.privateKey).toBe(SECRET);
+      const wrongSecret = created.secret.slice(0, -1) + (created.secret.endsWith("F") ? "0" : "F");
+      await expect(restoreRecoveryBackup(JSON.stringify(created.backup), wrongSecret)).rejects.toBeInstanceOf(
+        WrongPasswordError
+      );
+    },
+    TIMEOUT
+  );
+
+  it("rejects an oversized recovery backup", async () => {
+    const huge = "x".repeat(512 * 1024 + 1);
+    await expect(restoreRecoveryBackup(huge, "0000-0000-0000-0000-0000-0000-0000-0000")).rejects.toThrow(/too large/);
+  });
+
+  it("rejects a non-JSON recovery backup", async () => {
+    await expect(restoreRecoveryBackup("not json at all", "0000-0000-0000-0000-0000-0000-0000-0000")).rejects.toThrow(/not valid/);
+  });
+
+  it("rejects a recovery backup with a wrong format field", async () => {
+    const bad = JSON.stringify({ format: "unknown-v99", fingerprint: "A", publicKey: "B", envelope: {} });
+    await expect(restoreRecoveryBackup(bad, "0000-0000-0000-0000-0000-0000-0000-0000")).rejects.toThrow(/not supported/);
+  });
+
+  it("rejects a recovery backup missing required fields", async () => {
+    const noFingerprint = JSON.stringify({ format: "kypost-pgp-recovery-v1", publicKey: "B", envelope: {} });
+    await expect(restoreRecoveryBackup(noFingerprint, "0000-0000-0000-0000-0000-0000-0000-0000")).rejects.toThrow(/not supported/);
   });
 
   it("parseEnvelope returns null for anything that is not a usable v2 envelope", () => {
