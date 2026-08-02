@@ -65,6 +65,38 @@ async function signServiceAccountAssertion(config: FcmConfig, nowSeconds: number
 }
 
 /**
+ * Google's OAuth error code for a failed token exchange, reduced to something
+ * safe to put in a log line.
+ *
+ * The token endpoint answers a failure with `{"error":"invalid_grant",
+ * "error_description":"..."}`. The code is an RFC 6749 enum — `invalid_grant`,
+ * `invalid_client`, `unauthorized_client` — and it is the whole diagnostic an
+ * operator needs: `invalid_client` is a wrong `FCM_CLIENT_EMAIL`,
+ * `invalid_grant` is a bad `FCM_PRIVATE_KEY` or a clock that has drifted.
+ * `error_description` is free text from Google and is deliberately dropped.
+ *
+ * The returned value is checked against a narrow pattern rather than trusted,
+ * so this can never become a hole the response body fits through: anything
+ * that is not a short lowercase identifier is reported as a placeholder. That
+ * is a stronger guarantee than the send path's 200-character clip, and it is
+ * cheap here because — unlike FCM's send errors — the useful part of this
+ * response really is one enum.
+ */
+export function oauthErrorCode(body: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return "unparsable";
+  }
+  const code = (parsed as { error?: unknown } | null)?.error;
+  if (typeof code !== "string" || !/^[a-z_]{1,40}$/.test(code)) {
+    return "unrecognised";
+  }
+  return code;
+}
+
+/**
  * Return a valid Google OAuth access token, using the KV cache when possible.
  */
 async function getAccessToken(config: FcmConfig, cache: KVNamespace): Promise<string> {
@@ -87,9 +119,31 @@ async function getAccessToken(config: FcmConfig, cache: KVNamespace): Promise<st
   });
   const text = await resp.text();
   if (!resp.ok) {
-    throw new Error(`fcm oauth failed: status=${resp.status} response=${text}`);
+    // Status and the reason enum, never the body. This error is caught in
+    // index.ts and logged as `send.error`, and the relay's logging rule is
+    // that upstream response bodies do not go there (see
+    // push-relay-shared/AGENTS.md). The narrow exception recorded for
+    // `send.fcm_failed` covers FCM's own send errors, not this — the OAuth
+    // exchange is where the service-account credentials are in play, and it
+    // is the one response where "just log what they said" is least defensible.
+    throw new Error(`fcm oauth failed: status=${resp.status} error=${oauthErrorCode(text)}`);
   }
-  const parsed = JSON.parse(text) as { access_token?: string; expires_in?: number };
+
+  // Parsed inside a try for the same reason. On a 200 this body carries the
+  // access token, and V8's JSON.parse quotes the first ten characters of its
+  // input back in the SyntaxError message ("Unexpected token 'y', \"ya29.SUPER\"
+  // ... is not valid JSON"). An unparsable success response — Google serving an
+  // HTML error page through a proxy, a truncated body — would therefore have
+  // put a prefix of the token itself into `send.error` via an exception nobody
+  // wrote or reviewed. Ten characters is not a usable credential; it is also
+  // not something that needs to be in a log to find out.
+  let parsed: { access_token?: string; expires_in?: number };
+  try {
+    parsed = JSON.parse(text) as { access_token?: string; expires_in?: number };
+  } catch {
+    throw new Error(`fcm oauth response was not json: status=${resp.status}`);
+  }
+
   const token = (parsed.access_token ?? "").trim();
   if (!token) {
     throw new Error("fcm oauth token missing");
