@@ -959,6 +959,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Messages currently waiting to be retried, and how long the oldest has
+	// been waiting.
+	//
+	// checkpointHeldSinceUtc above says the poller is holding position; this
+	// says how much mail is behind that hold and how stuck it is. The two
+	// answer different questions, and only this one distinguishes "one message
+	// is being retried right now" from "forty messages have been retried since
+	// this morning" — the second being a stuck IMAP account rather than a
+	// blip. Anything here is retired by the poller's attempt cap eventually, so
+	// a number that only grows is the signal.
+	if deferred, oldest, defErr := store.DeferralStats(); defErr != nil {
+		s.logger.Error("status: deferral stats read failed", "error", defErr.Error())
+	} else {
+		resp["deferredMessages"] = deferred
+		if oldest != "" {
+			resp["oldestDeferredUtc"] = oldest
+		}
+	}
+
 	// Messages whose processing failed in the last 24h. One row per affected
 	// message, not per retry attempt, so this counts mail rather than effort.
 	if failed, failErr := store.FailedDecisionsSince(time.Now().UTC().Add(-24 * time.Hour)); failErr != nil {

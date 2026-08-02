@@ -399,7 +399,14 @@ func (s *Store) RecordProcessedDecision(d Decision) error {
 		if err := insertDecision(tx, d); err != nil {
 			return err
 		}
-		return markProcessed(tx, d.MessageID)
+		if err := markProcessed(tx, d.MessageID); err != nil {
+			return err
+		}
+		// Retiring a message ends any deferral of it, and this is the one place
+		// every terminal path in the poller goes through — so the ledger cannot
+		// drift from the processed set by a caller forgetting to clear it.
+		_, err := tx.Exec(`DELETE FROM deferrals WHERE message_id = ?`, d.MessageID)
+		return err
 	})
 }
 
@@ -426,10 +433,94 @@ func (s *Store) Cleanup(keepDays int) error {
 		if _, err := tx.Exec(`DELETE FROM decisions WHERE at_unix IS NOT NULL AND at_unix < ?`, cutoff.Unix()); err != nil {
 			return err
 		}
+		// Orphaned deferrals: a message the user deleted from the mailbox never
+		// comes back, so nothing retries it, nothing retires it, and its row
+		// would otherwise sit in the ledger forever inflating the deferred count
+		// an operator is meant to read as "work still pending". The attempt cap
+		// retires anything genuinely stuck long before this window.
+		if _, err := tx.Exec(`DELETE FROM deferrals WHERE first_at < ?`, cutoff.Unix()); err != nil {
+			return err
+		}
 		// Recorded in the same transaction as the deletes it describes, so the
 		// timestamp can never claim a cleanup that rolled back.
 		return setMeta(tx, metaLastCleanup, time.Now().UTC().Format(time.RFC3339))
 	})
+}
+
+// ---- deferrals -------------------------------------------------------------
+
+// RecordDeferral counts one more tick that left messageID unprocessed, and
+// returns the running total INCLUDING this attempt.
+//
+// The caller uses the returned count to decide whether to keep deferring or
+// give up: a deferral holds the poll checkpoint below the message, so a
+// failure that never clears would hold it forever. See the deferrals table.
+//
+// The error is returned rather than swallowed because a caller that cannot
+// count attempts cannot enforce the cap, and silently returning 1 forever is
+// exactly the unbounded behaviour this exists to prevent.
+func (s *Store) RecordDeferral(messageID string) (int, error) {
+	now := time.Now().UTC().Unix()
+	var attempts int
+	err := s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(
+			`INSERT INTO deferrals(message_id, attempts, first_at, last_at) VALUES(?, 1, ?, ?)
+			 ON CONFLICT(message_id) DO UPDATE SET
+			   attempts = deferrals.attempts + 1,
+			   last_at  = excluded.last_at`,
+			messageID, now, now); err != nil {
+			return err
+		}
+		// Read back inside the same transaction: two processes poll nothing in
+		// parallel today, but "increment then read" across two statements is the
+		// shape that stops being true quietly.
+		return tx.QueryRow(`SELECT attempts FROM deferrals WHERE message_id = ?`, messageID).Scan(&attempts)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("record deferral (%s): %w", s.baseDir, err)
+	}
+	return attempts, nil
+}
+
+// ClearDeferral forgets a message's deferral history. Called when the message
+// finally succeeds, and when it is retired — in both cases the row has no
+// further meaning, and leaving it behind would make a message that failed once
+// months ago start its next deferral part-way to the cap.
+func (s *Store) ClearDeferral(messageID string) error {
+	if _, err := s.db.Exec(`DELETE FROM deferrals WHERE message_id = ?`, messageID); err != nil {
+		return fmt.Errorf("clear deferral (%s): %w", s.baseDir, err)
+	}
+	return nil
+}
+
+// DeferralAttempts reports how many ticks have already deferred messageID, and
+// zero when it is not deferred.
+func (s *Store) DeferralAttempts(messageID string) (int, error) {
+	var attempts int
+	err := s.db.QueryRow(`SELECT attempts FROM deferrals WHERE message_id = ?`, messageID).Scan(&attempts)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read deferral (%s): %w", s.baseDir, err)
+	}
+	return attempts, nil
+}
+
+// DeferralStats reports how many messages are currently deferred and when the
+// oldest of them was first deferred (RFC3339, "" when none are).
+//
+// This is the operator-visible half of the retry contract: messages being
+// retried is normal, and the same number stuck for six hours is not.
+func (s *Store) DeferralStats() (count int, oldestUTC string, err error) {
+	var oldest sql.NullInt64
+	if err := s.db.QueryRow(`SELECT COUNT(*), MIN(first_at) FROM deferrals`).Scan(&count, &oldest); err != nil {
+		return 0, "", fmt.Errorf("read deferral stats (%s): %w", s.baseDir, err)
+	}
+	if oldest.Valid {
+		oldestUTC = time.Unix(oldest.Int64, 0).UTC().Format(time.RFC3339)
+	}
+	return count, oldestUTC, nil
 }
 
 // ---- decisions -------------------------------------------------------------

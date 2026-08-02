@@ -338,23 +338,49 @@ func TestShouldMarkProcessedOnError_PermanentClassifierErrorMarksProcessed(t *te
 	}
 }
 
-// TestShouldMarkProcessedOnError_NonClassifierErrorMarksProcessed is the
-// regression guard: rule-matching and IMAP errors from handleMessage are not
-// classifierErr at all, and must keep marking the message processed exactly
-// as before this change — this task must not widen the skip-MarkProcessed
-// behavior beyond classifier errors specifically.
-func TestShouldMarkProcessedOnError_NonClassifierErrorMarksProcessed(t *testing.T) {
+// TestShouldMarkProcessedOnError_UnclassifiedErrorMarksProcessed pins the
+// DEFAULT, which is still to retire.
+//
+// An error nothing wrapped is an error nothing has judged, and the failure mode
+// of guessing "transient" is a message that holds the poll checkpoint forever.
+// Deferral is opt-in at a call site that knows why the failure happened; these
+// errors carry no such claim.
+func TestShouldMarkProcessedOnError_UnclassifiedErrorMarksProcessed(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
 	}{
-		{"plain rule/IMAP-style error", errors.New("imap: connection reset by peer")},
-		{"wrapped non-classifier error", fmt.Errorf("rule action failed: %w", errors.New("imap: timeout"))},
+		{"plain error", errors.New("imap: connection reset by peer")},
+		{"wrapped, but not marked retryable", fmt.Errorf("rule action failed: %w", errors.New("imap: timeout"))},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if !shouldMarkProcessedOnError(tc.err) {
-				t.Fatal("expected a non-classifier error to still mark the message processed (regression guard)")
+				t.Fatal("expected an unclassified error to retire the message rather than defer it indefinitely")
+			}
+		})
+	}
+}
+
+// TestShouldMarkProcessedOnError_RetryableErrorLeavesUnmarked covers the
+// transient IMAP and state-store failures handleMessage now marks explicitly:
+// a keyword write that failed after its own retries, a rule action that lost
+// the connection, an audit write that lost a lock race. Each of these is work
+// the next tick can still complete, so retiring the message throws it away.
+func TestShouldMarkProcessedOnError_RetryableErrorLeavesUnmarked(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"keyword apply failed", &retryableErr{err: errors.New("imap: connection reset by peer")}},
+		{"rule action failed", &retryableErr{err: errors.New("archive: imap: timeout")}},
+		{"state write lost a lock race", &retryableErr{err: errors.New("database is locked")}},
+		{"wrapped further up", fmt.Errorf("handling message 42: %w", &retryableErr{err: errors.New("imap: eof")})},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if shouldMarkProcessedOnError(tc.err) {
+				t.Fatal("expected a retryable failure to leave the message unmarked so a later tick retries it")
 			}
 		})
 	}
@@ -381,7 +407,7 @@ func TestRecordMessageFailure_TransientClassifierErrorLeavesMessageUnprocessed(t
 	msg := imapadapter.Message{ID: "50", Subject: "Hello", Sender: "a@example.com"}
 
 	classifyErr := &classifierErr{err: errors.New("dial tcp 127.0.0.1:11434: connect: connection refused")}
-	p.recordMessageFailure(store, uc.id, uc, msg, classifyErr)
+	p.recordMessageFailure(store, uc.id, uc, msg, classifyErr, shouldMarkProcessedOnError(classifyErr))
 
 	if seenForTest(t, store, msg.ID) {
 		t.Fatal("expected the message to remain unmarked after a transient classifier outage, so it is retried next poll tick")
@@ -411,7 +437,7 @@ func TestRecordMessageFailure_PermanentClassifierErrorMarksProcessed(t *testing.
 	msg := imapadapter.Message{ID: "51", Subject: "Hello", Sender: "a@example.com"}
 
 	classifyErr := &classifierErr{err: errors.New("out of ai credits")}
-	p.recordMessageFailure(store, uc.id, uc, msg, classifyErr)
+	p.recordMessageFailure(store, uc.id, uc, msg, classifyErr, shouldMarkProcessedOnError(classifyErr))
 
 	if !seenForTest(t, store, msg.ID) {
 		t.Fatal("expected the message to still be marked processed for a permanent classifier error")
@@ -438,7 +464,7 @@ func TestRecordMessageFailure_NonClassifierErrorMarksProcessed(t *testing.T) {
 	msg := imapadapter.Message{ID: "52", Subject: "Hello", Sender: "a@example.com"}
 
 	ruleErr := errors.New("imap: connection reset by peer")
-	p.recordMessageFailure(store, uc.id, uc, msg, ruleErr)
+	p.recordMessageFailure(store, uc.id, uc, msg, ruleErr, shouldMarkProcessedOnError(ruleErr))
 
 	if !seenForTest(t, store, msg.ID) {
 		t.Fatal("expected a non-classifier (rule/IMAP) error to still mark the message processed (regression guard)")
@@ -503,13 +529,17 @@ func TestHandleMessage_StopRuleShortCircuitsClassification(t *testing.T) {
 	}
 }
 
-// TestHandleMessage_StopRuleActionFailureIsSurfaced proves a genuine action
-// failure (e.g. a transient IMAP error on the archive call) is logged and
-// reflected in the recorded Decision's Detail, rather than being silently
-// treated as success — the bug this test guards against left the message
-// permanently marked processed with no record anywhere that the archive
-// never actually happened.
-func TestHandleMessage_StopRuleActionFailureIsSurfaced(t *testing.T) {
+// TestHandleMessage_StopRuleActionFailureDefersInsteadOfClaimingSuccess proves
+// a genuine action failure (a transient IMAP error on the archive call) is
+// logged AND returned as a retryable error, so tickUser defers the message
+// instead of retiring it.
+//
+// The behaviour this replaces recorded the failure in the Decision's Detail and
+// then marked the message processed anyway, with Status "applied". The archive
+// had not happened, the audit log said it had, and no later tick would look at
+// the message again — a failed IMAP command silently discarded the user's rule.
+// An earlier version of this test asserted that retirement as correct.
+func TestHandleMessage_StopRuleActionFailureDefersInsteadOfClaimingSuccess(t *testing.T) {
 	logDir := t.TempDir()
 	logger, err := logging.New(logDir)
 	if err != nil {
@@ -544,27 +574,35 @@ func TestHandleMessage_StopRuleActionFailureIsSurfaced(t *testing.T) {
 	}
 	msg := imapadapter.Message{ID: "42", Subject: "Weekly newsletter", Sender: "news@example.com"}
 
-	if err := p.handleMessage(context.Background(), uc, msg); err != nil {
-		t.Fatalf("handleMessage: %v", err)
+	err = p.handleMessage(context.Background(), uc, msg)
+	if err == nil {
+		t.Fatal("expected a failed rule action to return an error, not a silent success")
 	}
 
-	// The failed archive doesn't stop control flow — stop still short-circuits
-	// classification and the message is still marked processed (design is
-	// unchanged); what must change is that the failure is observable.
-	if !seenForTest(t, store, msg.ID) {
-		t.Fatal("expected the message to still be marked processed (Stopped control flow unchanged)")
+	// Retryable, so tickUser defers the message and holds the checkpoint below
+	// it rather than retiring it.
+	var retryable *retryableErr
+	if !errors.As(err, &retryable) {
+		t.Fatalf("expected a retryableErr so the message is retried, got %T: %v", err, err)
+	}
+	if shouldMarkProcessedOnError(err) {
+		t.Fatal("expected a failed rule action to leave the message unmarked for a later tick")
+	}
+	if !strings.Contains(err.Error(), "rule(s) applied: archive and stop") {
+		t.Fatalf("expected the error to report the matched rule, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "1 action(s) failed") || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("expected the error to mention the failed action and its cause, got %q", err.Error())
 	}
 
-	decisions := store.Decisions(10)
-	if len(decisions) != 1 {
-		t.Fatalf("expected 1 decision recorded, got %d: %+v", len(decisions), decisions)
+	// Nothing may be recorded as applied and nothing retired: handleMessage
+	// returns before either write. tickUser records the failure via
+	// recordMessageFailure instead.
+	if seenForTest(t, store, msg.ID) {
+		t.Fatal("expected the message NOT to be retired when the archive it promised never happened")
 	}
-	d := decisions[0]
-	if !strings.Contains(d.Detail, "rule(s) applied: archive and stop") {
-		t.Fatalf("expected Detail to still report the matched rule, got %q", d.Detail)
-	}
-	if !strings.Contains(d.Detail, "1 action(s) failed") || !strings.Contains(d.Detail, wantErr) {
-		t.Fatalf("expected Detail to mention the failed action and its error, got %q", d.Detail)
+	if decisions := store.Decisions(10); len(decisions) != 0 {
+		t.Fatalf("expected no decision claiming the rule was applied, got %+v", decisions)
 	}
 
 	logBytes, err := os.ReadFile(filepath.Join(logDir, "app.log"))
@@ -994,7 +1032,7 @@ func TestRecordMessageFailure_TransientErrorIsRecordedOncePerMessage(t *testing.
 
 	// Five ticks of the same outage.
 	for i := 0; i < 5; i++ {
-		p.recordMessageFailure(store, uc.id, uc, msg, classifyErr)
+		p.recordMessageFailure(store, uc.id, uc, msg, classifyErr, shouldMarkProcessedOnError(classifyErr))
 	}
 
 	decisions := store.Decisions(50)
@@ -1008,7 +1046,7 @@ func TestRecordMessageFailure_TransientErrorIsRecordedOncePerMessage(t *testing.
 
 	// A different message during the same outage is its own report.
 	other := imapadapter.Message{ID: "51", Subject: "Other", Sender: "b@example.com"}
-	p.recordMessageFailure(store, uc.id, uc, other, classifyErr)
+	p.recordMessageFailure(store, uc.id, uc, other, classifyErr, shouldMarkProcessedOnError(classifyErr))
 	if got := len(store.Decisions(50)); got != 2 {
 		t.Fatalf("got %d decisions, want 2 — one per affected message", got)
 	}
@@ -1035,8 +1073,10 @@ func TestRecordMessageFailure_RetiredFailureStillRecordsUnconditionally(t *testi
 	// A transient failure first, then the same message failing permanently:
 	// the permanent one retires it and must be recorded even though a "failed"
 	// row already exists.
-	p.recordMessageFailure(store, uc.id, uc, msg, &classifierErr{err: errors.New("connection refused")})
-	p.recordMessageFailure(store, uc.id, uc, msg, &classifierErr{err: errors.New("out of ai credits")})
+	transient := &classifierErr{err: errors.New("connection refused")}
+	permanent := &classifierErr{err: errors.New("out of ai credits")}
+	p.recordMessageFailure(store, uc.id, uc, msg, transient, shouldMarkProcessedOnError(transient))
+	p.recordMessageFailure(store, uc.id, uc, msg, permanent, shouldMarkProcessedOnError(permanent))
 
 	if got := len(store.Decisions(50)); got != 2 {
 		t.Fatalf("got %d decisions, want 2 (the deferral and the retirement)", got)
