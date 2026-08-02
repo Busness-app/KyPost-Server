@@ -31,8 +31,8 @@ handlers, the CardDAV backend, the mobile sync endpoints); never imported by
 ## Local Contracts
 
 - `Store` is instantiated per user directory (`contacts.New(userStateDir)`),
-  mirroring `state.Store` — one file, `contacts.json`, sibling to `state.json`
-  and `decisions.json` in `$STATE_DIR/users/<userID>/`.
+  mirroring `state.Store` — one file, `contacts.json`, sibling to `state.db`
+  in `$STATE_DIR/users/<userID>/`.
 - Every read and mutation re-reads `contacts.json` from disk first
   (`refreshFromDiskLocked`), then writes atomically via
   `fsutil.AtomicWriteFile` — required because the API and daemon processes
