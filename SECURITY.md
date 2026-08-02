@@ -54,6 +54,10 @@ What an attacker can achieve: steer the label on **their own message** into a di
 
 **Do not build security controls on labels.** Never create a filter rule that grants trust based on a label, and never auto-archive anything by label alone. This is not a fixable limitation—it is a known property of using local LLMs to classify sender-controlled text. All decisions are recorded on the Decisions page so you can audit what actually happened.
 
+**Encrypted mail is not classified, and is never labelled as encrypted.** A PGP-encrypted message has no readable body, so it skips the classifier and is tagged with your account's default label instead. It is deliberately *not* given an `Encrypted` keyword. IMAP keywords are stored on the mail server in the clear, so such a keyword would hand whoever runs that server a precise index of which of your messages are worth attacking—the exact adversary client-protected custody exists to defend against—while looking to you like a security feature. It would break the rule above in both directions at once: not trustworthy enough to rely on, and harmful merely by existing. The padlock you see in the reader is derived from the message itself each time it is displayed and is never written anywhere.
+
+**Encrypted mail also stays out of mobile push payloads.** Native push travels to the relay Worker and on to FCM/APNs in cleartext at every hop. For an encrypted message the sender and subject are withheld from that payload regardless of your Content Preview setting, because a third-party PGP/MIME message that does not use protected headers carries its real subject in the clear. Web push is unaffected—those payloads are encrypted to your browser's own subscription keys (RFC 8291), so Content Preview remains your choice there.
+
 See [Classification flow](README.md#classification-flow) for details.
 
 ### Email HTML Rendering

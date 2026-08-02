@@ -85,13 +85,14 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 1. Poller fires on timer; lists active users from `users.json` and fans out over those with a stored IMAP config (bounded concurrency 4, per-user panic recovery)
 2. Per user: fetch unread emails from their IMAP mailbox since their checkpoint
 3. Scan each newly-seen message for KyPost self-impersonation and flag it with the `$Phishing` keyword if it does not authenticate to the account's own domain (`flagAppImpersonation`). Runs before every step below on purpose: a security verdict must not be rationed by the classifier rate limit, nor suppressed by a filter rule's `stop` action or a classifier outage
-4. Apply global redaction patterns to sender, subject, body
-5. POST to Ollama `/api/generate` with the user's tuning prompt + redacted email text (one shared, serialized classifier client across all users)
-6. Fuzzy-match Ollama response against the global label allowlist
-7. Apply matched label as an IMAP keyword in the user's mailbox
-8. Send browser and native push notifications using the user's notification-mode gate (`none`, `all`, `keywords`) and the shared VAPID keys
-9. Persist decision to the user's `state.db`
-10. Advance the user's checkpoint — but only as far as the messages this tick actually retired. A message left unmarked on purpose (transient classifier failure, transient IMAP/state failure, spent rate budget, unreadable processed-set) holds the checkpoint below itself, because `ListUnreadInbox` only ever returns UIDs above it (`imap.ClampCheckpoint`)
+4. A PGP-encrypted message leaves the pipeline here: there is no readable body to classify (the poller never decrypts, and `Message.PGPEncrypted` is set precisely *because* no MIME part rendered), so `tagWithFallbackLabel` applies the account's fallback label, notifies, and records the decision — steps 5-8 never run. It is never labelled as encrypted; see the note at the skip in `poller.go` and in `SECURITY.md`. The same helper serves the auto-labeling-disabled path, so the two cannot drift apart in what they write
+5. Apply global redaction patterns to sender, subject, body
+6. POST to Ollama `/api/generate` with the user's tuning prompt + redacted email text (one shared, serialized classifier client across all users)
+7. Fuzzy-match Ollama response against the global label allowlist
+8. Apply matched label as an IMAP keyword in the user's mailbox
+9. Send browser and native push notifications using the user's notification-mode gate (`none`, `all`, `keywords`) and the shared VAPID keys. An encrypted message's sender and subject are withheld from the native payload regardless of the user's Content Preview setting (`nativePushIncludesContent`) — that path is cleartext to the relay and to FCM/APNs. Web push is unaffected; RFC 8291 encrypts it to the browser's own subscription keys
+10. Persist decision to the user's `state.db`
+11. Advance the user's checkpoint — but only as far as the messages this tick actually retired. A message left unmarked on purpose (transient classifier failure, transient IMAP/state failure, spent rate budget, unreadable processed-set) holds the checkpoint below itself, because `ListUnreadInbox` only ever returns UIDs above it (`imap.ClampCheckpoint`)
 
 **Retire or defer is one decision, and `tickUser` makes it once.** `shouldMarkProcessedOnError` answers it and the result is passed to `recordMessageFailure` rather than re-derived there — the checkpoint and the processed set must agree, and two copies of the predicate are how they stop agreeing.
 

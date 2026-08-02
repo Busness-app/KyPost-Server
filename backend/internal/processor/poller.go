@@ -1273,33 +1273,38 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	}
 
 	if !uc.autoLabelEnabled {
-		defaultLabel := disabledLabelingFallback(cfg.Labels.Allowlist)
-		keywords := keywordsForSelectedLabel(defaultLabel, cfg.Labels.KeywordMappings)
-		p.log.Info(
-			"auto-labeling disabled; tagging default label",
-			"user_id", uc.id,
-			"message_id", msg.ID,
-			"selected_label", defaultLabel,
-			"keywords", strings.Join(keywords, ","),
-		)
-		if err := applyKeywordsWithRetry(ctx, uc.mail, msg.ID, keywords); err != nil {
-			p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", defaultLabel, "error", err.Error())
-			return &retryableErr{err: err}
-		}
-		if err := uc.store.RecordProcessedDecision(state.Decision{
-			MessageID: msg.ID,
-			Sender:    msg.Sender,
-			SentTo:    msg.SentTo,
-			Subject:   msg.Subject,
-			Label:     defaultLabel,
-			Status:    "applied",
-			Detail:    "automatic keyword labeling disabled; tagged " + defaultLabel,
-		}); err != nil {
-			return &retryableErr{err: err}
-		}
-		p.maybeSendPushNotification(uc, msg, defaultLabel, keywords)
-		p.maybeSendNativePushNotification(uc, msg, defaultLabel, keywords)
-		return nil
+		return p.tagWithFallbackLabel(ctx, uc, cfg, msg, "automatic keyword labeling disabled")
+	}
+
+	// A PGP-encrypted message carries no body to classify. GetEmails only sets
+	// PGPEncryptedPayload *because* the parse produced no text (imap
+	// client.go's `if body == ""` guard) — goimap cannot render
+	// multipart/encrypted — and the poller never decrypts. Sending it to the
+	// classifier anyway spends an Ollama call on an empty body and hands the
+	// model the sender plus, for third-party PGP/MIME that does not use
+	// protected headers, the real subject in the clear. Nothing useful comes
+	// back for that: the model answers off metadata alone or answers nothing,
+	// and the "no known label returned" path below retires the message
+	// unlabeled.
+	//
+	// Tagging the fallback label instead of leaving it unlabeled is
+	// deliberate. Mail stranded in the Uncategorized tab reads as vanished
+	// rather than sorted (see disabledLabelingFallback), and a growing pile of
+	// permanently-unlabeled mail is itself a statement about which messages
+	// matter.
+	//
+	// Do NOT "improve" this with an `Encrypted` keyword. IMAP keywords are
+	// stored on the mail server in the clear, so that keyword would hand
+	// whoever runs that server a precise index of which messages are worth
+	// attacking — the exact adversary client-protected custody exists to
+	// defend against — while looking to the user like a security feature. It
+	// would break the published contract in both directions at once: keywords
+	// are a sorting hint and never a security boundary (README.md, SECURITY.md),
+	// so such a keyword would be simultaneously not trustworthy enough to rely
+	// on and harmful merely by existing. The reader's encryption column is
+	// derived from the message bytes at render time and stores nothing.
+	if msg.PGPEncrypted {
+		return p.tagWithFallbackLabel(ctx, uc, cfg, msg, "message is encrypted; no readable content to classify")
 	}
 
 	body := strings.TrimSpace(msg.Body)
@@ -1502,7 +1507,7 @@ func (p *Poller) maybeSendNativePushNotification(uc userCtx, msg imapadapter.Mes
 		return
 	}
 
-	includeContent := uc.settings.ContentPreview
+	includeContent := nativePushIncludesContent(uc.settings, msg)
 	title, body := buildNativeNotificationText(msg, includeContent)
 	data := buildNativePushData(msg, messageKeywords, title, body, includeContent)
 
@@ -1605,6 +1610,24 @@ func buildNotificationBody(msg imapadapter.Message) string {
 		return fmt.Sprintf("From: %s", from)
 	}
 	return fmt.Sprintf("From %s: %s", from, subject)
+}
+
+// nativePushIncludesContent decides whether a native push may carry the
+// message's sender and subject.
+//
+// ContentPreview is the user's setting, but an encrypted message overrides it.
+// The outer subject is the KyPost placeholder only for KyPost-to-KyPost mail;
+// third-party PGP/MIME that does not use protected headers leaves the real
+// subject in the clear, and this path is cleartext to the relay Worker and to
+// FCM/APNs. Shipping the subject of an end-to-end encrypted message through
+// Google or Apple undoes the point of having encrypted it, and the user cannot
+// see it happening, so it is not theirs to opt into by accident.
+//
+// Web push is deliberately not held to this: RFC 8291 encrypts that payload to
+// the browser's own subscription keys, so there is no third party to withhold
+// it from and ContentPreview stays the user's call there.
+func nativePushIncludesContent(settings config.UserNotificationSettings, msg imapadapter.Message) bool {
+	return settings.ContentPreview && !msg.PGPEncrypted
 }
 
 // buildNativeNotificationText renders a mobile push. With includeContent it
@@ -1804,6 +1827,43 @@ func applySingleKeywordWithRetry(ctx context.Context, c imapadapter.Client, mess
 		return struct{}{}, err, true
 	})
 	return err
+}
+
+// tagWithFallbackLabel retires a message the classifier is not going to be
+// asked about: it applies the account's fallback label, records the decision
+// with reason as its Detail, and notifies. Shared by the two paths that skip
+// classification for reasons that are not failures — auto-labeling turned off,
+// and an encrypted message with no readable body — so the two cannot drift
+// apart in what they write to the mailbox or to the decision log.
+func (p *Poller) tagWithFallbackLabel(ctx context.Context, uc userCtx, cfg config.Config, msg imapadapter.Message, reason string) error {
+	defaultLabel := disabledLabelingFallback(cfg.Labels.Allowlist)
+	keywords := keywordsForSelectedLabel(defaultLabel, cfg.Labels.KeywordMappings)
+	p.log.Info(
+		"classification skipped; tagging default label",
+		"user_id", uc.id,
+		"message_id", msg.ID,
+		"reason", reason,
+		"selected_label", defaultLabel,
+		"keywords", strings.Join(keywords, ","),
+	)
+	if err := applyKeywordsWithRetry(ctx, uc.mail, msg.ID, keywords); err != nil {
+		p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", defaultLabel, "error", err.Error())
+		return &retryableErr{err: err}
+	}
+	if err := uc.store.RecordProcessedDecision(state.Decision{
+		MessageID: msg.ID,
+		Sender:    msg.Sender,
+		SentTo:    msg.SentTo,
+		Subject:   msg.Subject,
+		Label:     defaultLabel,
+		Status:    "applied",
+		Detail:    reason + "; tagged " + defaultLabel,
+	}); err != nil {
+		return &retryableErr{err: err}
+	}
+	p.maybeSendPushNotification(uc, msg, defaultLabel, keywords)
+	p.maybeSendNativePushNotification(uc, msg, defaultLabel, keywords)
+	return nil
 }
 
 // disabledLabelingFallback picks the label applied when auto-labeling is off.

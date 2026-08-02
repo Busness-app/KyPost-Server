@@ -12,7 +12,42 @@ non-prerelease version.
 
 ## Unreleased — 0.2.0
 
+### Added
+
+- **The inbox has an encryption column.** Every encrypted message now carries a
+  padlock in its own column, in both the inbox and search results, whether or
+  not it opened — previously the marking lived inside the Subject cell and
+  appeared only when a message could not be read without a further step, so a
+  message the server decrypted successfully looked exactly like one that
+  arrived in the clear. A failed decrypt keeps the padlock and tints it rather
+  than switching to a second symbol, so the column reads as "padlock or
+  nothing" at a glance.
+
+### Changed
+
+- **Encrypted mail no longer goes to the classifier.** A PGP-encrypted message
+  has no readable body — the poller never decrypts, and the payload is detected
+  precisely *because* no MIME part rendered — so every one of them spent an
+  Ollama call on an empty body, handed the model the sender and (for
+  third-party PGP/MIME without protected headers) the real subject, and was
+  then retired unlabeled into Uncategorized. Such a message is now tagged with
+  the account's default label and skips the model. It is deliberately not given
+  an `Encrypted` keyword: IMAP keywords are stored on the mail server in the
+  clear, so that would hand whoever runs that server an index of which messages
+  are worth attacking while looking like a security feature — and the published
+  contract says keywords are a sorting hint, never a security boundary.
+
 ### Fixed
+
+- **An encrypted message's sender and subject no longer reach FCM or APNs.**
+  Native push travels to the relay Worker and on to Google or Apple in
+  cleartext at every hop, and a third-party PGP/MIME message that does not use
+  protected headers carries its real subject in the clear — so turning on
+  Content Preview was shipping the subject of end-to-end encrypted mail through
+  two third parties, invisibly. Both are now withheld for encrypted messages
+  whatever that setting says. Web push is unchanged: RFC 8291 encrypts those
+  payloads to the browser's own subscription keys, so Content Preview remains
+  the user's call there.
 
 - **Transient failures no longer discard mail-processing work.** A keyword
   write, rule action, or state write that failed after its own retries used to

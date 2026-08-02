@@ -442,6 +442,26 @@ body {
   text-align: center;
 }
 
+/* The encryption column. Narrow and unlabelled: its header would have to read
+   "Encrypted" over a 34px column of mostly-empty cells, which costs more room
+   than the signal is worth. The <th> carries an aria-label instead. Not marked
+   inbox-desktop-col — a padlock is exactly the thing worth keeping on a phone,
+   and at this width it costs almost nothing. */
+.inbox-col-lock {
+  width: 34px;
+  text-align: center;
+}
+
+.inbox-lock-icon {
+  font-size: 0.85em;
+}
+
+/* A failed decrypt keeps the padlock and changes color rather than becoming a
+   second glyph: the column should stay readable as "padlock or nothing". */
+.inbox-lock-icon-failed {
+  color: var(--danger, #c0392b);
+}
+
 .inbox-col-heading {
   text-align: left;
   border-bottom: 1px solid var(--line);

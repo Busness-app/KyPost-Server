@@ -53,6 +53,19 @@ type Message struct {
 	// ListUnreadInbox fetches every unread message in one batch, and one oversized
 	// message must not fail the batch or block checkpoint progress.
 	TooLarge bool
+	// PGPEncrypted reports that this message is RFC 3156 multipart/encrypted,
+	// detected the same content-based way as UnreadMessage.PGPEncryptedPayload
+	// (pgpDetectPayload sniffing the armor header). Only the fact is carried,
+	// not the ciphertext: the poller never decrypts, so the payload itself
+	// would be dead weight in a struct that the rule engine and the phishing
+	// scan both read.
+	//
+	// Body is always empty when this is true — goimap cannot render
+	// multipart/encrypted as text, which is exactly how the payload is
+	// detected — so the poller uses it to skip a classifier call that has
+	// nothing to classify, and to keep the sender and outer subject out of
+	// cleartext native push payloads.
+	PGPEncrypted bool
 }
 
 type UnreadMessage struct {
@@ -611,6 +624,12 @@ func (c *APIClient) ListUnreadInbox(ctx context.Context, sinceCheckpoint string)
 			Body:           body,
 			BodyHTML:       bodyHTML,
 			HasAttachments: len(e.Attachments) > 0,
+			// Guarded on an empty body for the same reason ListUnreadMessages
+			// is: a readable body means the armored block is an attachment on
+			// an ordinary message, not the message itself. inboxBodies falls
+			// back to the HTML part, so an empty body here means neither part
+			// rendered.
+			PGPEncrypted: body == "" && pgpDetectPayload(e.Attachments) != "",
 		})
 		if uid > maxUID {
 			maxUID = uid
