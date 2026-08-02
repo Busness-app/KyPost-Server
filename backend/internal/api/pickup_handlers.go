@@ -327,15 +327,22 @@ func (s *Server) pickupBaseURL() string {
 // minPairingSecretLength is the shortest operator-supplied PAIRING_SECRET this
 // server will sign with.
 //
-// 32 characters, measured on the string as given rather than on decoded bytes.
-// Requiring 32 random BYTES would mean requiring a specific encoding, and every
-// existing deployment that set a long passphrase would stop working on upgrade
-// for no gain in strength — a 32-character passphrase is already far past the
-// point where guessing an HMAC key is the cheapest attack available. What this
-// is here to reject is "hunter2".
+// 32 BYTES of the value as supplied — len() on the raw string, which for the
+// ASCII that `openssl rand -base64 32` produces is also 32 characters.
 //
-// It matches what the server generates for itself: 32 random bytes, base64'd
-// (44 characters), so the default path clears this bar by construction.
+// Bytes rather than runes because bytes are what reaches hmac.New: the value is
+// used as the key verbatim, so its length in bytes is the length of the key.
+// Counting runes would reject a secret for containing multi-byte characters
+// while accepting a shorter ASCII one carrying less key material.
+//
+// It is deliberately NOT a check on 32 bytes of DECODED entropy. That would
+// mean mandating an encoding, and it would break every existing deployment that
+// set a long passphrase, for no real gain — a 32-byte passphrase is already far
+// past the point where guessing an HMAC key is the cheapest attack available.
+// What this is here to reject is "hunter2".
+//
+// The server's own generated secret is 32 random bytes base64'd (44 bytes of
+// ASCII), so the default path clears this bar by construction.
 const minPairingSecretLength = 32
 
 // resolvePairingSecret returns the HMAC secret used to sign pickup links, PGP

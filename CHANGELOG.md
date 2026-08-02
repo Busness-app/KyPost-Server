@@ -44,7 +44,7 @@ non-prerelease version.
 - **A weak `PAIRING_SECRET` is refused instead of used.** The server generates
   a strong one by default, but an operator-supplied value was taken verbatim
   however short — and one guessable string signs pickup links, device pairing
-  tokens and PGP QR key exchange alike. Values under 32 characters are now
+  tokens and PGP QR key exchange alike. Values under 32 bytes are now
   rejected, with the reason and the remedy logged, and those three features stay
   disabled rather than being signed with something forgeable. Only deployments
   that set the variable by hand are affected.

@@ -105,3 +105,23 @@ func TestHealthEndpointDoesNotReportHealthyWithNoDaemonNews(t *testing.T) {
 		t.Fatal("silence from the daemon was not reported as staleness")
 	}
 }
+
+// A nil globalStore means state.New failed at startup for the directory the
+// daemon keeps its checkpoints and per-user state in. Skipping the overlay
+// there would answer "healthy" for a server that cannot see its daemon AND
+// cannot read its own state — reintroducing the exact failure this endpoint was
+// changed to stop telling, in the one case where the deployment is most broken.
+func TestHealthEndpointFailsClosedWithNoSharedStore(t *testing.T) {
+	srv := newTestServer(t)
+	srv.health.MarkHealthy()
+	srv.globalStore = nil
+
+	code, st := getHealth(t, srv)
+
+	if st.Healthy || code != http.StatusServiceUnavailable {
+		t.Fatalf("an unreadable shared state store read as healthy: code=%d healthy=%v", code, st.Healthy)
+	}
+	if !st.DaemonStale {
+		t.Fatal("a server that cannot read the daemon's report did not say so")
+	}
+}

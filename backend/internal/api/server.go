@@ -924,9 +924,24 @@ func (s *Server) StartMfaPushLimiterSweeper(ctx context.Context) {
 // rendered "Working" on the health page. See health.MergeDaemonReport.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	st := s.health.GetStatus()
+	// Merged unconditionally, including when there is no store to read from.
+	//
+	// A nil globalStore means state.New failed at startup for the very
+	// directory the daemon keeps its checkpoints and per-user state in, so
+	// "this process cannot see the daemon" is exactly as true then as when the
+	// daemon has stopped writing — and skipping the overlay would answer
+	// "healthy" on it, which is the failure this endpoint was changed to stop
+	// telling. MergeDaemonReport already reads an empty report as unhealthy, so
+	// failing closed is just handing it the empty one.
+	//
+	// The blast radius of doing so is a 503 here and a red container
+	// healthcheck. Nothing restarts on it: monitorHealth (app.go) watches the
+	// in-memory status, not this merged one.
+	raw := ""
 	if s.globalStore != nil {
-		st = health.MergeDaemonReport(st, s.globalStore.DaemonHealth(), time.Now())
+		raw = s.globalStore.DaemonHealth()
 	}
+	st = health.MergeDaemonReport(st, raw, time.Now())
 	status := http.StatusOK
 	if !st.Healthy {
 		status = http.StatusServiceUnavailable

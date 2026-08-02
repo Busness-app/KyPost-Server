@@ -25,6 +25,12 @@ func (c *APIClient) FetchHeaderFields(ctx context.Context, uids []int, fields ..
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// Answered before connecting. Asking for the headers of no messages is a
+	// no-op, and dialing IMAP to perform it would make an empty caller slice
+	// cost a connection.
+	if len(uids) == 0 {
+		return map[int][]string{}, nil
+	}
 
 	d, err := c.ensureConnectedLocked()
 	if err != nil {
