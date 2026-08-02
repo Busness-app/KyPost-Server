@@ -920,3 +920,128 @@ func TestNativePushCarriesBothKeySpellingsWhenOptedIn(t *testing.T) {
 		}
 	}
 }
+
+// TestDeferredMessageStaysInRangeOfTheNextFetch pins the composition the
+// "retried next poll tick" contract actually rests on.
+//
+// Leaving a message unmarked in the processed set is only half of a retry.
+// ListUnreadInbox returns UIDs strictly above the stored checkpoint and
+// advances that checkpoint to the highest UID it FETCHED, so for a long time
+// tickUser recorded the failure, skipped MarkProcessed exactly as intended,
+// and then wrote a checkpoint that put the message permanently out of range —
+// never classified, never labelled, never retried. Every test covering the
+// behaviour asserted only the processed-set half, which is why it survived.
+//
+// Full tickUser integration is still out of reach here (no fake-goimap-Dialer
+// infrastructure — see TestMailCacheEntriesFromMessages), so this covers the
+// two halves meeting: the predicate that decides to defer, and the clamp that
+// makes the deferral mean something.
+func TestDeferredMessageStaysInRangeOfTheNextFetch(t *testing.T) {
+	const (
+		prevCheckpoint = "10"
+		fetchedThrough = "20" // the batch's highest UID
+		deferredUID    = "14"
+	)
+
+	transient := &classifierErr{err: errors.New("dial tcp 127.0.0.1:11434: connect: connection refused")}
+	if shouldMarkProcessedOnError(transient) {
+		t.Fatal("expected a transient classifier error to leave the message unmarked")
+	}
+
+	// tickUser adds exactly the messages it leaves unmarked to deferredIDs.
+	next := imapadapter.ClampCheckpoint(prevCheckpoint, fetchedThrough, []string{deferredUID})
+	if next == fetchedThrough {
+		t.Fatal("checkpoint advanced past a deferred message; the next fetch will never return it")
+	}
+	if next >= deferredUID {
+		t.Fatalf("checkpoint %q does not leave UID %s in range of the next fetch", next, deferredUID)
+	}
+
+	// A permanent failure is retired, so it must NOT hold the checkpoint back —
+	// otherwise one poison message refetches the batch forever.
+	permanent := &classifierErr{err: errors.New("classifier: 422 Unprocessable Entity")}
+	if !shouldMarkProcessedOnError(permanent) {
+		t.Fatal("expected a permanent classifier error to mark the message processed")
+	}
+	if got := imapadapter.ClampCheckpoint(prevCheckpoint, fetchedThrough, nil); got != fetchedThrough {
+		t.Fatalf("ClampCheckpoint = %q, want the fetched checkpoint %q when nothing is deferred", got, fetchedThrough)
+	}
+}
+
+// TestRecordMessageFailure_TransientErrorIsRecordedOncePerMessage is the
+// counterpart to holding the checkpoint back.
+//
+// Deferring a message means it really is re-processed on every poll tick for
+// as long as the classifier is down. The failure path appends a Decision and
+// pushes a notification, so doing that unconditionally would write one audit
+// row and fire one notification per message per tick — a mailbox's worth of
+// them every ~90 seconds, retained for 30 days — for a single outage.
+func TestRecordMessageFailure_TransientErrorIsRecordedOncePerMessage(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+	p := &Poller{log: logger}
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	uc := userCtx{id: "user-1", store: store, mail: &noopMailClient{}}
+	msg := imapadapter.Message{ID: "50", Subject: "Hello", Sender: "a@example.com"}
+	classifyErr := &classifierErr{err: errors.New("dial tcp 127.0.0.1:11434: connect: connection refused")}
+
+	// Five ticks of the same outage.
+	for i := 0; i < 5; i++ {
+		p.recordMessageFailure(store, uc.id, uc, msg, classifyErr)
+	}
+
+	decisions := store.Decisions(50)
+	if len(decisions) != 1 {
+		t.Fatalf("recorded %d decisions for one message across five ticks, want 1", len(decisions))
+	}
+	// Still unmarked, so the next tick still retries it.
+	if seenForTest(t, store, msg.ID) {
+		t.Fatal("expected the message to remain unmarked so it is still retried")
+	}
+
+	// A different message during the same outage is its own report.
+	other := imapadapter.Message{ID: "51", Subject: "Other", Sender: "b@example.com"}
+	p.recordMessageFailure(store, uc.id, uc, other, classifyErr)
+	if got := len(store.Decisions(50)); got != 2 {
+		t.Fatalf("got %d decisions, want 2 — one per affected message", got)
+	}
+}
+
+// TestRecordMessageFailure_RetiredFailureStillRecordsUnconditionally guards the
+// other half: a message that IS retired reaches recordMessageFailure once, so
+// gating it on a prior report must not swallow its audit row.
+func TestRecordMessageFailure_RetiredFailureStillRecordsUnconditionally(t *testing.T) {
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+	p := &Poller{log: logger}
+
+	store, err := state.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	uc := userCtx{id: "user-1", store: store, mail: &noopMailClient{}}
+	msg := imapadapter.Message{ID: "60", Subject: "Hello", Sender: "a@example.com"}
+
+	// A transient failure first, then the same message failing permanently:
+	// the permanent one retires it and must be recorded even though a "failed"
+	// row already exists.
+	p.recordMessageFailure(store, uc.id, uc, msg, &classifierErr{err: errors.New("connection refused")})
+	p.recordMessageFailure(store, uc.id, uc, msg, &classifierErr{err: errors.New("out of ai credits")})
+
+	if got := len(store.Decisions(50)); got != 2 {
+		t.Fatalf("got %d decisions, want 2 (the deferral and the retirement)", got)
+	}
+	if !seenForTest(t, store, msg.ID) {
+		t.Fatal("expected the permanent failure to retire the message")
+	}
+}

@@ -353,11 +353,11 @@ func (p *Poller) Run() {
 
 const (
 	// stateCleanupInterval is how often processed-message IDs and decisions are
-	// trimmed. Against a 30-day window, a longer gap only means state.json
+	// trimmed. Against a 30-day window, a longer gap only means state.db
 	// carries a few extra hours of entries past the cutoff.
 	stateCleanupInterval = 6 * time.Hour
-	// stateRetentionDays bounds both the audit view's history and the size of
-	// the two files every mutation rewrites.
+	// stateRetentionDays bounds both the audit view's history and the growth of
+	// the processed and decisions tables.
 	stateRetentionDays = 30
 )
 
@@ -600,9 +600,9 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		p.log.Error("failed to open user state store", "user_id", u.ID, "error", err.Error())
 		return err
 	}
-	// Cleanup runs on its own ticker (cleanupAllUsers), NOT here: it takes both
-	// file locks and rewrites and fsyncs both state.json and decisions.json in
-	// full, against a 30-day retention window.
+	// Cleanup runs on its own ticker (cleanupAllUsers), NOT here: it is two
+	// DELETEs in one transaction against a 30-day retention window, and there
+	// is no reason to pay them on the poll path.
 
 	settings, err := config.LoadUserSettings(p.userSettingsPath(u.ID))
 	if err != nil {
@@ -687,7 +687,14 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	skippedSeenCount := 0
 	failedCount := 0
 	rateLimitedCount := 0
-	for _, msg := range messages {
+	// deferredIDs are the messages this tick is leaving for a later one. Every
+	// "the next tick retries it" below is only true if the checkpoint stays
+	// below them — ListUnreadInbox filters on UID > checkpoint and advances its
+	// returned value to the highest UID it fetched regardless of outcome, so an
+	// unclamped write here retires exactly the messages these branches meant to
+	// keep. See imapadapter.ClampCheckpoint.
+	var deferredIDs []string
+	for i, msg := range messages {
 		seen, err := store.Seen(msg.ID)
 		if err != nil {
 			// Unknown is not unprocessed. Reprocessing re-labels the message and
@@ -695,6 +702,7 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 			// and the next tick retries.
 			p.log.Error("cannot determine processed state; skipping message this tick",
 				"user_id", u.ID, "message_id", msg.ID, "error", err.Error())
+			deferredIDs = append(deferredIDs, msg.ID)
 			skippedSeenCount++
 			continue
 		}
@@ -719,6 +727,13 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		if !p.allowByRate(u.ID) {
 			p.log.Info("rate limit reached, deferring remaining emails", "user_id", u.ID)
 			rateLimitedCount = len(messages) - processedCount - skippedSeenCount - failedCount
+			// "Deferring" is the whole point of the break: this message and
+			// everything after it are untouched, so the checkpoint must not
+			// advance past them. Any already-processed message swept up here is
+			// filtered by the Seen gate above on the next tick.
+			for _, deferred := range messages[i:] {
+				deferredIDs = append(deferredIDs, deferred.ID)
+			}
 			break
 		}
 		messageCtx, messageCancel := context.WithTimeout(context.Background(), 4*time.Minute)
@@ -726,14 +741,30 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		messageCancel()
 		if err != nil {
 			failedCount++
+			// Same predicate recordMessageFailure uses to decide whether to mark
+			// the message processed: a transient classifier failure is left
+			// unmarked to be retried, which requires the checkpoint to stay
+			// below it. A permanent one is retired and must not hold the
+			// checkpoint back forever.
+			if !shouldMarkProcessedOnError(err) {
+				deferredIDs = append(deferredIDs, msg.ID)
+			}
 			p.recordMessageFailure(store, u.ID, uc, msg, err)
 			continue
 		}
 		processedCount++
 	}
 
+	checkpointHeld := false
 	if nextCheckpoint != "" {
-		if err := store.SetCheckpoint(nextCheckpoint); err != nil {
+		clamped := imapadapter.ClampCheckpoint(checkpoint, nextCheckpoint, deferredIDs)
+		checkpointHeld = clamped != nextCheckpoint
+		if checkpointHeld {
+			p.log.Info("holding poll checkpoint below deferred messages so they are retried",
+				"user_id", u.ID, "deferred", strconv.Itoa(len(deferredIDs)),
+				"checkpoint", clamped, "fetched_through", nextCheckpoint)
+		}
+		if err := store.SetCheckpoint(clamped); err != nil {
 			p.log.Error("failed to persist checkpoint", "user_id", u.ID, "error", err.Error())
 		}
 	}
@@ -756,6 +787,26 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		"failed", strconv.Itoa(failedCount),
 		"deferred_rate_limited", strconv.Itoa(rateLimitedCount),
 	)
+
+	// The same summary, persisted, because the log line above answers "is mail
+	// being polled?" only for someone already reading logs. Recorded at the END
+	// of a completed tick: every early return above leaves the previous record
+	// alone so its age keeps growing, which is the outage signal.
+	//
+	// A failure here is logged and not returned — the tick genuinely succeeded,
+	// and failing it would restart work that is already done.
+	if err := store.RecordPollTick(state.PollTick{
+		AtUTC:          time.Now().UTC().Format(time.RFC3339),
+		Fetched:        len(messages),
+		Processed:      processedCount,
+		SkippedSeen:    skippedSeenCount,
+		Failed:         failedCount,
+		Deferred:       len(deferredIDs),
+		RateLimited:    rateLimitedCount > 0,
+		CheckpointHeld: checkpointHeld,
+	}); err != nil {
+		p.log.Error("failed to record poll tick", "user_id", u.ID, "error", err.Error())
+	}
 	return nil
 }
 
@@ -793,6 +844,34 @@ func shouldMarkProcessedOnError(err error) bool {
 // channel for message content to escape the owning user's state.db.
 const maxLoggedLabelBytes = 64
 
+// maxDecisionDetailBytes bounds the Detail of a recorded Decision.
+//
+// Detail is an error string from anywhere in handleMessage — a classifier
+// reply, an IMAP server's response, a rule action — none of which the message
+// pipeline controls the size of. It lands in state.db and is served back
+// through the decisions API, so an unbounded one is a row (and a response)
+// sized by whatever a remote endpoint felt like returning. 4 KiB holds any
+// diagnostic worth reading.
+const maxDecisionDetailBytes = 4096
+
+// clipDetail bounds an error string for storage as a Decision's Detail. Like
+// clipForLog it strips newlines and keeps the result valid UTF-8; unlike
+// clipForLog it is generous, because this is the audit record rather than a
+// log line.
+func clipDetail(s string) string {
+	s = strings.TrimSpace(s)
+	truncated := false
+	if len(s) > maxDecisionDetailBytes {
+		s = s[:maxDecisionDetailBytes]
+		truncated = true
+	}
+	s = strings.ToValidUTF8(strings.NewReplacer("\n", " ", "\r", " ").Replace(s), "")
+	if truncated {
+		s += "...(truncated)"
+	}
+	return s
+}
+
 // clipForLog trims and bounds a model-produced string for logging, and strips
 // the newlines that would otherwise let attacker-influenced text forge whole
 // log records for anything parsing app.log line by line.
@@ -809,8 +888,14 @@ func clipForLog(s string) string {
 // handleMessage failure: it logs the failure, records it as a "failed"
 // Decision, and marks the message processed — except for a transient
 // classifier error, which is deliberately left unmarked so it retries next
-// poll tick. Push notifications still fire exactly as before this change;
-// only the MarkProcessed gating is new.
+// poll tick (and which tickUser additionally holds the poll checkpoint below,
+// or the retry cannot happen at all).
+//
+// A retired message reaches this exactly once, so its Decision and its push
+// notification are unconditional. A DEFERRED one reaches it on every tick
+// until the outage clears, so both are gated on not having been reported
+// already — the audit log is per message, not per attempt, and a user gets one
+// notification for one email.
 func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc userCtx, msg imapadapter.Message, err error) {
 	p.log.Error("message processing failed", "user_id", userID, "message_id", msg.ID, "error", err.Error())
 	decision := state.Decision{
@@ -819,7 +904,7 @@ func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc user
 		SentTo:    msg.SentTo,
 		Subject:   msg.Subject,
 		Status:    "failed",
-		Detail:    err.Error(),
+		Detail:    clipDetail(err.Error()),
 	}
 	// Both writes together when the message is being retired, so a failure
 	// cannot leave it retired-but-unrecorded — see RecordProcessedDecision.
@@ -830,6 +915,22 @@ func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc user
 		writeErr = store.RecordProcessedDecision(decision)
 	} else {
 		p.log.Info("transient classifier error; leaving message unmarked so it is retried next poll tick", "user_id", userID, "message_id", msg.ID)
+		// Record and notify ONCE per message, not once per attempt. A deferred
+		// message really does come back every tick (the checkpoint is held
+		// below it), so an unconditional write here would append an audit row
+		// and push a notification every ~90 seconds for the whole length of a
+		// classifier outage, multiplied by every affected message. "I don't
+		// know" counts as reported: duplicating on an unreadable audit log is
+		// the unbounded direction, and the failure is logged at Error above
+		// regardless.
+		reported, readErr := store.HasDecisionWithStatus(msg.ID, "failed")
+		if readErr != nil {
+			p.log.Error("cannot determine whether this failure was already recorded; not repeating it",
+				"user_id", userID, "message_id", msg.ID, "error", readErr.Error())
+		}
+		if reported || readErr != nil {
+			return
+		}
 		writeErr = store.AddDecision(decision)
 	}
 	// This is already the failure path, so there is nothing above to abort;

@@ -54,6 +54,7 @@ import {
 import {
   clearDraftSnapshot,
   loadDraftSnapshot,
+  purgeExpiredDraftSnapshots,
   restoreNotice,
   saveDraftSnapshot
 } from "./app/draftAutosave";
@@ -130,6 +131,20 @@ export function App() {
 
   useEffect(() => {
     refreshAuth();
+  }, []);
+
+  // Enforce the compose autosave's 24-hour bound. The snapshot is unencrypted
+  // plaintext of a message that may have been headed for PGP encryption, and
+  // expiring it on read is not an expiry: loadDraftSnapshot runs only when a
+  // blank compose window is opened, so a user who closes the tab and never
+  // composes again would keep it forever. Swept on mount for the ordinary
+  // "opened the app" case, and hourly for a PWA tab that stays open for days
+  // without ever reloading. Not scoped to the current user — a shared browser
+  // is exactly where a previous account's draft outlives its session.
+  useEffect(() => {
+    purgeExpiredDraftSnapshots();
+    const timer = window.setInterval(purgeExpiredDraftSnapshots, 60 * 60 * 1000);
+    return () => window.clearInterval(timer);
   }, []);
 
   // Cold start: the unwrapped PGP key cannot survive a reload, so every

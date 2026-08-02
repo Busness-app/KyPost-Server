@@ -17,9 +17,19 @@ enabled = true
 # The per-minute limit is enforced by the PUSH_RATE_LIMITER binding below.
 # RATE_LIMIT_PER_MINUTE here is display-only (/health + 429 body) and should be
 # kept equal to that binding's simple.limit.
-# NOTE: hour/day rolling limits were removed so an accepted send does zero KV
-# writes (free-tier friendly). Restore them via Durable Objects on Workers Paid.
+# NOTE: rolling hour/day limits were removed so an accepted send does zero KV
+# writes (free-tier friendly). The day tier is back as RELAY_DAILY_BUDGET below,
+# built the way that note prescribed — a Durable Object counter, not KV.
 RATE_LIMIT_PER_MINUTE = "10"  # display only; keep equal to PUSH_RATE_LIMITER.simple.limit
+
+# Relay-wide ceiling on sends per UTC day, enforced by the RELAY_COORDINATOR
+# Durable Object already bound below. Commented out = unmetered (the prior
+# behaviour). One shared pool across every key: the per-minute limiter is
+# per-key, and with REGISTRATION_ENABLED open a caller who wants a second
+# bucket just registers a second key, so nothing else bounds what this relay
+# spends against YOUR APNs quota in a day. "0" closes the relay to sends.
+# See the fuller note in ../worker/wrangler.toml.example.
+# RELAY_DAILY_BUDGET = "50000"
 
 # Public self-registration (POST /register). Set to "true" ONLY if you intend to
 # run an unauthenticated key-minting endpoint on the public internet: anyone who

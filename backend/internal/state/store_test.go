@@ -1,6 +1,8 @@
 package state
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -663,5 +665,185 @@ func TestSeenAndCheckpointReportReadFailures(t *testing.T) {
 	}
 	if cp != "" {
 		t.Errorf("Checkpoint returned %q alongside an error, want empty", cp)
+	}
+}
+
+// TestPollTickRecordAndRead covers the record the health page reads to answer
+// "is mail actually being polled?" — a question /api/health cannot answer,
+// since it reports IMAP reachability, which a daemon that has stopped ticking
+// entirely still satisfies.
+func TestPollTickRecordAndRead(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, ok, _, err := store.LastPollTick(); err != nil {
+		t.Fatalf("LastPollTick on a fresh store: %v", err)
+	} else if ok {
+		t.Fatal("expected no tick on a fresh store")
+	}
+
+	if err := store.RecordPollTick(PollTick{
+		Fetched: 12, Processed: 11, SkippedSeen: 3, Failed: 1,
+	}); err != nil {
+		t.Fatalf("RecordPollTick: %v", err)
+	}
+
+	tick, ok, _, err := store.LastPollTick()
+	if err != nil {
+		t.Fatalf("LastPollTick: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected a recorded tick")
+	}
+	if tick.Fetched != 12 || tick.Processed != 11 || tick.SkippedSeen != 3 || tick.Failed != 1 {
+		t.Fatalf("round-trip lost counts: %+v", tick)
+	}
+	if tick.AtUTC == "" {
+		t.Fatal("expected RecordPollTick to stamp a time when the caller left it empty")
+	}
+}
+
+// TestPollTickVisibleAcrossStoreInstances is the one that matters in
+// deployment: the daemon writes the tick and the API process reads it, so an
+// in-memory-only record would report "never polled" to every user forever.
+func TestPollTickVisibleAcrossStoreInstances(t *testing.T) {
+	dir := t.TempDir()
+	daemon, err := New(dir)
+	if err != nil {
+		t.Fatalf("New (daemon): %v", err)
+	}
+	if err := daemon.RecordPollTick(PollTick{Fetched: 4, Processed: 4}); err != nil {
+		t.Fatalf("RecordPollTick: %v", err)
+	}
+
+	api, err := New(dir)
+	if err != nil {
+		t.Fatalf("New (api): %v", err)
+	}
+	tick, ok, _, err := api.LastPollTick()
+	if err != nil {
+		t.Fatalf("LastPollTick: %v", err)
+	}
+	if !ok || tick.Fetched != 4 {
+		t.Fatalf("second store instance did not see the tick: ok=%v tick=%+v", ok, tick)
+	}
+}
+
+// TestCheckpointHeldSinceIsSticky pins the behaviour that makes the signal
+// useful. One held tick is routine — a classifier hiccup. What an operator
+// needs to see is that it has been held since 09:00, so the timestamp must be
+// the FIRST held tick, not the latest one, and must clear the moment the
+// checkpoint advances again.
+func TestCheckpointHeldSinceIsSticky(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	first := "2026-08-01T09:00:00Z"
+	if err := store.RecordPollTick(PollTick{AtUTC: first, Deferred: 2, CheckpointHeld: true}); err != nil {
+		t.Fatalf("RecordPollTick (first held): %v", err)
+	}
+	if _, _, held, err := store.LastPollTick(); err != nil {
+		t.Fatalf("LastPollTick: %v", err)
+	} else if held != first {
+		t.Fatalf("heldSince = %q, want %q", held, first)
+	}
+
+	// Still stuck one tick later: the timestamp must not creep forward, or the
+	// duration always reads as one tick and the outage looks momentary.
+	if err := store.RecordPollTick(PollTick{
+		AtUTC: "2026-08-01T09:01:30Z", Deferred: 2, CheckpointHeld: true,
+	}); err != nil {
+		t.Fatalf("RecordPollTick (still held): %v", err)
+	}
+	if _, _, held, err := store.LastPollTick(); err != nil {
+		t.Fatalf("LastPollTick: %v", err)
+	} else if held != first {
+		t.Fatalf("heldSince crept forward to %q, want the first held tick %q", held, first)
+	}
+
+	// Recovered.
+	if err := store.RecordPollTick(PollTick{AtUTC: "2026-08-01T09:03:00Z"}); err != nil {
+		t.Fatalf("RecordPollTick (recovered): %v", err)
+	}
+	if _, _, held, err := store.LastPollTick(); err != nil {
+		t.Fatalf("LastPollTick: %v", err)
+	} else if held != "" {
+		t.Fatalf("heldSince = %q, want cleared once the checkpoint advanced", held)
+	}
+}
+
+func TestFailedDecisionsSince(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	now := time.Now().UTC()
+
+	add := func(id, status string, at time.Time) {
+		t.Helper()
+		if err := store.AddDecision(Decision{
+			MessageID: id, Status: status, AtUTC: at.Format(time.RFC3339),
+		}); err != nil {
+			t.Fatalf("AddDecision: %v", err)
+		}
+	}
+	add("1", "failed", now.Add(-1*time.Hour))
+	add("2", "failed", now.Add(-2*time.Hour))
+	add("3", "classified", now.Add(-1*time.Hour)) // not a failure
+	add("4", "failed", now.Add(-48*time.Hour))    // outside the window
+
+	got, err := store.FailedDecisionsSince(now.Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("FailedDecisionsSince: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("FailedDecisionsSince = %d, want 2", got)
+	}
+}
+
+func TestCleanupRecordsItsTimestamp(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if store.LastCleanup() != "" {
+		t.Fatal("expected no cleanup timestamp before Cleanup runs")
+	}
+	if err := store.Cleanup(30); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if store.LastCleanup() == "" {
+		t.Fatal("expected Cleanup to record when it ran")
+	}
+}
+
+// TestDiskUsageIncludesWAL guards the reason this is not a plain stat of
+// state.db: the WAL holds committed pages until a checkpoint folds them back,
+// so a busy mailbox carries real size there that state.db alone does not show.
+func TestDiskUsageIncludesWAL(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := store.DiskUsageBytes(); got <= 0 {
+		t.Fatalf("DiskUsageBytes = %d, want a positive size for an open database", got)
+	}
+
+	before := store.DiskUsageBytes()
+	for i := 0; i < 200; i++ {
+		if err := store.AddDecision(Decision{
+			MessageID: fmt.Sprint(i),
+			Subject:   strings.Repeat("padding", 64),
+			AtUTC:     time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			t.Fatalf("AddDecision: %v", err)
+		}
+	}
+	if after := store.DiskUsageBytes(); after <= before {
+		t.Fatalf("DiskUsageBytes did not grow after 200 inserts: %d -> %d", before, after)
 	}
 }

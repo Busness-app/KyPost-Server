@@ -199,6 +199,24 @@ func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxLogLineBytes is how much of a single log line tailLines will return.
+//
+// Writers bound what they emit (see the classifier's logLine), but this reader
+// serves any *.log in the log directory and must not depend on every present
+// and future writer having remembered to.
+const maxLogLineBytes = 64 * 1024
+
+// tailLines returns the last `limit` lines of a log file.
+//
+// bufio.Reader.ReadLine rather than bufio.Scanner: Scanner refuses any token
+// larger than its buffer and fails the ENTIRE scan with bufio.ErrTooLong, so
+// one oversized line — a model reply or an upstream error body quoted into a
+// diagnostic, both bounded only in the megabytes — turned GET /api/logs into a
+// 500 for that whole file. ReadLine truncates the offending line and keeps
+// going, which also keeps the tail a tail: recovering from ErrTooLong instead
+// would discard everything AFTER the bad line, and the newest lines are the
+// ones being asked for. Memory stays bounded by the reader's buffer no matter
+// how long the line is.
 func tailLines(path string, limit int) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -207,15 +225,36 @@ func tailLines(path string, limit int) ([]string, error) {
 	defer f.Close()
 
 	buf := make([]string, 0, limit)
-	s := bufio.NewScanner(f)
-	for s.Scan() {
-		buf = append(buf, s.Text())
+	push := func(line string) {
+		buf = append(buf, line)
 		if len(buf) > limit {
 			buf = buf[1:]
 		}
 	}
-	if err := s.Err(); err != nil {
-		return nil, err
+
+	r := bufio.NewReaderSize(f, maxLogLineBytes)
+	for {
+		chunk, isPrefix, err := r.ReadLine()
+		line := string(chunk)
+		if isPrefix {
+			line += " ...(truncated)"
+			// Discard the rest of the over-long line so the next iteration
+			// starts on a real line boundary rather than mid-record.
+			for isPrefix && err == nil {
+				_, isPrefix, err = r.ReadLine()
+			}
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				return nil, err
+			}
+			// ReadLine returns EOF with no data, so there is nothing to keep
+			// unless this iteration had already read part of a line.
+			if line != "" {
+				push(line)
+			}
+			return buf, nil
+		}
+		push(line)
 	}
-	return buf, nil
 }

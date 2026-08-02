@@ -171,7 +171,8 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   }
 
   // Count the accepted send in Analytics Engine (off the KV write path). No KV
-  // write happens on the send path — see the hour/day TODO above.
+  // write happens on the send path — see the single-tier note in
+  // push-relay-common.ts, which is what that constraint comes from.
   recordUsageAnalytics(env, record);
 
   const message: FcmMessage = payload;

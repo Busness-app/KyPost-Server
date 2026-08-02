@@ -96,6 +96,10 @@ CREATE TABLE IF NOT EXISTS decisions (
 	at_unix    INTEGER
 );
 CREATE INDEX IF NOT EXISTS decisions_at_unix ON decisions(at_unix);
+-- HasDecisionWithStatus runs on the poll path for every message whose
+-- processing failed, on every tick it keeps failing. Without this it is a full
+-- scan of up to 30 days of audit rows each time.
+CREATE INDEX IF NOT EXISTS decisions_message_id ON decisions(message_id);
 
 CREATE TABLE IF NOT EXISTS notifications (
 	endpoint   TEXT PRIMARY KEY,
@@ -201,4 +205,10 @@ const (
 	metaAICreditsAt        = "ai_credits_exhausted_at"
 	metaOllamaNotified     = "ollama_update_notified_version"
 	metaServerNotified     = "server_update_notified_version"
+	// Poll observability. The health check watches IMAP reachability, not the
+	// poller, so a daemon that has stopped ticking looks identical to a healthy
+	// one from /api/health — these are what tell the two apart.
+	metaLastPollTick        = "last_poll_tick"
+	metaCheckpointHeldSince = "checkpoint_held_since"
+	metaLastCleanup         = "last_cleanup_at"
 )

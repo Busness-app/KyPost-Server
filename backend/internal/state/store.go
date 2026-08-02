@@ -218,6 +218,129 @@ func (s *Store) SetCheckpoint(value string) error {
 	return setMeta(s.db, metaCheckpoint, value)
 }
 
+// PollTick is the outcome of one completed poll tick, persisted so the health
+// page can answer "is mail actually being polled?".
+//
+// Nothing else could answer it. /api/health reports whether IMAP is reachable,
+// which a daemon that has stopped ticking entirely still satisfies, and the
+// per-tick counts existed only as a log line. The fields mirror that line.
+type PollTick struct {
+	AtUTC       string `json:"atUtc"`
+	Fetched     int    `json:"fetched"`
+	Processed   int    `json:"processed"`
+	SkippedSeen int    `json:"skippedSeen"`
+	Failed      int    `json:"failed"`
+	// Deferred is how many messages this tick deliberately left for a later one
+	// (transient classifier failure, spent rate budget, unreadable processed
+	// set). Non-zero means the checkpoint is being held back on purpose.
+	Deferred int `json:"deferred"`
+	// RateLimited is the subset of Deferred that hit the per-user rate budget,
+	// which is a configuration answer rather than a fault.
+	RateLimited bool `json:"rateLimited"`
+	// CheckpointHeld records that the checkpoint did NOT advance to the highest
+	// UID fetched, because doing so would have retired the deferred messages.
+	CheckpointHeld bool `json:"checkpointHeld"`
+}
+
+// RecordPollTick stores the outcome of a completed tick, and maintains the
+// sticky "checkpoint held since" timestamp in the same transaction.
+//
+// Only COMPLETED ticks are recorded. A tick that aborts early (unreadable
+// checkpoint, failed IMAP fetch) deliberately leaves the previous record in
+// place, so the reported age grows — "last poll 40 minutes ago" is the signal,
+// and overwriting it with a fresher timestamp for a tick that fetched nothing
+// would hide exactly the outage worth seeing.
+func (s *Store) RecordPollTick(t PollTick) error {
+	if t.AtUTC == "" {
+		t.AtUTC = time.Now().UTC().Format(time.RFC3339)
+	}
+	blob, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	return s.tx(func(tx *sql.Tx) error {
+		// Sticky: set on the first tick that holds the checkpoint, cleared as
+		// soon as one doesn't. A single held tick is routine; one held for an
+		// hour is a classifier that never came back.
+		if t.CheckpointHeld {
+			held, err := metaString(tx, metaCheckpointHeldSince)
+			if err != nil {
+				return err
+			}
+			if held == "" {
+				if err := setMeta(tx, metaCheckpointHeldSince, t.AtUTC); err != nil {
+					return err
+				}
+			}
+		} else if err := setMeta(tx, metaCheckpointHeldSince, ""); err != nil {
+			return err
+		}
+		return setMeta(tx, metaLastPollTick, string(blob))
+	})
+}
+
+// LastPollTick returns the most recently recorded tick, whether one exists, and
+// the sticky timestamp since which the checkpoint has been held back ("" when
+// it is advancing normally).
+func (s *Store) LastPollTick() (tick PollTick, ok bool, heldSince string, err error) {
+	raw, err := metaString(s.db, metaLastPollTick)
+	if err != nil {
+		return PollTick{}, false, "", fmt.Errorf("read last poll tick (%s): %w", s.baseDir, err)
+	}
+	heldSince, err = metaString(s.db, metaCheckpointHeldSince)
+	if err != nil {
+		return PollTick{}, false, "", fmt.Errorf("read checkpoint held since (%s): %w", s.baseDir, err)
+	}
+	if strings.TrimSpace(raw) == "" {
+		return PollTick{}, false, heldSince, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &tick); err != nil {
+		// A record this process cannot parse is not a reason to fail the whole
+		// status page; report "never ticked" and let the age speak.
+		return PollTick{}, false, heldSince, nil
+	}
+	return tick, true, heldSince, nil
+}
+
+// FailedDecisionsSince counts decisions recorded as failures since a cutoff.
+//
+// Meaningful only because a deferred failure is recorded once per message
+// rather than once per attempt (see the poller's recordMessageFailure) — this
+// counts affected messages, not retry attempts.
+func (s *Store) FailedDecisionsSince(since time.Time) (int, error) {
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM decisions WHERE status = 'failed' AND at_unix IS NOT NULL AND at_unix >= ?`,
+		since.Unix()).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count failed decisions (%s): %w", s.baseDir, err)
+	}
+	return n, nil
+}
+
+// LastCleanup returns when Cleanup last completed, or "" if it never has.
+func (s *Store) LastCleanup() string {
+	v, _ := metaString(s.db, metaLastCleanup)
+	return v
+}
+
+// DiskUsageBytes reports what this account's state costs on disk.
+//
+// The WAL is included because it is not a rounding error: it holds committed
+// pages until a checkpoint folds them back, so a busy mailbox can carry tens of
+// megabytes there that a plain stat of state.db does not see. A missing file
+// contributes zero rather than failing — the -wal and -shm files exist only
+// while the database is open.
+func (s *Store) DiskUsageBytes() int64 {
+	var total int64
+	base := filepath.Join(s.baseDir, "state.db")
+	for _, name := range []string{base, base + "-wal", base + "-shm"} {
+		if info, err := os.Stat(name); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
 // Seen reports whether a message has already been classified.
 //
 // The error is returned rather than swallowed into false, because false means
@@ -300,8 +423,12 @@ func (s *Store) Cleanup(keepDays int) error {
 		if _, err := tx.Exec(`DELETE FROM processed WHERE seen_at < ?`, cutoff.Unix()); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`DELETE FROM decisions WHERE at_unix IS NOT NULL AND at_unix < ?`, cutoff.Unix())
-		return err
+		if _, err := tx.Exec(`DELETE FROM decisions WHERE at_unix IS NOT NULL AND at_unix < ?`, cutoff.Unix()); err != nil {
+			return err
+		}
+		// Recorded in the same transaction as the deletes it describes, so the
+		// timestamp can never claim a cleanup that rolled back.
+		return setMeta(tx, metaLastCleanup, time.Now().UTC().Format(time.RFC3339))
 	})
 }
 
@@ -326,6 +453,27 @@ func insertDecision(e execer, d Decision) error {
 // the JSON version re-serialized and fsynced the entire history per message.
 func (s *Store) AddDecision(d Decision) error {
 	return insertDecision(s.db, d)
+}
+
+// HasDecisionWithStatus reports whether a decision with this status has
+// already been recorded for messageID.
+//
+// This is what keeps a RETRIED message from writing the same row twice. A
+// message left unmarked on purpose (a transient classifier outage) comes back
+// on every poll tick until it succeeds, so an unconditional AddDecision on the
+// failure path would append one row — and fire one push notification — per
+// tick, for as long as the outage lasts, for every affected message.
+//
+// The processed set cannot answer this: the whole point of the deferral is
+// that the message is NOT in it.
+func (s *Store) HasDecisionWithStatus(messageID, status string) (bool, error) {
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM decisions WHERE message_id = ? AND status = ?`,
+		messageID, status).Scan(&n); err != nil {
+		return false, fmt.Errorf("read decisions (%s): %w", s.baseDir, err)
+	}
+	return n > 0, nil
 }
 
 // Decisions returns the most recent decisions, newest first.
