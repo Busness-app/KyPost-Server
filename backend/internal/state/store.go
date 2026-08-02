@@ -1099,6 +1099,38 @@ func (s *Store) AICreditsExhausted() (bool, string) {
 	return flag == "1", at
 }
 
+// ---- daemon health --------------------------------------------------------
+
+// SetDaemonHealth records the daemon process's latest health report, which the
+// API process reads back through DaemonHealth to serve /api/health.
+//
+// The payload is opaque here on purpose: its shape and its staleness rule
+// belong to internal/health (see health.DaemonReport), and this store has no
+// business knowing what a classifier is. It is stored the same way the poll
+// tick is — one JSON string under one meta key — because the writer is one
+// process, the reader is another, and this database is already the thing they
+// share.
+func (s *Store) SetDaemonHealth(report string) error {
+	return s.tx(func(tx *sql.Tx) error {
+		return setMeta(tx, metaDaemonHealth, report)
+	})
+}
+
+// DaemonHealth returns the last report the daemon wrote, or "" if it never has.
+//
+// A read failure is reported as "" rather than an error: the caller's answer to
+// both is the same — no usable news from the daemon, which health.
+// MergeDaemonReport treats as unhealthy — and an unreadable state database
+// must not turn the health endpoint itself into a 500.
+func (s *Store) DaemonHealth() string {
+	raw, err := metaString(s.db, metaDaemonHealth)
+	if err != nil {
+		slog.Error("state read failed", "field", "daemonHealth", "dir", s.baseDir, "error", err.Error())
+		return ""
+	}
+	return raw
+}
+
 // SetOllamaUpdateNotified records that the admin has already been told about
 // latestVersion. Returns notify=true only the first time a given version is
 // recorded, so the periodic check emails once per newly-seen release.

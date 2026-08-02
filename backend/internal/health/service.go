@@ -40,6 +40,15 @@ type Status struct {
 	// response body, and this struct is served to admins over /api/health.
 	ClassifierFailing   bool   `json:"classifierFailing"`
 	ClassifierFailingAt string `json:"classifierFailingAt,omitempty"`
+
+	// Cross-process liveness. Under supervisord the poller runs as a separate
+	// process with its own Service, so everything above that only the daemon
+	// observes reaches the API through a stored DaemonReport (daemon.go).
+	// DaemonHeartbeatUTC is when it last reported; DaemonStale means it has
+	// stopped, and unlike the two subsystem flags it DOES flip Healthy —
+	// nothing this server exists to do happens without the poller.
+	DaemonHeartbeatUTC string `json:"daemonHeartbeatUtc,omitempty"`
+	DaemonStale        bool   `json:"daemonStale,omitempty"`
 }
 
 type Service struct {

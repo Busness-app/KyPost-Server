@@ -170,6 +170,11 @@ describe("stale-envelope recovery", () => {
       const uploaded = JSON.parse(rewrapPGPPrivateKey.mock.calls[0][0] as string);
       const { unwrapPrivateKey } = await import("./keyVault");
       await expect(unwrapPrivateKey(uploaded, NEW_PASSWORD)).resolves.toBe(SECRET);
+      // The CURRENT account password also goes up as the step-up credential:
+      // the server refuses to overwrite an envelope it cannot inspect on a
+      // session alone. Sending the old one here would fail the confirmation and
+      // leave the stale envelope in place — the exact state this recovers from.
+      expect(rewrapPGPPrivateKey.mock.calls[0][1]).toBe(NEW_PASSWORD);
     },
     TIMEOUT
   );

@@ -329,6 +329,19 @@ func (p *Poller) Run() {
 	wkdTicker := time.NewTicker(recheckWKDInterval)
 	defer wkdTicker.Stop()
 
+	// The heartbeat runs on its own ticker rather than at the end of each poll
+	// tick, and that separation is the point: a tick can legitimately take
+	// minutes (tickTimeout is 8), and a heartbeat derived from tick completion
+	// would report a busy daemon as a dead one. This says "the poller loop is
+	// alive and here is what it has observed", which is a different question
+	// from "how fast is it getting through the mail".
+	//
+	// Written once eagerly so a freshly started daemon is not reported missing
+	// for its first interval.
+	heartbeatTicker := time.NewTicker(daemonHeartbeatInterval)
+	defer heartbeatTicker.Stop()
+	p.reportDaemonHealth()
+
 	// time.NewTicker only fires after the first full interval, so a host that
 	// restarts more often than recheckWKDInterval (12h) would never run
 	// recheckWKDDomains — silently disabling the revocation half of the WKD
@@ -359,6 +372,13 @@ func (p *Poller) Run() {
 			return
 		case <-ticker.C:
 			p.tick()
+			// Also after a tick, not only on the heartbeat ticker: a tick is
+			// when the subsystem flags actually change, and waiting up to
+			// daemonHeartbeatInterval to publish a classifier failure would
+			// leave the health page stale for no reason.
+			p.reportDaemonHealth()
+		case <-heartbeatTicker.C:
+			p.reportDaemonHealth()
 		case <-wkdTicker.C:
 			p.recheckWKDDomains()
 		case <-cleanupTicker.C:
@@ -367,7 +387,46 @@ func (p *Poller) Run() {
 	}
 }
 
+// reportDaemonHealth publishes this process's health to shared state, where the
+// API process reads it (health.MergeDaemonReport). Without it, everything the
+// poller observes — classifier failures, native-push failures, whether any
+// mailbox is reachable at all — stays in a health.Service that only this
+// process can see, while /api/health serves the API's untouched copy of the
+// same fields and reports them as false.
+//
+// A write failure is logged and otherwise ignored: the report ages out on its
+// own, and the API treats a report that stopped arriving as a daemon that
+// stopped, which is the correct reading of "the daemon cannot write to its
+// state database".
+func (p *Poller) reportDaemonHealth() {
+	if p.globalStore == nil || p.health == nil {
+		return
+	}
+	encoded, err := health.NewDaemonReport(p.health.GetStatus(), time.Now()).Encode()
+	if err != nil {
+		p.log.Error("failed to encode daemon health report", "error", err.Error())
+		return
+	}
+	if err := p.globalStore.SetDaemonHealth(encoded); err != nil {
+		p.log.Error("failed to publish daemon health report", "error", err.Error())
+	}
+}
+
 const (
+	// tickTimeout bounds one user's whole poll tick, and perMessageTimeout one
+	// message within it. Both are ceilings on work that is ALREADY cancellable
+	// by Stop(): they derive from lifetimeCtx, so shutdown does not wait for
+	// them to elapse. They exist to stop a wedged IMAP or classifier call from
+	// holding the tick semaphore forever, not to bound shutdown.
+	tickTimeout       = 8 * time.Minute
+	perMessageTimeout = 4 * time.Minute
+
+	// daemonHeartbeatInterval is how often the poller publishes its health to
+	// shared state for the API process to serve. Comfortably under
+	// health.DaemonHeartbeatMaxAge (5m) so an ordinary missed beat — a tick
+	// holding the loop, a slow disk — does not read as a dead daemon.
+	daemonHeartbeatInterval = 30 * time.Second
+
 	// stateCleanupInterval is how often processed-message IDs and decisions are
 	// trimmed. Against a 30-day window, a longer gap only means state.db
 	// carries a few extra hours of entries past the cutoff.
@@ -502,6 +561,15 @@ func (p *Poller) currentRedaction() *redaction.Engine {
 }
 
 func (p *Poller) tick() {
+	// Refuse to start a tick after Stop. TriggerNow (the admin "poll now"
+	// button) and TriggerUnreadSweep call tick() directly, not through Run's
+	// select, so without this an admin request arriving during shutdown starts
+	// a full tick that shutdown then waits for.
+	if err := p.lifetimeCtx().Err(); err != nil {
+		p.log.Info("poll tick skipped: poller is shutting down")
+		return
+	}
+
 	p.reloadConfigIfNeeded()
 
 	// acquire semaphore; if another tick is running, log that we're waiting
@@ -513,6 +581,13 @@ func (p *Poller) tick() {
 		<-p.tickSem
 	}
 	defer func() { p.tickSem <- struct{}{} }()
+
+	// Re-checked after the wait: acquiring the semaphore can block for as long
+	// as the tick ahead runs, and shutdown may have started in the meantime.
+	if err := p.lifetimeCtx().Err(); err != nil {
+		p.log.Info("poll tick abandoned: poller is shutting down")
+		return
+	}
 
 	all, err := p.users.List()
 	if err != nil {
@@ -666,7 +741,14 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		rules:            activeRules,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	// Derived from lifetimeCtx, not context.Background(): Stop() cancels the
+	// poller's context, and a tick rooted at Background did not observe it. The
+	// tick loop returned immediately while the IMAP fetch, the classifier call
+	// and the state writes underneath kept running for up to the full timeout —
+	// and Wait(), which shutdown blocks on, waited for exactly those. Eight
+	// minutes of it, against Docker's 10-second default grace period, meant
+	// routine restarts reached SIGKILL mid-write.
+	ctx, cancel := context.WithTimeout(p.lifetimeCtx(), tickTimeout)
 	defer cancel()
 
 	checkpoint, err := store.Checkpoint()
@@ -771,7 +853,22 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 			}
 			break
 		}
-		messageCtx, messageCancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		// Stop admitting new work once shutdown has begun. Without this, a tick
+		// that started with 300 messages kept starting message #4, #5, #6 after
+		// Stop() — each with its own fresh timeout — so cancellation only ever
+		// took effect at the end of the batch.
+		//
+		// Deferred exactly like the rate-limit break above: this message and
+		// everything after it are untouched, so the checkpoint must not advance
+		// past them, and the next tick re-fetches them.
+		if err := ctx.Err(); err != nil {
+			p.log.Info("shutdown requested, deferring remaining emails", "user_id", u.ID)
+			for _, deferred := range messages[i:] {
+				deferredIDs = append(deferredIDs, deferred.ID)
+			}
+			break
+		}
+		messageCtx, messageCancel := context.WithTimeout(ctx, perMessageTimeout)
 		err = p.handleMessage(messageCtx, uc, msg)
 		messageCancel()
 		if err != nil {

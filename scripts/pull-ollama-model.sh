@@ -10,58 +10,86 @@ hostport="${hostport#https://}"
 export OLLAMA_HOST="$hostport"
 export OLLAMA_MODELS="$models_dir"
 
-mkdir -p "$models_dir"
-if ! touch "$models_dir/.write-test" 2>/dev/null; then
-  echo "ERROR: Ollama models dir is not writable: $models_dir"
-  exit 1
-fi
-rm -f "$models_dir/.write-test"
-
-# This program runs ONCE per container start (supervisord: autorestart=false),
-# so every transient failure below has to be handled here or not at all. It
-# used to fall out of the wait loop without checking whether the API had ever
-# answered and then run a single `ollama pull`: a slow first start or a minute
-# of registry trouble left the container up, healthy, and permanently without
-# the model it is supposed to classify with, until a human restarted it.
-echo "Waiting for Ollama API at $base_url"
-ready=""
-for _ in $(seq 1 60); do
-  if ollama list >/dev/null 2>&1; then
-    ready=1
-    break
-  fi
-  sleep 2
-done
-if [ -z "$ready" ]; then
-  echo "ERROR: Ollama API did not answer at $base_url within 120s; not pulling $model." >&2
-  echo "       Check the ollama program's log, then restart the container to retry." >&2
-  exit 1
-fi
-
-echo "Pulling model: $model"
-echo "Using Ollama models dir: $OLLAMA_MODELS"
+# This program runs until the model is installed, then exits 0 and stays exited.
+#
+# It used to give up — after five pull attempts, or after 120s of the Ollama API
+# not answering, or immediately if the models directory was unwritable — and
+# exit 1. Under supervisord's autorestart=false that exit was terminal: the
+# program went EXITED rather than FATAL, so the crashexit listener never fired,
+# nothing restarted it, and a container that met any of those conditions at boot
+# ran forever without the model it is supposed to classify with. The only
+# recovery was a human noticing and restarting the container, and until
+# classifier health reached /api/health (see health/daemon.go) there was nothing
+# for them to notice.
+#
+# So nothing here gives up. One outer loop covers all three conditions, because
+# all three are the same kind of problem: a cause that may be fixed later, by
+# somebody who is not going to restart this container to prove it. Fast retries
+# absorb a blip; then it settles onto a capped interval and picks the model up
+# whenever the cause clears.
+#
+# Retrying in-process rather than by exiting for supervisord to restart is
+# deliberate: this program's startsecs is 0 (it must be able to exit 0 in
+# milliseconds when the model is already there), so an exit-and-restart cycle
+# has no floor on it and a fast failure — the unwritable directory — would spin
+# as fast as the machine allows. A sleep in a loop has a floor by construction.
 attempt=1
-max_attempts=5
+# Backoff schedule: 15s, 30s, 45s, 60s while the failure might be a blip, then
+# every max_delay seconds indefinitely. Capped rather than growing without
+# bound, so a cause fixed at 3am is picked up within fifteen minutes instead of
+# whenever an ever-doubling delay happens to come round.
+max_fast_attempts=5
+max_delay=900
+
+# retry_delay prints the reason (loudly for the fast attempts, then once at the
+# transition, then silently) and sleeps. Silence afterwards is deliberate: an
+# operator needs to see that the pull is failing, not one line every fifteen
+# minutes for the life of the container.
+retry_delay() {
+  reason="$1"
+  if [ "$attempt" -lt "$max_fast_attempts" ]; then
+    delay=$((attempt * 15))
+  else
+    delay="$max_delay"
+  fi
+  if [ "$attempt" -lt "$max_fast_attempts" ]; then
+    echo "$reason (attempt $attempt); retrying in ${delay}s" >&2
+  elif [ "$attempt" -eq "$max_fast_attempts" ]; then
+    echo "ERROR: $reason, after $max_fast_attempts attempts. Mail is delivered but" >&2
+    echo "       not classified until this succeeds. Retrying every ${max_delay}s; the" >&2
+    echo "       server reports this as classifierFailing in GET /api/health." >&2
+  fi
+  sleep "$delay"
+  attempt=$((attempt + 1))
+}
+
 while :; do
+  mkdir -p "$models_dir" 2>/dev/null || true
+  if ! touch "$models_dir/.write-test" 2>/dev/null; then
+    retry_delay "Ollama models dir is not writable: $models_dir"
+    continue
+  fi
+  rm -f "$models_dir/.write-test"
+
+  # Ollama is a sibling supervised program and races this one at boot, so "not
+  # answering yet" is the normal first state rather than a fault.
+  if ! ollama list >/dev/null 2>&1; then
+    retry_delay "Ollama API is not answering at $base_url"
+    continue
+  fi
+
+  # Already installed: nothing to do. Cheap, and it makes every restart after
+  # the first instant instead of a network round trip to the registry.
+  if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$model"; then
+    echo "Ollama model ready: $model"
+    exit 0
+  fi
+
+  echo "Pulling model: $model"
+  echo "Using Ollama models dir: $OLLAMA_MODELS"
   if ollama pull "$model"; then
     echo "Ollama model ready: $model"
     exit 0
   fi
-  if [ "$attempt" -ge "$max_attempts" ]; then
-    break
-  fi
-  # Linear backoff: 15s, 30s, 45s, 60s — 2.5 minutes of registry trouble
-  # absorbed without a hot loop against a service that is already unhappy.
-  delay=$((attempt * 15))
-  echo "pull failed (attempt $attempt/$max_attempts); retrying in ${delay}s" >&2
-  sleep "$delay"
-  attempt=$((attempt + 1))
+  retry_delay "could not pull $model"
 done
-
-# Nonzero, and loudly. Classification stays broken until the model is present;
-# the server reports that as classifierFailing in GET /api/health rather than as
-# an unhealthy container, because restarting the container does not install a
-# model the registry would not serve.
-echo "ERROR: could not pull $model after $max_attempts attempts. Mail will be delivered" >&2
-echo "       but not classified. Restart the container to retry once the cause is fixed." >&2
-exit 1

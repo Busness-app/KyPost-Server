@@ -37,16 +37,44 @@ export function getPGPIdentity(): Promise<PGPIdentity> {
   return getJSON<PGPIdentity>("/api/pgp/identity");
 }
 
-export function generatePGPIdentity(): Promise<PGPIdentity> {
-  return postJSON<PGPIdentity>("/api/pgp/identity/generate", {});
+/**
+ * Step-up credential for the operations that replace or destroy an existing
+ * PGP identity.
+ *
+ * A session cookie is a bearer token, and everything else it authorises ends
+ * with the session. A replaced published key does not: it goes out over WKD and
+ * Autocrypt, so every future correspondent encrypts to it. Deleting the
+ * identity is worse and cannot be undone at all.
+ *
+ * Both credential forms are sent because the server picks which one to check
+ * from what the ACCOUNT stores, not from what arrives — see lib/authSecret.ts.
+ * Omit `password` entirely (pass "") for a first-time setup, which the server
+ * does not gate: there is no key to redirect and none to strand.
+ */
+async function stepUp(password: string): Promise<{ password?: string; authSecret?: string }> {
+  if (!password) return {};
+  const { authSecret } = await deriveCredential("", password);
+  return { password, authSecret };
 }
 
-export function importPGPIdentity(armoredPrivateKey: string, passphrase: string): Promise<PGPIdentity> {
-  return postJSON<PGPIdentity>("/api/pgp/identity/import", { armoredPrivateKey, passphrase });
+export async function generatePGPIdentity(password = ""): Promise<PGPIdentity> {
+  return postJSON<PGPIdentity>("/api/pgp/identity/generate", await stepUp(password));
 }
 
-export function deletePGPIdentity(): Promise<{ ok: boolean }> {
-  return deleteJSON<{ ok: boolean }>("/api/pgp/identity");
+export async function importPGPIdentity(
+  armoredPrivateKey: string,
+  passphrase: string,
+  password = ""
+): Promise<PGPIdentity> {
+  return postJSON<PGPIdentity>("/api/pgp/identity/import", {
+    armoredPrivateKey,
+    passphrase,
+    ...(await stepUp(password))
+  });
+}
+
+export async function deletePGPIdentity(password = ""): Promise<{ ok: boolean }> {
+  return deleteJSON<{ ok: boolean }>("/api/pgp/identity", await stepUp(password));
 }
 
 export function checkPGPRecipients(addresses: string[]): Promise<{ results: PGPRecipientStatus[] }> {
@@ -175,18 +203,41 @@ export function getPGPBootstrap(): Promise<PGPBootstrap> {
   return getJSON<PGPBootstrap>("/api/pgp/bootstrap");
 }
 
-/** Stores a browser-generated or imported identity. `wrapped` is opaque to the server. */
-export function storeClientPGPIdentity(
+/**
+ * Stores a browser-generated or imported identity. `wrapped` is opaque to the
+ * server.
+ *
+ * `password` is required only when this REPLACES an existing identity; first-
+ * time setup passes "" and the server does not ask. See stepUp above.
+ */
+export async function storeClientPGPIdentity(
   publicKey: string,
   wrapped: string,
-  source: "generated" | "imported"
+  source: "generated" | "imported",
+  password = ""
 ): Promise<PGPIdentity> {
-  return postJSON<PGPIdentity>("/api/pgp/identity/client", { publicKey, wrapped, source });
+  return postJSON<PGPIdentity>("/api/pgp/identity/client", {
+    publicKey,
+    wrapped,
+    source,
+    ...(await stepUp(password))
+  });
 }
 
-/** Replaces the wrapped envelope after a password change. */
-export function rewrapPGPPrivateKey(wrapped: string): Promise<{ ok: boolean }> {
-  return postJSON<{ ok: boolean }>("/api/pgp/identity/rewrap", { wrapped });
+/**
+ * Replaces the wrapped envelope.
+ *
+ * `password` is always required here: rewrapping presupposes an identity to
+ * rewrap, and the server cannot inspect the envelope it is given — so an
+ * unconfirmed caller could replace it with a blob that opens to nothing and
+ * strand every message ever encrypted to this key.
+ *
+ * Note the password-CHANGE path does not come through here: it sends the
+ * re-sealed envelope inside /api/auth/password, which verifies the old password
+ * already (see LoginPage).
+ */
+export async function rewrapPGPPrivateKey(wrapped: string, password: string): Promise<{ ok: boolean }> {
+  return postJSON<{ ok: boolean }>("/api/pgp/identity/rewrap", { wrapped, ...(await stepUp(password)) });
 }
 
 /**

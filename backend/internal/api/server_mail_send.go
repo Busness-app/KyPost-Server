@@ -276,47 +276,59 @@ func encryptedSentCopy(msg []byte, selfArmoredPubKey string, signer *pgpmail.Ide
 	return pgpmail.EncryptMIME(msg, []string{selfArmoredPubKey}, signer)
 }
 
-// sentCopyForSend returns the PGP/MIME Sent copy for this send, or nil to keep
-// the plaintext one.
+// sentCopyForSend returns the PGP/MIME Sent copy for this send, or nil.
 //
 // Only an encrypted send gets a wrapped copy. Wrapping an unencrypted one would
 // lock the sender out of an outbox they never asked to protect, and would put a
 // "PGP: encrypted" badge on a message that went out in the clear — the same
-// misreporting this fixes, pointing the other way.
+// misreporting this fixes, pointing the other way. An unencrypted send
+// therefore returns nil with no warning, and the caller rebuilds the readable
+// copy as always.
 //
-// Every failure degrades to the plaintext copy rather than dropping it: unlike
-// the client-custody path (sentCopyDraft), a server-custody account's key is
-// one this server holds anyway, so a readable copy is not a broken promise —
-// just a worse outcome than the one we were aiming for, and losing the record
-// of a message you sent is worse still.
+// For an ENCRYPTED send, nil means no Sent copy is saved at all. It does not
+// mean "fall back to the readable one" — see sentCopyDraftForSend.
 //
-// It is not a SILENT degrade. The second return is a warning for the send
-// response, because the user asked for encryption and a log line they will
-// never read is not their answer. Two other things surface it: the copy carries
-// no padlock in the Sent column (read/encryption.ts) while the recipient's
-// delivery was ciphertext, and the log line records why.
+// That fallback used to exist, justified by the observation that a
+// server-custody account's key is one this server holds anyway, so a readable
+// copy revealed nothing to this server that it could not already read. True,
+// and beside the point: the Sent copy is APPENDed to the account's IMAP host,
+// which is somebody else's machine and holds no key at all. The body and the
+// real Subject of every encrypted message landed there in the clear — the exact
+// disclosure the sender ticked a box to prevent. The client-custody path
+// (sentCopyDraft, pgp_send_client.go) has always refused to save anything
+// rather than save cleartext; this is the same refusal, arrived at late.
 //
-// A sender with no key of their own is not a failure and warns about nothing:
-// encrypting to recipients never required one, so there is simply nothing to
-// encrypt a copy to, and the plaintext copy is the only copy available.
+// Losing the copy is a real cost and is never silent. The second return is a
+// warning for the send response, because the user asked for encryption, the
+// message DID go out, and a log line they will never read is not their answer.
+// finishMailSend also reports sentSaved:false, which the composer already
+// renders.
+//
+// The two failure kinds warn differently because the remedy differs: an encrypt
+// failure is something to report, while "you have no key of your own" is fixed
+// by generating one.
 func (s *Server) sentCopyForSend(userID string, msg []byte, req mailRequest, signer *pgpmail.Identity) ([]byte, string) {
 	if !req.Encrypt {
 		return nil, ""
 	}
-	const warning = "This message was sent encrypted, but the copy saved to your Sent folder could not be encrypted and is stored in plain text."
+	const warning = "This message was sent encrypted, but the copy for your Sent folder could not be encrypted, so it was not saved. Your recipients received the message."
+	const noKeyWarning = "This message was sent encrypted. You have no PGP key of your own to encrypt a Sent copy to, so no copy was saved. Generate a key to keep copies of the encrypted mail you send."
 	u, err := s.users.Get(userID)
 	if err != nil {
-		s.logger.Error("sent copy left unencrypted: cannot read account", "error", err.Error())
+		s.logger.Error("sent copy not saved: cannot read account", "error", err.Error())
 		return nil, warning
 	}
 	copyBytes, err := encryptedSentCopy(msg, u.PGPPublicKey, signer)
 	if err != nil {
-		s.logger.Error("sent copy left unencrypted: encrypt failed", "error", err.Error())
+		s.logger.Error("sent copy not saved: encrypt failed", "error", err.Error())
 		return nil, warning
 	}
 	if copyBytes == nil {
-		// No key of this account's own. Nothing failed.
-		return nil, ""
+		// No key of this account's own. Encrypting to recipients never required
+		// one, so nothing FAILED — but there is still no copy, and that is not
+		// something to leave the sender to discover.
+		s.logger.Info("sent copy not saved: account has no pgp key of its own", "user_id", userID)
+		return nil, noKeyWarning
 	}
 	return copyBytes, ""
 }
@@ -335,28 +347,43 @@ func joinWarnings(warnings ...string) string {
 }
 
 // sentCopyDraftForSend decides what finishMailSend APPENDs to Sent: the
-// already-wrapped ciphertext verbatim when there is one, otherwise the message
-// rebuilt from the request as before.
+// already-wrapped ciphertext verbatim when there is one, the message rebuilt
+// from the request when the send was not encrypted, and NOTHING (save=false)
+// for an encrypted send with no ciphertext to append.
 //
-// Verbatim matters. Rebuilding from Subject/Body would wrap a complete
-// PGP/MIME message in a fresh envelope — no reader would decrypt it — and
-// would need the real Subject, the value the encryption exists to hide. This
-// mirrors sentCopyDraft on the client-custody path (pgp_send_client.go).
+// The third case is the one worth stating. It is reached when encryption of the
+// copy failed, or when the sender has no key of their own, and the only two
+// answers available are "save the cleartext" and "save nothing". Saving the
+// cleartext puts the body and real Subject of a message the user encrypted onto
+// their IMAP provider's disk, which is the disclosure they encrypted to
+// prevent, and it is invisible from the composer — the send reports success and
+// the copy looks ordinary. Saving nothing loses the record, which is worse for
+// bookkeeping and better for the promise the product makes; sentCopyForSend
+// warns and finishMailSend reports sentSaved:false, so unlike the disclosure it
+// is at least something the sender is told about. sentCopyDraft on the
+// client-custody path (pgp_send_client.go) made the same choice.
+//
+// Verbatim matters for the first case. Rebuilding from Subject/Body would wrap
+// a complete PGP/MIME message in a fresh envelope — no reader would decrypt it
+// — and would need the real Subject, the value the encryption exists to hide.
 //
 // Recipient lists stay in the clear either way: the Sent folder listing is
 // unusable without them, and SMTP already carried them.
-func sentCopyDraftForSend(req mailRequest, toList, ccList, bccList []string, encryptedCopy []byte) imapadapter.DraftMessage {
+func sentCopyDraftForSend(req mailRequest, toList, ccList, bccList []string, encryptedCopy []byte) (imapadapter.DraftMessage, bool) {
 	draft := imapadapter.DraftMessage{To: toList, CC: ccList, BCC: bccList}
 	if len(encryptedCopy) > 0 {
 		draft.Subject = pgpmail.OuterPlaceholderSubject
 		draft.Raw = encryptedCopy
-		return draft
+		return draft, true
+	}
+	if req.Encrypt {
+		return imapadapter.DraftMessage{}, false
 	}
 	draft.Subject = req.Subject
 	draft.Body = req.Body
 	draft.Mode = req.Mode
 	draft.Attachments = req.Attachments
-	return draft
+	return draft, true
 }
 
 // resolveMailFrom decides the From header value handleMailSend should use,
@@ -730,12 +757,13 @@ func encryptSigner(signer *pgpmail.Identity, sign bool) *pgpmail.Identity {
 // (e.g. pickup notifications) know not to proceed.
 //
 // sentCopy is the PGP/MIME copy to append instead of rebuilding the message
-// from req — nil for an unencrypted send, and for an encrypted one whose
-// sender has no key of their own (see sentCopyForSend). An encrypted send used
-// to append the rebuilt plaintext unconditionally, which left the cleartext and
+// from req. It is nil for an unencrypted send (rebuild as always), and nil for
+// an encrypted send whose copy could not be encrypted — in which case nothing
+// is appended at all and sentSaved comes back false. An encrypted send used to
+// append the rebuilt plaintext unconditionally, which left the cleartext and
 // real subject of every encrypted message on the IMAP store and gave the reader
 // nothing to derive its "PGP: encrypted" badge from — so the Sent folder showed
-// an encrypted send exactly like a cleartext one.
+// an encrypted send exactly like a cleartext one. See sentCopyDraftForSend.
 //
 // extraWarning is folded into the response's warning field alongside any
 // save-to-Sent warning generated here — the all-keyless opt-in path uses it
@@ -773,15 +801,30 @@ func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, 
 		}
 	}
 	sentSaved := true
-	if mailClient, mailErr := s.userMailClient(userID); mailErr == nil {
-		if err := mailClient.SaveSent(r.Context(), sentCopyDraftForSend(req, toList, ccList, bccList, sentCopy)); err != nil {
-			sentSaved = false
-			if warning != "" {
-				warning += "; "
-			}
-			warning += "email sent but could not be saved to Sent folder"
-			s.logger.Error("mail sent but save-sent failed", "error", err.Error())
+	if draft, saveCopy := sentCopyDraftForSend(req, toList, ccList, bccList, sentCopy); !saveCopy {
+		// An encrypted send with no ciphertext copy. Nothing is appended — see
+		// sentCopyDraftForSend — and the reason already travelled here as
+		// extraWarning from sentCopyForSend, so this adds no second warning of
+		// its own. It must still report sentSaved:false: the composer renders
+		// that, and reporting true for a copy that was deliberately not written
+		// would be the same lie the plaintext fallback used to tell.
+		sentSaved = false
+	} else if mailClient, mailErr := s.userMailClient(userID); mailErr != nil {
+		// No IMAP client means no APPEND happened either. This used to leave
+		// sentSaved true, which reported a copy that was never written.
+		sentSaved = false
+		if warning != "" {
+			warning += "; "
 		}
+		warning += "email sent but could not be saved to Sent folder"
+		s.logger.Error("mail sent but save-sent unavailable", "error", mailErr.Error())
+	} else if err := mailClient.SaveSent(r.Context(), draft); err != nil {
+		sentSaved = false
+		if warning != "" {
+			warning += "; "
+		}
+		warning += "email sent but could not be saved to Sent folder"
+		s.logger.Error("mail sent but save-sent failed", "error", err.Error())
 	}
 	s.logger.Info("mail send completed", "sentSaved", strconv.FormatBool(sentSaved))
 

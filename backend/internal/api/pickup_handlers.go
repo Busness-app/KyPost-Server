@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -323,6 +324,20 @@ func (s *Server) pickupBaseURL() string {
 	return "http://localhost:5866"
 }
 
+// minPairingSecretLength is the shortest operator-supplied PAIRING_SECRET this
+// server will sign with.
+//
+// 32 characters, measured on the string as given rather than on decoded bytes.
+// Requiring 32 random BYTES would mean requiring a specific encoding, and every
+// existing deployment that set a long passphrase would stop working on upgrade
+// for no gain in strength — a 32-character passphrase is already far past the
+// point where guessing an HMAC key is the cheapest attack available. What this
+// is here to reject is "hunter2".
+//
+// It matches what the server generates for itself: 32 random bytes, base64'd
+// (44 characters), so the default path clears this bar by construction.
+const minPairingSecretLength = 32
+
 // resolvePairingSecret returns the HMAC secret used to sign pickup links, PGP
 // QR key-exchange tokens and device pairing tokens.
 //
@@ -332,12 +347,22 @@ func (s *Server) pickupBaseURL() string {
 // PICKUP_STORE_KEY_FILE all go through cryptutil.LoadOrCreateKey).
 //
 // Generated rather than operator-invented. An unset value fails closed (503,
-// logged), but a weak one does not: "PAIRING_SECRET=hunter2" is accepted
-// silently and produces forgeable HMACs for pickup links and pairing tokens.
+// logged), and so, now, does a weak one: an operator-supplied secret shorter
+// than minPairingSecretLength is REFUSED rather than used. "PAIRING_SECRET=
+// hunter2" used to be accepted silently and produced forgeable HMACs for
+// pickup links, device pairing tokens and PGP QR key exchange — one guessable
+// string standing behind three separate capabilities.
+//
+// Refused, not fallen back from. Quietly generating a file secret instead would
+// hand a multi-replica deployment a different secret per replica, so links
+// signed by one would fail to verify on another — an intermittent, load-
+// balancer-dependent failure, which is a worse thing to debug than a feature
+// that is off and says so.
 //
 // The environment override stays because a multi-replica deployment needs every
 // replica to agree on one secret, which a per-container generated file cannot
-// provide. An operator-supplied value is used verbatim and writes no file.
+// provide. An operator-supplied value of adequate length is used verbatim and
+// writes no file.
 //
 // A generation failure — read-only secrets volume, bad permissions — returns
 // "", which every consumer already reads as "not configured" and answers 503
@@ -345,6 +370,16 @@ func (s *Server) pickupBaseURL() string {
 // weak-but-present secret would be worse than a disabled feature.
 func resolvePairingSecret(keyPath string, logger *logging.Logger) string {
 	if fromEnv := strings.TrimSpace(os.Getenv("PAIRING_SECRET")); fromEnv != "" {
+		if len(fromEnv) < minPairingSecretLength {
+			if logger != nil {
+				logger.Error("PAIRING_SECRET is too short to sign anything with; pickup links, device pairing and PGP QR key-exchange stay disabled",
+					"length", strconv.Itoa(len(fromEnv)),
+					"minimum", strconv.Itoa(minPairingSecretLength),
+					"remedy", "set PAIRING_SECRET to at least "+strconv.Itoa(minPairingSecretLength)+
+						" random characters (openssl rand -base64 32), or unset it and let the server generate one")
+			}
+			return ""
+		}
 		return fromEnv
 	}
 

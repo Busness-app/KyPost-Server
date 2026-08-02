@@ -23,6 +23,40 @@ non-prerelease version.
   than switching to a second symbol, so the column reads as "padlock or
   nothing" at a glance.
 
+- **CI runs the scripts that install and update a deployment.** `scripts/` is
+  the supported install and update path and nothing in CI touched it — the
+  updater's own self-check existed and was never run. A `ci-scripts` job now
+  runs it, the new model-installer self-check, shell syntax across `scripts/`,
+  and `docker compose config`, and it is part of the release gate. The container
+  smoke test additionally asserts the daemon is reporting its own health, so
+  "healthy" cannot mean "the API answered".
+
+### Security
+
+- **The poll daemon refuses plaintext mailbox credentials.** The API's reader
+  already rejected an unencrypted IMAP config and named the remedy, but the
+  daemon's kept a copy of the fallback that had been removed from the shared
+  helper — so a legacy config produced a daemon happily polling mail from a
+  password sitting in cleartext on disk while the settings page reported the
+  file unreadable. Re-save your IMAP/SMTP settings once if you see the new
+  error; nothing else is needed.
+
+- **A weak `PAIRING_SECRET` is refused instead of used.** The server generates
+  a strong one by default, but an operator-supplied value was taken verbatim
+  however short — and one guessable string signs pickup links, device pairing
+  tokens and PGP QR key exchange alike. Values under 32 characters are now
+  rejected, with the reason and the remedy logged, and those three features stay
+  disabled rather than being signed with something forgeable. Only deployments
+  that set the variable by hand are affected.
+
+- **Replacing or deleting a PGP identity requires the account password.** A
+  session cookie was enough, and unlike everything else a session authorises,
+  the damage outlives it: a replaced public key is published through WKD and
+  Autocrypt, so every future correspondent encrypts to it, and a deleted
+  identity cannot be recovered at all. Generate, import, client-key upload,
+  rewrap and delete now take the same credential the legacy-key export already
+  did. First-time setup is not gated — there is no key to redirect yet.
+
 ### Changed
 
 - **Encrypted mail no longer goes to the classifier.** A PGP-encrypted message
@@ -65,12 +99,59 @@ non-prerelease version.
   attachments returned something from inside it, or a 404, for a file the
   listing said was there. Both endpoints now apply the same test.
 
-- **A Sent copy that could not be encrypted now says so.** When encryption of
-  the copy fails, the send still succeeds and the copy is stored readable
-  rather than lost — but that outcome reached only the server log, so a user who
-  ticked "encrypt" could not tell it from the one they asked for. It now comes
-  back as a warning on the send. (A sender who has no key of their own is not a
-  failure and warns about nothing.)
+- **An encrypted send never stores a readable Sent copy.** When the copy could
+  not be encrypted, it was saved in plain text instead — and the argument for
+  that ("this server holds the account's key anyway, so a readable copy reveals
+  nothing new") missed where the copy goes: it is APPENDed to the account's IMAP
+  host, which holds no key at all and now holds the body and real subject of a
+  message the sender encrypted. Nothing is saved in that case now, the send
+  reports `sentSaved:false`, and the reason comes back as a warning. The
+  client-custody path has always refused to save cleartext here; the two paths
+  agree again. The sender with no key of their own — previously the one case
+  that produced plaintext with no warning anywhere — is included.
+
+- **Whole-message encryption is decided by the message's root Content-Type.**
+  Detection inferred it from the shape of a message's MIME parts, because the
+  IMAP library does not parse root headers, and a bodyless message carrying one
+  armored attachment is indistinguishable from a real PGP/MIME envelope that
+  way. A sender could build one deliberately and be rewarded with a padlock and
+  a message the classifier skips. The part shapes are now only a candidate
+  filter; the real `multipart/encrypted; protocol="application/pgp-encrypted"`
+  header is fetched for the few that pass it and decides.
+
+- **The daemon's health reaches the health endpoint.** Under supervisord the
+  poller runs as its own process with its own in-memory health, and
+  `/api/health` served the API process's copy — so `classifierFailing` and
+  `nativePushFailing` were permanently false, because nothing in the API
+  process classifies mail or sends a push. A container whose poller had been
+  dead for a week answered "healthy" and the health page rendered "Working".
+  The daemon now publishes its subsystem health and a heartbeat to shared
+  state; the API merges it and treats a heartbeat that stopped as unhealthy.
+
+- **Shutdown actually cancels the work it waits for.** Poll ticks and per-message
+  processing ran under `context.Background()` with 8- and 4-minute timeouts, so
+  `Stop()` returned immediately, the tick loop exited, and the IMAP, SMTP and
+  state writes underneath carried on — while shutdown blocked on exactly those.
+  Against Docker's 10-second default grace period, routine updates reached
+  SIGKILL mid-write. Both contexts now derive from the poller's own, no new
+  message is admitted after cancellation, and Compose and supervisord are given
+  grace periods that match.
+
+- **One poll tick cannot exhaust the container's memory.** Every unread message
+  past the checkpoint was fetched in a single call that buffers and MIME-decodes
+  each one, with a 25 MiB per-message cap and no cap on the count — so the peak
+  memory of a tick was a function of how much unread mail happened to be
+  waiting, and the poller's rate limit could not help because it applies during
+  processing, after the fetch. Fetching is now paged with a byte budget, and
+  what it does not reach stays above the checkpoint for the next tick.
+
+- **The model installer no longer gives up.** It exited after five failed pull
+  attempts, which under `autorestart=false` was terminal — the program went
+  EXITED rather than FATAL, so nothing restarted it and a container that met a
+  few minutes of registry trouble at boot ran forever without the model it
+  classifies with. It now retries on a capped interval until the model is
+  installed, so a cause fixed later is picked up without anyone restarting
+  anything.
 
 - **An attachment-only encrypted message no longer tells you to unlock a key.**
   The inbox padlock read "unlock your PGP key to read" whenever an encrypted

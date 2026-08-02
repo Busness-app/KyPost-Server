@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getJSON, postJSON, toErrorMessage } from "../api/client";
 import { useAuth } from "../auth";
+import { fetchHealth } from "./health/fetchHealth";
 
 // These types are the contract with /api/health and /api/status, and both
 // endpoints send more than this page used to read. The dropped fields were not
@@ -28,6 +29,13 @@ type Health = {
   nativePushFailingAt?: string;
   nativePushLastError?: string;
   nativePushLastSuccessUtc?: string;
+  // The poll daemon runs as its own process under supervisord, with its own
+  // in-memory health that /api/health could not see — so every field above that
+  // only the daemon observes read as `false`, which renders as "fine". It now
+  // publishes them to shared state on a heartbeat; daemonStale means that
+  // heartbeat stopped, and the fields above are last known rather than current.
+  daemonHeartbeatUtc?: string;
+  daemonStale?: boolean;
 };
 
 type RunStatus = {
@@ -162,7 +170,7 @@ export function HealthPage() {
     setLoading(true);
     try {
       const [nextHealth, nextStatus] = await Promise.all([
-        getJSON<Health>("/api/health"),
+        fetchHealth<Health>(),
         getJSON<RunStatus>("/api/status"),
       ]);
       setHealth(nextHealth);
@@ -208,6 +216,11 @@ export function HealthPage() {
   const creditsExhaustedAt = useMemo(
     () => formatTimestamp(health?.aiCreditsExhaustedAt),
     [health?.aiCreditsExhaustedAt]
+  );
+
+  const daemonHeartbeat = useMemo(
+    () => formatTimestamp(health?.daemonHeartbeatUtc),
+    [health?.daemonHeartbeatUtc]
   );
 
   const classifierFailingAt = useMemo(
@@ -276,6 +289,25 @@ export function HealthPage() {
             <strong>{health.healthy ? "System Healthy" : "System Unhealthy"}</strong>
             <span>Last checked: {lastChecked}</span>
           </div>
+
+          {/*
+            Placed above every subsystem banner on purpose: when the daemon has
+            stopped reporting, everything below it is last-known rather than
+            current, and reading "Classification: Working" off a dead reporter is
+            the exact mistake this whole signal exists to prevent.
+          */}
+          {health.daemonStale && (
+            <div className="health-banner health-bad" style={{ marginTop: 10 }}>
+              <strong>Mail daemon not reporting</strong>
+              <span>
+                The poll daemon has stopped publishing its health
+                {daemonHeartbeat ? ` (last heartbeat ${daemonHeartbeat})` : ""}, so no mail is
+                being fetched, classified or pushed. Every subsystem shown below is the last
+                thing it reported, not its current state. Check the daemon log; supervisord
+                restarts the process automatically if it exited.
+              </span>
+            </div>
+          )}
 
           {health.aiCreditsExhausted && (
             <div className="health-banner health-bad" style={{ marginTop: 10 }}>
@@ -412,7 +444,16 @@ export function HealthPage() {
             </article>
             <article className="health-card">
               <h4>Classification</h4>
-              <p className="health-value">{health.classifierFailing ? "Failing" : "Working"}</p>
+              {/*
+                "Unknown" rather than "Working" when the daemon has stopped
+                reporting. The daemon is the only process that classifies
+                anything, so with no heartbeat this field is a stale reading, and
+                rendering a stale false as "Working" is what let a dead
+                classifier sit behind a green page.
+              */}
+              <p className="health-value">
+                {health.daemonStale ? "Unknown" : health.classifierFailing ? "Failing" : "Working"}
+              </p>
             </article>
             <article className="health-card">
               <h4>Classifier Queue</h4>

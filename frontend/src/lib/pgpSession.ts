@@ -162,9 +162,14 @@ export async function rewrappedEnvelopeFor(
  * current password, and a stale envelope by definition does not open with it.
  * Unlocking with the older password (PgpUnlockDialog) puts the key in memory,
  * and this writes it back under the current one.
+ *
+ * `password` does double duty and both uses need it to be the CURRENT account
+ * password: it is the key the envelope is re-sealed under, and it is the
+ * step-up credential the server now requires before overwriting an envelope it
+ * cannot itself inspect.
  */
 export async function rewrapUnlockedKeyUnder(password: string): Promise<void> {
   const armored = requireUnlockedKey();
-  await rewrapPGPPrivateKey(JSON.stringify(await wrapPrivateKey(armored, password)));
+  await rewrapPGPPrivateKey(JSON.stringify(await wrapPrivateKey(armored, password)), password);
   await loadPGPSession();
 }

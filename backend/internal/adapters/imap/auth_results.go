@@ -25,13 +25,21 @@ func (c *APIClient) FetchHeaderFields(ctx context.Context, uids []int, fields ..
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(uids) == 0 {
-		return map[int][]string{}, nil
-	}
 
 	d, err := c.ensureConnectedLocked()
 	if err != nil {
 		return nil, err
+	}
+	return fetchHeaderFieldsLocked(d, uids, fields...)
+}
+
+// fetchHeaderFieldsLocked is FetchHeaderFields without the lock or the
+// connection setup, for callers already inside an operation holding opMu with a
+// dialer in hand — the PGP/MIME root-header check runs in the middle of a body
+// fetch and would otherwise deadlock on the mutex it is already holding.
+func fetchHeaderFieldsLocked(d *goimap.Dialer, uids []int, fields ...string) (map[int][]string, error) {
+	if len(uids) == 0 {
+		return map[int][]string{}, nil
 	}
 
 	var uidsStr strings.Builder
