@@ -20,10 +20,20 @@
   var bodyEl = document.getElementById("body");
   var subjectEl = document.getElementById("subject");
   var noticeEl = document.getElementById("notice");
+  var revealEl = document.getElementById("reveal");
 
   function fail(message) {
     statusEl.className = "err";
     statusEl.textContent = message;
+    // Take the button away with the error. Every failure this reports is one
+    // that pressing it again cannot fix — a stripped key, no WebCrypto, an
+    // already-consumed record — and leaving it live invites the recipient to
+    // spend the one read they may still have on a request that will fail the
+    // same way.
+    if (revealEl) {
+      revealEl.hidden = true;
+      revealEl.disabled = true;
+    }
   }
 
   function fromBase64(value) {
@@ -75,60 +85,94 @@
     return;
   }
 
-  fetch("/pickup/" + encodeURIComponent(id) + "/blob?t=" + encodeURIComponent(token), {
-    cache: "no-store"
-  })
-    .then(function (response) {
-      if (response.status === 410) {
-        throw new Error("This message has already been viewed, or the link has expired.");
-      }
-      if (response.status === 403) {
-        throw new Error("This link is invalid or has expired.");
-      }
-      if (!response.ok) {
-        throw new Error("Could not fetch the message (" + response.status + ").");
-      }
-      return response.json();
+  // Nothing above this point touched the network, and nothing below it runs
+  // until the recipient presses the button.
+  //
+  // Fetching the blob is destructive: the server marks the record viewed and
+  // cannot hand it back. Doing that on page load made this script the thing
+  // that burned the message — a mail-security scanner that executes page
+  // JavaScript (the ones worth worrying about do) consumed it before a human
+  // ever saw the page, and the recipient was left with an unrecoverable 410.
+  // The server-sealed pickup page has always required a click for exactly this
+  // reason; this path was the odd one out.
+  //
+  // The button is also why the /blob endpoint is a POST: a gesture stops the
+  // scanners that run scripts, and the method stops the ones that only
+  // prefetch. Neither covers the other.
+  if (!revealEl) {
+    // The button comes from clientSealedPickupPage in the same repo, so this is
+    // markup drift rather than a user-facing case. It still cannot be left to
+    // throw: an uncaught TypeError here would leave the recipient staring at
+    // the "can be read once" text with no button, no error, and no idea the
+    // page is dead — for a message they get one chance at.
+    fail("This page did not load correctly. Ask the sender to resend the message.");
+    return;
+  }
+
+  revealEl.addEventListener("click", function () {
+    revealEl.disabled = true;
+    revealEl.hidden = true;
+    statusEl.textContent = "Decrypting in your browser…";
+    consume();
+  });
+
+  function consume() {
+    fetch("/pickup/" + encodeURIComponent(id) + "/blob?t=" + encodeURIComponent(token), {
+      method: "POST",
+      cache: "no-store"
     })
-    .then(function (sealed) {
-      var rawKey = fromBase64Url(fragmentKey);
-      if (rawKey.length !== 32) {
-        throw new Error("The key in this link is malformed.");
-      }
-      return window.crypto.subtle
-        .importKey("raw", rawKey, "AES-GCM", false, ["decrypt"])
-        .then(function (key) {
-          return window.crypto.subtle.decrypt(
-            { name: "AES-GCM", iv: fromBase64(sealed.iv) },
-            key,
-            fromBase64(sealed.ciphertext)
-          );
-        });
-    })
-    .then(function (plain) {
-      var contents = JSON.parse(new TextDecoder().decode(plain));
-      if (contents.subject) {
-        subjectEl.textContent = contents.subject;
-        document.title = contents.subject;
-      }
-      statusEl.hidden = true;
-      bodyEl.hidden = false;
-      bodyEl.textContent = toPlainText(contents.body || "", contents.mode);
-      noticeEl.hidden = false;
-      // Drop the key from the address bar so it does not sit in browser
-      // history or get shoulder-surfed. The message is already decrypted in
-      // memory; a reload would correctly fail, since the link is one-time.
-      if (window.history && window.history.replaceState) {
-        window.history.replaceState(null, "", window.location.pathname);
-      }
-    })
-    .catch(function (err) {
-      // An AES-GCM failure here means the key does not match the ciphertext,
-      // which for a link that carried a key means it was altered in transit.
-      var message = err && err.message ? err.message : "";
-      if (!message || err instanceof DOMException) {
-        message = "Could not decrypt this message. The link may have been altered.";
-      }
-      fail(message);
-    });
+      .then(function (response) {
+        if (response.status === 410) {
+          throw new Error("This message has already been viewed, or the link has expired.");
+        }
+        if (response.status === 403) {
+          throw new Error("This link is invalid or has expired.");
+        }
+        if (!response.ok) {
+          throw new Error("Could not fetch the message (" + response.status + ").");
+        }
+        return response.json();
+      })
+      .then(function (sealed) {
+        var rawKey = fromBase64Url(fragmentKey);
+        if (rawKey.length !== 32) {
+          throw new Error("The key in this link is malformed.");
+        }
+        return window.crypto.subtle
+          .importKey("raw", rawKey, "AES-GCM", false, ["decrypt"])
+          .then(function (key) {
+            return window.crypto.subtle.decrypt(
+              { name: "AES-GCM", iv: fromBase64(sealed.iv) },
+              key,
+              fromBase64(sealed.ciphertext)
+            );
+          });
+      })
+      .then(function (plain) {
+        var contents = JSON.parse(new TextDecoder().decode(plain));
+        if (contents.subject) {
+          subjectEl.textContent = contents.subject;
+          document.title = contents.subject;
+        }
+        statusEl.hidden = true;
+        bodyEl.hidden = false;
+        bodyEl.textContent = toPlainText(contents.body || "", contents.mode);
+        noticeEl.hidden = false;
+        // Drop the key from the address bar so it does not sit in browser
+        // history or get shoulder-surfed. The message is already decrypted in
+        // memory; a reload would correctly fail, since the link is one-time.
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(null, "", window.location.pathname);
+        }
+      })
+      .catch(function (err) {
+        // An AES-GCM failure here means the key does not match the ciphertext,
+        // which for a link that carried a key means it was altered in transit.
+        var message = err && err.message ? err.message : "";
+        if (!message || err instanceof DOMException) {
+          message = "Could not decrypt this message. The link may have been altered.";
+        }
+        fail(message);
+      });
+  }
 })();

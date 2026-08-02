@@ -46,7 +46,10 @@ import {
   MAX_ATTACHMENT_BYTES,
   readFileAsAttachment,
   formatBytes,
-  keylessRecipientsFrom409
+  keylessRecipientsFrom409,
+  deliverSealedPickupLinks,
+  combineWarnings,
+  secureLinkWarning
 } from "./app/compose";
 import {
   clearDraftSnapshot,
@@ -790,13 +793,28 @@ export function App() {
       warning = result.warning ?? "";
     }
 
-    for (const address of missing) {
-      await sendSealedPickupLink(address, body);
-    }
     if (groups.length === 0 && missing.length === 0) {
       throw new Error("Nothing to send: no recipients.");
     }
-    return warning;
+
+    // The keyed ciphertext above is already delivered and cannot be recalled,
+    // so a link that fails here must not throw: that would report the whole
+    // send as failed, and the retry it invites would deliver the keyed copy
+    // twice. Every keyless recipient is attempted and the ones that got nothing
+    // are named in the warning, which is the only form of this the user can
+    // actually act on.
+    //
+    // The all-keyless case is the exception: nothing has been delivered, so
+    // there is nothing to duplicate and a total failure is a real failure.
+    const failedLinks = await deliverSealedPickupLinks(missing, (address) =>
+      sendSealedPickupLink(address, body)
+    );
+    if (groups.length === 0 && failedLinks.length === missing.length) {
+      throw new Error(
+        `Could not send a secure link to any recipient (${failedLinks.join(", ")}). Nothing was sent.`
+      );
+    }
+    return combineWarnings(warning, secureLinkWarning(failedLinks, missing.length));
   }
 
   async function sendComposeEmail() {

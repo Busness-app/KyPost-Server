@@ -140,12 +140,24 @@ func looksLikeSealedBlob(sealed string) bool {
 
 // handlePickupBlob hands the sealed blob to the recipient's browser, once.
 //
-// GET /pickup/{id}/blob?t=<token>
+// POST /pickup/{id}/blob?t=<token>
 //
 // Unauthenticated and token-gated, exactly like the pickup page itself — the
-// recipient has no account here. Consuming happens on this call rather than
-// on the page load, so a link-preview bot that fetches the HTML does not burn
-// the message before a human reads it.
+// recipient has no account here. Consuming happens on this call rather than on
+// the page load, so a link-preview bot that fetches the HTML does not burn the
+// message before a human reads it.
+//
+// POST rather than GET, and fired from a button rather than on load, for the
+// same reason handlePickupOpen is a POST. Consuming on a GET made the page's
+// own script the attacker: a mail-security scanner that merely executes page
+// JavaScript — which the ones that matter do — burned the message before it
+// reached a person, and the recipient got an unrecoverable 410. Moving the
+// consumption behind a method that is not prefetchable AND a control the
+// recipient has to operate closes both halves; either alone leaves one open.
+//
+// There is no CSRF concern to trade against: the endpoint is unauthenticated
+// and carries no ambient authority, so the token in the URL is the entire
+// capability, and an attacker holding it has no need of the victim's browser.
 func (s *Server) handlePickupBlob(w http.ResponseWriter, r *http.Request) {
 	if !s.pairingSecretConfigured() {
 		http.Error(w, "pickup links are not configured", http.StatusServiceUnavailable)
@@ -209,7 +221,8 @@ pre{white-space:pre-wrap;font-family:inherit;background:#f6f6f6;padding:12px;bor
 </style>
 </head><body>
 <h1 id="subject">Encrypted message</h1>
-<div id="status" class="muted">Decrypting in your browser…</div>
+<div id="status" class="muted">This message can be read once. Decryption happens in your browser.</div>
+<p><button id="reveal" type="button" style="font-size:1rem;padding:10px 18px;cursor:pointer">Decrypt and read the message</button></p>
 <pre id="body" hidden></pre>
 <p id="notice" class="muted" hidden>This message has now been marked as viewed and cannot be retrieved again.</p>
 <script src="/pickup-decrypt.js" data-pickup-id="{{.PickupID}}" data-pickup-token="{{.PickupToken}}"></script>

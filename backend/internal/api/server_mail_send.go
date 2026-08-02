@@ -415,7 +415,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			msg = signed
 		}
 		recipients := append(append(append([]string{}, toList...), ccList...), bccList...)
-		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, recipients, msg, req, "")
+		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, recipients, msg, req, "", nil)
 		return
 	}
 
@@ -479,7 +479,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		}
 		// Passing no recipients is safe — finishMailSend skips SMTP on an empty
 		// list and still saves the plaintext Sent copy.
-		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req, extraWarning) {
+		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req, extraWarning, nil) {
 			return
 		}
 		return
@@ -504,21 +504,43 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	mainRecipients, mainCiphertext := deliveries[0].Recipients, deliveries[0].Ciphertext
 	bccDeliveries := deliveries[1:]
 
-	if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, mainRecipients, mainCiphertext, req, "") {
-		return
-	}
-
-	for _, delivery := range bccDeliveries {
-		if err := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, delivery.Recipients, delivery.Ciphertext); err != nil {
-			s.logger.Error("bcc pgp send failed", "recipient", delivery.Recipients[0], "error", err.Error())
+	// The remaining deliveries run inside finishMailSend, after the primary
+	// send has succeeded and before the response is written. They are still
+	// best-effort in the sense that none of them can turn the whole send into a
+	// hard error — the keyed recipients above already have the message, so
+	// there is nothing to retry wholesale — but "best effort" no longer means
+	// "silent". What failed is counted and travels back as response.warning.
+	s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, mainRecipients, mainCiphertext, req, "", func() string {
+		bccFailed := 0
+		for _, delivery := range bccDeliveries {
+			if err := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, delivery.Recipients, delivery.Ciphertext); err != nil {
+				s.logger.Error("bcc pgp send failed", "recipient", delivery.Recipients[0], "error", err.Error())
+				bccFailed++
+			}
 		}
-	}
+		pickupFailed := s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, req.Mode, smtpHost, smtpPort, addr, payload.Username, payload.Password)
+		return partialDeliveryWarning(bccFailed, len(bccDeliveries), pickupFailed, len(plan.withoutKeyEmails))
+	})
+}
 
-	// Best-effort here (failures only logged, never surfaced) is deliberate and
-	// unlike the all-keyless branch above: the keyed recipients above already
-	// received the message, so this loop is topping up delivery to the
-	// keyless subset, not carrying the entire send.
-	s.sendPickupNotifications(ac.UserID, envelopeFrom, plan.withoutKeyEmails, req.Subject, req.Body, req.Mode, smtpHost, smtpPort, addr, payload.Username, payload.Password)
+// partialDeliveryWarning describes what an encrypted send did not manage to
+// deliver, for the response's warning field.
+//
+// The two kinds are counted separately rather than summed because the sender's
+// next move differs. A blind copy that bounced is an address or receiving-server
+// problem and the message may still arrive on a retry; a pickup link that never
+// went out means that recipient has nothing at all and no idea a message exists.
+// Returns "" when everything was delivered, which is the overwhelmingly common
+// case and must not decorate a clean send with an empty warning.
+func partialDeliveryWarning(bccFailed, bccTotal, pickupFailed, pickupTotal int) string {
+	parts := []string{}
+	if bccFailed > 0 {
+		parts = append(parts, fmt.Sprintf("%d of %d blind copies were not delivered", bccFailed, bccTotal))
+	}
+	if pickupFailed > 0 {
+		parts = append(parts, fmt.Sprintf("%d of %d secure links could not be sent", pickupFailed, pickupTotal))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // sendPickupNotifications mails a pickup link to every keyless recipient,
@@ -565,7 +587,7 @@ func encryptSigner(signer *pgpmail.Identity, sign bool) *pgpmail.Identity {
 // save-to-Sent warning generated here — the all-keyless opt-in path uses it
 // to report partial pickup-notification failures the caller would otherwise
 // never see; every other caller passes "".
-func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest, extraWarning string) bool {
+func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest, extraWarning string, afterPrimary func() string) bool {
 	s.logger.Info("mail send requested", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "recipientCount", strconv.Itoa(len(recipients)))
 
 	if len(recipients) > 0 {
@@ -577,6 +599,25 @@ func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, 
 	}
 
 	warning := extraWarning
+	// Follow-on deliveries — per-BCC ciphertexts and pickup links — run here,
+	// between the primary send and the answer, and never when the primary send
+	// failed above.
+	//
+	// Both halves of that matter. They used to run after finishMailSend had
+	// already written {"ok":true}, so a send whose blind copies all bounced
+	// reported success and the sender learned nothing; putting them before the
+	// response is what lets their outcome reach the person who pressed Send.
+	// Keeping them after the primary send is what stops a 502 — which the
+	// composer treats as "nothing went out, try again" — from having quietly
+	// delivered half the message first, so the retry duplicates it.
+	if afterPrimary != nil {
+		if followOn := afterPrimary(); followOn != "" {
+			if warning != "" {
+				warning += "; "
+			}
+			warning += followOn
+		}
+	}
 	sentSaved := true
 	if mailClient, mailErr := s.userMailClient(userID); mailErr == nil {
 		if err := mailClient.SaveSent(r.Context(), imapadapter.DraftMessage{

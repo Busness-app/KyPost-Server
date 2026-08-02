@@ -41,6 +41,8 @@ import {
   RequestContext,
   bearer,
   checkMinuteLimit,
+  checkDailyBudget,
+  secondsUntilUTCMidnight,
   claimTokenForSend,
   createRelayFetchHandler,
   fail,
@@ -138,6 +140,36 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   // concurrent rollback either way.
   const settle = (delivered: boolean) => rc.ctx.waitUntil(settleToken(rc, token, record.id, delivered));
 
+  // Relay-wide day tier, AFTER the claim rather than before it.
+  //
+  // The budget bounds what this relay spends against the operator's FCM
+  // quota, so only a request that is going to reach FCM may draw from it. A
+  // request refused at the claim above never does — and charging it was an
+  // amplification, not a conservative rounding: any holder of any valid key
+  // could spend the entire day on tokens they do not own, deliver nothing, and
+  // leave every legitimate self-hoster refused until UTC midnight. That turns a
+  // cost ceiling into a cheap outage, which is the reverse of the trade it is
+  // here to make.
+  //
+  // Settled as undelivered on refusal, which releases the claim this request
+  // just took — the same close-out every other post-claim failure path uses, and
+  // the reason taking the claim first costs nothing.
+  const budget = await checkDailyBudget(rc);
+  if (!budget.allowed) {
+    settle(false);
+    rc.log({ level: "warn", event: "send.denied", reason: "daily_budget", keyId: record.id, window: "day" });
+    // Computed once: the body hint and the header must name the same instant,
+    // and two calls can straddle a second boundary.
+    const retryAfter = secondsUntilUTCMidnight();
+    const response = fail(rc, 429, "relay daily budget exhausted", {
+      window: "day",
+      limit: budget.limit,
+      retryAfterSeconds: retryAfter,
+    });
+    response.headers.set("Retry-After", String(retryAfter));
+    return response;
+  }
+
   // Count the accepted send in Analytics Engine (off the KV write path). No KV
   // write happens on the send path — see the hour/day TODO above.
   recordUsageAnalytics(env, record);
@@ -170,7 +202,18 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return json({ stale: true, requestId: rc.requestId }, 410);
   }
   settle(false);
-  rc.log({ level: "error", event: "send.fcm_failed", keyId: record.id, fcmStatus: result.status });
+  // Carry FCM's reason, not just the status. INVALID_ARGUMENT and
+  // SENDER_ID_MISMATCH are relay misconfiguration and no longer retire the
+  // device (see isStaleResponse), so this log line is now where an operator
+  // learns FCM_PROJECT_ID is wrong. The reason is Google's own short enum and
+  // carries no device or account data.
+  rc.log({
+    level: "error",
+    event: "send.fcm_failed",
+    keyId: record.id,
+    fcmStatus: result.status,
+    fcmDetail: result.detail.slice(0, 200),
+  });
   return failDelivery(rc);
 }
 

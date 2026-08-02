@@ -100,27 +100,33 @@ async function getProviderToken(config: ApnsConfig, cache: KVNamespace): Promise
 }
 
 /**
- * Detect APNs device-token errors (token is dead, not provider-token errors).
+ * Whether Apple said this device token is gone.
+ *
+ * This is not a severity judgement, it is a destructive one: a true here becomes
+ * HTTP 410 to the backend, which deletes the device registration outright
+ * (processor/push_dispatch.go). The device must then be re-paired by hand, and
+ * until it is, that account has no push 2FA. Nothing recovers it from this side.
+ *
+ * So the rule is Apple's own contract and nothing looser: **410, and only 410**.
+ * Apple returns 410 for `Unregistered` and for no other reason.
+ *
+ * This deliberately does NOT include the 400 reasons that carry "DeviceToken" in
+ * their names. Those describe a token Apple declined to accept from *us*, which
+ * is usually our configuration rather than their device:
+ *
+ *   - `BadDeviceToken` — most often a well-formed token sent to the wrong host.
+ *     Every production token looks like this when APNS_ENVIRONMENT is sandbox.
+ *   - `DeviceTokenNotForTopic` — the token does not match APNS_TOPIC. Ours.
+ *   - `TopicDisallowed` / `BadTopic` — unambiguously ours.
+ *
+ * Treating those as staleness is how one wrong environment variable unpairs an
+ * entire fleet on the first notification after deploy — see the header of
+ * apns-config.test.mts, which is the same incident caught one layer earlier.
+ * Classified as ordinary failures they cost a retry and a red relay health
+ * status, which is the correct way for a misconfigured relay to present.
  */
-function isStaleResponse(status: number, response: string): boolean {
-  const lower = response.toLowerCase();
-
-  // APNs returns HTTP 400 with "Unregistered", "BadDeviceToken", or "DeviceTokenNotForTopic"
-  if (
-    status === 400 &&
-    (lower.includes("unregistered") ||
-      lower.includes("baddevicetoken") ||
-      lower.includes("devicetokennotfortopic"))
-  ) {
-    return true;
-  }
-
-  // APNs returns HTTP 410 Gone for expired/revoked tokens
-  if (status === 410) {
-    return true;
-  }
-
-  return false;
+export function isStaleResponse(status: number, _response: string): boolean {
+  return status === 410;
 }
 
 /**

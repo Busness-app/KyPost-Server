@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { MAX_ATTACHMENT_BYTES, formatBytes, keylessRecipientsFrom409, readFileAsAttachment } from "./compose";
+import {
+  MAX_ATTACHMENT_BYTES,
+  combineWarnings,
+  deliverSealedPickupLinks,
+  formatBytes,
+  keylessRecipientsFrom409,
+  readFileAsAttachment,
+  secureLinkWarning
+} from "./compose";
 import { HttpError } from "../api/client";
 
 describe("readFileAsAttachment", () => {
@@ -64,5 +72,77 @@ describe("attachment budget", () => {
   it("base64-expands to within the 25 MiB request cap", () => {
     const encoded = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3);
     expect(encoded + 1024 * 1024).toBeLessThanOrEqual(25 * 1024 * 1024);
+  });
+});
+
+// --- partial delivery of a client-side encrypted send -----------------------
+//
+// A browser-side encrypted send is several deliveries: one POST carrying the
+// ciphertext for every recipient with a key, then one sealed pickup link per
+// recipient without one. The keyed POST goes first and cannot be taken back.
+//
+// The compose window used to `await sendSealedPickupLink(...)` in a bare loop,
+// so the first link that failed threw out of the send entirely: the remaining
+// recipients were never attempted, and the error the user saw ("send failed")
+// invited a retry that would deliver the keyed copy a second time. These cover
+// the two properties that fixes it — every recipient is attempted, and what
+// failed is reported rather than thrown.
+
+describe("deliverSealedPickupLinks", () => {
+  it("reports no failures when every link is sent", async () => {
+    const sent: string[] = [];
+    const failed = await deliverSealedPickupLinks(["a@example.com", "b@example.com"], async (addr) => {
+      sent.push(addr);
+    });
+
+    expect(sent).toEqual(["a@example.com", "b@example.com"]);
+    expect(failed).toEqual([]);
+  });
+
+  it("still attempts the remaining recipients after one fails", async () => {
+    const attempted: string[] = [];
+    const failed = await deliverSealedPickupLinks(
+      ["a@example.com", "b@example.com", "c@example.com"],
+      async (addr) => {
+        attempted.push(addr);
+        if (addr === "a@example.com") throw new Error("smtp rejected");
+      }
+    );
+
+    expect(attempted).toEqual(["a@example.com", "b@example.com", "c@example.com"]);
+    expect(failed).toEqual(["a@example.com"]);
+  });
+
+  it("does not throw when every link fails, so the delivered copy is not retried", async () => {
+    const failed = await deliverSealedPickupLinks(["a@example.com", "b@example.com"], async () => {
+      throw new Error("offline");
+    });
+
+    expect(failed).toEqual(["a@example.com", "b@example.com"]);
+  });
+});
+
+describe("combineWarnings", () => {
+  it("drops empty parts and joins the rest", () => {
+    expect(combineWarnings("", "")).toBe("");
+    expect(combineWarnings("saved to Sent failed", "")).toBe("saved to Sent failed");
+    expect(combineWarnings("", "1 of 2 secure links could not be sent")).toBe(
+      "1 of 2 secure links could not be sent"
+    );
+    expect(combineWarnings("a", "b")).toBe("a; b");
+  });
+});
+
+describe("secureLinkWarning", () => {
+  it("is empty when nothing failed", () => {
+    expect(secureLinkWarning([], 3)).toBe("");
+  });
+
+  it("names the recipients who got nothing", () => {
+    // Wording matches the server's partialDeliveryWarning, and names the
+    // addresses because the user's only recovery is to contact them directly.
+    expect(secureLinkWarning(["a@example.com"], 2)).toBe(
+      "1 of 2 secure links could not be sent: a@example.com"
+    );
   });
 });

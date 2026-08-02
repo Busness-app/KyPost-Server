@@ -194,3 +194,66 @@ func TestSealedPickupRejectsUnsealedPayload(t *testing.T) {
 		}
 	}
 }
+
+// A GET must not be able to burn a client-sealed message.
+//
+// The blob endpoint is the destructive one — it marks the record viewed and
+// nothing can hand it back. handlePickupOpen (the server-sealed equivalent)
+// already refuses to be a GET for exactly this reason: "it must not be
+// reachable by a crawler, a prefetch, a link-preview fetch, or a HEAD probe."
+// The client-sealed path was left as a GET that the page's own script fired on
+// load, which reintroduced the problem one layer up: any scanner that executes
+// page JavaScript consumed the message before a human saw it.
+func TestSealedPickupBlobRefusesGET(t *testing.T) {
+	srv := newTestServer(t)
+	u := clientProtectedUser(t, srv)
+	id, token := createSealedPickupFor(t, srv, u.ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"/blob?t="+token, nil)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("GET returned the blob; a prefetch or scanner can burn the message")
+	}
+
+	// And the record must still be readable afterwards — a refused GET that
+	// consumed it anyway would be the same bug wearing a 405.
+	post := httptest.NewRequest(http.MethodPost, "/pickup/"+id+"/blob?t="+token, nil)
+	postRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(postRec, post)
+	if postRec.Code != http.StatusOK {
+		t.Fatalf("after the refused GET, POST status = %d, want %d; the GET consumed the record: %s",
+			postRec.Code, http.StatusOK, postRec.Body.String())
+	}
+	if !strings.Contains(postRec.Body.String(), "Y2lwaGVydGV4dA==") {
+		t.Fatalf("POST did not return the sealed blob: %s", postRec.Body.String())
+	}
+}
+
+// The shell page must not fetch anything on its own. Whatever consumes the
+// message has to be behind a control the recipient operates.
+func TestSealedPickupPageRequiresAGesture(t *testing.T) {
+	srv := newTestServer(t)
+	u := clientProtectedUser(t, srv)
+	id, token := createSealedPickupFor(t, srv, u.ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/pickup/"+id+"?t="+token, nil)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `id="reveal"`) {
+		t.Fatalf("pickup shell page has no reveal control, so the script has nothing to wait for:\n%s", rec.Body.String())
+	}
+
+	// Rendering the page must leave the message intact.
+	post := httptest.NewRequest(http.MethodPost, "/pickup/"+id+"/blob?t="+token, nil)
+	postRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(postRec, post)
+	if postRec.Code != http.StatusOK {
+		t.Fatalf("rendering the page consumed the record: POST status = %d", postRec.Code)
+	}
+}

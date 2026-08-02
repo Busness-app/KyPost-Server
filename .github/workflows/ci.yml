@@ -211,7 +211,14 @@ jobs:
       # Files are listed explicitly rather than by directory: `node --test <dir>`
       # walks it, and these directories have node_modules in them.
       - name: relay behaviour
-        run: node --test push-relay-shared/relay-claims.test.mts worker-apns/src/apns-config.test.mts
+        run: |
+          node --test \
+            push-relay-shared/relay-claims.test.mts \
+            push-relay-shared/relay-budget.test.mts \
+            worker-apns/src/apns-config.test.mts \
+            worker-apns/src/apns-stale.test.mts \
+            worker-apns/src/send-budget-order.test.mts \
+            worker/src/fcm-stale.test.mts
 
   docker:
     name: ci-docker

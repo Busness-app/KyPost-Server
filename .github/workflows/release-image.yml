@@ -10,6 +10,9 @@ permissions:
   attestations: write
   artifact-metadata: write
   id-token: write
+  # Read the check runs recorded against the tagged commit. Without this the
+  # CI gate below cannot see whether ci.yml ever passed for it.
+  checks: read
 
 jobs:
   publish:
@@ -38,6 +41,77 @@ jobs:
             exit 1
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      # Refuse to publish a commit that CI never passed.
+      #
+      # A release is a human action on an arbitrary ref. Nothing in this
+      # workflow previously connected the thing being built to the thing that
+      # was tested: tagging a red commit, or a commit CI had never seen at all,
+      # produced a fully attested image and moved :stable onto it, and the
+      # auto-updater in scripts/update-host.sh accepted it — because the
+      # attestation is honest. Provenance says where an image came from, not
+      # that it works, and the two are easy to confuse precisely because the
+      # signature verifies either way.
+      #
+      # The check is against the resolved commit, not the tag: a tag is a
+      # mutable pointer, and "this tag passed CI" is not a statement about any
+      # particular code. `git rev-parse HEAD` is used rather than $GITHUB_SHA
+      # because for an annotated tag the latter can name the tag object; this
+      # reads the commit actions/checkout actually materialised, which is
+      # exactly what `context: .` hands to the build below.
+      - name: Require CI to have passed for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "tagged commit: $sha"
+
+          # Every job ci.yml defines. Named explicitly rather than "did anything
+          # succeed": a run that was cancelled, or one where the expensive
+          # ci-docker job was skipped, must not read as a pass. A job added to
+          # ci.yml and not added here is simply not part of the release gate,
+          # which is a visible omission rather than a silent one.
+          required="ci-backend-api ci-backend-other ci-frontend ci-relay ci-docker"
+
+          # filter=latest asks the API for the most recent run per check name,
+          # so a re-run supersedes what it replaced. It is currently also the
+          # default, and is named anyway: the previous form read whichever
+          # matching row happened to come last in the response and called it the
+          # newest, which is not something the API promises — under pagination,
+          # or a change of default, that silently becomes "an older success
+          # outranks the failed re-run that replaced it", in the one direction
+          # this gate must never fail.
+          runs="$(gh api --paginate \
+            "repos/${REPO}/commits/${sha}/check-runs?filter=latest&per_page=100" \
+            --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "none")"')"
+          echo "check runs for this commit:"
+          printf '%s\n' "${runs:-<none>}"
+
+          missing=""
+          for job in $required; do
+            # Strict rather than "pick one and judge it": every row carrying this
+            # job's name must be a completed success. With filter=latest there is
+            # exactly one, so this is the same question asked in the shape that
+            # cannot be answered wrongly if that ever stops being true.
+            rows="$(printf '%s\n' "$runs" | awk -F'\t' -v j="$job" '$1 == j { print $2 "/" $3 }')"
+            if [ -z "$rows" ]; then
+              missing="${missing} ${job}(absent)"
+              continue
+            fi
+            bad="$(printf '%s\n' "$rows" | grep -v '^completed/success$' || true)"
+            if [ -n "$bad" ]; then
+              missing="${missing} ${job}($(printf '%s' "$bad" | tr '\n' ','))"
+            fi
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::refusing to publish ${sha}: CI did not pass for it —${missing}" >&2
+            echo "Push the commit to main (or open a PR for it) and let ci.yml finish before releasing." >&2
+            exit 1
+          fi
+          echo "all required CI jobs passed for ${sha}"
 
       - name: Log in to GitHub Container Registry
         env:

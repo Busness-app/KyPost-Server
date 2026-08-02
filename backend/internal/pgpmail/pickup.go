@@ -347,6 +347,27 @@ func (s *PickupStore) consumeLocked(id string, want wantKind) (PickupRecord, err
 	// through rendering, the link is still burned. A message that fails to
 	// display is recoverable by asking the sender to resend; a link that
 	// stays live after being fetched is not.
+	//
+	// This ordering gets re-reported as a bug — "the record is destroyed before
+	// the key is loaded and before either encrypted field is authenticated, so a
+	// transient read error loses the only ciphertext". That is an accurate
+	// description of the code and the wrong conclusion. Working as designed.
+	//
+	// The proposed inversion (decrypt first, tombstone only on success) trades a
+	// rare unrecoverable message for a routine one: any failure between handing
+	// the plaintext out and committing the tombstone leaves a one-time link that
+	// has been read and is still live. For a store whose entire contract is
+	// "readable exactly once" that is the worse direction to fail in, and it is
+	// the direction that fails silently — nobody notices a link that keeps
+	// working, whereas a message that will not open gets reported immediately
+	// and the sender can resend.
+	//
+	// Note also what already moved above this point for the same reason: the
+	// wrong-kind check. It used to run in the callers on the returned record, so
+	// asking the client-sealed route for a server-sealed record burned it and
+	// then answered 409. Failures that can be detected WITHOUT spending the read
+	// belong before the tombstone; the ones that cannot are what this ordering
+	// deliberately accepts.
 	if err := s.save(tombstone(record)); err != nil {
 		return PickupRecord{}, err
 	}
@@ -423,6 +444,58 @@ func (s *PickupStore) Kind(id string) (clientSealed bool, err error) {
 		return record.ClientSealed != "", ErrPickupExpired
 	}
 	return record.ClientSealed != "", nil
+}
+
+// Discard deletes a record whose pickup link was never delivered, freeing the
+// quota slot it would otherwise hold for the full TTL.
+//
+// The send path creates the record, then mints the link token, then mails the
+// link. A failure in either later step leaves a live record for a link that
+// reached nobody: it cannot be opened, it cannot be resent, and it counts
+// against maxOutstandingPickupsPerUser until it expires a week later. Retrying
+// during an SMTP outage therefore used to consume the sender's entire cap with
+// records that were pure garbage, after which their real pickup sends were
+// refused.
+//
+// Deleting outright (rather than tombstoning, as consumption does) is right
+// here precisely because nothing was handed out: there is no recipient who
+// might revisit the link and deserve an "already opened" answer, so there is
+// nothing for a tombstone to say. A record that HAS been viewed is left exactly
+// as it is — its slot is already free, and its tombstone is still doing that
+// job.
+//
+// senderUserID must match the record's owner. Every present caller passes an id
+// it created moments earlier, so the check never fires; it is here so that a
+// later caller cannot turn "my send failed" into a way to delete somebody
+// else's outstanding message.
+func (s *PickupStore) Discard(senderUserID, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := os.ReadFile(s.recordPath(id))
+	if os.IsNotExist(err) {
+		// Already gone. The caller is on a failure path and may be reacting to
+		// the record never having landed, so this is the expected shape of
+		// success, not an error.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var record PickupRecord
+	if err := json.Unmarshal(b, &record); err != nil {
+		return err
+	}
+	if record.SenderUserID != senderUserID {
+		return ErrPickupNotFound
+	}
+	if record.Viewed {
+		return nil
+	}
+	if err := os.Remove(s.recordPath(id)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // viewedPickupRetention is how long a consumed record's file lingers after it
