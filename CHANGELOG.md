@@ -34,6 +34,30 @@ non-prerelease version.
   — roughly three hours at the default 90-second interval — the message is
   retired with a decision recording that it was given up on.
 
+- **A rule stops at its first failed action.** Remaining actions used to run
+  anyway. Since the retry the failure triggers is an unread-inbox search, an
+  action that archived or read the message after an earlier one failed put it
+  out of reach of the retry it had just been promised: the remaining work was
+  lost silently while the audit row recorded a failure. Rule actions also stop
+  at a cancelled context instead of running the rest of the list against a
+  connection that is going away.
+
+- **Rule actions are validated and bounded at every write.** Creating or
+  updating a rule — by form, by API, or by Sieve script — now checks the action
+  list, which nothing did before: at most 20 actions, only action types the
+  engine can execute, bounded rule names and values, and at most one action that
+  changes a message's visibility (read, move, archive, spam, delete), which must
+  come last. An unknown action type used to be stored happily and then fail on
+  every matching message for three hours before the message was retired
+  unlabelled. Rules already saved are checked the same way when loaded; one that
+  cannot be executed is skipped with a log line instead of failing per message.
+
+- **A deferral counter that cannot be written no longer discards the message.**
+  If the state database failed while recording a retry attempt, the poller
+  retired the message and advanced the checkpoint past it — turning a momentary
+  database contention into lost work. The message is now kept for retry and the
+  poll tick is reported as failed so the database problem is visible.
+
 ### Added
 
 - `GET /api/status` reports `deferredMessages` and `oldestDeferredUtc`:

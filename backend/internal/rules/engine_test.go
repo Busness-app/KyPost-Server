@@ -295,17 +295,66 @@ func TestApplyOutcome_MapsEachActionTypeToTheRightCall(t *testing.T) {
 	}
 }
 
-func TestApplyOutcome_PartialFailureDoesNotStopRemainingActions(t *testing.T) {
+// This asserted the opposite until the retry contract was traced end to end.
+//
+// Running on past a failure is only defensible if the caller can retry what
+// failed. The poller retries by re-running an UNSEEN SEARCH over INBOX, so an
+// "archive" that ran after a failed "keyword" took the message out of the only
+// query that could ever find it again — the keyword was lost, permanently, and
+// the audit row said the message failed while it had in fact been half applied.
+func TestApplyOutcome_StopsAtTheFirstFailedAction(t *testing.T) {
 	outcome := Outcome{Applied: []Action{
 		{Type: "keyword", Value: "VIP"},
 		{Type: "unkeyword", Value: "Old"},
 	}}
 	fake := &fakeClient{failLabel: errors.New("imap down")}
 	results := ApplyOutcome(context.Background(), fake, "INBOX", EvalInput{MessageID: "1"}, outcome)
-	if results[0].Err == nil {
-		t.Fatal("expected first action to report its failure")
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1 — execution must stop at the failure", len(results))
 	}
-	if len(fake.removedLabels) != 1 {
-		t.Fatalf("expected the second action to still run despite the first failing, got %+v", fake.removedLabels)
+	if results[0].Err == nil {
+		t.Fatal("expected the first action to report its failure")
+	}
+	if len(fake.removedLabels) != 0 {
+		t.Fatalf("the action after a failure must not run, got %+v", fake.removedLabels)
+	}
+}
+
+// The specific ordering the whole contract exists for: a terminal action must
+// not run after something else failed, or the message leaves the retry query
+// still owing work.
+func TestApplyOutcome_TerminalActionDoesNotRunAfterAFailure(t *testing.T) {
+	outcome := Outcome{Applied: []Action{
+		{Type: "keyword", Value: "VIP"},
+		{Type: "archive"},
+	}}
+	fake := &fakeClient{failLabel: errors.New("imap down")}
+	results := ApplyOutcome(context.Background(), fake, "INBOX", EvalInput{MessageID: "1"}, outcome)
+	if len(results) != 1 || results[0].Err == nil {
+		t.Fatalf("expected exactly one failed result, got %+v", results)
+	}
+	if len(fake.inboxActions) != 0 {
+		t.Fatalf("archive must not run after the keyword write failed, got %+v", fake.inboxActions)
+	}
+}
+
+// A terminal action that succeeds and is followed by a failure is the case
+// ordering cannot fix on its own — ValidateRule refuses to store such a rule
+// (TestValidateRule_*), and this pins the engine half: nothing runs after a
+// cancelled context either.
+func TestApplyOutcome_CancelledContextStopsExecution(t *testing.T) {
+	outcome := Outcome{Applied: []Action{
+		{Type: "keyword", Value: "VIP"},
+		{Type: "unkeyword", Value: "Old"},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fake := &fakeClient{}
+	results := ApplyOutcome(ctx, fake, "INBOX", EvalInput{MessageID: "1"}, outcome)
+	if len(results) != 1 || !errors.Is(results[0].Err, context.Canceled) {
+		t.Fatalf("expected one context.Canceled result, got %+v", results)
+	}
+	if len(fake.appliedLabels) != 0 {
+		t.Fatalf("no action may run under a cancelled context, got %+v", fake.appliedLabels)
 	}
 }

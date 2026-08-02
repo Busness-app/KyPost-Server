@@ -113,12 +113,12 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "too many rules for this account", http.StatusBadRequest)
 			return
 		}
-		if err := rules.ValidateMatchShape(payload.Match); err != nil {
+		payload.ID = ""
+		payload.Name = name
+		if err := rules.ValidateRule(ruleFromPayload(payload)); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		payload.ID = ""
-		payload.Name = name
 		created, err := store.Upsert(ruleFromPayload(payload))
 		if err != nil {
 			http.Error(w, "failed to create rule", http.StatusInternalServerError)
@@ -159,10 +159,6 @@ func (s *Server) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name is required", http.StatusBadRequest)
 			return
 		}
-		if err := rules.ValidateMatchShape(payload.Match); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
 		payload.ID = existing.ID
 		payload.Name = name
 		// Order and Scope aren't part of the editable payload for this
@@ -172,6 +168,10 @@ func (s *Server) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 		// them out via Go's int/struct zero values.
 		payload.Order = existing.Order
 		payload.Scope = existing.Scope
+		if err := rules.ValidateRule(ruleFromPayload(payload)); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		updated, err := store.Upsert(ruleFromPayload(payload))
 		if err != nil {
 			http.Error(w, "failed to update rule", http.StatusInternalServerError)
@@ -259,14 +259,17 @@ func (s *Server) handleRuleSieve(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		// The same width bound the two JSON write paths enforce. ParseRuleText
-		// caps nesting depth but not leaf count, and a script well inside the
-		// 1 MiB body limit above parses into hundreds of thousands of
-		// conditions — each of which recompiles its regex on every message,
-		// inside an evaluation the poller cannot interrupt and holds a
+		// The same contract the two JSON write paths enforce. ParseRuleText
+		// caps nesting depth but neither leaf count nor action count, and a
+		// script well inside the 1 MiB body limit above parses into hundreds of
+		// thousands of conditions — each of which recompiles its regex on every
+		// message — or into an action list that is one IMAP round trip per
+		// entry, inside an evaluation the poller cannot interrupt and holds a
 		// single instance-wide semaphore across. Skipping this check here made
-		// the cap the other two paths enforce trivially bypassable.
-		if err := rules.ValidateMatchShape(parsed.Match); err != nil {
+		// the caps the other two paths enforce trivially bypassable. The
+		// parser's own action grammar covers action TYPES, but not their count,
+		// their sizes, or the visibility ordering ValidateRule requires.
+		if err := rules.ValidateRule(parsed); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
@@ -341,9 +344,17 @@ func (s *Server) handleRulesRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read rules", http.StatusInternalServerError)
 		return
 	}
+	// rules.json predates ValidateRule and is a plain file in the user's state
+	// directory, so the write boundaries above cannot be the only gate — see
+	// FilterRunnable. A rejected rule is skipped, not fatal: one unexecutable
+	// rule must not stop the user's other rules from running.
+	runnable, rejected := rules.FilterRunnable(all)
+	for _, why := range rejected {
+		s.logger.Error("skipping unexecutable rule in manual run", "reason", why)
+	}
 	var activeRules []rules.Rule
 	needsBody := false
-	for _, rl := range all {
+	for _, rl := range runnable {
 		if !rl.Enabled {
 			continue
 		}

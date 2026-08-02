@@ -16,10 +16,11 @@ import {
   updateRule
 } from "../api/rules";
 import { RulesHelpModal } from "../components/RulesHelpModal";
+import { ACTION_TYPES, ruleActionsError } from "../lib/ruleActions";
 
 const FIELD_OPTIONS = ["from", "to", "cc", "bcc", "subject", "body", "keyword"] as const;
 const COMPARATOR_OPTIONS = ["contains", "is", "matches", "regex"] as const;
-const ACTION_TYPE_OPTIONS = ["keyword", "unkeyword", "move", "read", "archive", "spam", "delete", "stop"] as const;
+const ACTION_TYPE_OPTIONS = ACTION_TYPES;
 
 function actionNeedsValue(type: string): boolean {
   return type === "keyword" || type === "unkeyword" || type === "move";
@@ -95,6 +96,10 @@ export function RulesPage() {
   const [runResult, setRunResult] = useState<RunRulesResult | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [creatingRule, setCreatingRule] = useState(false);
+
+  // The server rejects these outright (rules.ValidateRule); showing the reason
+  // while the rule is being composed beats surfacing it as a 400 on Save.
+  const draftActionsError = draft ? ruleActionsError(draft.actions) : "";
 
   async function loadRules() {
     setLoading(true);
@@ -212,9 +217,12 @@ export function RulesPage() {
     setDraft({ ...draft, actions });
   }
 
+  // "keyword", not "archive": archive is visibility-changing and so must be the
+  // rule's last action, which made the default for "+ Action" the one type that
+  // is invalid to append to a rule that already ends in one.
   function addDraftAction() {
     if (!draft) return;
-    setDraft({ ...draft, actions: [...draft.actions, { type: "archive" }] });
+    setDraft({ ...draft, actions: [...draft.actions, { type: "keyword", value: "" }] });
   }
 
   function removeDraftAction(index: number) {
@@ -460,11 +468,16 @@ export function RulesPage() {
                           + Action
                         </button>
                       </div>
+                      {draftActionsError ? <p className="rule-script-error">{draftActionsError}</p> : null}
                     </>
                   )}
 
                   <div className="security-actions">
-                    <button type="button" onClick={saveDraft} disabled={!draft.guiEditable}>
+                    <button
+                      type="button"
+                      onClick={saveDraft}
+                      disabled={!draft.guiEditable || draftActionsError !== ""}
+                    >
                       Save
                     </button>
                     <button

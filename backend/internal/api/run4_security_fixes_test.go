@@ -31,7 +31,11 @@ func TestSieveEditorEnforcesMatchShapeCap(t *testing.T) {
 			"op":         "allof",
 			"conditions": []map[string]any{{"field": "from", "comparator": "contains", "value": "x"}},
 		},
-		"actions": []map[string]any{{"type": "addflag", "value": "X"}},
+		// "keyword", not the Sieve verb "addflag": this is the JSON action
+		// vocabulary (see rules.Action), and rules.ValidateRule now rejects a
+		// type the engine cannot execute rather than storing it to fail on
+		// every matching message.
+		"actions": []map[string]any{{"type": "keyword", "value": "X"}},
 	})
 	createReq := httptest.NewRequest(http.MethodPost, "/api/rules", bytes.NewReader(createBody))
 	authRequest(srv, createReq)

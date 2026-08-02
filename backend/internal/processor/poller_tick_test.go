@@ -2,6 +2,7 @@ package processor
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -367,5 +368,171 @@ func TestTickUser_FailedRuleActionDefersInsteadOfRetiring(t *testing.T) {
 		if d.Status == "applied" {
 			t.Fatalf("recorded the rule as applied even though its action failed: %+v", d)
 		}
+	}
+}
+
+// TestTickUser_FailedKeywordDoesNotArchiveTheMessage is the ordering half of
+// the retry contract, driven end to end.
+//
+// "keyword then archive" is a legal rule (rules.ValidateRule requires the
+// visibility-changing action last, precisely so this ordering is the only one
+// storable). When the keyword write fails, the archive must NOT run: an
+// archived message is out of INBOX, and INBOX is where the next tick looks.
+// Running it anyway is how a failure that reported itself as retryable became
+// one nothing could retry.
+func TestTickUser_FailedKeywordDoesNotArchiveTheMessage(t *testing.T) {
+	mail := &scriptedMailbox{
+		msgs: []imapadapter.Message{{ID: "7", Subject: "Weekly newsletter", Sender: "news@example.com"}},
+		applyLabelErr: map[string]error{
+			"7": errors.New("imap: connection reset by peer"),
+		},
+	}
+	p, u := newTickTestPoller(t, mail)
+	store := tickStore(t, p, u)
+	seedRule(t, p, u, rules.Rule{
+		Name:    "tag then archive",
+		Enabled: true,
+		Match: rules.MatchGroup{
+			Op:         "allof",
+			Conditions: []rules.Condition{{Field: "subject", Comparator: "contains", Value: "newsletter"}},
+		},
+		Actions: []rules.Action{{Type: "keyword", Value: "VIP"}, {Type: "archive"}},
+	})
+
+	if err := p.tickUser(u, time.Now()); err != nil {
+		t.Fatalf("tickUser: %v", err)
+	}
+
+	if len(mail.inboxActions) != 0 {
+		t.Fatalf("archive ran after the keyword write failed (%v) — the message is now outside the retry query", mail.inboxActions)
+	}
+	if seenForTest(t, store, "7") {
+		t.Fatal("the rule did not complete, so the message must not be retired as handled")
+	}
+	if got := checkpointOf(t, store); got != "" && got != "6" {
+		t.Fatalf("checkpoint = %q, want it held below the deferred message", got)
+	}
+}
+
+// TestTickUser_KeywordAppliedThenFailedArchiveStaysRetryable is the other side:
+// the keyword landed, the archive did not, so the message is still unread in
+// INBOX and the next tick genuinely can retry it. Re-running the keyword is
+// harmless (setting a flag that is already set), which is what makes stopping
+// at the first failure sufficient rather than needing per-action progress.
+func TestTickUser_KeywordAppliedThenFailedArchiveStaysRetryable(t *testing.T) {
+	mail := &scriptedMailbox{
+		msgs: []imapadapter.Message{{ID: "7", Subject: "Weekly newsletter", Sender: "news@example.com"}},
+	}
+	mail.inboxActionErr = errors.New("imap: connection reset by peer")
+
+	p, u := newTickTestPoller(t, mail)
+	store := tickStore(t, p, u)
+	seedRule(t, p, u, rules.Rule{
+		Name:    "tag then archive",
+		Enabled: true,
+		Match: rules.MatchGroup{
+			Op:         "allof",
+			Conditions: []rules.Condition{{Field: "subject", Comparator: "contains", Value: "newsletter"}},
+		},
+		Actions: []rules.Action{{Type: "keyword", Value: "VIP"}, {Type: "archive"}},
+	})
+
+	if err := p.tickUser(u, time.Now()); err != nil {
+		t.Fatalf("tickUser: %v", err)
+	}
+
+	if len(mail.labelled) != 1 || mail.labelled[0] != "7:VIP" {
+		t.Fatalf("labelled = %v, want the keyword to have been applied before the archive failed", mail.labelled)
+	}
+	if seenForTest(t, store, "7") {
+		t.Fatal("the archive failed, so the message must not be retired as handled")
+	}
+	if got := checkpointOf(t, store); got != "" && got != "6" {
+		t.Fatalf("checkpoint = %q, want it held below the deferred message", got)
+	}
+	for _, d := range store.Decisions(50) {
+		if d.Status == "applied" {
+			t.Fatalf("recorded the rule as applied even though its archive failed: %+v", d)
+		}
+	}
+}
+
+func seedRule(t *testing.T, p *Poller, u users.User, r rules.Rule) {
+	t.Helper()
+	if err := rules.ValidateRule(r); err != nil {
+		t.Fatalf("test rule is not one the API would accept: %v", err)
+	}
+	rulesStore, err := p.userRulesStore(u.ID)
+	if err != nil {
+		t.Fatalf("userRulesStore: %v", err)
+	}
+	if _, err := rulesStore.Upsert(r); err != nil {
+		t.Fatalf("rules Upsert: %v", err)
+	}
+}
+
+// breakDeferralLedger drops the deferrals table out from under an already-open
+// state.Store, so RecordDeferral fails while the checkpoint and processed-set
+// reads the assertions depend on keep working.
+//
+// A separate connection to the same file, because state.Store deliberately
+// exposes no raw handle. The "sqlite" driver is registered by the state
+// package's blank import, which this package pulls in transitively.
+func breakDeferralLedger(t *testing.T, p *Poller, u users.User) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(p.userStateDir(u.ID), "state.db"))
+	if err != nil {
+		t.Fatalf("open state db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DROP TABLE deferrals`); err != nil {
+		t.Fatalf("drop deferrals: %v", err)
+	}
+}
+
+// TestTickUser_UnwritableDeferralLedgerHoldsTheCheckpoint is the regression
+// test for the third finding: a failed RecordDeferral used to set retire=true
+// and leave the message out of deferredIDs, so the checkpoint advanced past
+// mail whose work had not been done — a transient SQLITE_BUSY turned "retry
+// this" into "discard this".
+//
+// It must now fail closed: the message stays deferred, the checkpoint stays
+// below it, and the tick reports failure so the state-store outage is visible
+// rather than showing up as mail that quietly stopped being processed.
+func TestTickUser_UnwritableDeferralLedgerHoldsTheCheckpoint(t *testing.T) {
+	mail := &scriptedMailbox{
+		msgs: []imapadapter.Message{{ID: "9", Subject: "first", Sender: "a@example.com"}},
+		applyLabelErr: map[string]error{
+			"9": errors.New("imap: connection reset by peer"),
+		},
+	}
+	p, u := newTickTestPoller(t, mail)
+	store := tickStore(t, p, u)
+	breakDeferralLedger(t, p, u)
+
+	err := p.tickUser(u, time.Now())
+	if err == nil {
+		t.Fatal("tickUser must report the tick as failed when the deferral ledger cannot be written")
+	}
+	if !strings.Contains(err.Error(), "deferral ledger") {
+		t.Fatalf("tick error = %v, want it to name the deferral ledger so an operator can act on it", err)
+	}
+
+	if seenForTest(t, store, "9") {
+		t.Fatal("the message's label never landed, so an unwritable attempt counter must not retire it")
+	}
+	if got := checkpointOf(t, store); got != "" && got != "8" {
+		t.Fatalf("checkpoint = %q, want it held below message 9 — advancing past it is the mail loss this test exists for", got)
+	}
+
+	// And the hold is real: the next tick re-fetches the message rather than
+	// having skipped past it forever.
+	fetchesBefore := mail.fetches
+	_ = p.tickUser(u, time.Now())
+	if mail.fetches != fetchesBefore+1 {
+		t.Fatalf("fetches = %d, want one more than %d", mail.fetches, fetchesBefore)
+	}
+	if seenForTest(t, store, "9") {
+		t.Fatal("message 9 must still be awaiting a successful attempt")
 	}
 }

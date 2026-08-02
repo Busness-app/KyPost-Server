@@ -92,12 +92,29 @@ func Evaluate(input EvalInput, activeRules []Rule) Outcome {
 //	delete     -> c.ApplyInboxAction(..., "delete", mailbox, "")
 //	stop       -> pure control flow, no call
 //
-// One action's failure doesn't stop the remaining actions from running —
-// callers inspect the returned []ActionResult for partial failures.
+// Execution STOPS at the first failed action, and at a cancelled or expired
+// ctx. Callers inspect the returned []ActionResult, which therefore ends at
+// the failure: everything before it ran, nothing after it did.
+//
+// It used to run the whole list regardless, on the reasoning that a caller
+// could report the partial failure. The caller that matters — the poller —
+// responds by leaving the message for a later tick, and a later tick can only
+// find it with an UNSEEN SEARCH over INBOX. So "keyword fails, archive
+// succeeds" left the message archived, the keyword unwritten, and no tick that
+// would ever look at it again: the retry the failure was reported for could not
+// happen. Stopping here, plus ValidateRule requiring the one
+// visibility-changing action last, keeps every failure retryable.
 func ApplyOutcome(ctx context.Context, c imapadapter.Client, mailbox string, input EvalInput, outcome Outcome) []ActionResult {
 	messageID := input.MessageID
 	results := make([]ActionResult, 0, len(outcome.Applied))
 	for _, action := range outcome.Applied {
+		// A cancelled context fails every remaining call anyway; recording it
+		// once and stopping keeps the tick from spending its shutdown on a list
+		// of identical errors.
+		if cerr := ctx.Err(); cerr != nil {
+			results = append(results, ActionResult{Action: action, Err: cerr})
+			return results
+		}
 		var err error
 		switch action.Type {
 		case "keyword":
@@ -120,6 +137,9 @@ func ApplyOutcome(ctx context.Context, c imapadapter.Client, mailbox string, inp
 			err = fmt.Errorf("unsupported action type %q", action.Type)
 		}
 		results = append(results, ActionResult{Action: action, Err: err})
+		if err != nil {
+			return results
+		}
 	}
 	return results
 }
