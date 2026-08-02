@@ -4,6 +4,14 @@ on:
   release:
     types: [published]
 
+# One release publish at a time. Two runs racing both end in "move :stable",
+# and the winner is whichever finished last rather than whichever is newer.
+# cancel-in-progress is deliberately false: a run that has already pushed an
+# immutable version tag must be allowed to finish attesting it.
+concurrency:
+  group: release-image
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
@@ -41,6 +49,43 @@ jobs:
             exit 1
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      # Refuse to publish a tag the code does not agree with.
+      #
+      # serverVersion is compiled in, and it is the LEFT-HAND SIDE of the
+      # hourly update check every install runs. Tagging v1.0.0 while that
+      # constant still says 0.1.0 ships a 1.0 server that compares itself
+      # against 1.0, decides it is behind, and emails the admin of every
+      # install about an upgrade they are already running — forever, because
+      # the comparison never stops being true. Nothing detected that, because
+      # the constant is only ever read at runtime against live GitHub data.
+      #
+      # frontend/package.json is checked with it so "what version is this?" has
+      # exactly one answer across the whole artifact.
+      - name: Require the tag, serverVersion and frontend version to agree
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          server="$(sed -n 's/^const serverVersion = "\(.*\)"$/\1/p' \
+            backend/internal/api/server_version.go)"
+          frontend="$(node -p 'require("./frontend/package.json").version')"
+
+          echo "tag=${VERSION} serverVersion=${server:-<unparsed>} frontend=${frontend:-<unparsed>}"
+
+          if [ -z "$server" ]; then
+            echo "::error::could not read serverVersion from backend/internal/api/server_version.go" >&2
+            echo "If the constant was reformatted, update this check with it." >&2
+            exit 1
+          fi
+          fail=""
+          [ "$server" = "$VERSION" ] || fail="${fail} serverVersion(${server})"
+          [ "$frontend" = "$VERSION" ] || fail="${fail} frontend/package.json(${frontend})"
+          if [ -n "$fail" ]; then
+            echo "::error::release ${VERSION} disagrees with:${fail}" >&2
+            echo "Bump every version source in the commit you tag. See backend/AGENTS.md." >&2
+            exit 1
+          fi
 
       # Refuse to publish a commit that CI never passed.
       #
@@ -120,15 +165,23 @@ jobs:
           set -euo pipefail
           printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
-      - name: Build, publish, and attest image
+      # Only the immutable version tag is published here. :stable is promoted
+      # further down, AFTER the attestation exists and verifies.
+      #
+      # Publishing both at once made :stable move before anything had attested
+      # it. If the attestation step then failed, the workflow went red with
+      # :stable already pointing at an unattested image — scripts/update-host.sh
+      # refuses that (it verifies before deploying), but a plain
+      # `docker compose pull` does not, so the guarded path failed closed while
+      # the unguarded path shipped it. A red workflow that already changed what
+      # everyone downloads is not a failure anyone can act on.
+      - name: Build and publish the immutable version tag
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}
-            ${{ env.IMAGE_NAME }}:stable
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha
@@ -143,3 +196,63 @@ jobs:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+      # Verify the attestation the same way the host updater will, before
+      # promoting anything. Publishing an attestation and being able to verify
+      # one are different claims, and operators only ever experience the second.
+      - name: Verify the attestation before promoting
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://${IMAGE_NAME}@${DIGEST}" --repo "$REPO"
+
+      # :stable must only ever move FORWARD.
+      #
+      # Concurrency serializes runs but does not order them by version. Patching
+      # an old branch (v0.9.1 published after v1.0.0 already shipped) is a normal
+      # thing to do, and its immutable tag should absolutely be published — but
+      # promoting it to :stable silently downgrades every install that follows
+      # that tag. The version tag above is unconditional; only this step is
+      # gated.
+      - name: Decide whether this release may move stable
+        id: promote
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.value }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Every published, non-draft, non-prerelease dotted-numeric release.
+          # Drafts and prereleases are excluded because operators following
+          # :stable did not opt into them.
+          published="$(gh api --paginate "repos/${REPO}/releases" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+            | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+
+          highest="$(printf '%s\n%s\n' "$published" "$VERSION" | sort -V | tail -n1)"
+          echo "highest published release: ${highest}; this release: ${VERSION}"
+
+          if [ "$highest" != "$VERSION" ]; then
+            echo "::notice::${VERSION} is older than ${highest}; publishing the version tag but leaving :stable where it is"
+            echo "move=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "move=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Promote by DIGEST, not by rebuilding or re-tagging from a name: this
+      # points :stable at the exact bytes that were just attested and verified,
+      # with no second build that could differ.
+      - name: Promote the verified digest to stable
+        if: steps.promote.outputs.move == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE_NAME}:stable" \
+            "${IMAGE_NAME}@${DIGEST}"
+          echo "stable now points at ${IMAGE_NAME}@${DIGEST} (${VERSION})"

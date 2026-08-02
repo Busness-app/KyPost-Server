@@ -137,6 +137,26 @@ CREATE TABLE IF NOT EXISTS pull_notifications (
 	created_at TEXT NOT NULL DEFAULT ''
 );
 
+-- Messages the poller deliberately left unprocessed so a later tick can retry
+-- them, and how many ticks have already tried.
+--
+-- Deferring holds the poll checkpoint below the message (see
+-- imapadapter.ClampCheckpoint), so a failure that never clears would hold it
+-- forever and re-fetch a growing batch on every tick. This table is what makes
+-- the deferral bounded: the poller retires a message once attempts reaches its
+-- cap, and deletes the row the moment the message succeeds or is retired.
+--
+-- first_at is kept alongside last_at because "deferred 40 times" and "deferred
+-- since 06:00" answer different operator questions, and the second one is what
+-- /api/health reports.
+CREATE TABLE IF NOT EXISTS deferrals (
+	message_id TEXT PRIMARY KEY,
+	attempts   INTEGER NOT NULL DEFAULT 0,
+	first_at   INTEGER NOT NULL,
+	last_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS deferrals_first_at ON deferrals(first_at);
+
 CREATE TABLE IF NOT EXISTS desktop_pairing_codes (
 	code       TEXT PRIMARY KEY,
 	expires_at TEXT NOT NULL

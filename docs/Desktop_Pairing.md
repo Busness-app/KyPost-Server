@@ -109,7 +109,7 @@ The `handleDesktopPair` handler:
 - `RecordDesktopPairingAttempt(code, success)` — Records attempt for rate limiting
 
 **Persistence:**
-- Codes stored in user's state.json file (encrypted at rest if configured)
+- Codes stored in the user's `state.db` (`desktop_pairing_codes` table)
 - Attempt history stored (last 100 attempts, 24-hour retention)
 - Automatic cleanup of expired codes and old attempts on load/persist
 - Survives server restart

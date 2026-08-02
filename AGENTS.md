@@ -109,7 +109,10 @@ Default section order:
 
 ## Root-owned files
 
-`Dockerfile`, `docker-compose.yml`, `supervisord.conf` and `.env.example` are owned here, not by any child.
+`Dockerfile`, `docker-compose.yml`, `supervisord.conf`, `.env.example`, `CODE_OF_CONDUCT.md` and `CONTRIBUTING.md` are owned here, not by any child.
+
+- **`CONTRIBUTING.md` is the contribution contract.** It states the user contract (secure by default, every convenience-for-security trade-off signposted where the user reads it), the mandatory AI-attribution rules, and the two merge gates: all CI jobs green, plus an adversarial review pass whose surviving findings go in the PR description. A change to what CI enforces, to the rejection criteria, or to the review skills used belongs in that file in the same change set.
+- **`CODE_OF_CONDUCT.md`** bounds the adversarial review practice: hostility points at code, never at a person. Do not soften the review standard to satisfy it, and do not use the review personas to excuse conduct it forbids.
 
 - **Every build input is pinned, and "every" includes the base images.** All three `FROM` lines carry `tag@sha256:...`; the Ollama tarball carries its published SHA-256. A tag is a mutable pointer — `debian:stable-slim` moves on each point release and even an exact `golang:1.26.5` is republished when its own base is rebuilt — so a tag-only `FROM` means two builds of the same commit ship different userlands, which is the property the Ollama pin exists to prevent. Bump tag and digest together; a digest that no longer matches its tag is a silent lie about what is being built. Re-resolve with `docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`.
 - The runtime stage's `apt-get update` is the one deliberate exception. Pinning package versions would freeze the runtime on whatever CVEs the base digest shipped with, and this image parses hostile MIME, vCards and OpenPGP packets. The digest fixes the base; apt keeps it patched.

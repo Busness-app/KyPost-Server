@@ -56,7 +56,7 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 | Package | Responsibility |
 |---------|---------------|
 | `app/` | Mode flag parsing; bootstrap logger, config, users store, legacy migration, poller, API server |
-- **Per-user mailbox state is SQLite** (`STATE_DIR/users/<id>/state.db`), not JSON. `state.Store` owns processed-message ids, the decision audit log, native devices, web-push subscriptions, the App Pull queue and desktop pairing. Every method reads and writes the database directly — there is no in-memory copy, no dirty flags, and no `fsutil.WithFileLock`, because SQLite's own WAL locking is what makes the api and daemon processes safe against each other. Two rules that are load-bearing rather than tuning:
+- **Per-user mailbox state is SQLite** (`STATE_DIR/users/<id>/state.db`), not JSON. `state.Store` owns processed-message ids, the decision audit log, the deferral ledger, native devices, web-push subscriptions, the App Pull queue and desktop pairing. `RecordProcessedDecision` writes the decision, the processed marker AND the deferral delete in one transaction: retiring a message ends its deferral, and putting that in the store is what stops a caller forgetting it. Every method reads and writes the database directly — there is no in-memory copy, no dirty flags, and no `fsutil.WithFileLock`, because SQLite's own WAL locking is what makes the api and daemon processes safe against each other. Two rules that are load-bearing rather than tuning:
   - the DSN sets `_txlock=immediate`. `database/sql`'s `Begin` issues a DEFERRED `BEGIN`, which cannot upgrade to a writer under contention and fails `SQLITE_BUSY_SNAPSHOT` (517) — `busy_timeout` does not retry an upgrade. Pinned by `TestConcurrentPairingCodeConsumedOnce`.
   - `state.Store` releases its handle on UNREACHABILITY, via the `runtime.AddCleanup` registered in `state.New` — **not** on cache eviction. `api.Server.sweepIdleUserStores` must only drop the map entry. The caches hand out bare pointers and release `userMu` before the caller is done, and `userLastSeen` records acquisition rather than release, so "idle" never means "unheld": closing at eviction severed the handle under long-running callers and their next query failed `sql: database is closed`. `Close()` remains, is idempotent, and is for callers that genuinely own the last reference. Pinned by `TestEvictedStoreStaysUsableForItsHolder`.
 - **Never read a store's file behind its back.** `rescanSubscriberIndex`/`rescanDeviceIndex` parsed `state.json` directly and so broke silently on the SQLite move — every device registration answering "unknown subscriber". They now go through `state.Store`.
@@ -89,7 +89,15 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 7. Apply matched label as an IMAP keyword in the user's mailbox
 8. Send browser and native push notifications using the user's notification-mode gate (`none`, `all`, `keywords`) and the shared VAPID keys
 9. Persist decision to the user's `state.db`
-10. Advance the user's checkpoint — but only as far as the messages this tick actually retired. A message left unmarked on purpose (transient classifier failure, spent rate budget, unreadable processed-set) holds the checkpoint below itself, because `ListUnreadInbox` only ever returns UIDs above it (`imap.ClampCheckpoint`)
+10. Advance the user's checkpoint — but only as far as the messages this tick actually retired. A message left unmarked on purpose (transient classifier failure, transient IMAP/state failure, spent rate budget, unreadable processed-set) holds the checkpoint below itself, because `ListUnreadInbox` only ever returns UIDs above it (`imap.ClampCheckpoint`)
+
+**Retire or defer is one decision, and `tickUser` makes it once.** `shouldMarkProcessedOnError` answers it and the result is passed to `recordMessageFailure` rather than re-derived there — the checkpoint and the processed set must agree, and two copies of the predicate are how they stop agreeing.
+
+- A `classifierErr` retires only when `isPermanentClassifierError` (bad input, credits exhausted). A transient outage defers.
+- A `retryableErr` always defers. `handleMessage` wraps the failures a later tick can still complete: `applyKeywordsWithRetry` after its own retries, a failed rule action, and the `state.Store` writes that can hit `SQLITE_BUSY` past the busy timeout. **Wrapping is opt-in at the call site that knows the failure is an outage rather than a mistake.**
+- Everything else retires. An unclassified error is one nothing has judged, and guessing "transient" means holding the checkpoint forever.
+- **A failed rule action is not an applied rule.** `handleMessage` returns before writing any decision when `rules.ApplyOutcome` reports a failure. It previously appended the failure to the detail of an `applied` decision and — for a `stop` rule — retired the message in the same breath, so an IMAP reset during "archive and stop" left the mail in the inbox and an audit row claiming otherwise.
+- **Deferral is bounded, or it is not a retry.** Holding the checkpoint re-fetches a growing batch every tick, so `state.Store` counts attempts per message (`deferrals` table) and `tickUser` retires one that reaches `maxDeferralAttempts` (120, ~3h at the default interval), recording that it gave up. A store that cannot count attempts retires rather than opening a deferral nothing can close. Pinned by `poller_tick_test.go`, which drives whole ticks through the `newMailClient` seam and asserts the processed set, the checkpoint and the audit log together — the defects above were each invisible to per-piece tests.
 
 One failing mailbox never blocks other users; global health flips unhealthy only when every polled mailbox fails in the same tick.
 
@@ -111,7 +119,7 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 | `GET /api/setup` | no | Returns admin credential bootstrap status |
 | `GET /api/health` | no | 503 when unhealthy |
 | `POST /api/health/repair` | admin | Clears sticky failure state (container restart) |
-| `GET /api/status` | yes | Scan interval, rate limits, caller's checkpoint and emails processed in the last hour, server time |
+| `GET /api/status` | yes | Scan interval, rate limits, caller's checkpoint and emails processed in the last hour, server time, and the poll-health fields: last tick, `checkpointHeldSinceUtc`, `deferredMessages`/`oldestDeferredUtc` (how much mail is behind the hold and how long the oldest has waited), `failedLast24h`, classifier queue depth |
 | `GET\|PUT /api/config` | yes | Global config; PUT rejects Remote LLM (`classifier.*`) changes from non-admins with 403; PUT broadcasts to running poller |
 | `GET /api/labels` | yes | Allowed label list + labels discovered in the caller's mailbox |
 | `GET /api/decisions?limit=N` | yes | Caller's own audit trail |
@@ -180,7 +188,7 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 | `$SECRET_DIR/imap-config.key` | Master AES key for all stored IMAP credentials |
 | `$SECRET_DIR/imap-config.json` | Legacy global IMAP credentials; migrated to the first admin, then unused |
 | `$STATE_DIR/state.db` | SQLite. Global state: sticky AI-credits flag |
-| `$STATE_DIR/users/<userID>/state.db` | SQLite. User's checkpoint + processed-set + decision audit log + push subscriptions + pairing `subscriberId` + native devices + App Pull queue. Owned by `state.Store`; WAL locking is what makes the api and daemon processes safe against each other |
+| `$STATE_DIR/users/<userID>/state.db` | SQLite. User's checkpoint + processed-set + decision audit log + deferral ledger + push subscriptions + pairing `subscriberId` + native devices + App Pull queue. Owned by `state.Store`; WAL locking is what makes the api and daemon processes safe against each other |
 | `$STATE_DIR/users/<userID>/state.json`, `decisions.json` | Pre-SQLite formats. Imported into `state.db` on first start after upgrade and renamed `.migrated`; never read afterwards |
 | `$STATE_DIR/users/<userID>/contacts.json` | User's address book (contacts, revisions, tombstones) |
 | `$STATE_DIR/users/<userID>/mailcache.json` | User's mail metadata cache, per mailbox (not full message bodies except where opportunistically warmed) |
@@ -207,7 +215,7 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 - Keep adapter packages free of direct state mutation; they communicate via interfaces and channels defined in `processor/`
 - PII redaction must be applied before any text is sent to Ollama
 - Do not add dependencies outside the go.mod without explicit approval
-- **Cutting a release**: bump `serverVersion` in `internal/api/server_version.go` in the same commit as the tag, and publish the GitHub release with a dotted-numeric tag (`v0.2.0`, not `v0.2-alpha`). The release-image workflow publishes immutable `0.2.0` plus moving `stable` GHCR images; the host updater resolves stable to a digest and verifies the GitHub attestation before deployment. Every install polls this repo's releases hourly, emails its admin once per newly-seen release, and shows the cached result in Settings; a tag that is not dotted-numeric fails the comparison closed and no one is told, and a `serverVersion` left behind mails everyone about a release they are already running
+- **Cutting a release**: bump `serverVersion` in `internal/api/server_version.go` AND `frontend/package.json` (plus its lockfile) to the same value, in the same commit as the tag, add the release notes to `CHANGELOG.md`, and publish the GitHub release with a dotted-numeric tag (`v0.2.0`, not `v0.2-alpha`). `release-image.yml` now enforces the agreement rather than trusting it: it refuses to publish a tag that disagrees with either version source, and refuses a commit CI never passed. It then publishes the immutable `0.2.0` image, attests it, verifies the attestation, and only then promotes that exact digest to `stable` — never backward, and one release at a time. The host updater resolves stable to a digest and verifies the GitHub attestation before deployment. Every install polls this repo's releases hourly, emails its admin once per newly-seen release, and shows the cached result in Settings; a tag that is not dotted-numeric fails the comparison closed and no one is told, and a `serverVersion` left behind mails everyone about a release they are already running
 
 ## Verification
 

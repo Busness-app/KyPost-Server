@@ -88,6 +88,16 @@ type Poller struct {
 	// existing key (see addAliasUserIDToPGPKey).
 	pgpKeyPath string
 
+	// newMailClient builds one user's IMAP client from their sealed credential
+	// file. A field rather than a direct call to
+	// imapadapter.NewAPIClientFromStoredConfig — the same test-seam idiom as
+	// sendRejectionNotice — so a test can drive a whole tickUser against a
+	// scripted mailbox and assert what the checkpoint, the processed set and
+	// the audit log look like afterwards. Those are the contracts that decide
+	// whether mail is retried or thrown away, and until this existed they could
+	// only be tested a piece at a time. nil means the real client.
+	newMailClient func(configPath, keyPath string) imapadapter.Client
+
 	userMu         sync.Mutex
 	stores         map[string]*state.Store
 	mailClients    map[string]*mailClientEntry
@@ -231,7 +241,13 @@ func (p *Poller) userMailClient(userID string, configModTime time.Time) imapadap
 			_ = c.Close()
 		}
 	}
-	client := imapadapter.NewAPIClientFromStoredConfig(p.userIMAPConfigPath(userID), p.imapKeyPath)
+	build := p.newMailClient
+	if build == nil {
+		build = func(configPath, keyPath string) imapadapter.Client {
+			return imapadapter.NewAPIClientFromStoredConfig(configPath, keyPath)
+		}
+	}
+	client := build(p.userIMAPConfigPath(userID), p.imapKeyPath)
 	p.mailClients[userID] = &mailClientEntry{client: client, modTime: configModTime}
 	return client
 }
@@ -741,17 +757,49 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		messageCancel()
 		if err != nil {
 			failedCount++
-			// Same predicate recordMessageFailure uses to decide whether to mark
-			// the message processed: a transient classifier failure is left
-			// unmarked to be retried, which requires the checkpoint to stay
-			// below it. A permanent one is retired and must not hold the
-			// checkpoint back forever.
-			if !shouldMarkProcessedOnError(err) {
-				deferredIDs = append(deferredIDs, msg.ID)
+			// Decided ONCE, here, and handed to recordMessageFailure rather than
+			// re-derived there: retiring the message and advancing the checkpoint
+			// past it are the same decision, and two copies of the predicate are
+			// how they drift apart.
+			retire := shouldMarkProcessedOnError(err)
+			if !retire {
+				// A deferral holds the checkpoint below this message, so every
+				// later message is re-fetched next tick too. That is affordable
+				// while the failure is genuinely transient and ruinous if it
+				// never clears, which is what the attempt cap decides.
+				attempts, cerr := store.RecordDeferral(msg.ID)
+				switch {
+				case cerr != nil:
+					// Unable to count attempts means unable to enforce the cap.
+					// Retire rather than open a deferral nothing can ever close:
+					// an unbounded hold on the checkpoint stops this mailbox
+					// making progress at all, which is worse than losing the
+					// retry for one message.
+					p.log.Error("cannot count deferral attempts; retiring message rather than deferring it unboundedly",
+						"user_id", u.ID, "message_id", msg.ID, "error", cerr.Error())
+					retire = true
+				case attempts >= maxDeferralAttempts:
+					p.log.Error("deferral limit reached; retiring message",
+						"user_id", u.ID, "message_id", msg.ID,
+						"attempts", strconv.Itoa(attempts),
+						"limit", strconv.Itoa(maxDeferralAttempts),
+						"error", err.Error())
+					retire = true
+					// Wrapped so the recorded Decision says the message was given
+					// up on, not merely that it failed once — the audit log is
+					// the only place an operator learns mail was abandoned.
+					err = fmt.Errorf("gave up after %d deferred attempts: %w", attempts, err)
+				default:
+					deferredIDs = append(deferredIDs, msg.ID)
+				}
 			}
-			p.recordMessageFailure(store, u.ID, uc, msg, err)
+			p.recordMessageFailure(store, u.ID, uc, msg, err, retire)
 			continue
 		}
+		// No ClearDeferral here on purpose: every success path in handleMessage
+		// ends in RecordProcessedDecision, which drops the deferral row in the
+		// same transaction that retires the message. Clearing it again from the
+		// caller would be a second copy of an invariant the store already owns.
 		processedCount++
 	}
 
@@ -811,10 +859,9 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 }
 
 // classifierErr marks an error returned by classifyWithRetry so tickUser's
-// message loop (via shouldMarkProcessedOnError) can distinguish classifier
-// failures from every other handleMessage failure mode (rule-matching
-// errors, IMAP errors), which must keep marking messages processed exactly
-// as they did before this gating was introduced.
+// message loop (via shouldMarkProcessedOnError) can apply the classifier's own
+// permanent/transient split (isPermanentClassifierError) rather than the
+// blanket judgement below.
 type classifierErr struct {
 	err error
 }
@@ -822,19 +869,70 @@ type classifierErr struct {
 func (e *classifierErr) Error() string { return e.err.Error() }
 func (e *classifierErr) Unwrap() error { return e.err }
 
+// retryableErr marks a handleMessage failure that a LATER TICK MAY SUCCEED AT:
+// an IMAP action that timed out or lost its connection, a state write that lost
+// a lock race. The message is left unmarked and the poll checkpoint is held
+// below it, so the next tick tries again.
+//
+// This exists because the opposite was the default. Every non-classifier error
+// used to retire the message it belonged to — deliberately, to preserve the
+// behaviour that predated classifier gating — which meant an IMAP reset while
+// applying a keyword recorded the message as handled, advanced the checkpoint
+// past it, and never applied the label. The message was classified correctly
+// and the result was silently thrown away, which is the one thing this program
+// exists to do.
+//
+// Not everything is retryable, and the default stays "retire": a rule
+// referencing a folder that does not exist, or a malformed action, fails
+// identically forever, and retrying it only holds the checkpoint back. Wrapping
+// is therefore opt-in at the call site that knows the failure is an outage
+// rather than a mistake. The attempt cap in tickUser is the backstop for
+// getting that judgement wrong in the retryable direction.
+type retryableErr struct {
+	err error
+}
+
+func (e *retryableErr) Error() string { return e.err.Error() }
+func (e *retryableErr) Unwrap() error { return e.err }
+
 // shouldMarkProcessedOnError reports whether tickUser should mark a message
-// processed after handleMessage returned err. A classifier error only marks
-// processed when the failure is permanent (bad input / AI credits exhausted, per
-// isPermanentClassifierError); a transient outage leaves the message unmarked so
-// the next tick retries it instead of skipping it forever. Any non-classifier
-// error (rule-matching, IMAP) always marks processed.
+// processed after handleMessage returned err — that is, whether to RETIRE the
+// message or leave it for a later tick.
+//
+//   - a classifier error retires only when permanent (bad input / AI credits
+//     exhausted, per isPermanentClassifierError); a transient outage defers.
+//   - a retryableErr (transient IMAP, transient state-store) always defers.
+//   - anything else retires, because an unrecognised failure that repeats
+//     forever must not hold the checkpoint forever.
+//
+// Deferral is not unbounded: tickUser counts attempts per message and retires
+// one that has exhausted them, whatever this says.
 func shouldMarkProcessedOnError(err error) bool {
 	var cerr *classifierErr
 	if errors.As(err, &cerr) {
 		return isPermanentClassifierError(cerr.err)
 	}
-	return true
+	// Retryable defers; everything else retires.
+	var rerr *retryableErr
+	return !errors.As(err, &rerr)
 }
+
+// maxDeferralAttempts caps how many consecutive ticks may defer one message
+// before it is retired with a recorded failure.
+//
+// Deferring holds the poll checkpoint below the message, and every tick
+// re-fetches the whole batch above it, so an unbounded deferral degrades from
+// "retry" into "re-fetch this mailbox forever and never make progress". The cap
+// converts a permanent failure that was mistaken for a transient one back into
+// a retirement.
+//
+// 120 against the default 90-second scan interval is about three hours of
+// retries. The asymmetry is deliberate: deferring costs one re-fetched batch
+// per tick, while retiring too early permanently loses the label for mail that
+// was classified correctly. Three hours rides out an IMAP server restart, a
+// classifier model re-pull, or a network partition, and still stops a genuinely
+// poisoned message from holding the checkpoint for a whole day.
+const maxDeferralAttempts = 120
 
 // maxLoggedLabelBytes bounds a raw model output before it reaches the log.
 //
@@ -885,18 +983,23 @@ func clipForLog(s string) string {
 }
 
 // recordMessageFailure is what tickUser's message loop runs on every
-// handleMessage failure: it logs the failure, records it as a "failed"
-// Decision, and marks the message processed — except for a transient
-// classifier error, which is deliberately left unmarked so it retries next
-// poll tick (and which tickUser additionally holds the poll checkpoint below,
-// or the retry cannot happen at all).
+// handleMessage failure: it logs the failure and records it as a "failed"
+// Decision, retiring the message (marking it processed) only when retire says
+// so. A deferred message is deliberately left unmarked so it retries next poll
+// tick — which also requires tickUser to hold the poll checkpoint below it, or
+// the retry cannot happen at all.
+//
+// retire is passed in rather than re-derived from err. tickUser has to make the
+// same call to decide the checkpoint, and it also applies the deferral attempt
+// cap, which err alone cannot express: a message given up on after 40 attempts
+// carries an error that still looks perfectly transient.
 //
 // A retired message reaches this exactly once, so its Decision and its push
 // notification are unconditional. A DEFERRED one reaches it on every tick
 // until the outage clears, so both are gated on not having been reported
 // already — the audit log is per message, not per attempt, and a user gets one
 // notification for one email.
-func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc userCtx, msg imapadapter.Message, err error) {
+func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc userCtx, msg imapadapter.Message, err error, retire bool) {
 	p.log.Error("message processing failed", "user_id", userID, "message_id", msg.ID, "error", err.Error())
 	decision := state.Decision{
 		MessageID: msg.ID,
@@ -908,13 +1011,13 @@ func (p *Poller) recordMessageFailure(store *state.Store, userID string, uc user
 	}
 	// Both writes together when the message is being retired, so a failure
 	// cannot leave it retired-but-unrecorded — see RecordProcessedDecision.
-	// A transient classifier error records the decision only: the message is
-	// deliberately left unmarked so the next tick retries it.
+	// A deferred message records the decision only: it is deliberately left
+	// unmarked so the next tick retries it.
 	var writeErr error
-	if shouldMarkProcessedOnError(err) {
+	if retire {
 		writeErr = store.RecordProcessedDecision(decision)
 	} else {
-		p.log.Info("transient classifier error; leaving message unmarked so it is retried next poll tick", "user_id", userID, "message_id", msg.ID)
+		p.log.Info("transient failure; leaving message unmarked so it is retried next poll tick", "user_id", userID, "message_id", msg.ID)
 		// Record and notify ONCE per message, not once per attempt. A deferred
 		// message really does come back every tick (the checkpoint is held
 		// below it), so an unconditional write here would append an audit row
@@ -1077,8 +1180,30 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 			)
 			failures = append(failures, fmt.Sprintf("%s: %s", r.Action.Type, r.Err.Error()))
 		}
+		// An action that failed did not happen, so the message has not been
+		// handled and must not be recorded as if it had.
+		//
+		// This used to append the failures to the Detail of an "applied"
+		// decision and carry on — which, for the "stop" rule below, retired the
+		// message in the same breath. An IMAP reset during "archive and stop"
+		// therefore left the mail sitting in the inbox, an audit row claiming it
+		// was archived, and no tick that would ever look at it again.
+		//
+		// Retryable rather than fatal because the overwhelmingly common cause is
+		// an outage: a dropped connection, a timeout, a server that went away
+		// mid-command. A rule that fails for a permanent reason — moving to a
+		// folder that does not exist — fails identically on every retry and is
+		// retired by tickUser's deferral cap instead of holding the checkpoint
+		// forever.
+		//
+		// Retrying is safe because the action set is idempotent in effect
+		// (keyword/unkeyword/read set state; move/archive/spam/delete are
+		// terminal on a UID, and a message whose move DID succeed is no longer
+		// in INBOX for the next ListUnreadInbox to return). There is no forward
+		// or reply action that a retry could duplicate.
 		if len(failures) > 0 {
-			detail += fmt.Sprintf("; %d action(s) failed: %s", len(failures), strings.Join(failures, "; "))
+			return &retryableErr{err: fmt.Errorf(
+				"%s; %d action(s) failed: %s", detail, len(failures), strings.Join(failures, "; "))}
 		}
 		decision := state.Decision{
 			MessageID: msg.ID,
@@ -1093,15 +1218,19 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		// the message carries on to classification, which will retire it, so
 		// only the decision is recorded here.
 		if outcome.Stopped {
+			// Retryable: the actions succeeded and only the bookkeeping failed,
+			// which under api/daemon contention means SQLITE_BUSY past the busy
+			// timeout. Retiring the message on a failed write would lose the
+			// audit row for work that really happened.
 			if err := uc.store.RecordProcessedDecision(decision); err != nil {
-				return err
+				return &retryableErr{err: err}
 			}
 			p.maybeSendPushNotification(uc, msg, "", nil)
 			p.maybeSendNativePushNotification(uc, msg, "", nil)
 			return nil
 		}
 		if err := uc.store.AddDecision(decision); err != nil {
-			return err
+			return &retryableErr{err: err}
 		}
 	}
 
@@ -1117,7 +1246,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		)
 		if err := applyKeywordsWithRetry(ctx, uc.mail, msg.ID, keywords); err != nil {
 			p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", defaultLabel, "error", err.Error())
-			return err
+			return &retryableErr{err: err}
 		}
 		if err := uc.store.RecordProcessedDecision(state.Decision{
 			MessageID: msg.ID,
@@ -1128,7 +1257,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 			Status:    "applied",
 			Detail:    "automatic keyword labeling disabled; tagged " + defaultLabel,
 		}); err != nil {
-			return err
+			return &retryableErr{err: err}
 		}
 		p.maybeSendPushNotification(uc, msg, defaultLabel, keywords)
 		p.maybeSendNativePushNotification(uc, msg, defaultLabel, keywords)
@@ -1193,7 +1322,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 			Status:    "skipped",
 			Detail:    "no known label returned",
 		}); err != nil {
-			return err
+			return &retryableErr{err: err}
 		}
 		p.maybeSendPushNotification(uc, msg, "", nil)
 		p.maybeSendNativePushNotification(uc, msg, "", nil)
@@ -1207,9 +1336,14 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		"selected_label", selected,
 		"keywords", strings.Join(keywords, ","),
 	)
+	// The core promise of the product, and the one failure that used to be
+	// discarded silently: applyKeywordsWithRetry has already exhausted its own
+	// retries, so reaching here means the IMAP session is genuinely unwell.
+	// Retiring the message would record a correct classification whose label
+	// was never written and never will be.
 	if err := applyKeywordsWithRetry(ctx, uc.mail, msg.ID, keywords); err != nil {
 		p.log.Error("label apply failed", "user_id", uc.id, "message_id", msg.ID, "selected_label", selected, "error", err.Error())
-		return err
+		return &retryableErr{err: err}
 	}
 	p.log.Info("label applied", "user_id", uc.id, "message_id", msg.ID, "selected_label", selected, "keywords", strings.Join(keywords, ","))
 	if err := uc.store.RecordProcessedDecision(state.Decision{
@@ -1221,7 +1355,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		Status:    "applied",
 		Detail:    "label applied successfully",
 	}); err != nil {
-		return err
+		return &retryableErr{err: err}
 	}
 	p.maybeSendPushNotification(uc, msg, selected, keywords)
 	p.maybeSendNativePushNotification(uc, msg, selected, keywords)
@@ -1604,9 +1738,14 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n])
 }
 
+// keywordRetryDelay is the wait between keyword-write attempts. A var rather
+// than a const only so the full-tick tests, which deliberately fail this call,
+// do not spend two 30-second sleeps per message proving it.
+var keywordRetryDelay = 30 * time.Second
+
 func applySingleKeywordWithRetry(ctx context.Context, c imapadapter.Client, messageID, keyword string) error {
 	_, err := retry.Loop(ctx, 3, func(attempt int) time.Duration {
-		return 30 * time.Second
+		return keywordRetryDelay
 	}, func(attempt int) (struct{}, error, bool) {
 		err := c.EnsureLabel(ctx, keyword)
 		if err == nil {

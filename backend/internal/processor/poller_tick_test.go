@@ -1,0 +1,371 @@
+package processor
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	imapadapter "kypost-server/backend/internal/adapters/imap"
+	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/health"
+	"kypost-server/backend/internal/logging"
+	"kypost-server/backend/internal/mailcache"
+	"kypost-server/backend/internal/rules"
+	"kypost-server/backend/internal/sendas"
+	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/users"
+)
+
+// Full-tick tests.
+//
+// Everything else in this package tests tickUser's contracts one piece at a
+// time: a predicate here, a clamp there, recordMessageFailure against a real
+// store. That is how a message could be classified correctly, have its label
+// write fail, be recorded as handled, and have the checkpoint advance past it —
+// every individual piece behaved, and nothing ran them together.
+//
+// These drive tickUser end to end against a scripted mailbox (via the
+// newMailClient seam) and assert the three pieces of state that decide whether
+// mail is retried or thrown away: the processed set, the poll checkpoint, and
+// the audit log. They deliberately use the auto-labeling-disabled path so no
+// classifier is involved — the failure being tested is the IMAP keyword write,
+// and a live model would only add nondeterminism to it.
+
+// scriptedMailbox is an imapadapter.Client backed by an in-memory UID list.
+//
+// ListUnreadInbox honours the checkpoint the way the real one does — UIDs
+// strictly above it, with the returned checkpoint advanced to the highest UID
+// FETCHED regardless of what happens to those messages afterwards. That detail
+// is the whole reason deferral needs a clamp, so a fake that skipped it would
+// test nothing.
+type scriptedMailbox struct {
+	msgs []imapadapter.Message
+
+	// applyLabelErr[uid] is returned by ApplyLabel for that message, standing in
+	// for a keyword write that failed after applyKeywordsWithRetry gave up.
+	applyLabelErr map[string]error
+	// labelled records successful ApplyLabel calls as "uid:label", in order.
+	labelled []string
+	// fetches counts ListUnreadInbox calls, so a test can prove a later tick
+	// really re-fetched a deferred message rather than inventing it.
+	fetches int
+
+	noopMailClient
+}
+
+func (m *scriptedMailbox) ListUnreadInbox(_ context.Context, checkpoint string) ([]imapadapter.Message, string, error) {
+	m.fetches++
+	after, _ := strconv.Atoi(checkpoint)
+	var out []imapadapter.Message
+	highest := after
+	for _, msg := range m.msgs {
+		uid, err := strconv.Atoi(msg.ID)
+		if err != nil || uid <= after {
+			continue
+		}
+		out = append(out, msg)
+		if uid > highest {
+			highest = uid
+		}
+	}
+	if len(out) == 0 {
+		return nil, checkpoint, nil
+	}
+	return out, strconv.Itoa(highest), nil
+}
+
+func (m *scriptedMailbox) ApplyLabel(_ context.Context, id string, label string) error {
+	if err := m.applyLabelErr[id]; err != nil {
+		return err
+	}
+	m.labelled = append(m.labelled, id+":"+label)
+	return nil
+}
+
+// newTickTestPoller builds a Poller wired for a whole tickUser: real temp
+// state/config dirs, a real state.Store underneath, and the scripted mailbox in
+// place of an IMAP connection. Auto-labeling is turned OFF for the user so
+// handleMessage takes the deterministic default-label path and never reaches
+// the (nil) classifier.
+func newTickTestPoller(t *testing.T, mail imapadapter.Client) (*Poller, users.User) {
+	t.Helper()
+
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	// These tests fail keyword writes on purpose, and the production delay is
+	// 30s per retry. Nothing here is testing the backoff itself.
+	prevDelay := keywordRetryDelay
+	keywordRetryDelay = time.Millisecond
+	t.Cleanup(func() { keywordRetryDelay = prevDelay })
+
+	cfg := config.Config{}
+	cfg.Labels.Allowlist = []string{"Primary", "Promotions"}
+	cfg.Labels.KeywordMappings = map[string][]string{}
+	cfg.RateLimits.PerMinute = 1000
+	cfg.RateLimits.PerHour = 1000
+
+	configDir := t.TempDir()
+	// tickUser's tail (ensureOwnAddressProven) looks the polled user up, so this
+	// needs to be a real store rather than a nil one.
+	usersStore, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
+	if err != nil {
+		t.Fatalf("users.LoadOrMigrate: %v", err)
+	}
+
+	p := &Poller{
+		cfg:           cfg,
+		log:           logger,
+		users:         usersStore,
+		health:        health.NewService(),
+		stateDir:      t.TempDir(),
+		configDir:     configDir,
+		stores:        map[string]*state.Store{},
+		mailClients:   map[string]*mailClientEntry{},
+		mailCaches:    map[string]*mailcache.Store{},
+		rulesStores:   map[string]*rules.Store{},
+		sendAsStores:  map[string]*sendas.Store{},
+		rate:          map[string][]time.Time{},
+		newMailClient: func(string, string) imapadapter.Client { return mail },
+	}
+
+	u := users.User{ID: "user-tick", Username: "tick"}
+	if err := os.MkdirAll(p.userConfigDir(u.ID), 0o700); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
+	settings := config.DefaultUserSettings()
+	settings.Labels.AutoApplyEnabled = false
+	if err := config.SaveUserSettings(p.userSettingsPath(u.ID), settings); err != nil {
+		t.Fatalf("SaveUserSettings: %v", err)
+	}
+	return p, u
+}
+
+func tickStore(t *testing.T, p *Poller, u users.User) *state.Store {
+	t.Helper()
+	store, err := p.userStore(u.ID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	return store
+}
+
+func checkpointOf(t *testing.T, store *state.Store) string {
+	t.Helper()
+	cp, err := store.Checkpoint()
+	if err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	return cp
+}
+
+// TestTickUser_TransientLabelFailureIsRetriedOnTheNextTick is the regression
+// test for the defect this whole error taxonomy exists for.
+//
+// A message whose keyword write fails must be left unprocessed AND left in
+// range of the next fetch. Before, it was marked processed and the checkpoint
+// advanced past it: the classification succeeded, the label was never written,
+// and nothing ever tried again. Green unit tests covered both halves
+// separately.
+func TestTickUser_TransientLabelFailureIsRetriedOnTheNextTick(t *testing.T) {
+	mail := &scriptedMailbox{
+		msgs: []imapadapter.Message{
+			{ID: "10", Subject: "first", Sender: "a@example.com"},
+			{ID: "11", Subject: "second", Sender: "b@example.com"},
+			{ID: "12", Subject: "third", Sender: "c@example.com"},
+		},
+		applyLabelErr: map[string]error{
+			"11": errors.New("imap: connection reset by peer"),
+		},
+	}
+	p, u := newTickTestPoller(t, mail)
+	store := tickStore(t, p, u)
+
+	if err := p.tickUser(u, time.Now()); err != nil {
+		t.Fatalf("tickUser: %v", err)
+	}
+
+	// 10 and 12 are done; 11 is not, because its label never landed.
+	for _, id := range []string{"10", "12"} {
+		if !seenForTest(t, store, id) {
+			t.Fatalf("expected message %s to be processed", id)
+		}
+	}
+	if seenForTest(t, store, "11") {
+		t.Fatal("message 11's label write failed, so it must NOT be recorded as processed")
+	}
+
+	// The other half: the checkpoint has to stay below 11 or the next fetch
+	// never returns it, and "unprocessed" becomes "lost".
+	if got := checkpointOf(t, store); got != "10" {
+		t.Fatalf("checkpoint = %q, want %q so message 11 is still in range of the next fetch", got, "10")
+	}
+
+	// The failure is in the audit log, once, and not as a success.
+	decisions := store.Decisions(50)
+	var failed int
+	for _, d := range decisions {
+		if d.MessageID == "11" {
+			if d.Status != "failed" {
+				t.Fatalf("message 11 recorded with status %q, want \"failed\"", d.Status)
+			}
+			failed++
+		}
+	}
+	if failed != 1 {
+		t.Fatalf("got %d decisions for the failed message, want exactly 1", failed)
+	}
+
+	// The deferral is counted, which is what bounds it.
+	if attempts, err := store.DeferralAttempts("11"); err != nil || attempts != 1 {
+		t.Fatalf("DeferralAttempts(11) = %d, %v; want 1, nil", attempts, err)
+	}
+
+	// --- the outage clears; the next tick must actually finish the work ---
+	delete(mail.applyLabelErr, "11")
+
+	if err := p.tickUser(u, time.Now()); err != nil {
+		t.Fatalf("second tickUser: %v", err)
+	}
+	if mail.fetches != 2 {
+		t.Fatalf("mailbox fetched %d times, want 2", mail.fetches)
+	}
+	if !seenForTest(t, store, "11") {
+		t.Fatal("expected message 11 to be processed on the retry tick")
+	}
+	if got := checkpointOf(t, store); got != "12" {
+		t.Fatalf("checkpoint = %q, want %q once nothing is deferred", got, "12")
+	}
+	if attempts, err := store.DeferralAttempts("11"); err != nil || attempts != 0 {
+		t.Fatalf("DeferralAttempts(11) after success = %d, %v; want 0, nil", attempts, err)
+	}
+
+	// The label really was applied, exactly once per message, and 10/12 were
+	// not re-labelled by the tick that re-fetched them.
+	want := []string{"10:Primary", "12:Primary", "11:Primary"}
+	if len(mail.labelled) != len(want) {
+		t.Fatalf("labelled = %v, want %v", mail.labelled, want)
+	}
+	for i := range want {
+		if mail.labelled[i] != want[i] {
+			t.Fatalf("labelled = %v, want %v", mail.labelled, want)
+		}
+	}
+}
+
+// TestTickUser_PermanentlyFailingMessageIsRetiredAtTheCap is the other side of
+// the contract, and the one the reviewer's proposed fix would have left out.
+//
+// Holding the checkpoint below a deferred message means a failure that NEVER
+// clears holds it forever, re-fetching a growing batch on every tick and never
+// making progress. The attempt cap converts that back into a retirement: the
+// message is recorded as failed, the checkpoint is released, and an operator
+// gets a log line saying mail was given up on.
+func TestTickUser_PermanentlyFailingMessageIsRetiredAtTheCap(t *testing.T) {
+	mail := &scriptedMailbox{
+		msgs: []imapadapter.Message{
+			{ID: "10", Subject: "fine", Sender: "a@example.com"},
+			{ID: "11", Subject: "poison", Sender: "b@example.com"},
+		},
+		applyLabelErr: map[string]error{
+			// Never cleared: a mailbox that rejects this keyword forever.
+			"11": errors.New("imap: NO [CANNOT] keyword rejected"),
+		},
+	}
+	p, u := newTickTestPoller(t, mail)
+	store := tickStore(t, p, u)
+
+	// One tick short of the cap: still deferred, still holding the checkpoint.
+	for i := 0; i < maxDeferralAttempts-1; i++ {
+		if err := p.tickUser(u, time.Now()); err != nil {
+			t.Fatalf("tickUser %d: %v", i, err)
+		}
+	}
+	if seenForTest(t, store, "11") {
+		t.Fatalf("message retired before the cap of %d attempts", maxDeferralAttempts)
+	}
+	if got := checkpointOf(t, store); got != "10" {
+		t.Fatalf("checkpoint = %q, want it held at %q while the message is deferred", got, "10")
+	}
+
+	// The tick that reaches the cap retires it.
+	if err := p.tickUser(u, time.Now()); err != nil {
+		t.Fatalf("capping tickUser: %v", err)
+	}
+	if !seenForTest(t, store, "11") {
+		t.Fatalf("expected the message to be retired once %d attempts were exhausted", maxDeferralAttempts)
+	}
+	if got := checkpointOf(t, store); got != "11" {
+		t.Fatalf("checkpoint = %q, want it released to %q once nothing is deferred", got, "11")
+	}
+	if attempts, err := store.DeferralAttempts("11"); err != nil || attempts != 0 {
+		t.Fatalf("DeferralAttempts after retirement = %d, %v; want 0, nil (row dropped)", attempts, err)
+	}
+
+	// Giving up has to be visible in the audit log, not just in the fact that
+	// the message stopped coming back.
+	var gaveUp bool
+	for _, d := range store.Decisions(50) {
+		if d.MessageID == "11" && d.Status == "failed" {
+			if strings.Contains(d.Detail, "gave up after") {
+				gaveUp = true
+			}
+		}
+	}
+	if !gaveUp {
+		t.Fatalf("expected a decision recording that the message was given up on, got %+v", store.Decisions(50))
+	}
+}
+
+// TestTickUser_FailedRuleActionDefersInsteadOfRetiring is the same contract for
+// the rules engine: an archive that never happened must not retire the message
+// with a decision claiming the rule was applied.
+func TestTickUser_FailedRuleActionDefersInsteadOfRetiring(t *testing.T) {
+	mail := &scriptedMailbox{
+		msgs: []imapadapter.Message{{ID: "7", Subject: "Weekly newsletter", Sender: "news@example.com"}},
+	}
+	mail.inboxActionErr = errors.New("imap: connection reset by peer")
+
+	p, u := newTickTestPoller(t, mail)
+	store := tickStore(t, p, u)
+
+	rulesStore, err := p.userRulesStore(u.ID)
+	if err != nil {
+		t.Fatalf("userRulesStore: %v", err)
+	}
+	if _, err := rulesStore.Upsert(rules.Rule{
+		Name:    "archive and stop",
+		Enabled: true,
+		Match: rules.MatchGroup{
+			Op:         "allof",
+			Conditions: []rules.Condition{{Field: "subject", Comparator: "contains", Value: "newsletter"}},
+		},
+		Actions: []rules.Action{{Type: "archive"}, {Type: "stop"}},
+	}); err != nil {
+		t.Fatalf("rules Upsert: %v", err)
+	}
+
+	if err := p.tickUser(u, time.Now()); err != nil {
+		t.Fatalf("tickUser: %v", err)
+	}
+
+	if seenForTest(t, store, "7") {
+		t.Fatal("the archive failed, so the message must not be retired as handled")
+	}
+	if got := checkpointOf(t, store); got != "" && got != "6" {
+		t.Fatalf("checkpoint = %q, want it held below the deferred message", got)
+	}
+	for _, d := range store.Decisions(50) {
+		if d.Status == "applied" {
+			t.Fatalf("recorded the rule as applied even though its action failed: %+v", d)
+		}
+	}
+}

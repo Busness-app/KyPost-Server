@@ -19,7 +19,7 @@ All code under `backend/internal/mailcache/`. Consumed by both `api/`
 
 - `Store` is instantiated per user directory (`mailcache.New(userStateDir)`),
   mirroring `state.Store`/`contacts.Store` — one file, `mailcache.json`,
-  sibling to `state.json`/`contacts.json`/`decisions.json` in
+  sibling to `state.db`/`contacts.json` in
   `$STATE_DIR/users/<userID>/`.
 - Every read and mutation re-reads `mailcache.json` from disk first
   (`refreshFromDiskLocked`), then writes atomically via
