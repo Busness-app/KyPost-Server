@@ -23,7 +23,8 @@ import {
   createRecoveryBackup,
   requireUnlockedKey,
   restoreRecoveryBackup,
-  wrapPrivateKey
+  wrapPrivateKey,
+  type RecoveryBackup
 } from "../lib/keyVault";
 import {
   lockPGPSession,
@@ -102,6 +103,11 @@ export function SecurityPage() {
   const [unlockOpen, setUnlockOpen] = useState(false);
   const [migratePassword, setMigratePassword] = useState("");
   const [migrateOpen, setMigrateOpen] = useState(false);
+  // Backing out a server-custody key before it becomes unrecoverable. Needs its
+  // own password prompt because export-legacy re-verifies the account
+  // credential, and its own open flag so it does not share the migrate form.
+  const [legacyBackupOpen, setLegacyBackupOpen] = useState(false);
+  const [legacyBackupPassword, setLegacyBackupPassword] = useState("");
 
   // Stale-envelope recovery: the stored PGP envelope is sealed under an OLDER
   // password than the account's, so nothing can open it with the current one.
@@ -368,6 +374,26 @@ export function SecurityPage() {
     }
   }
 
+  /**
+   * Writes a recovery backup to disk and reveals the secret that opens it.
+   *
+   * Shared by both custody modes, which differ only in where the armored key
+   * came from — the browser's own vault, or a one-time export of the copy the
+   * server still holds. The file format, the one-time secret and the warning
+   * that follows must not differ between them.
+   */
+  function saveRecoveryBackup(backup: RecoveryBackup, fingerprint: string, secret: string) {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(backup)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `kypost-pgp-recovery-${fingerprint.slice(0, 8)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    setRecoverySecret(secret);
+  }
+
   async function handleDownloadRecoveryBackup() {
     setPgpBusy(true);
     setPgpStatus("");
@@ -381,17 +407,50 @@ export function SecurityPage() {
         pgpIdentity.fingerprint,
         bootstrap.publicKey
       );
-      const url = URL.createObjectURL(new Blob([JSON.stringify(backup)], { type: "application/json" }));
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `kypost-pgp-recovery-${pgpIdentity.fingerprint.slice(0, 8)}.json`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      setRecoverySecret(secret);
+      saveRecoveryBackup(backup, pgpIdentity.fingerprint, secret);
     } catch (e) {
       setPgpStatus(`Backup failed: ${toErrorMessage(e, "unlock your key first")}`);
+    } finally {
+      setPgpBusy(false);
+    }
+  }
+
+  /**
+   * The same backup for a key the server still holds.
+   *
+   * A server-custody key is recoverable by an admin, so the backup buys less
+   * here than it does under client custody — but it is the only copy that
+   * survives the migration cliff. Migrating puts the key beyond the server's
+   * reach, and from that moment a password reset destroys it and every message
+   * ever encrypted to it, so the file has to exist BEFORE the migration, which
+   * is the one point at which no client-side vault exists to make it from.
+   *
+   * It goes through export-legacy rather than any new endpoint: that call
+   * already hands this browser the armored key after a fresh password, which is
+   * exactly what the migration flow above does with it, and it refuses once the
+   * account is client-protected. Nothing here widens what the server will give
+   * out. The key is wrapped under a one-time secret before it touches disk —
+   * a bare .asc download is deliberately not offered, because an unprotected
+   * private key in a downloads folder is the failure this whole page exists to
+   * prevent.
+   */
+  async function handleDownloadLegacyBackup(e: FormEvent) {
+    e.preventDefault();
+    if (!pgpIdentity) return;
+    setPgpBusy(true);
+    setPgpStatus("");
+    try {
+      const exported = await exportLegacyPGPKey(legacyBackupPassword);
+      const { backup, secret } = await createRecoveryBackup(
+        exported.privateKey,
+        pgpIdentity.fingerprint,
+        exported.publicKey
+      );
+      saveRecoveryBackup(backup, pgpIdentity.fingerprint, secret);
+      setLegacyBackupOpen(false);
+      setLegacyBackupPassword("");
+    } catch (err) {
+      setPgpStatus(`Backup failed: ${toErrorMessage(err, "check your password and try again")}`);
     } finally {
       setPgpBusy(false);
     }
@@ -1123,33 +1182,6 @@ export function SecurityPage() {
                       </div>
                     </form>
                   ) : null}
-                  {recoverySecret ? (
-                    <div className="sec-inline-form">
-                      <h4>Store this recovery secret</h4>
-                      <p className="sec-muted">
-                        The downloaded file is useless without this secret. KyPost does not store it. Anyone with both
-                        can decrypt your historical mail.
-                      </p>
-                      <p className="sec-fingerprint"><code>{recoverySecret}</code></p>
-                      <div className="sec-actions">
-                        <button
-                          type="button"
-                          className="sec-action-quiet"
-                          onClick={async () => {
-                            try {
-                              await navigator.clipboard.writeText(recoverySecret);
-                              setPgpStatus("Recovery secret copied.");
-                            } catch {
-                              setPgpStatus("Copy failed — select and copy the secret manually.");
-                            }
-                          }}
-                        >
-                          Copy secret
-                        </button>
-                        <button type="button" onClick={() => setRecoverySecret("")}>Done</button>
-                      </div>
-                    </div>
-                  ) : null}
                 </div>
               ) : pgpSession?.bootstrap?.migrationAvailable ? (
                 <div className="sec-section">
@@ -1165,6 +1197,55 @@ export function SecurityPage() {
                   <p className="sec-muted">
                     After migrating, an admin password reset will make the key unrecoverable — export a backup first.
                   </p>
+                  {legacyBackupOpen ? (
+                    <form
+                      onSubmit={(e) => void handleDownloadLegacyBackup(e)}
+                      className="auth-form sec-inline-form"
+                    >
+                      <h4>Confirm your password</h4>
+                      <p className="sec-muted">
+                        The key is wrapped in this browser under a one-time secret shown after the download, so the
+                        file is safe to keep in a password manager or a cloud drive.
+                      </p>
+                      <label>
+                        <div>Account password</div>
+                        <input
+                          type="password"
+                          autoComplete="current-password"
+                          value={legacyBackupPassword}
+                          onChange={(e) => setLegacyBackupPassword(e.target.value)}
+                          required
+                        />
+                      </label>
+                      <div className="sec-actions">
+                        <button type="submit" disabled={pgpBusy || legacyBackupPassword.length === 0}>
+                          {pgpBusy ? "Preparing…" : "Download backup"}
+                        </button>
+                        <button
+                          type="button"
+                          className="sec-action-quiet"
+                          onClick={() => {
+                            setLegacyBackupOpen(false);
+                            setLegacyBackupPassword("");
+                          }}
+                          disabled={pgpBusy}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <div className="sec-actions">
+                      <button
+                        type="button"
+                        className="sec-action-quiet"
+                        onClick={() => setLegacyBackupOpen(true)}
+                        disabled={pgpBusy}
+                      >
+                        Download recovery backup
+                      </button>
+                    </div>
+                  )}
                   {migrateOpen ? (
                     <form
                       onSubmit={(e) => void handleMigrateToClientProtection(e)}
@@ -1205,6 +1286,38 @@ export function SecurityPage() {
                       </button>
                     </div>
                   )}
+                </div>
+              ) : null}
+              {/*
+                Outside the custody branches on purpose: both of them produce a
+                backup, and both owe the user the secret that opens it. A copy
+                per branch is a copy that gets fixed in one place.
+              */}
+              {recoverySecret ? (
+                <div className="sec-inline-form">
+                  <h4>Store this recovery secret</h4>
+                  <p className="sec-muted">
+                    The downloaded file is useless without this secret. KyPost does not store it. Anyone with both
+                    can decrypt your historical mail.
+                  </p>
+                  <p className="sec-fingerprint"><code>{recoverySecret}</code></p>
+                  <div className="sec-actions">
+                    <button
+                      type="button"
+                      className="sec-action-quiet"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(recoverySecret);
+                          setPgpStatus("Recovery secret copied.");
+                        } catch {
+                          setPgpStatus("Copy failed — select and copy the secret manually.");
+                        }
+                      }}
+                    >
+                      Copy secret
+                    </button>
+                    <button type="button" onClick={() => setRecoverySecret("")}>Done</button>
+                  </div>
                 </div>
               ) : null}
               <p className="sec-muted">

@@ -227,7 +227,14 @@ Implemented:
   `POST /api/mail/send-pgp`, `GET /api/mail/pgp-payload`.
   `POST /api/pgp/identity/export-legacy` is **session-only** on purpose: it
   is the one endpoint that returns a private key, and it re-verifies the
-  account password, which a device secret is not.
+  account password, which a device secret is not. It has two callers in the
+  web UI, both in `SecurityPage.tsx` and both one-shot: the migration to
+  client custody, and the recovery backup a server-custody account takes
+  before that migration makes the key unrecoverable. Neither writes the
+  armored key anywhere — migration rewraps it under the account password and
+  uploads the envelope, the backup wraps it under a one-time recovery secret
+  and hands the file to the browser. There is no bare `.asc` download and
+  should not be one.
 - The server derives fingerprint and key ID from the uploaded public key
   rather than trusting the client's claim — otherwise a client could get its
   own key published under someone else's identity through WKD or Autocrypt.

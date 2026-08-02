@@ -6,7 +6,7 @@
 // what it returns — see lib/authSecret.ts for why the password itself must not
 // be transmitted.
 
-import { getJSON } from "./client";
+import { getJSON, postJSON } from "./client";
 import { defaultIterations, deriveAuthSecret, type LoginParams } from "../lib/authSecret";
 
 /**
@@ -78,4 +78,23 @@ export async function deriveNewCredential(
   iterations: number
 ): Promise<string> {
   return deriveAuthSecret(password, { salt, iterations });
+}
+
+/**
+ * Re-proves the account credential and the second factor for the session that
+ * already exists. Throws on any failure; the caller shows the message.
+ *
+ * `code` is a TOTP code, or a one-time recovery code in its place, and is
+ * ignored by the server for an account without TOTP. Both credential forms go
+ * up because the server picks which to check from what the ACCOUNT stores — see
+ * lib/authSecret.ts.
+ *
+ * This authorises nothing on its own. It answers "is the person at this
+ * keyboard the account owner, right now", which is what a screen full of key
+ * material wants to know before it draws itself; the operations behind that
+ * screen re-verify for themselves regardless.
+ */
+export async function reauthenticate(password: string, code: string): Promise<void> {
+  const { authSecret } = await deriveCredential("", password);
+  await postJSON("/api/auth/step-up", { password, authSecret, code });
 }

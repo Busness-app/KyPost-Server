@@ -27,6 +27,7 @@ import { RulesPage } from "./pages/RulesPage";
 import { SecurityPage } from "./pages/SecurityPage";
 import { TuningPage } from "./pages/TuningPage";
 import { UsersPage } from "./pages/UsersPage";
+import { ReauthGate, clearReauth } from "./components/ReauthGate";
 import agplLicenseText from "./agpl-3.0.txt?raw";
 
 import { APP_VERSION, settingsNavItems } from "./app/navigation";
@@ -212,6 +213,11 @@ export function App() {
       // Drop the unwrapped private key with the session. Leaving it in memory
       // after logout would let the next person at this browser read mail.
       clearPGPSession();
+      // Same reasoning for the security page's re-auth: it is keyed to the
+      // username, so a second sign-in as someone else could not inherit it, but
+      // signing back in as the SAME user within the window would have walked
+      // straight past a gate whose whole subject is who is sitting here.
+      clearReauth();
       // Drop the autosaved compose buffer with the session, for the same
       // reason: the next person at this browser must not read it.
       if (auth?.userId) {
@@ -1228,7 +1234,14 @@ export function App() {
           <Route path="/health" element={protect(<HealthPage />)} />
           <Route path="/config" element={protect(<ConfigPage />)} />
           <Route path="/notifications" element={protect(<NotificationsPage />)} />
-          <Route path="/security" element={protect(<SecurityPage />)} />
+          <Route
+            path="/security"
+            element={protect(
+              <ReauthGate what="your security settings">
+                <SecurityPage />
+              </ReauthGate>
+            )}
+          />
           <Route path="/rules" element={protect(<RulesPage />)} />
           <Route path="/contacts" element={protect(<ContactsPage />)} />
           <Route path="/tuning" element={protect(<TuningPage />)} />
