@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -212,7 +213,7 @@ func pgpEnvelopePayload(attachments []goimap.Attachment) string {
 		if !IsPGPEnvelopePartType(a.MimeType) {
 			return ""
 		}
-		if pgpcrypto.IsPGPMessage(string(a.Content)) {
+		if IsArmoredPGPMessage(a.Content) {
 			if payload == "" {
 				payload = string(a.Content)
 			}
@@ -227,12 +228,49 @@ func pgpEnvelopePayload(attachments []goimap.Attachment) string {
 	return payload
 }
 
+// armoredMessagePrefix and armoredSignaturePrefix open the two armored blocks
+// this package identifies. Kept as byte slices because every check runs against
+// attachment content, which is up to mailmsg.MaxInboundMessageBytes.
+var (
+	armoredMessagePrefix   = []byte("-----BEGIN PGP MESSAGE-----")
+	armoredSignaturePrefix = []byte("-----BEGIN PGP SIGNATURE-----")
+	pgpVersionPrefix       = []byte("version:")
+)
+
+// IsArmoredPGPMessage reports whether content is an armored OpenPGP message.
+// Exported so internal/api's attachment endpoints decide this the same way the
+// envelope detector does; two spellings of "is this ciphertext" is how the
+// listing and the download came to disagree in the first place.
+//
+// The prefix test is a necessary condition for pgpcrypto.IsPGPMessage — its
+// regexp is anchored with ^ and no (?m) flag, so the armor header must be the
+// first bytes — and it is checked first for a reason that is not micro-
+// optimization. IsPGPMessage takes a string, so calling it means COPYING the
+// whole attachment (up to mailmsg.MaxInboundMessageBytes), and it compiles its
+// regexp on every call. This runs per attachment, per message, on every poll
+// tick, where nearly every part is an ordinary file that fails at byte 0. The
+// guard keeps the copy and the compile for the parts that can actually match,
+// and the delegation keeps the END-marker check, so the verdict is unchanged.
+func IsArmoredPGPMessage(content []byte) bool {
+	if !bytes.HasPrefix(content, armoredMessagePrefix) {
+		return false
+	}
+	return pgpcrypto.IsPGPMessage(string(content))
+}
+
 // isPGPVersionPart matches the RFC 3156 control part. goimap normally drops it
 // (enmime files it under OtherParts), so this exists for the servers that
 // present it as an attachment rather than as an assumption that they do not.
+//
+// Byte-wise and case-insensitive against a bounded prefix: the previous form
+// built a whole lowercased copy of a part that can be megabytes, to compare its
+// first eight characters.
 func isPGPVersionPart(a goimap.Attachment) bool {
-	body := strings.ToLower(strings.TrimSpace(string(a.Content)))
-	return strings.HasPrefix(body, "version:")
+	body := bytes.TrimSpace(a.Content)
+	if len(body) < len(pgpVersionPrefix) {
+		return false
+	}
+	return bytes.EqualFold(body[:len(pgpVersionPrefix)], pgpVersionPrefix)
 }
 
 // pgpDetectSignature scans attachments for an armored OpenPGP detached signature
@@ -241,7 +279,10 @@ func isPGPVersionPart(a goimap.Attachment) bool {
 // callers check for this alongside the body rather than only when it is empty.
 func pgpDetectSignature(attachments []goimap.Attachment) string {
 	for _, a := range attachments {
-		if strings.HasPrefix(strings.TrimSpace(string(a.Content)), "-----BEGIN PGP SIGNATURE-----") {
+		// Byte-wise: this runs on every attachment of every message with a
+		// readable body, and string(a.Content) copies the whole part to look at
+		// its first 29 bytes.
+		if bytes.HasPrefix(bytes.TrimSpace(a.Content), armoredSignaturePrefix) {
 			return string(a.Content)
 		}
 	}

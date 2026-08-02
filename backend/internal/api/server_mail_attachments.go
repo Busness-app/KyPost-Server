@@ -24,13 +24,19 @@ func attachmentRequestParams(r *http.Request) (mailbox string, uid int, err erro
 	return mailbox, uid, nil
 }
 
-// armoredPGPPrefix opens an armored OpenPGP message. Matching the prefix is how
-// the IMAP adapter detects an encrypted body too (imap.pgpEnvelopePayload), kept
-// the same here so the two cannot disagree about what counts as ciphertext.
-const armoredPGPPrefix = "-----BEGIN PGP MESSAGE-----"
-
+// isArmoredPGPMessage delegates to the IMAP adapter's check rather than
+// spelling the prefix out again. This file used to carry its own copy with a
+// comment claiming the two were "kept the same" — they were not: the adapter's
+// test is anchored at byte 0 (gopenpgp's regexp is ^-anchored) while this one
+// trimmed leading whitespace first, so a part could be ciphertext here and not
+// there. Two spellings of "is this ciphertext" is how the listing and the
+// download came to disagree; there is now one.
+//
+// It is also byte-wise. The previous form converted the whole attachment to a
+// string to look at its first 27 bytes, which for a 25 MiB part is a 25 MiB
+// copy on every list and every download.
 func isArmoredPGPMessage(content []byte) bool {
-	return strings.HasPrefix(strings.TrimSpace(string(content)), armoredPGPPrefix)
+	return imapadapter.IsArmoredPGPMessage(content)
 }
 
 // looksLikeEncryptedEnvelope reports whether a message's outer parts have the

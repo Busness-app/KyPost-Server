@@ -156,6 +156,45 @@ func TestIsPGPEnvelopePartType(t *testing.T) {
 	}
 }
 
+// IsArmoredPGPMessage is the single definition of "is this ciphertext" — the
+// api attachment endpoints call it rather than matching the prefix themselves.
+// The prefix guard in front of gopenpgp must not change any verdict: gopenpgp's
+// regexp is ^-anchored and also requires the END marker.
+func TestIsArmoredPGPMessage(t *testing.T) {
+	if !IsArmoredPGPMessage([]byte(armoredCiphertext)) {
+		t.Error("a complete armored message was not recognised")
+	}
+	// Header without a terminator is not a message. The prefix guard alone
+	// would have said yes; delegating to gopenpgp is what keeps this false.
+	if IsArmoredPGPMessage([]byte("-----BEGIN PGP MESSAGE-----\r\n\r\nhQIMA0\r\n")) {
+		t.Error("an unterminated armor block was accepted")
+	}
+	// Anchored at byte 0, matching gopenpgp. Pinned so the asymmetry that used
+	// to exist between this and the api copy cannot come back unnoticed.
+	if IsArmoredPGPMessage([]byte("   \r\n" + armoredCiphertext)) {
+		t.Error("armor behind leading whitespace was accepted; the check is meant to be anchored")
+	}
+	if IsArmoredPGPMessage([]byte("just a file")) {
+		t.Error("ordinary content was called ciphertext")
+	}
+	if IsArmoredPGPMessage(nil) {
+		t.Error("empty content was called ciphertext")
+	}
+}
+
+func TestIsPGPVersionPart(t *testing.T) {
+	for _, body := range []string{"Version: 1\r\n", "version: 1", "  VERSION: 1  "} {
+		if !isPGPVersionPart(goimap.Attachment{Content: []byte(body)}) {
+			t.Errorf("version part %q was not recognised", body)
+		}
+	}
+	for _, body := range []string{"", "Ver", "not a version part"} {
+		if isPGPVersionPart(goimap.Attachment{Content: []byte(body)}) {
+			t.Errorf("%q was treated as the version part", body)
+		}
+	}
+}
+
 func describe(attachments []goimap.Attachment) string {
 	parts := make([]string, 0, len(attachments))
 	for _, a := range attachments {
