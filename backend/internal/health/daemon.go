@@ -2,6 +2,7 @@ package health
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 )
@@ -132,6 +133,14 @@ func (r DaemonReport) Age(now time.Time) time.Duration {
 // native push — so "false" there is the absence of an observation, not an
 // observation of health, and OR-ing the two would let it mask the daemon's.
 func MergeDaemonReport(st Status, raw string, now time.Time) Status {
+	// st is the caller's value and every branch below appends a reason to it.
+	// Appending to a slice with spare capacity writes into the array behind it,
+	// which this function does not own — so it is copied first. Service.
+	// GetStatus already clones on the way out, and this does not rely on that:
+	// a pure function that quietly scribbles on its input is a trap for whoever
+	// next calls it with a Status from somewhere else.
+	st.FailureReason = slices.Clone(st.FailureReason)
+
 	report, ok := DecodeDaemonReport(raw)
 	if !ok {
 		st.DaemonStale = true
