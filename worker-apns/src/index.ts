@@ -42,6 +42,8 @@ import {
   KEY_PREFIX,
   bearer,
   checkMinuteLimit,
+  checkDailyBudget,
+  secondsUntilUTCMidnight,
   claimTokenForSend,
   createRelayFetchHandler,
   fail,
@@ -164,6 +166,23 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return response;
   }
 
+  // Relay-wide day tier, in the same window and for the same reason as the
+  // minute tier above: before the claim, because the claim is a durable write.
+  // The minute limiter buckets per key, so it bounds how fast one key sends and
+  // nothing about how much the relay spends in total — which, with self-issued
+  // keys, is the number an operator's APNs quota actually cares about.
+  const budget = await checkDailyBudget(rc);
+  if (!budget.allowed) {
+    rc.log({ level: "warn", event: "send.denied", reason: "daily_budget", keyId: record.id, window: "day" });
+    const response = fail(rc, 429, "relay daily budget exhausted", {
+      window: "day",
+      limit: budget.limit,
+      retryAfterSeconds: secondsUntilUTCMidnight(),
+    });
+    response.headers.set("Retry-After", String(secondsUntilUTCMidnight()));
+    return response;
+  }
+
   const claim = await claimTokenForSend(rc, token, record.id);
   if (!claim.allowed) {
     rc.log({ level: "warn", event: "send.denied", reason: claim.logReason, keyId: record.id });
@@ -207,7 +226,19 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return json({ stale: true, requestId: rc.requestId }, 410);
   }
   settle(false);
-  rc.log({ level: "error", event: "send.apns_failed", keyId: record.id, apnsStatus: result.status });
+  // Carry Apple's reason, not just the status. The 400s that name a device token
+  // (BadDeviceToken, DeviceTokenNotForTopic) are relay misconfiguration and no
+  // longer retire the device (see isStaleResponse) — which means this log line is
+  // now the only place an operator learns that APNS_TOPIC or APNS_ENVIRONMENT is
+  // wrong, rather than finding out from a fleet of unpaired phones. The reason is
+  // Apple's own short enum, so it carries no device or account data.
+  rc.log({
+    level: "error",
+    event: "send.apns_failed",
+    keyId: record.id,
+    apnsStatus: result.status,
+    apnsDetail: result.detail.slice(0, 200),
+  });
   return failDelivery(rc);
 }
 

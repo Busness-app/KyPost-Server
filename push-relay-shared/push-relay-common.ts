@@ -37,6 +37,15 @@ export interface CommonEnv {
    * above checkMinuteLimit, whose fail-closed behaviour depends on it.
    */
   RATE_LIMIT_PER_MINUTE?: string; // display only; default 10
+  /**
+   * Relay-wide ceiling on sends per UTC day, ENFORCED via the coordinator's
+   * spendDailyBudget. Unset means unmetered, which is what a deployment that
+   * never configures it keeps getting; "0" is a real limit of zero.
+   *
+   * This is the aggregate tier the single-tier note above says is missing. It
+   * is not per-key on purpose — see checkDailyBudget.
+   */
+  RELAY_DAILY_BUDGET?: string;
   /** Public self-registration (`POST /register`). "true" opens it; default closed. */
   REGISTRATION_ENABLED?: string;
   /**
@@ -490,6 +499,80 @@ export async function checkMinuteLimit(
 }
 
 /**
+ * The Durable Object instance holding the relay-wide daily budget. One fixed
+ * name, because the budget is one shared pool — see spendDailyBudget.
+ */
+const BUDGET_INSTANCE = "relay-daily-budget";
+
+/**
+ * Seconds until the budget resets, for Retry-After. The counter rolls at the
+ * UTC day boundary, so this is a real time at which the caller's next attempt
+ * can succeed rather than a guess — which is what makes it worth sending
+ * instead of a fixed 60.
+ */
+export function secondsUntilUTCMidnight(now: number = Date.now()): number {
+  const midnight = Date.UTC(
+    new Date(now).getUTCFullYear(),
+    new Date(now).getUTCMonth(),
+    new Date(now).getUTCDate() + 1,
+  );
+  return Math.max(1, Math.ceil((midnight - now) / 1000));
+}
+
+/**
+ * Draw one send from the relay-wide daily budget.
+ *
+ * This is the upper tier the single-tier note above asks for, built the way
+ * that note specifies: a Durable Object counter rather than a KV
+ * read-modify-write, so it does not reintroduce the write pressure that made
+ * the previous rolling limits the outage.
+ *
+ * It is AGGREGATE, not per-key. The per-minute limiters bucket per key and per
+ * registering IP, and with public registration open neither is a scarce
+ * resource: an actor who wants a second bucket registers a second key from a
+ * second address. What is scarce is the operator's FCM/APNs quota, which every
+ * key spends from together — so the ceiling on it is counted together.
+ *
+ * Unset RELAY_DAILY_BUDGET means unmetered, which is what every existing
+ * deployment gets. An operator opts into the ceiling; nobody wakes up to find
+ * their working relay capped. "0" is a real limit of zero (a closed relay),
+ * not an unset value — the inversion resolveLimit already refuses elsewhere.
+ *
+ * Fails CLOSED when configured but uncountable, for the same reason
+ * checkMinuteLimit does: once a budget exists it is the only thing bounding
+ * daily volume, and "the binding drifted" is indistinguishable from "there is
+ * no binding" from out here.
+ */
+export async function checkDailyBudget(
+  rc: RequestContext,
+  now: number = Date.now(),
+): Promise<{ allowed: boolean; used: number; limit: number }> {
+  const raw = (rc.env.RELAY_DAILY_BUDGET ?? "").trim();
+  if (raw === "") {
+    return { allowed: true, used: 0, limit: 0 };
+  }
+  const limit = resolveLimit(raw, 0);
+
+  const binding = rc.env.RELAY_COORDINATOR;
+  if (!binding || typeof binding.idFromName !== "function") {
+    rc.log({ level: "error", event: "budget.binding_missing" });
+    return { allowed: false, used: 0, limit };
+  }
+
+  try {
+    const stub = binding.get(binding.idFromName(BUDGET_INSTANCE));
+    const result = await stub.spendDailyBudget(limit, now);
+    if (!result.allowed) {
+      rc.log({ level: "warn", event: "budget.exhausted", used: result.used, limit, day: result.day });
+    }
+    return { allowed: result.allowed, used: result.used, limit };
+  } catch (err) {
+    rc.log({ level: "error", event: "budget.error", error: String((err as Error).message ?? err) });
+    return { allowed: false, used: 0, limit };
+  }
+}
+
+/**
  * Record one accepted send to Analytics Engine (off the KV write path). Query
  * lifetime totals per key later via the WAE SQL API. Best-effort: never throws.
  */
@@ -750,6 +833,24 @@ export function registrationEnabled(env: CommonEnv): boolean {
  * re-register. That bounds only *concurrent* keys per IP, so it is paired with a
  * per-IP minute-tier rate limit (REGISTER_RATE_LIMITER) on top of the per-key
  * rolling limits and the REGISTRATION_ENABLED kill-switch.
+ *
+ * KNOWN LIMIT, stated rather than implied: an IP is not an identity. Two
+ * self-hosters behind one CGNAT address take each other's key away by
+ * registering, and one actor with many addresses accumulates many permanent
+ * keys. Neither is fixed here, because both need a durable identity this
+ * endpoint does not have — an invite code, an operator approval step, or a
+ * credential that survives an address change — and inventing one silently
+ * inside the registration path would be worse than the gap.
+ *
+ * What IS bounded, as of RELAY_DAILY_BUDGET (see checkDailyBudget), is the thing
+ * the accumulation was worth doing: the relay's total spend against the
+ * operator's provider quota is now one shared daily counter, so extra keys no
+ * longer buy extra budget. The remaining exposure from key accumulation is
+ * denial-of-service against that shared pool, not unbounded provider cost.
+ *
+ * The CGNAT collision has no mitigation here at all. An operator running a relay
+ * for users who may share an address should keep REGISTRATION_ENABLED off and
+ * issue keys out of band.
  *
  * "One" is enforced by the IP's RelayCoordinator, not by a KV read followed by a
  * KV write. As four separate KV operations — look up the prior key, revoke it,

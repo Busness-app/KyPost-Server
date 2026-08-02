@@ -102,22 +102,33 @@ async function getAccessToken(config: FcmConfig, cache: KVNamespace): Promise<st
 }
 
 /**
- * Detect FCM's "token no longer registered" signal. Mirrors the Go backend's
- * isFCMStaleResponse logic.
+ * Whether FCM said this device token is gone.
+ *
+ * A true here leaves the relay as HTTP 410 and the backend DELETES the device
+ * registration (processor/push_dispatch.go). A device row carries that device's
+ * authentication secret, not just a push token, so the account loses push 2FA
+ * and has to pair again by hand. Nothing on the server side undoes it.
+ *
+ * The rule is therefore status AND reason, never a substring on its own:
+ * FCM v1 reports a retired token as HTTP 404 `NOT_FOUND` with errorCode
+ * `UNREGISTERED`. Anything else — `INVALID_ARGUMENT` from a token belonging to
+ * another Firebase project, `SENDER_ID_MISMATCH`, an auth failure, a proxy's
+ * HTML error page that happens to contain the word — is a delivery failure,
+ * which costs a retry and a red relay health status instead of a fleet of
+ * unpaired devices.
+ *
+ * This mirrors isRelayStaleResponse in processor/native_sender.go, which was
+ * narrowed for exactly this reason: matching "four substrings anywhere in an
+ * 8 KiB body at any non-2xx status, with nothing tying the response to the token
+ * that was sent" handed the upstream far more authority than delivering a
+ * notification requires. The same argument applies one hop earlier, here.
  */
-function isStaleResponse(status: number, response: string): boolean {
+export function isStaleResponse(status: number, response: string): boolean {
+  if (status !== 404) {
+    return false;
+  }
   const lower = response.toLowerCase();
-  if (
-    lower.includes("unregistered") ||
-    lower.includes("notregistered") ||
-    lower.includes("registration-token-not-registered")
-  ) {
-    return true;
-  }
-  if (status === 404 && lower.includes("requested entity was not found")) {
-    return true;
-  }
-  return false;
+  return lower.includes("unregistered") || lower.includes("notregistered");
 }
 
 /**

@@ -225,9 +225,26 @@ func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainB
 	if err != nil {
 		return fmt.Errorf("create pickup record: %w", err)
 	}
+	// From here on, every failure return has to take the record with it.
+	//
+	// The record exists before the link does and long before the link is
+	// delivered, so any failure below leaves a live seven-day record for a link
+	// that reached nobody — unopenable, unresendable, and holding one of the
+	// sender's maxOutstandingPickupsPerUser slots the whole time. An SMTP outage
+	// plus an ordinary amount of retrying used to spend the entire cap on those,
+	// after which real pickup sends were refused for a week.
+	discard := func(wrapped error) error {
+		if derr := s.pickupStore.Discard(userID, id); derr != nil {
+			// Worth knowing about — it means a slot is leaking — but the send
+			// failure is what the caller needs reported.
+			s.logger.Error("failed to discard undelivered pickup record", "id", id, "error", derr.Error())
+		}
+		return wrapped
+	}
+
 	token, _, err := s.createPairingToken(id, pairingPurposePickupLink, pickupLinkTTL)
 	if err != nil {
-		return fmt.Errorf("create pickup token: %w", err)
+		return discard(fmt.Errorf("create pickup token: %w", err))
 	}
 
 	link := fmt.Sprintf("%s/pickup/%s?t=%s", s.pickupBaseURL(), id, token)
@@ -247,11 +264,28 @@ func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainB
 	}.Build()
 
 	recipients := []string{recipient}
+	var sendErr error
 	if smtpPort == 465 {
-		return mailmsg.SMTPSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, notice, 45*time.Second)
+		sendErr = mailmsg.SMTPSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, notice, 45*time.Second)
+	} else {
+		auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
+		sendErr = mailmsg.SMTPSendWithTimeout(addr, auth, from, recipients, notice, 45*time.Second)
 	}
-	auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
-	return mailmsg.SMTPSendWithTimeout(addr, auth, from, recipients, notice, 45*time.Second)
+	if sendErr != nil {
+		// Not every failure means the link went nowhere. If the server accepted
+		// the message and only the session teardown failed, the recipient has
+		// the link in their inbox — deleting the record would hand them a 410
+		// for a message they were told about, with no way to ask for it again.
+		// A leaked quota slot is recoverable; that is not. Keep the record and
+		// let the sweeper collect it if the link really is never used.
+		if errors.Is(sendErr, mailmsg.ErrSMTPAcceptedThenFailed) {
+			s.logger.Error("pickup link accepted by the smtp server but the session failed; keeping the record",
+				"recipient", recipient, "error", sendErr.Error())
+			return sendErr
+		}
+		return discard(sendErr)
+	}
+	return nil
 }
 
 // pickupBaseURL is the externally-reachable base URL used to build pickup

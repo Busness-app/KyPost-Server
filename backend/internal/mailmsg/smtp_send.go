@@ -180,6 +180,23 @@ func SMTPSendWithTimeout(addr string, auth smtp.Auth, from string, recipients []
 	return writeSMTPMessage(client, from, recipients, msg)
 }
 
+// ErrSMTPAcceptedThenFailed marks a send that the receiving server ACCEPTED
+// before the session failed. Wrapped into the returned error so callers can
+// tell it apart from a message that never got in.
+//
+// It exists for callers that undo work when a send fails. The pickup path
+// deletes its stored record on failure, so that a link nobody received does not
+// hold one of the sender's quota slots for seven days — but deleting on this
+// error would throw away a message whose "you have mail" link is already in the
+// recipient's inbox, leaving them a 410 and no way to ask for it again. Losing
+// a quota slot is an annoyance; losing the message is not.
+//
+// The window is small and specific: net/smtp's data writer returning nil from
+// Close() means the server answered 250 to the body, and QUIT is sent after
+// that. Anything that breaks in between is a delivered message reported as a
+// failure.
+var ErrSMTPAcceptedThenFailed = errors.New("smtp: message was accepted but the session did not close cleanly")
+
 // writeSMTPMessage runs the MAIL/RCPT/DATA/QUIT half of a send, shared by
 // the STARTTLS and implicit-TLS paths.
 func writeSMTPMessage(client *smtp.Client, from string, recipients []string, msg []byte) error {
@@ -199,10 +216,16 @@ func writeSMTPMessage(client *smtp.Client, from string, recipients []string, msg
 		_ = writer.Close()
 		return err
 	}
+	// Close() returning nil is the acceptance: the server has answered 250 to
+	// the message body. Everything after this point is teardown, and a failure
+	// in teardown does not un-deliver the message.
 	if err := writer.Close(); err != nil {
 		return err
 	}
-	return client.Quit()
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("%w: %w", ErrSMTPAcceptedThenFailed, err)
+	}
+	return nil
 }
 
 // SMTPSendWithImplicitTLS delivers msg over an implicit-TLS (port 465 style)

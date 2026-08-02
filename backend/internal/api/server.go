@@ -554,7 +554,10 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// blob, and the key travels in the link fragment it never receives.
 	// See pickup_client_sealed.go.
 	mux.HandleFunc("POST /pickup/{id}/open", withTokenAuth(s.handlePickupOpen))
-	mux.HandleFunc("GET /pickup/{id}/blob", withTokenAuth(s.handlePickupBlob))
+	// POST, matching /open above and for the same reason: this is the call that
+	// burns the message, so it must not be reachable by a crawler, a prefetch,
+	// a link-preview fetch, or a HEAD probe.
+	mux.HandleFunc("POST /pickup/{id}/blob", withTokenAuth(s.handlePickupBlob))
 	mux.HandleFunc("POST /api/pgp/pickup", withUploadDeadline(s.withMailAuth(s.handlePickupCreate)))
 }
 

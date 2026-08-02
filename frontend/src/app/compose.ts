@@ -53,3 +53,48 @@ export function keylessRecipientsFrom409(error: unknown): string[] | null {
   return list.filter((item): item is string => typeof item === "string");
 }
 
+
+// --- partial delivery of a client-side encrypted send -----------------------
+
+/**
+ * Mails one sealed pickup link per keyless recipient, and reports which ones
+ * failed instead of throwing on the first.
+ *
+ * This runs AFTER the keyed ciphertext has already been posted and delivered,
+ * which is what makes the distinction matter. Throwing here used to abandon
+ * every recipient after the failing one and surface a bare "send failed" — so
+ * the user retried, and the retry delivered the keyed copy a second time while
+ * the recipients who had been skipped still got nothing. Neither half of that
+ * is recoverable by the caller, so neither is treated as an exception: every
+ * address is attempted, and what did not go out comes back as data.
+ */
+export async function deliverSealedPickupLinks(
+  addresses: string[],
+  send: (address: string) => Promise<void>
+): Promise<string[]> {
+  const failed: string[] = [];
+  for (const address of addresses) {
+    try {
+      await send(address);
+    } catch {
+      failed.push(address);
+    }
+  }
+  return failed;
+}
+
+/** Joins the non-empty warnings a single send can produce. */
+export function combineWarnings(...parts: string[]): string {
+  return parts.filter((p) => p.trim() !== "").join("; ");
+}
+
+/**
+ * Describes the secure links that never went out. Wording mirrors the server's
+ * partialDeliveryWarning so the two send paths read the same, and it names the
+ * addresses because the user's only recovery is to reach those people another
+ * way — a count alone would not tell them who.
+ */
+export function secureLinkWarning(failed: string[], total: number): string {
+  if (failed.length === 0) return "";
+  return `${failed.length} of ${total} secure links could not be sent: ${failed.join(", ")}`;
+}

@@ -40,6 +40,10 @@ const CONFIRMED_KEY = "confirmed";
 const INFLIGHT_KEY = "inflight";
 /** When the current claim was taken (ms epoch), for the caller's takeover guard. */
 const CLAIMED_AT_KEY = "claimedAt";
+/** UTC day (YYYY-MM-DD) the relay-wide budget count below belongs to. */
+const BUDGET_DAY_KEY = "budgetDay";
+/** Sends drawn from the relay-wide budget during BUDGET_DAY_KEY. */
+const BUDGET_USED_KEY = "budgetUsed";
 
 export interface ClaimTokenOptions {
   /** The key attempting to claim. */
@@ -246,5 +250,48 @@ export class RelayCoordinator extends DurableObject {
    */
   async confirmRegistrationIp(keyId: string): Promise<boolean> {
     return (await this.ctx.storage.get<string>(OWNER_KEY)) === keyId;
+  }
+
+  /**
+   * Draw one unit from the relay-wide daily budget, returning whether it was
+   * available. Called on ONE well-known instance, so the count is aggregate
+   * across every key and every IP.
+   *
+   * Aggregate is the point. The per-minute limiters bucket per key and per
+   * registering IP, which bounds burst rate but not daily volume — and with
+   * public registration open, a caller who wants more buckets simply registers
+   * more keys. The resource actually being spent (the operator's FCM/APNs
+   * quota) is one shared pool, so the ceiling on it has to be one shared
+   * counter, or it is not a ceiling.
+   *
+   * The counter resets on the UTC day boundary rather than on a rolling window:
+   * a rolling window needs the timestamps of every send in it, and this needs
+   * two integers. The cost is that a day's budget can be spent in its first
+   * minute; the minute limiter is what bounds that shape, and the two together
+   * are what the note in push-relay-common.ts asks for.
+   *
+   * An over-budget call does NOT increment. A rejected caller retrying in a
+   * loop would otherwise push the count arbitrarily far past the limit, which
+   * changes nothing while the day lasts but makes the counter useless as a
+   * report of what was actually spent.
+   */
+  async spendDailyBudget(limit: number, now: number): Promise<{ allowed: boolean; used: number; day: string }> {
+    const day = new Date(now).toISOString().slice(0, 10);
+    const storedDay = await this.ctx.storage.get<string>(BUDGET_DAY_KEY);
+    const used = storedDay === day ? (await this.ctx.storage.get<number>(BUDGET_USED_KEY)) ?? 0 : 0;
+
+    if (used >= limit) {
+      // Persist the day rollover even on a refusal, so the first call of a new
+      // day that happens to be over an exhausted previous day's count still
+      // lands on a fresh counter.
+      if (storedDay !== day) {
+        await this.ctx.storage.put({ [BUDGET_DAY_KEY]: day, [BUDGET_USED_KEY]: 0 });
+      }
+      return { allowed: false, used, day };
+    }
+
+    const next = used + 1;
+    await this.ctx.storage.put({ [BUDGET_DAY_KEY]: day, [BUDGET_USED_KEY]: next });
+    return { allowed: true, used: next, day };
   }
 }
