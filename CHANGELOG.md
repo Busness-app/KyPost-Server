@@ -20,6 +20,18 @@ non-prerelease version.
   and uploads only a new account-password-wrapped envelope; the server never
   receives the recovery secret or plaintext private key.
 
+- **Server-held PGP keys can be backed up too.** The recovery backup was wired
+  only to client-protected identities, because it is built from the key held in
+  the browser and a server-custody account never has one there. That left the
+  one group who most needs a file without a way to make it: migrating to
+  end-to-end puts the key beyond the server's reach, and from that moment an
+  admin password reset destroys it and every message ever encrypted to it. The
+  legacy path now offers the same download, through the existing one-time key
+  export it already uses to migrate, producing the identical browser-encrypted
+  file and one-time secret. A bare `.asc` download is deliberately still not
+  offered — an unprotected private key in a downloads folder is what the format
+  exists to avoid.
+
 - **The inbox has an encryption column.** Every encrypted message now carries a
   padlock in its own column, in both the inbox and search results, whether or
   not it opened — previously the marking lived inside the Subject cell and
@@ -54,6 +66,17 @@ non-prerelease version.
   rejected, with the reason and the remedy logged, and those three features stay
   disabled rather than being signed with something forgeable. Only deployments
   that set the variable by hand are affected.
+
+- **The Security page re-authenticates before it draws.** It lists key
+  fingerprints and paired devices and hands out a backup of the private key, and
+  a session cookie only ever proved that somebody signed in on this browser
+  once. Opening it now asks for the account password and, on an account with
+  two-factor auth, a TOTP or recovery code — verified by the server
+  (`POST /api/auth/step-up`), on the same throttles and the same per-account
+  replay guard as signing in. The confirmation lasts five minutes, is dropped at
+  logout, and does not survive a reload. It is a gate on the screen, not a new
+  authorisation boundary: every operation behind it still re-verifies for
+  itself, so nothing changes for a caller who skips the page.
 
 - **Replacing or deleting a PGP identity requires the account password.** A
   session cookie was enough, and unlike everything else a session authorises,

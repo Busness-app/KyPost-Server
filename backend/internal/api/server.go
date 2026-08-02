@@ -410,6 +410,9 @@ func (s *Server) routesAuth(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/csrf", withSelfAuth(s.handleCSRFToken))
 	mux.HandleFunc("POST /api/auth/logout", s.withAuth(s.handleLogout))
 	mux.HandleFunc("POST /api/auth/password", s.withAuth(s.handleChangePassword))
+	// Full re-authentication (credential + second factor) for an existing
+	// session. Authorises nothing on its own — see auth_stepup.go.
+	mux.HandleFunc("POST /api/auth/step-up", s.withAuth(s.handleAuthStepUp))
 }
 
 // routesAdmin registers instance administration and observability:
