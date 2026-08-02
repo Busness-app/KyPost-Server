@@ -42,7 +42,7 @@ KyPost is honest about what it does and does not protect. Read these carefully b
 
 KyPost has two key protection modes. **Choose deliberately, not by accident.** See [Where your PGP private key lives](README.md#where-your-pgp-private-key-lives) for a complete explanation.
 
-**Client-Protected (End-to-End):** Your browser generates or wraps the key under a password-derived key. The server cannot open it. Costs: password resets destroy the key, you must unlock it each browser session, admin operations cannot access your encrypted mail.
+**Client-Protected (End-to-End):** Your browser generates or wraps the key under a password-derived key. The server cannot open it. Costs: you must unlock it each browser session, and admin operations cannot access your encrypted mail. Security can create an encrypted offline recovery backup in the browser; restoring it requires both the downloaded file and its separately displayed random secret. Neither the plaintext key nor the secret is sent to or stored by the server.
 
 **Server-Protected:** The server holds a master key and unwraps your PGP key on demand. Convenience: automatic decryption, password resets work, background polling works. Cost: this is **not** end-to-end encryption. The server, and anyone with access to its disk (root, backup operators, disk seizure), can decrypt everything you receive. If you self-host, this may be acceptable. If someone else runs it, you are trusting them with plaintext mail.
 
@@ -221,6 +221,7 @@ User data is stored in `/kypost/config/users/<userID>/` and `/kypost/state/users
 - **TOTP secrets:** AES encryption with a master key (`totp-secret.key`).
 - **PGP keys (server-protected mode):** Encryption with a master key (`pgp-server-key`).
 - **PGP keys (client-protected mode):** Wrapped in the browser under a password-derived key; the server stores only the wrapped blob.
+- **Client recovery backups:** The downloaded backup contains a second browser-created AES-GCM envelope. Its recovery secret is shown once and is not stored by KyPost.
 
 Unencrypted:
 

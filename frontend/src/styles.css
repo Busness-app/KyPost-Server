@@ -2284,6 +2284,16 @@ pre {
   filter: none;
 }
 
+.sec-action-file {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
 .sec-action-danger {
   border-color: var(--sec-risk-line);
   background: var(--sec-risk-bg);

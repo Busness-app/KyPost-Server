@@ -244,7 +244,10 @@ The costs are real. Know them before you choose this mode:
 - **An admin password reset destroys the key.** The wrapping key comes from
   your password. An admin can reset the password but cannot rewrap a key they
   cannot open. The key becomes unrecoverable and you must import or generate a
-  new one. Keep an exported backup of your private key in a safe place.
+  new one. Security offers a browser-generated encrypted recovery backup: keep
+  its downloaded file and separately displayed recovery secret offline. The
+  server never receives the plaintext key or secret, and both are required to
+  restore the same identity after the reset.
 - **You unlock the key once for each browser session.** The browser holds the
   unwrapped key in page memory only, never in localStorage or sessionStorage.
   After a reload you must enter your password again.

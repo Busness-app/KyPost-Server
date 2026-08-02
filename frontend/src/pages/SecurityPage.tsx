@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router";
 import QRCode from "qrcode";
 import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
@@ -8,6 +8,7 @@ import {
   generatePGPIdentity,
   deletePGPIdentity,
   storeClientPGPIdentity,
+  rewrapPGPPrivateKey,
   exportLegacyPGPKey,
   getPGPDiscoverySettings,
   updatePGPDiscoverySettings,
@@ -18,7 +19,12 @@ import {
   type DiscoverySuppression
 } from "../api/pgp";
 import { generateIdentity, importIdentity } from "../lib/pgpClient";
-import { wrapPrivateKey } from "../lib/keyVault";
+import {
+  createRecoveryBackup,
+  requireUnlockedKey,
+  restoreRecoveryBackup,
+  wrapPrivateKey
+} from "../lib/keyVault";
 import {
   lockPGPSession,
   loadPGPSession,
@@ -104,6 +110,10 @@ export function SecurityPage() {
   const [recoverOpen, setRecoverOpen] = useState(false);
   const [recoverOldPassword, setRecoverOldPassword] = useState("");
   const [recoverCurrentPassword, setRecoverCurrentPassword] = useState("");
+  const [recoverySecret, setRecoverySecret] = useState("");
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [restoreSecret, setRestoreSecret] = useState("");
+  const [restorePassword, setRestorePassword] = useState("");
   const [selfContact, setSelfContact] = useState<Contact | null>(null);
 
   // PGP key-discovery settings.
@@ -353,6 +363,77 @@ export function SecurityPage() {
       setPgpStatus(
         `Recovery failed: ${toErrorMessage(err, "unknown error")}. Check that the first password is the one your key was last encrypted under.`
       );
+    } finally {
+      setPgpBusy(false);
+    }
+  }
+
+  async function handleDownloadRecoveryBackup() {
+    setPgpBusy(true);
+    setPgpStatus("");
+    try {
+      const bootstrap = pgpSession?.bootstrap;
+      if (!bootstrap || bootstrap.protection !== "client" || !pgpIdentity) {
+        throw new Error("A client-protected identity is required.");
+      }
+      const { backup, secret } = await createRecoveryBackup(
+        requireUnlockedKey(),
+        pgpIdentity.fingerprint,
+        bootstrap.publicKey
+      );
+      const url = URL.createObjectURL(new Blob([JSON.stringify(backup)], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `kypost-pgp-recovery-${pgpIdentity.fingerprint.slice(0, 8)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setRecoverySecret(secret);
+    } catch (e) {
+      setPgpStatus(`Backup failed: ${toErrorMessage(e, "unlock your key first")}`);
+    } finally {
+      setPgpBusy(false);
+    }
+  }
+
+  function handleRestoreFileSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setRestoreFile(file);
+    setRestoreSecret("");
+    setRestorePassword("");
+    setPgpStatus("");
+  }
+
+  function cancelRestore() {
+    setRestoreFile(null);
+    setRestoreSecret("");
+    setRestorePassword("");
+  }
+
+  async function handleRestoreSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!restoreFile) return;
+    setPgpBusy(true);
+    setPgpStatus("");
+    try {
+      const restored = await restoreRecoveryBackup(await restoreFile.text(), restoreSecret);
+      const imported = await importIdentity(restored.privateKey, "");
+      const expected = pgpIdentity?.fingerprint.toUpperCase();
+      if (!expected || imported.fingerprint !== expected || restored.fingerprint.toUpperCase() !== expected) {
+        throw new Error("This backup belongs to a different PGP identity.");
+      }
+      const wrapped = await wrapPrivateKey(imported.armoredPrivateKey, restorePassword);
+      await rewrapPGPPrivateKey(JSON.stringify(wrapped), restorePassword);
+      unlockWithArmoredKey(imported.armoredPrivateKey);
+      setRecoverySecret("");
+      cancelRestore();
+      await loadPGPSession();
+      setPgpStatus("PGP key restored and re-encrypted with your current account password.");
+    } catch (err) {
+      setPgpStatus(`Restore failed: ${toErrorMessage(err, "check the file and recovery secret")}`);
     } finally {
       setPgpBusy(false);
     }
@@ -988,6 +1069,86 @@ export function SecurityPage() {
                         </button>
                       </div>
                     </form>
+                  ) : null}
+                  <div className="sec-actions">
+                    <button
+                      type="button"
+                      className="sec-action-quiet"
+                      disabled={pgpBusy || !pgpSession.unlocked}
+                      onClick={() => void handleDownloadRecoveryBackup()}
+                    >
+                      Download recovery backup
+                    </button>
+                    <label className="sec-action-file sec-action-quiet">
+                      Restore recovery backup
+                      <input
+                        type="file"
+                        accept="application/json,.json"
+                        hidden
+                        disabled={pgpBusy}
+                        onChange={(e) => handleRestoreFileSelected(e)}
+                      />
+                    </label>
+                  </div>
+                  {restoreFile ? (
+                    <form className="sec-inline-form" onSubmit={(e) => void handleRestoreSubmit(e)}>
+                      <h4>Restore from {restoreFile.name}</h4>
+                      <label className="sec-label">
+                        Recovery secret
+                        <input
+                          type="password"
+                          className="sec-input"
+                          value={restoreSecret}
+                          onChange={(e) => setRestoreSecret(e.target.value)}
+                          autoComplete="off"
+                          required
+                        />
+                      </label>
+                      <label className="sec-label">
+                        Current account password
+                        <input
+                          type="password"
+                          className="sec-input"
+                          value={restorePassword}
+                          onChange={(e) => setRestorePassword(e.target.value)}
+                          autoComplete="current-password"
+                          required
+                        />
+                      </label>
+                      <div className="sec-actions">
+                        <button type="submit" disabled={pgpBusy}>Restore</button>
+                        <button type="button" className="sec-action-quiet" disabled={pgpBusy} onClick={cancelRestore}>
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  ) : null}
+                  {recoverySecret ? (
+                    <div className="sec-inline-form">
+                      <h4>Store this recovery secret</h4>
+                      <p className="sec-muted">
+                        The downloaded file is useless without this secret. KyPost does not store it. Anyone with both
+                        can decrypt your historical mail.
+                      </p>
+                      <p className="sec-fingerprint"><code>{recoverySecret}</code></p>
+                      <div className="sec-actions">
+                        <button
+                          type="button"
+                          className="sec-action-quiet"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(recoverySecret);
+                              setPgpStatus("Recovery secret copied.");
+                            } catch {
+                              setPgpStatus("Copy failed — select and copy the secret manually.");
+                            }
+                          }}
+                        >
+                          Copy secret
+                        </button>
+                        <button type="button" onClick={() => setRecoverySecret("")}>Done</button>
+                      </div>
+                    </div>
                   ) : null}
                 </div>
               ) : pgpSession?.bootstrap?.migrationAvailable ? (

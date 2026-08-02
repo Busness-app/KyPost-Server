@@ -72,6 +72,16 @@ export type WrappedKeyEnvelope = {
   ciphertext: string;
 };
 
+export type RecoveryBackup = {
+  format: "kypost-pgp-recovery-v1";
+  fingerprint: string;
+  publicKey: string;
+  envelope: WrappedKeyEnvelope;
+};
+
+const RECOVERY_SECRET_BYTES = 16;
+const MAX_RECOVERY_BACKUP_CHARS = 512 << 10;
+
 export class VaultLockedError extends Error {
   constructor() {
     super("Your PGP key is locked. Enter your password to unlock it.");
@@ -161,6 +171,58 @@ export async function wrapPrivateKey(armoredPrivateKey: string, password: string
     iv: toBase64(iv),
     ciphertext: toBase64(new Uint8Array(ciphertext))
   };
+}
+
+function recoverySecretText(bytes: Uint8Array): string {
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase();
+  return hex.match(/.{1,4}/g)!.join("-");
+}
+
+function recoverySecretBytes(secret: string): Uint8Array {
+  const compact = secret.replace(/[\s-]/g, "");
+  if (!/^[A-Fa-f0-9]{32}$/.test(compact)) {
+    throw new Error("The recovery secret is invalid.");
+  }
+  const bytes = new Uint8Array(RECOVERY_SECRET_BYTES);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = Number.parseInt(compact.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/** Creates an offline backup without sending the private key to the server. */
+export async function createRecoveryBackup(
+  armoredPrivateKey: string,
+  fingerprint: string,
+  publicKey: string
+): Promise<{ backup: RecoveryBackup; secret: string }> {
+  const secretBytes = crypto.getRandomValues(new Uint8Array(RECOVERY_SECRET_BYTES));
+  const secret = recoverySecretText(secretBytes);
+  const envelope = await wrapPrivateKey(armoredPrivateKey, secret);
+  return { backup: { format: "kypost-pgp-recovery-v1", fingerprint, publicKey, envelope }, secret };
+}
+
+/** Opens an offline backup locally; the returned private key never leaves this module's caller. */
+export async function restoreRecoveryBackup(raw: string, secret: string): Promise<RecoveryBackup & { privateKey: string }> {
+  if (raw.length > MAX_RECOVERY_BACKUP_CHARS) {
+    throw new Error("The recovery backup is too large.");
+  }
+  let backup: RecoveryBackup;
+  try {
+    backup = JSON.parse(raw) as RecoveryBackup;
+  } catch {
+    throw new Error("The recovery backup is not valid.");
+  }
+  if (
+    backup?.format !== "kypost-pgp-recovery-v1" ||
+    typeof backup.fingerprint !== "string" ||
+    typeof backup.publicKey !== "string" ||
+    !backup.envelope
+  ) {
+    throw new Error("The recovery backup format is not supported.");
+  }
+  const privateKey = await unwrapPrivateKey(backup.envelope, recoverySecretText(recoverySecretBytes(secret)));
+  return { ...backup, privateKey };
 }
 
 /**
