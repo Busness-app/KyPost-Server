@@ -433,26 +433,31 @@ export function resolveLimit(raw: string | undefined, fallback: number): number 
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
 }
 
-// Single-tier rate limiting: a decision, not a gap. Stated here rather than as a
-// TODO because checkMinuteLimit's fail-closed behaviour depends on the minute
-// tier being the only tier.
+// Single-tier PER-KEY rate limiting: a decision, not a gap. Stated here rather
+// than as a TODO because checkMinuteLimit's fail-closed behaviour depends on
+// the minute tier being the only PER-KEY tier.
 //
-// Enforced: a per-minute cap via the native rate-limiting bindings
+// Enforced per key: a per-minute cap via the native rate-limiting bindings
 // (PUSH_RATE_LIMITER per key, REGISTER_RATE_LIMITER per IP). No KV writes on an
 // accepted send.
 //
-// Not enforced: rolling hour and day caps. They required a KV read-modify-write
-// per send, which capped the free tier at ~1,000 pushes/day — the limiter became
-// the outage. They are not coming back in that form.
+// Not enforced per key: rolling hour and day caps. They required a KV
+// read-modify-write per send, which capped the free tier at ~1,000 pushes/day —
+// the limiter became the outage. They are not coming back in that form.
 //
 // The cost: a caller who stays under the per-minute cap can sustain it
 // indefinitely, so the minute limit bounds burst rate but not daily volume
 // against someone else's FCM quota. That residual is why the fail-closed
 // behaviour below is not negotiable.
 //
-// To restore the upper tiers, use Durable Objects (exact atomic counters, no KV
-// write pressure, Workers Paid) and revisit the fail-closed reasoning at both
-// call sites, which is stated in terms of "the only tier".
+// The daily half of that residual is now covered — by checkDailyBudget, built
+// the way this note prescribed (a Durable Object counter, no KV write
+// pressure) and AGGREGATE rather than per-key, since a per-key day cap is
+// worth nothing when registration mints keys on demand. It is opt-in via
+// RELAY_DAILY_BUDGET and unset by default, so the paragraph above still
+// describes an unconfigured relay exactly. What has NOT changed is the
+// reasoning at this function's call sites: the minute tier is still the only
+// per-key tier, so failing it closed is still not negotiable.
 
 /**
  * Minute-tier check via a native rate-limiting binding (no KV writes). Returns

@@ -218,7 +218,24 @@ block in `wrangler.toml.example` creates the class on first deploy.
 
 Each key is capped by a **per-minute** limit on `/send`, enforced by the native `PUSH_RATE_LIMITER` binding in `wrangler.toml` (`simple = { limit = 10, period = 60 }`) — a fixed 60s window with **no KV writes**. Change the limit there and redeploy. `RATE_LIMIT_PER_MINUTE` in `[vars]` is display-only (`/health` + the 429 body) and should be kept equal to `simple.limit`. Exceeding it returns `429` with `{"error":"rate limit exceeded","window":"minute","limit":10,"retryAfterSeconds":60}`.
 
-> **Hour/day rolling limits were removed for now.** They required a KV read-modify-write on every accepted send, which capped the free tier at ~1,000 pushes/day. Dropping them keeps an accepted send at **zero KV writes**.
+> **Rolling hour/day limits were removed.** They required a KV read-modify-write on every accepted send, which capped the free tier at ~1,000 pushes/day. Dropping them keeps an accepted send at **zero KV writes**. The day tier came back as `RELAY_DAILY_BUDGET` below, built the way that note prescribed: a Durable Object counter rather than a KV read-modify-write.
+
+### `RELAY_DAILY_BUDGET` — the daily ceiling
+
+**Set this if you open `REGISTRATION_ENABLED`.** The per-minute limiter buckets per key, and registration mints keys on demand — so a caller who wants a second bucket registers a second key from a second address. The minute limit bounds how fast one caller sends and **nothing at all** about what the relay spends against your APNs quota in a day. `RELAY_DAILY_BUDGET` is the only setting that bounds that number.
+
+Uncomment it in `[vars]` and redeploy:
+
+```toml
+RELAY_DAILY_BUDGET = "50000"
+```
+
+- **Aggregate, not per-key** — one shared pool across every key, because the scarce thing is your provider quota, which all keys spend from together.
+- **Unset = unmetered**, so an existing deployment that never configures it is unaffected. `"0"` is a real limit of zero (a closed relay), not "unset".
+- **Per UTC day**, counted by the `RELAY_COORDINATOR` Durable Object that `/send` and `/register` already require — no extra binding to create.
+- **Fails closed** when configured but uncountable: once a budget exists it is the only thing bounding daily volume, so a drifted binding refuses rather than waves sends through.
+
+Exhausting it returns `429` with `{"error":"relay daily budget exhausted","window":"day","limit":50000,"retryAfterSeconds":...}` and a `Retry-After` header counting down to UTC midnight. Unlike the per-minute limit, the budget is not surfaced on `/health` — a public endpoint should not report how much of the relay's daily capacity is left. Watch the `budget.exhausted` log event instead.
 
 `POST /register` has its own per-IP limiter (`REGISTER_RATE_LIMITER`), bucketed on the IPv6 /64 so one allocation can't rotate addresses past it. Both fail **closed**: a missing binding refuses the request rather than waving it through, because "misconfigured" and "absent" are indistinguishable from outside and the failure mode of guessing is an open relay.
 

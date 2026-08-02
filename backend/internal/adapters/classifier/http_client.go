@@ -204,6 +204,43 @@ func readBoundedBody(r io.Reader) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r, maxOllamaResponse))
 }
 
+// maxErrorBodyBytes bounds how much of an upstream error body is quoted into
+// an error string.
+//
+// maxOllamaResponse bounds the READ, which is what keeps a hostile endpoint
+// from OOM-ing the process. It does not bound what happens next: an error
+// carrying the whole body is written verbatim to classifier.err.log AND
+// stored as the Detail of a state.Decision, so a 1 MiB reply becomes a 1 MiB
+// log line and a 1 MiB database row. The log line is the sharper edge —
+// GET /api/logs reads with a bufio.Scanner, which refuses a token over its
+// buffer, so one such line makes the whole file unreadable in the admin
+// viewer.
+//
+// A diagnostic needs the shape of the failure, not the whole payload: the
+// status code is already in the message and the first 2 KiB carries any real
+// error text an endpoint returns.
+const maxErrorBodyBytes = 2048
+
+// clipErrorBody bounds an upstream body for inclusion in an error string and
+// flattens the newlines that would otherwise let a hostile endpoint forge
+// whole records in a line-oriented log.
+func clipErrorBody(body string) string {
+	body = strings.TrimSpace(body)
+	truncated := false
+	if len(body) > maxErrorBodyBytes {
+		body = body[:maxErrorBodyBytes]
+		truncated = true
+	}
+	body = strings.NewReplacer("\n", " ", "\r", " ").Replace(body)
+	// The cut above is a byte offset and can land mid-rune; a log line and a
+	// SQLite TEXT column both want valid UTF-8.
+	body = strings.ToValidUTF8(body, "")
+	if truncated {
+		body += "...(truncated)"
+	}
+	return body
+}
+
 func (c *HTTPClient) Warmup(ctx context.Context) error {
 	return c.ensureWarm(ctx)
 }
@@ -379,7 +416,7 @@ func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string, allowedLab
 		return "", fmt.Errorf("ollama classify: read response: %w", err)
 	}
 	if resp.StatusCode >= 300 {
-		body := strings.TrimSpace(string(bodyBytes))
+		body := clipErrorBody(string(bodyBytes))
 		if body != "" {
 			return "", fmt.Errorf("ollama classify failed: status %d body: %s", resp.StatusCode, body)
 		}
@@ -394,8 +431,8 @@ func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string, allowedLab
 	if err := json.Unmarshal(bodyBytes, &out); err != nil {
 		return strings.TrimSpace(string(bodyBytes)), nil
 	}
-	if strings.TrimSpace(out.Error) != "" {
-		return "", fmt.Errorf("ollama classify failed: %s", strings.TrimSpace(out.Error))
+	if clipped := clipErrorBody(out.Error); clipped != "" {
+		return "", fmt.Errorf("ollama classify failed: %s", clipped)
 	}
 	// Safety net for a reasoning model that ignores think=false: an empty
 	// response alongside a populated reasoning channel means the answer was
@@ -540,7 +577,7 @@ func (c *HTTPClient) pullModel(ctx context.Context) error {
 
 	if resp.StatusCode >= 300 {
 		body, _ := readBoundedBody(resp.Body)
-		return fmt.Errorf("ollama pull failed: status %d body: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return fmt.Errorf("ollama pull failed: status %d body: %s", resp.StatusCode, clipErrorBody(string(body)))
 	}
 	c.logServer("[OLLAMA WARMUP] model pulled")
 	return nil
@@ -947,6 +984,13 @@ func (c *HTTPClient) logLine(w io.Writer, prefix, message string) {
 		if line == "" {
 			continue
 		}
+		// Bound every emitted line, whatever the caller passed. The three
+		// writers here carry model output and upstream error bodies, both
+		// bounded only by maxOllamaResponse (1 MiB) — and GET /api/logs reads
+		// these files with a bufio.Scanner, which fails the whole file on a
+		// token larger than its buffer. One oversized reply must not cost the
+		// admin the entire log.
+		line = clipErrorBody(line)
 		if prefix != "" {
 			_, _ = fmt.Fprintf(w, "[%s] %s %s\n", ts, prefix, line)
 		} else {

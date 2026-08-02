@@ -324,3 +324,65 @@ func TestInboxBodies(t *testing.T) {
 		}
 	})
 }
+
+// TestClampCheckpoint covers the rule that makes "the next tick retries it"
+// true: ListUnreadInbox returns only UIDs above the checkpoint it is given and
+// advances its own to the highest UID it FETCHED, so a checkpoint written
+// without regard for what the caller actually handled retires the messages the
+// caller deliberately left alone.
+func TestClampCheckpoint(t *testing.T) {
+	t.Run("nothing deferred advances to the fetched checkpoint", func(t *testing.T) {
+		if got := ClampCheckpoint("10", "20", nil); got != "20" {
+			t.Fatalf("ClampCheckpoint = %q, want %q", got, "20")
+		}
+	})
+
+	t.Run("holds one below the lowest deferred uid", func(t *testing.T) {
+		// 14 is left for a later tick, so the checkpoint must stay below it —
+		// 15..20 are refetched and filtered by the processed set.
+		if got := ClampCheckpoint("10", "20", []string{"18", "14", "16"}); got != "13" {
+			t.Fatalf("ClampCheckpoint = %q, want %q", got, "13")
+		}
+	})
+
+	t.Run("a deferred message is returned again by the next fetch", func(t *testing.T) {
+		// The property that actually matters, stated in ListUnreadInbox's own
+		// terms: UID > checkpoint.
+		next := ClampCheckpoint("10", "20", []string{"14"})
+		if minUID := parseCheckpointUID(next); 14 <= minUID {
+			t.Fatalf("checkpoint %q excludes the deferred UID 14 (minUID=%d)", next, minUID)
+		}
+	})
+
+	t.Run("never rewinds below the previous checkpoint", func(t *testing.T) {
+		// The lowest deferred UID is the first of the batch, so there is no
+		// room to advance at all — but rewinding would re-scan mail already
+		// retired on an earlier tick.
+		if got := ClampCheckpoint("10", "20", []string{"11"}); got != "10" {
+			t.Fatalf("ClampCheckpoint = %q, want the previous checkpoint %q", got, "10")
+		}
+	})
+
+	t.Run("never advances past what was fetched", func(t *testing.T) {
+		if got := ClampCheckpoint("10", "20", []string{"99"}); got != "20" {
+			t.Fatalf("ClampCheckpoint = %q, want %q", got, "20")
+		}
+	})
+
+	t.Run("an unparseable id holds the checkpoint rather than guessing", func(t *testing.T) {
+		// Cannot prove the message would come back, and retiring it is the
+		// unrecoverable direction.
+		if got := ClampCheckpoint("10", "20", []string{"not-a-uid"}); got != "10" {
+			t.Fatalf("ClampCheckpoint = %q, want the previous checkpoint %q", got, "10")
+		}
+	})
+
+	t.Run("an empty previous checkpoint is a valid floor", func(t *testing.T) {
+		if got := ClampCheckpoint("", "20", []string{"1"}); got != "" {
+			t.Fatalf("ClampCheckpoint = %q, want an empty checkpoint", got)
+		}
+		if got := ClampCheckpoint("", "20", []string{"5"}); got != "4" {
+			t.Fatalf("ClampCheckpoint = %q, want %q", got, "4")
+		}
+	})
+}

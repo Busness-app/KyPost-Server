@@ -1165,3 +1165,51 @@ func parseCheckpointUID(checkpoint string) int {
 	}
 	return uid
 }
+
+// ClampCheckpoint holds the checkpoint below every message the caller is
+// deliberately leaving for a later tick.
+//
+// ListUnreadInbox advances its returned checkpoint to the highest UID it
+// FETCHED, not the highest one the caller HANDLED, and it only ever returns
+// UIDs strictly above the checkpoint it was given. Persisting the fetched
+// value therefore retires every message in the batch — including the ones the
+// poller left unprocessed on purpose (a transient classifier outage, a
+// spent per-user rate budget, an unreadable processed-set) so that "the next
+// tick retries it" holds. Without this clamp those messages are never
+// returned again: not classified, not labelled, not retried, silently.
+//
+// deferredIDs are Message.ID values from this batch (this package renders
+// them as the decimal UID). The result is the highest checkpoint that still
+// leaves every one of them in range:
+//
+//   - no deferred messages -> next, unchanged
+//   - otherwise            -> one below the lowest deferred UID, never
+//     rewound below prev and never advanced past next
+//
+// An ID that does not parse as a UID means the caller cannot prove the
+// message would come back, so the checkpoint stays at prev — refetching a
+// handled batch costs one IMAP round trip and is filtered by the processed
+// set, while retiring an unhandled message loses it for good.
+func ClampCheckpoint(prev, next string, deferredIDs []string) string {
+	if len(deferredIDs) == 0 {
+		return next
+	}
+	lowest := 0
+	for _, id := range deferredIDs {
+		uid, err := strconv.Atoi(strings.TrimSpace(id))
+		if err != nil || uid <= 0 {
+			return prev
+		}
+		if lowest == 0 || uid < lowest {
+			lowest = uid
+		}
+	}
+	candidate := lowest - 1
+	if nextUID := parseCheckpointUID(next); candidate > nextUID {
+		candidate = nextUID
+	}
+	if candidate <= parseCheckpointUID(prev) {
+		return prev
+	}
+	return strconv.Itoa(candidate)
+}

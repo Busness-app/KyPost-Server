@@ -34,6 +34,11 @@ const SNAPSHOT_VERSION = 1;
  * 24 hours keeps the actual recovery story (crash, accidental close, restart,
  * "I'll finish this after lunch") while bounding how long the plaintext can
  * outlive the session that produced it.
+ *
+ * The bound is enforced from two places, and it needs both:
+ * purgeExpiredDraftSnapshots at startup, and a check on read. Reading alone is
+ * not an expiry — loadDraftSnapshot is called only when a blank compose window
+ * is opened, so a user who never composes again would never trigger it.
  */
 const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -42,8 +47,60 @@ const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60 * 1000;
  * whoever logs in next — clearDraftSnapshot on logout is the primary defence,
  * but the key means a missed clear still cannot cross accounts.
  */
+const KEY_PREFIX = "kypost-compose-draft:";
+
 function storageKey(userId: string): string {
-  return `kypost-compose-draft:${userId}`;
+  return `${KEY_PREFIX}${userId}`;
+}
+
+/** isExpired centralises the age rule for both the read path and the sweep. */
+function isExpired(savedAt: unknown, now: number): boolean {
+  const savedAtMs = Date.parse(typeof savedAt === "string" ? savedAt : "");
+  // An unparseable or absent savedAt is treated as expired rather than as
+  // "fresh": a snapshot whose age cannot be established is exactly the one that
+  // has been sitting there since before this check existed, and it is plaintext.
+  return !Number.isFinite(savedAtMs) || now - savedAtMs > MAX_SNAPSHOT_AGE_MS;
+}
+
+/**
+ * purgeExpiredDraftSnapshots deletes every expired snapshot in this origin,
+ * for every user, and is what makes MAX_SNAPSHOT_AGE_MS an actual bound.
+ *
+ * Expiring on read alone did not bound anything. loadDraftSnapshot runs in one
+ * place — opening a BLANK compose window — so the plaintext of a message the
+ * user may have been about to PGP-encrypt was deleted only if they came back
+ * and started another one. Close the tab and never compose again and it stayed
+ * in localStorage forever, which is precisely the case the expiry was added
+ * for. Sweeping at startup means the age limit holds whenever the app is
+ * opened at all, and sweeping ALL keys rather than the current user's covers
+ * the shared browser where the previous account never logs in again.
+ */
+export function purgeExpiredDraftSnapshots(now: number = Date.now()): void {
+  try {
+    const storage = window.localStorage;
+    // Collect first: removeItem reindexes the store, so deleting while walking
+    // it by index skips entries.
+    const expired: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (!key?.startsWith(KEY_PREFIX)) continue;
+      let savedAt: unknown = null;
+      try {
+        savedAt = (JSON.parse(storage.getItem(key) ?? "") as Partial<DraftSnapshot>)?.savedAt;
+      } catch {
+        // Unparseable is unreadable is unrestorable — and it is still
+        // plaintext, so it goes.
+      }
+      if (isExpired(savedAt, now)) {
+        expired.push(key);
+      }
+    }
+    for (const key of expired) {
+      storage.removeItem(key);
+    }
+  } catch {
+    // Storage disabled or unavailable. See saveDraftSnapshot.
+  }
 }
 
 export type DraftSnapshot = {
@@ -133,12 +190,10 @@ export function loadDraftSnapshot(userId: string): DraftSnapshot | null {
       window.localStorage.removeItem(storageKey(userId));
       return null;
     }
-    // Expire on read. An unparseable or absent savedAt is treated as expired
-    // rather than as "fresh": a snapshot whose age cannot be established is
-    // exactly the one that has been sitting there since before this check
-    // existed, and it is plaintext.
-    const savedAtMs = Date.parse(parsed.savedAt ?? "");
-    if (!Number.isFinite(savedAtMs) || Date.now() - savedAtMs > MAX_SNAPSHOT_AGE_MS) {
+    // Expire on read as well as on the startup sweep: this is the path that
+    // must never hand back a stale draft, whatever the sweep did or didn't
+    // catch (storage written by another tab since startup, a clock change).
+    if (isExpired(parsed.savedAt, Date.now())) {
       window.localStorage.removeItem(storageKey(userId));
       return null;
     }

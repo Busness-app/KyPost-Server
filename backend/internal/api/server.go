@@ -335,11 +335,17 @@ func (s *Server) SetPoller(p *processor.Poller) {
 // wkdPublishStore returns the instance-level WKD domain-claim store. Domain
 // ownership is a property of the domain, not of a user, so there is exactly one
 // store (and one TXT record) per domain for the whole instance, rooted at the
-// state directory itself. s.wkdStore is set once at construction to the SAME
-// *wkdpublish.Store instance the poller process uses — both built once in
-// app.go and injected — so the store's own mutex serializes every
-// read-modify-write across both processes. An error here only means "not wired"
-// (e.g. a test server built without a wkdStore), not an I/O failure.
+// state directory itself.
+//
+// What makes concurrent mutation safe is the store's own inter-process FILE
+// lock, not the shared instance: supervisord runs `--mode server` and
+// `--mode daemon` as separate processes, so a Go mutex — shared instance or
+// not — never serialized an admin request against the daemon's periodic
+// claim re-check. app.go still injects one instance into both api.NewServer
+// and processor.New, but that is a convenience (one warm in-memory copy), not
+// a correctness requirement; see wkdpublish.Store's doc comment. An error here
+// only means "not wired" (e.g. a test server built without a wkdStore), not an
+// I/O failure.
 func (s *Server) wkdPublishStore() (*wkdpublish.Store, error) {
 	if s.wkdStore == nil {
 		return nil, fmt.Errorf("wkd publish store not configured")
@@ -930,6 +936,35 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"checkpointReadFailed":    err != nil,
 		"emailsProcessedLastHour": store.ProcessedSince(processedSince),
 		"serverTimeUtc":           time.Now().UTC().Format(time.RFC3339),
+		"stateDiskBytes":          store.DiskUsageBytes(),
+		"lastCleanupUtc":          store.LastCleanup(),
+	}
+
+	// Poll freshness. `healthy` above tracks IMAP reachability, which a daemon
+	// that has stopped ticking altogether still satisfies, so without this the
+	// page cannot tell a working poller from a stopped one. Reported as the
+	// tick's own timestamp rather than an age, so the client measures against
+	// serverTimeUtc and a skewed browser clock is visible instead of silent.
+	if tick, ok, heldSince, tickErr := store.LastPollTick(); tickErr != nil {
+		s.logger.Error("status: poll tick read failed", "error", tickErr.Error())
+	} else {
+		if ok {
+			resp["lastPollTick"] = tick
+		}
+		if heldSince != "" {
+			// The checkpoint is deliberately not advancing because messages are
+			// waiting to be retried. Routine for a tick; an hour of it is a
+			// classifier that never came back.
+			resp["checkpointHeldSinceUtc"] = heldSince
+		}
+	}
+
+	// Messages whose processing failed in the last 24h. One row per affected
+	// message, not per retry attempt, so this counts mail rather than effort.
+	if failed, failErr := store.FailedDecisionsSince(time.Now().UTC().Add(-24 * time.Hour)); failErr != nil {
+		s.logger.Error("status: failed-decision count failed", "error", failErr.Error())
+	} else {
+		resp["failedLast24h"] = failed
 	}
 	// Classifier admission depth. Without this the only symptom of a backlog
 	// the model cannot drain is mail that quietly classifies late — the poll
