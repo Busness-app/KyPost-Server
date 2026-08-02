@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -45,6 +46,45 @@ func TestValidateRule_RejectsUnknownActionType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "addflag") {
 		t.Fatalf("error should name the offending type, got %q", err)
+	}
+}
+
+// ApplyOutcome switches on the raw Action.Type, so a validator that normalized
+// case or whitespace first would wave through a type the engine's switch has no
+// case for — the "unsupported action type" default, which fails identically
+// forever while counting as retryable. Both sides compare the same bytes.
+func TestValidateRule_RejectsNonCanonicalActionTypes(t *testing.T) {
+	for _, bad := range []string{"Keyword", "KEYWORD", " keyword", "keyword ", "Archive", "\tstop"} {
+		err := ValidateRule(ruleWithActions(Action{Type: bad, Value: "VIP"}))
+		if err == nil {
+			t.Fatalf("ValidateRule accepted %q, which ApplyOutcome cannot execute", bad)
+		}
+	}
+	// The exact spelling still passes, so this is not just rejecting everything.
+	if err := ValidateRule(ruleWithActions(Action{Type: "keyword", Value: "VIP"})); err != nil {
+		t.Fatalf("canonical type rejected: %v", err)
+	}
+}
+
+// Every type ValidateRule accepts must be one ApplyOutcome has a case for. This
+// pins the two lists together rather than trusting them to be edited in step.
+func TestValidateRule_AcceptedTypesAreAllExecutable(t *testing.T) {
+	for actionType := range knownActionTypes {
+		value := ""
+		if actionsNeedingValue[actionType] {
+			value = "x"
+		}
+		results := ApplyOutcome(
+			context.Background(), &fakeClient{}, "INBOX",
+			EvalInput{MessageID: "1"},
+			Outcome{Applied: []Action{{Type: actionType, Value: value}}},
+		)
+		if len(results) != 1 {
+			t.Fatalf("%q: got %d results, want 1", actionType, len(results))
+		}
+		if results[0].Err != nil {
+			t.Fatalf("%q validates but the engine cannot run it: %v", actionType, results[0].Err)
+		}
 	}
 }
 
@@ -150,5 +190,29 @@ func TestFilterRunnable_SkipsUnexecutableRulesAndKeepsTheRest(t *testing.T) {
 		if !strings.HasPrefix(why, "bad: ") && !strings.HasPrefix(why, "worse: ") {
 			t.Fatalf("rejection %q should name the rule it came from", why)
 		}
+	}
+}
+
+// A blank Name is itself a rejection reason, so the rejection log is exactly
+// where an unnamed rule shows up — and ": name is required" tells an operator
+// nothing about which entry in rules.json to go and fix.
+func TestFilterRunnable_NamesAnUnnamedRuleByID(t *testing.T) {
+	unnamed := ruleWithActions(Action{Type: "keyword", Value: "VIP"})
+	unnamed.Name = "  "
+	unnamed.ID = "abc-123"
+
+	_, rejected := FilterRunnable([]Rule{unnamed})
+	if len(rejected) != 1 {
+		t.Fatalf("rejected = %+v, want the unnamed rule reported", rejected)
+	}
+	if !strings.HasPrefix(rejected[0], "rule abc-123: ") {
+		t.Fatalf("rejection %q should identify the rule by ID when it has no name", rejected[0])
+	}
+
+	idless := ruleWithActions(Action{Type: "keyword", Value: "VIP"})
+	idless.Name = ""
+	_, rejected = FilterRunnable([]Rule{idless})
+	if !strings.HasPrefix(rejected[0], "(unnamed rule): ") {
+		t.Fatalf("rejection %q should still carry a placeholder with no name and no ID", rejected[0])
 	}
 }

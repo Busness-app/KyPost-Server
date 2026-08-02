@@ -16,6 +16,22 @@ describe("ruleActionsError", () => {
     ).toBe("");
   });
 
+  // The builder's select cannot produce these, but a draft cloned from a stored
+  // rule can — rules.json predates the validation and the API is not its only
+  // writer. Without this the UI showed no error and enabled Save on a rule the
+  // server rejects, which is the 400 this module exists to pre-empt.
+  it("rejects action types the server cannot run", () => {
+    expect(ruleActionsError([{ type: "addflag", value: "X" }])).toMatch(/not an action/);
+    expect(ruleActionsError([{ type: "keep" }])).toMatch(/not an action/);
+  });
+
+  // The backend compares raw strings, so near-misses are not accepted there and
+  // must not be shown as valid here.
+  it("does not accept non-canonical spellings of a known type", () => {
+    expect(ruleActionsError([{ type: "Keyword", value: "VIP" }])).toMatch(/not an action/);
+    expect(ruleActionsError([{ type: " archive" }])).toMatch(/not an action/);
+  });
+
   it("rejects two actions that both change visibility", () => {
     expect(ruleActionsError([{ type: "archive" }, { type: "read" }])).toMatch(/only do one of/);
   });

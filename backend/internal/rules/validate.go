@@ -94,17 +94,25 @@ func ValidateRule(r Rule) error {
 
 	visibilityAt := -1
 	for i, a := range r.Actions {
-		t := strings.ToLower(strings.TrimSpace(a.Type))
-		if !knownActionTypes[t] {
-			return fmt.Errorf("unsupported action type %q", a.Type)
+		// EXACT match, deliberately: ApplyOutcome switches on the raw
+		// Action.Type, so a check that lowercased or trimmed first would accept
+		// "Keyword" or " archive", store it, and hand the engine a type its
+		// switch does not have a case for — landing on the "unsupported action
+		// type" default that fails identically on every attempt while counting
+		// as retryable. That is the ~3h defer loop this validation exists to
+		// prevent, reintroduced by the validator itself. Both sides compare the
+		// same bytes or neither claim holds. Every producer (the GUI's action
+		// select, the Sieve parser) already emits canonical types.
+		if !knownActionTypes[a.Type] {
+			return fmt.Errorf("unsupported action type %q (types are lower-case, without surrounding spaces)", a.Type)
 		}
 		if len(a.Value) > maxActionValueBytes {
-			return fmt.Errorf("action %q value exceeds maximum length of %d bytes", t, maxActionValueBytes)
+			return fmt.Errorf("action %q value exceeds maximum length of %d bytes", a.Type, maxActionValueBytes)
 		}
-		if actionsNeedingValue[t] && strings.TrimSpace(a.Value) == "" {
-			return fmt.Errorf("action %q requires a value", t)
+		if actionsNeedingValue[a.Type] && strings.TrimSpace(a.Value) == "" {
+			return fmt.Errorf("action %q requires a value", a.Type)
 		}
-		if !IsVisibilityChanging(t) {
+		if !IsVisibilityChanging(a.Type) {
 			continue
 		}
 		if visibilityAt >= 0 {
@@ -119,8 +127,7 @@ func ValidateRule(r Rule) error {
 	// owed to a message the archive already made invisible.
 	if visibilityAt >= 0 {
 		last := len(r.Actions) - 1
-		trailingStop := last == visibilityAt+1 &&
-			strings.EqualFold(strings.TrimSpace(r.Actions[last].Type), "stop")
+		trailingStop := last == visibilityAt+1 && r.Actions[last].Type == "stop"
 		if visibilityAt != last && !trailingStop {
 			return fmt.Errorf(
 				"action %q changes message visibility and must be the rule's last action (an optional trailing \"stop\" aside), "+
@@ -145,10 +152,24 @@ func FilterRunnable(list []Rule) ([]Rule, []string) {
 	var rejected []string
 	for _, r := range list {
 		if err := ValidateRule(r); err != nil {
-			rejected = append(rejected, fmt.Sprintf("%s: %s", r.Name, err.Error()))
+			rejected = append(rejected, fmt.Sprintf("%s: %s", ruleLabel(r), err.Error()))
 			continue
 		}
 		out = append(out, r)
 	}
 	return out, rejected
+}
+
+// ruleLabel names a rule in an operator-facing log line. A blank Name is one of
+// the things ValidateRule rejects, so the rejection log is exactly where a rule
+// with no name turns up — and "": name is required" identifies nothing in a
+// file the operator now has to go and edit. The ID does.
+func ruleLabel(r Rule) string {
+	if name := strings.TrimSpace(r.Name); name != "" {
+		return name
+	}
+	if id := strings.TrimSpace(r.ID); id != "" {
+		return "rule " + id
+	}
+	return "(unnamed rule)"
 }

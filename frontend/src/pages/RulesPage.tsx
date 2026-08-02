@@ -16,11 +16,11 @@ import {
   updateRule
 } from "../api/rules";
 import { RulesHelpModal } from "../components/RulesHelpModal";
-import { ruleActionsError } from "../lib/ruleActions";
+import { ACTION_TYPES, ruleActionsError } from "../lib/ruleActions";
 
 const FIELD_OPTIONS = ["from", "to", "cc", "bcc", "subject", "body", "keyword"] as const;
 const COMPARATOR_OPTIONS = ["contains", "is", "matches", "regex"] as const;
-const ACTION_TYPE_OPTIONS = ["keyword", "unkeyword", "move", "read", "archive", "spam", "delete", "stop"] as const;
+const ACTION_TYPE_OPTIONS = ACTION_TYPES;
 
 function actionNeedsValue(type: string): boolean {
   return type === "keyword" || type === "unkeyword" || type === "move";

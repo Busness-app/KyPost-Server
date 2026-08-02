@@ -10,6 +10,26 @@ import type { Action } from "../api/rules";
 export const MAX_ACTIONS_PER_RULE = 20;
 
 /**
+ * The action vocabulary, in the order the builder offers it. Exactly the set
+ * the engine can execute, matched exactly — the backend compares raw strings
+ * (see the note in validate.go), so "Keyword" is not a keyword here either.
+ *
+ * The builder's own <select> is driven off this list, so it cannot produce an
+ * unknown type. A draft cloned from a stored rule can: rules.json predates this
+ * validation and the API is not the only writer.
+ */
+export const ACTION_TYPES = [
+  "keyword",
+  "unkeyword",
+  "move",
+  "read",
+  "archive",
+  "spam",
+  "delete",
+  "stop"
+] as const;
+
+/**
  * Actions that can take a message out of the poller's retry query: it looks for
  * UNSEEN messages in INBOX, so marking one read or moving it elsewhere means a
  * later action that fails can never be retried.
@@ -36,6 +56,9 @@ export function ruleActionsError(actions: Action[]): string {
   let visibilityAt = -1;
   for (let i = 0; i < actions.length; i++) {
     const a = actions[i];
+    if (!(ACTION_TYPES as readonly string[]).includes(a.type)) {
+      return `“${a.type}” is not an action this server can run.`;
+    }
     if (actionNeedsValue(a.type) && !(a.value ?? "").trim()) {
       return a.type === "move"
         ? "The “move” action needs a target folder."
