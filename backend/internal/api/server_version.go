@@ -18,7 +18,15 @@ import (
 // empty for almost every operator and the check would never fire. The cost is
 // that cutting a release means bumping this in the same commit as the tag —
 // see backend/AGENTS.md.
-const serverVersion = "0.1.0"
+//
+// It must equal frontend/package.json's version and the release tag it is
+// published under. That is not a convention: release-image.yml refuses to
+// publish a tag that disagrees with either, because a mismatch here is not
+// cosmetic. This constant is the LEFT-HAND SIDE of the update check, so a
+// binary tagged v1.0.0 while this still said 0.1.0 would compare itself
+// against every published release, conclude it was out of date forever, and
+// email the admin of every install about an upgrade they had already applied.
+const serverVersion = "0.2.0"
 
 // serverReleasesURL is the LIST endpoint for this project's own releases. A
 // var, not a const, only so tests can point it at an httptest server.
