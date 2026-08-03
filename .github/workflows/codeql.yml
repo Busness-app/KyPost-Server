@@ -1,0 +1,95 @@
+name: CodeQL
+
+# This replaces GitHub's "default setup" for code scanning. The two cannot both
+# be enabled: default setup must be turned off in Settings > Code security, or
+# every upload from this workflow is rejected.
+#
+# The move was forced by a query filter. go/email-injection fires on this
+# repository by construction — it reports a user's own composed message
+# reaching SMTP DATA, which is what a mail server is — and default setup offers
+# no way to exclude a single query. The choice was between dismissing the same
+# alert by hand every time a line near the SMTP writer moves, or writing the
+# exclusion down somewhere reviewable. .github/codeql/codeql-config.yml is that
+# place, and it carries the reasoning with it.
+#
+# Everything else matches what default setup was doing: the same three
+# languages, the default query suite, and a weekly scheduled scan on top of the
+# per-push and per-PR runs. Dropping the schedule would mean main is only
+# rescanned when someone pushes, so a query added to a newer CodeQL bundle
+# would never be applied to code that had stopped changing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, matching the cadence default setup ran at. Deliberately off the
+    # hour: GitHub drops scheduled runs at peak times.
+    - cron: "31 6 * * 1"
+
+permissions:
+  contents: read
+
+# Same reasoning as ci.yml: supersede an in-flight run when a PR branch is
+# pushed again, but never cancel main, where a completed analysis is the record
+# of what that commit contained.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Actions are pinned to commit SHAs for the reason ci.yml spells out: a tag is
+# a mutable pointer, and this workflow holds security-events: write. Dependabot
+# advances these — .github/dependabot.yml covers /.github/workflows.
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Required to upload results to the code scanning API.
+      security-events: write
+      # Required by the actions extractor to read workflow run metadata.
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: go
+            build-mode: autobuild
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The Go extractor builds the module, and backend/go.mod asks for a
+      # toolchain newer than the runner image ships. Without this the autobuild
+      # step falls back to whatever `go` is on PATH and the extraction is
+      # partial — which shows up as an analysis that finds nothing rather than
+      # as a failure, so it is worth pinning explicitly.
+      #
+      # GOTOOLCHAIN is left at its default here, unlike ci.yml: setup-go
+      # installs exactly what go.mod names, and forbidding a download would
+      # only turn a version bump into an extractor failure.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.language == 'go'
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@18420e3271f74589575af831a523c833acda327f # codeql-bundle-v2.26.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@18420e3271f74589575af831a523c833acda327f # codeql-bundle-v2.26.2
+        with:
+          category: "/language:${{ matrix.language }}"

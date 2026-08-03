@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -191,14 +192,22 @@ func TestVerifySignedOnlyMessageContentRoundTrip(t *testing.T) {
 	armoredSig := extractArmoredDetachedSignature(t, signed)
 
 	// The exact bytes VerifyDetached must be given to succeed are the signed
-	// MIME part as SignMIME produced it: a Content-Type header line plus the
-	// body, byte-identical to what buildSignedEnvelope wrapped (see
-	// pgpmail.SignMIME/buildSignedEnvelope). This mirrors the "verification
-	// succeeds when the exact signed bytes are available" case; a real
-	// goimap-parsed inbox body drops that header line, which is the
-	// documented best-effort gap verifySignedOnlyMessageContent's doc
-	// comment describes.
-	exactSignedContent := "Content-Type: text/plain; charset=UTF-8\r\n\r\ntrust me"
+	// MIME part as SignMIME produced it: the Content-Type and
+	// Content-Transfer-Encoding header lines plus the body, byte-identical to
+	// what buildSignedEnvelope wrapped (see pgpmail.SignMIME/splitMessage).
+	// This mirrors the "verification succeeds when the exact signed bytes are
+	// available" case; a real goimap-parsed inbox body drops those header
+	// lines, which is the documented best-effort gap
+	// verifySignedOnlyMessageContent's doc comment describes.
+	//
+	// The body is base64 because mailmsg.Message.Build emits every body that
+	// way. Spelled out structurally — headers, blank line, one wrapped base64
+	// line, trailing CRLF — rather than as a transcribed literal, so a change
+	// to the framing fails here instead of being absorbed by a hand-copied
+	// blob.
+	exactSignedContent := "Content-Type: text/plain; charset=UTF-8\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" +
+		base64.StdEncoding.EncodeToString([]byte("trust me")) + "\r\n"
 
 	t.Run("verifies against the exact signed bytes", func(t *testing.T) {
 		content := imapadapter.MessageContent{Body: exactSignedContent, PGPSignaturePayload: armoredSig}

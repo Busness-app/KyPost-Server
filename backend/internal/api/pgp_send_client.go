@@ -111,11 +111,12 @@ func (s *Server) handleMailSendPGP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("delivery %d: %s", i, err), http.StatusBadRequest)
 			return
 		}
-		prepared[i], normalizeErr = mailmsg.PrepareSMTPMessage([]byte(strings.TrimSpace(delivery.Ciphertext)))
+		normalized, normalizeErr := mailmsg.PrepareSMTPMessage([]byte(strings.TrimSpace(delivery.Ciphertext)))
 		if normalizeErr != nil {
 			http.Error(w, fmt.Sprintf("delivery %d: %s", i, normalizeErr), http.StatusBadRequest)
 			return
 		}
+		prepared[i] = normalized
 	}
 
 	payload, exists, err := mailmsg.ReadIMAPConfigPayload(s.userIMAPConfigPath(ac.UserID), s.imapConfigKeyPath)

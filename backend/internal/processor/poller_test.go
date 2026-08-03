@@ -1,11 +1,15 @@
 package processor
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"kypost-server/backend/internal/cryptutil"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
@@ -792,6 +796,31 @@ func stubSendRejectionNotice(t *testing.T, failWith error) *[]fakeRejectionSMTPC
 	return &calls
 }
 
+// decodeNoticeBody returns the readable text of a single-part notice built by
+// mailmsg.Message.Build. The transfer encoding is asserted rather than
+// assumed: if Build ever stops using base64, this fails loudly instead of
+// quietly handing back bytes that no longer decode to what was sent.
+func decodeNoticeBody(t *testing.T, raw []byte) string {
+	t.Helper()
+	parsed, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("parse notice: %v\n%s", err, raw)
+	}
+	if got := parsed.Header.Get("Content-Transfer-Encoding"); got != "base64" {
+		t.Fatalf("expected a base64 notice body, got Content-Transfer-Encoding %q", got)
+	}
+	encoded, err := io.ReadAll(parsed.Body)
+	if err != nil {
+		t.Fatalf("read notice body: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(
+		strings.NewReplacer("\r", "", "\n", "").Replace(string(encoded)))
+	if err != nil {
+		t.Fatalf("decode notice body: %v\n%s", err, encoded)
+	}
+	return string(decoded)
+}
+
 // TestHandleMessage_TooLargeMessageRejectsAndNotifies is the reject-and-
 // notify integration test: a message ListUnreadInbox flagged as TooLarge
 // must not go through the normal rule/classify/label pipeline at all, must
@@ -841,7 +870,10 @@ func TestHandleMessage_TooLargeMessageRejectsAndNotifies(t *testing.T) {
 	if len(call.recipients) != 1 || call.recipients[0] != "alice@example.com" {
 		t.Fatalf("expected notice addressed to the account's own address, got %v", call.recipients)
 	}
-	body := string(call.msg)
+	// mailmsg.Message.Build emits the body as base64 (Content-Transfer-Encoding:
+	// base64), so the notice text has to be decoded before it can be asserted
+	// on — grepping the raw message would silently stop checking anything.
+	body := decodeNoticeBody(t, call.msg)
 	if !strings.Contains(body, "Huge attachment") || !strings.Contains(body, "sender@example.com") {
 		t.Fatalf("expected the notice to mention the rejected message's subject/sender, got:\n%s", body)
 	}
