@@ -40,6 +40,19 @@ func TestAtomicWriteFileCreatesOwnerOnlyDirectories(t *testing.T) {
 	}
 }
 
+func TestSafePathComponentRejectsTraversal(t *testing.T) {
+	for _, value := range []string{"", ".", "..", "../outside", `..\outside`, "nested/name", "nul\x00byte"} {
+		if SafePathComponent(value) {
+			t.Errorf("SafePathComponent(%q) = true, want false", value)
+		}
+	}
+	for _, value := range []string{"user-a", "550e8400-e29b-41d4-a716-446655440000"} {
+		if !SafePathComponent(value) {
+			t.Errorf("SafePathComponent(%q) = false, want true", value)
+		}
+	}
+}
+
 // MkdirAll leaves an existing directory's mode alone, so tightening the create
 // mode must not disturb a volume that already has one.
 func TestAtomicWriteFileLeavesExistingDirectoryModeAlone(t *testing.T) {

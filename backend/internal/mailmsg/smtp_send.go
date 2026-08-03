@@ -1,6 +1,7 @@
 package mailmsg
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -200,6 +201,10 @@ var ErrSMTPAcceptedThenFailed = errors.New("smtp: message was accepted but the s
 // writeSMTPMessage runs the MAIL/RCPT/DATA/QUIT half of a send, shared by
 // the STARTTLS and implicit-TLS paths.
 func writeSMTPMessage(client *smtp.Client, from string, recipients []string, msg []byte) error {
+	normalized, err := NormalizeSMTPMessage(msg)
+	if err != nil {
+		return err
+	}
 	if err := client.Mail(from); err != nil {
 		return err
 	}
@@ -212,7 +217,7 @@ func writeSMTPMessage(client *smtp.Client, from string, recipients []string, msg
 	if err != nil {
 		return err
 	}
-	if _, err := writer.Write(msg); err != nil {
+	if _, err := writer.Write(normalized); err != nil {
 		_ = writer.Close()
 		return err
 	}
@@ -226,6 +231,59 @@ func writeSMTPMessage(client *smtp.Client, from string, recipients []string, msg
 		return fmt.Errorf("%w: %w", ErrSMTPAcceptedThenFailed, err)
 	}
 	return nil
+}
+
+// NormalizeSMTPMessage makes caller-provided message bytes safe for the SMTP
+// DATA stream. MIME bodies may legitimately contain line breaks, so removing
+// CR/LF would corrupt mail; instead, all line endings are made RFC 5322 CRLF.
+// NUL bytes and overlong physical lines are rejected because they are not
+// valid message data and can make different SMTP/MIME parsers disagree about
+// where content ends. The returned slice is a copy when normalization is
+// needed and otherwise aliases msg.
+func NormalizeSMTPMessage(msg []byte) ([]byte, error) {
+	if bytes.IndexByte(msg, 0) >= 0 {
+		return nil, errors.New("smtp message contains NUL byte")
+	}
+
+	var normalized []byte
+	for i := 0; i < len(msg); i++ {
+		if msg[i] == '\r' && (i+1 >= len(msg) || msg[i+1] != '\n') {
+			if normalized == nil {
+				normalized = make([]byte, 0, len(msg)+1)
+				normalized = append(normalized, msg[:i]...)
+			}
+			normalized = append(normalized, '\r', '\n')
+			continue
+		}
+		if msg[i] == '\n' && (i == 0 || msg[i-1] != '\r') {
+			if normalized == nil {
+				normalized = make([]byte, 0, len(msg)+1)
+				normalized = append(normalized, msg[:i]...)
+			}
+			normalized = append(normalized, '\r', '\n')
+			continue
+		}
+		if normalized != nil {
+			normalized = append(normalized, msg[i])
+		}
+	}
+	if normalized == nil {
+		normalized = msg
+	}
+
+	lineStart := 0
+	for i, b := range normalized {
+		if b == '\n' {
+			if i-lineStart > 998 {
+				return nil, errors.New("smtp message contains a line longer than 998 bytes")
+			}
+			lineStart = i + 1
+		}
+	}
+	if len(normalized)-lineStart > 998 {
+		return nil, errors.New("smtp message contains a line longer than 998 bytes")
+	}
+	return normalized, nil
 }
 
 // SMTPSendWithImplicitTLS delivers msg over an implicit-TLS (port 465 style)

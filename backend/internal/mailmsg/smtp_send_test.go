@@ -1,11 +1,30 @@
 package mailmsg
 
 import (
+	"bytes"
 	"net"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestNormalizeSMTPMessage(t *testing.T) {
+	got, err := NormalizeSMTPMessage([]byte("Subject: hi\n\nbody\rmore\n"))
+	if err != nil {
+		t.Fatalf("NormalizeSMTPMessage: %v", err)
+	}
+	want := []byte("Subject: hi\r\n\r\nbody\r\nmore\r\n")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("normalized message = %q, want %q", got, want)
+	}
+	if _, err := NormalizeSMTPMessage([]byte("Subject: hi\x00\r\n\r\nbody")); err == nil {
+		t.Fatal("NUL byte accepted")
+	}
+	if _, err := NormalizeSMTPMessage([]byte("Subject: " + strings.Repeat("x", 999) + "\r\n\r\nbody")); err == nil {
+		t.Fatal("overlong SMTP line accepted")
+	}
+}
 
 // TestResolveSMTPTarget covers the fallback chain shared by every
 // outbound-send call site: payload.SMTPHost, then SMTP_HOST env var, then

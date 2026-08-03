@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Logger struct {
@@ -40,9 +41,25 @@ func (l *Logger) Error(msg string, kv ...string) {
 // caller convenience — every call site already has string values) onto
 // slog's ...any args.
 func stringsToArgs(kv []string) []any {
-	args := make([]any, len(kv))
-	for i, v := range kv {
-		args[i] = v
+	args := make([]any, 0, len(kv))
+	for i := 0; i+1 < len(kv); i += 2 {
+		args = append(args, kv[i], redactValue(kv[i], kv[i+1]))
 	}
 	return args
+}
+
+// redactValue keeps the Logger's convenient flat-string API from turning a
+// call-site mistake into a cleartext disclosure. Keys are intentionally
+// matched by meaning, not by an exhaustive list of current field names.
+func redactValue(key, value string) string {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
+	for _, sensitive := range []string{
+		"password", "secret", "token", "credential", "authorization", "cookie",
+		"recipient", "email", "username", "subject", "body", "private_key", "api_key",
+	} {
+		if strings.Contains(normalized, sensitive) {
+			return "[REDACTED]"
+		}
+	}
+	return value
 }

@@ -393,8 +393,7 @@ func resolvePairingSecret(keyPath string, logger *logging.Logger) string {
 	key, err := cryptutil.LoadOrCreateKey(keyPath)
 	if err != nil {
 		if logger != nil {
-			logger.Error("could not generate or read the pairing secret; pickup links and PGP QR key-exchange stay disabled",
-				"path", keyPath, "error", err.Error())
+			logger.Error("could not generate or read the pairing secret; pickup links and PGP QR key-exchange stay disabled")
 		}
 		return ""
 	}

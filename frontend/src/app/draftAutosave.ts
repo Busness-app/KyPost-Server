@@ -138,7 +138,7 @@ export type DraftInput = {
  * like unsaved work and stomps a real snapshot with an empty one.
  */
 export function hasContent(draft: DraftInput): boolean {
-  const bodyText = draft.body.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim();
+  const bodyText = new DOMParser().parseFromString(draft.body, "text/html").body.textContent?.trim() ?? "";
   return Boolean(
     draft.to.trim() ||
       draft.cc.trim() ||

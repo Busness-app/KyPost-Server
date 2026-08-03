@@ -59,6 +59,11 @@ func (s *Server) handlePGPRecipientsResolve(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, map[string]any{"results": []any{}})
 		return
 	}
+	addresses, err := parseDeliveryRecipients(req.Addresses)
+	if err != nil {
+		http.Error(w, "invalid recipient address", http.StatusBadRequest)
+		return
+	}
 
 	contactsStore, err := s.userContactsStore(ac.UserID)
 	if err != nil {
@@ -85,8 +90,8 @@ func (s *Server) handlePGPRecipientsResolve(w http.ResponseWriter, r *http.Reque
 		Usable      bool   `json:"usable"`
 	}
 	seen := map[string]bool{}
-	results := make([]result, 0, len(req.Addresses))
-	for _, addr := range req.Addresses {
+	results := make([]result, 0, len(addresses))
+	for _, addr := range addresses {
 		clean := strings.TrimSpace(addr)
 		if clean == "" || seen[strings.ToLower(clean)] {
 			continue
