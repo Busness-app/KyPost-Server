@@ -146,8 +146,9 @@ func (m Message) Build() []byte {
 
 	if len(m.Attachments) == 0 {
 		msg.WriteString("Content-Type: " + m.ContentType() + "\r\n")
+		msg.WriteString("Content-Transfer-Encoding: base64\r\n")
 		msg.WriteString("\r\n")
-		msg.WriteString(m.Body)
+		writeBase64Wrapped(&msg, []byte(m.Body))
 		return msg.Bytes()
 	}
 
@@ -156,9 +157,10 @@ func (m Message) Build() []byte {
 	msg.WriteString("\r\n")
 
 	text, _ := w.CreatePart(textproto.MIMEHeader{
-		"Content-Type": {m.ContentType()},
+		"Content-Type":              {m.ContentType()},
+		"Content-Transfer-Encoding": {"base64"},
 	})
-	_, _ = io.WriteString(text, m.Body)
+	writeBase64Wrapped(text, []byte(m.Body))
 
 	for _, a := range m.Attachments {
 		// Sanitized like every other header value here. mime/multipart writes
