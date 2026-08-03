@@ -48,6 +48,18 @@ func TestValidateSMTPEnvelopeRejectsCommandInjection(t *testing.T) {
 	}
 }
 
+func TestSMTPTransportsRejectUnsafeEnvelopeBeforeConnecting(t *testing.T) {
+	if err := SMTPSendWithTimeout("not-a-host:25", nil,
+		"sender@example.com\r\nRCPT TO:<attacker@example.com>",
+		[]string{"victim@example.com"}, nil, time.Second); err == nil {
+		t.Fatal("SMTPSendWithTimeout accepted an unsafe envelope")
+	}
+	if err := SMTPSendWithImplicitTLS("not-a-host", 465, "", "",
+		"sender@example.com", []string{"victim@example.com\r\nX-Injected: yes"}, nil, time.Second); err == nil {
+		t.Fatal("SMTPSendWithImplicitTLS accepted an unsafe envelope")
+	}
+}
+
 // TestResolveSMTPTarget covers the fallback chain shared by every
 // outbound-send call site: payload.SMTPHost, then SMTP_HOST env var, then
 // deriveSMTPHost(payload.Host), then a hardcoded default port of 587 (or an

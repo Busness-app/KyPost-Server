@@ -140,6 +140,9 @@ func requireSTARTTLS(negotiatedTLS, allowInsecure bool) error {
 }
 
 func SMTPSendWithTimeout(addr string, auth smtp.Auth, from string, recipients []string, msg []byte, timeout time.Duration) error {
+	if err := validateSMTPEnvelope(from, recipients); err != nil {
+		return err
+	}
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("invalid smtp address %q: %w", addr, err)
@@ -290,6 +293,9 @@ func NormalizeSMTPMessage(msg []byte) ([]byte, error) {
 // SMTPSendWithImplicitTLS delivers msg over an implicit-TLS (port 465 style)
 // SMTP connection, since net/smtp only supports STARTTLS natively.
 func SMTPSendWithImplicitTLS(host string, port int, username, password, from string, recipients []string, msg []byte, timeout time.Duration) error {
+	if err := validateSMTPEnvelope(from, recipients); err != nil {
+		return err
+	}
 	addr := fmt.Sprintf("%s:%d", host, port)
 	dialer := &net.Dialer{Timeout: timeout}
 	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
