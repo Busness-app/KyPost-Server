@@ -33,6 +33,23 @@ type IMAPConfigPayload struct {
 	UpdatedAt string `json:"updatedAt,omitempty"`
 }
 
+// PreparedSMTPMessage is a message that has passed NormalizeSMTPMessage.
+// Callers receiving complete MIME from an end-to-end client must prepare it
+// before it can enter an SMTP delivery call.
+type PreparedSMTPMessage struct {
+	data []byte
+}
+
+// PrepareSMTPMessage validates and normalizes a complete MIME message before
+// it crosses the SMTP transport boundary.
+func PrepareSMTPMessage(msg []byte) (PreparedSMTPMessage, error) {
+	normalized, err := NormalizeSMTPMessage(msg)
+	if err != nil {
+		return PreparedSMTPMessage{}, err
+	}
+	return PreparedSMTPMessage{data: normalized}, nil
+}
+
 // NormalizeIMAPPayload applies default values and trimming to an IMAP config
 // payload.
 func NormalizeIMAPPayload(p IMAPConfigPayload) IMAPConfigPayload {
@@ -333,6 +350,19 @@ func SMTPDeliver(smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword
 	}
 	auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
 	return SMTPSendWithTimeout(addr, auth, from, recipients, msg, 45*time.Second)
+}
+
+// SMTPDeliverPrepared relays a complete MIME message after its caller has
+// explicitly passed it through PrepareSMTPMessage.
+func SMTPDeliverPrepared(smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, recipients []string, msg PreparedSMTPMessage) error {
+	if err := validateSMTPEnvelope(from, recipients); err != nil {
+		return err
+	}
+	if smtpPort == 465 {
+		return SMTPSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, msg.data, 45*time.Second)
+	}
+	auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
+	return SMTPSendWithTimeout(addr, auth, from, recipients, msg.data, 45*time.Second)
 }
 
 // validateSMTPEnvelope keeps request/config-derived values out of the SMTP

@@ -97,7 +97,7 @@ func (s *Server) handleMailSendPGP(w http.ResponseWriter, r *http.Request) {
 	// only after 0, 1 and 2 went out is a partial send the caller cannot undo —
 	// and this pass needs no IMAP config, so a malformed request still costs no
 	// config read and no SMTP connection.
-	prepared := make([][]byte, len(req.Deliveries))
+	prepared := make([]mailmsg.PreparedSMTPMessage, len(req.Deliveries))
 	for i, delivery := range req.Deliveries {
 		recipients, rerr := parseDeliveryRecipients(delivery.Recipients)
 		if rerr != nil {
@@ -111,8 +111,7 @@ func (s *Server) handleMailSendPGP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("delivery %d: %s", i, err), http.StatusBadRequest)
 			return
 		}
-		var normalizeErr error
-		prepared[i], normalizeErr = mailmsg.NormalizeSMTPMessage([]byte(strings.TrimSpace(delivery.Ciphertext)))
+		prepared[i], normalizeErr = mailmsg.PrepareSMTPMessage([]byte(strings.TrimSpace(delivery.Ciphertext)))
 		if normalizeErr != nil {
 			http.Error(w, fmt.Sprintf("delivery %d: %s", i, normalizeErr), http.StatusBadRequest)
 			return
@@ -168,7 +167,7 @@ func (s *Server) handleMailSendPGP(w http.ResponseWriter, r *http.Request) {
 		if len(recipients) == 0 || ciphertext == "" {
 			continue
 		}
-		sendErr := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password,
+		sendErr := mailmsg.SMTPDeliverPrepared(smtpHost, smtpPort, addr, payload.Username, payload.Password,
 			envelopeFrom, recipients, prepared[i])
 		if sendErr == nil {
 			continue
