@@ -26,6 +26,28 @@ func TestNormalizeSMTPMessage(t *testing.T) {
 	}
 }
 
+func TestValidateSMTPEnvelopeRejectsCommandInjection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		from       string
+		recipients []string
+	}{
+		{"sender CRLF", "sender@example.com\r\nRCPT TO:<attacker@example.com>", []string{"victim@example.com"}},
+		{"recipient CRLF", "sender@example.com", []string{"victim@example.com\r\nX-Injected: yes"}},
+		{"sender display name", "Sender <sender@example.com>", []string{"victim@example.com"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateSMTPEnvelope(tc.from, tc.recipients); err == nil {
+				t.Fatal("accepted an unsafe SMTP envelope")
+			}
+		})
+	}
+
+	if err := validateSMTPEnvelope("sender@example.com", []string{"victim@example.com"}); err != nil {
+		t.Fatalf("rejected a valid SMTP envelope: %v", err)
+	}
+}
+
 // TestResolveSMTPTarget covers the fallback chain shared by every
 // outbound-send call site: payload.SMTPHost, then SMTP_HOST env var, then
 // deriveSMTPHost(payload.Host), then a hardcoded default port of 587 (or an

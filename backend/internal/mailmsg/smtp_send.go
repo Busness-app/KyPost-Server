@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"os"
 	"strings"
@@ -318,11 +319,41 @@ func SMTPSendWithImplicitTLS(host string, port int, username, password, from str
 // SMTPDeliver sends msg over SMTP to recipients, choosing implicit TLS (port
 // 465) or STARTTLS/plain auth otherwise.
 func SMTPDeliver(smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, recipients []string, msg []byte) error {
+	if err := validateSMTPEnvelope(from, recipients); err != nil {
+		return err
+	}
 	if smtpPort == 465 {
 		return SMTPSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, msg, 45*time.Second)
 	}
 	auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
 	return SMTPSendWithTimeout(addr, auth, from, recipients, msg, 45*time.Second)
+}
+
+// validateSMTPEnvelope keeps request/config-derived values out of the SMTP
+// command stream. net/smtp formats these strings into MAIL FROM and RCPT TO
+// commands; accepting a display name, CR/LF, or an invalid address here would
+// let different SMTP servers parse a caller-controlled envelope differently.
+func validateSMTPEnvelope(from string, recipients []string) error {
+	if err := validateSMTPAddress("sender", from); err != nil {
+		return err
+	}
+	for _, recipient := range recipients {
+		if err := validateSMTPAddress("recipient", recipient); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSMTPAddress(kind, value string) error {
+	if strings.TrimSpace(value) != value || strings.ContainsAny(value, "\r\n\x00") {
+		return fmt.Errorf("invalid smtp %s address", kind)
+	}
+	parsed, err := mail.ParseAddress(value)
+	if err != nil || parsed.Address != value {
+		return fmt.Errorf("invalid smtp %s address", kind)
+	}
+	return nil
 }
 
 // ErrIMAPConfigNotEncrypted is returned by ReadIMAPConfigPayload when the
