@@ -1065,8 +1065,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 type imapConfigPayload = mailmsg.IMAPConfigPayload
 
 type mailRequest struct {
-	Subject     string
-	Body        string
+	Subject string
+	Body    string
+	// EncodedBody is the request body encoded before it enters any outbound
+	// MIME message. Body remains raw for drafts and pickup storage.
+	EncodedBody string
 	Mode        string
 	To          []string
 	CC          []string
