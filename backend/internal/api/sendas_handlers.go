@@ -136,14 +136,14 @@ func (s *Server) handleSendAsCreate(w http.ResponseWriter, r *http.Request) {
 	// 9. Send the probe email. The pending record created in step 7 remains
 	// in place regardless of the outcome.
 	msg := mailmsg.Message{
-		From:    sanitizeHeaderValue(imapCfg.Username),
+		From:    mailmsg.SanitizeHeaderValue(imapCfg.Username),
 		To:      []string{normalizedEmail},
 		Subject: "Verify send-as: " + alias.VerificationCode,
 		Body:    "This is an automated verification message from KyPost. No action is needed — this check completes automatically. If you don't recognize this, you can ignore it.",
 		Mode:    "plain",
 	}.Build()
 
-	if err := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, imapCfg.Username, imapCfg.Password, sanitizeHeaderValue(imapCfg.Username), []string{normalizedEmail}, msg); err != nil {
+	if err := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, imapCfg.Username, imapCfg.Password, mailmsg.SanitizeHeaderValue(imapCfg.Username), []string{normalizedEmail}, msg); err != nil {
 		http.Error(w, fmt.Sprintf("failed to send verification email: %s", err), http.StatusBadGateway)
 		return
 	}
