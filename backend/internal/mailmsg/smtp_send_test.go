@@ -1,11 +1,64 @@
 package mailmsg
 
 import (
+	"bytes"
 	"net"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestNormalizeSMTPMessage(t *testing.T) {
+	got, err := NormalizeSMTPMessage([]byte("Subject: hi\n\nbody\rmore\n"))
+	if err != nil {
+		t.Fatalf("NormalizeSMTPMessage: %v", err)
+	}
+	want := []byte("Subject: hi\r\n\r\nbody\r\nmore\r\n")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("normalized message = %q, want %q", got, want)
+	}
+	if _, err := NormalizeSMTPMessage([]byte("Subject: hi\x00\r\n\r\nbody")); err == nil {
+		t.Fatal("NUL byte accepted")
+	}
+	if _, err := NormalizeSMTPMessage([]byte("Subject: " + strings.Repeat("x", 999) + "\r\n\r\nbody")); err == nil {
+		t.Fatal("overlong SMTP line accepted")
+	}
+}
+
+func TestValidateSMTPEnvelopeRejectsCommandInjection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		from       string
+		recipients []string
+	}{
+		{"sender CRLF", "sender@example.com\r\nRCPT TO:<attacker@example.com>", []string{"victim@example.com"}},
+		{"recipient CRLF", "sender@example.com", []string{"victim@example.com\r\nX-Injected: yes"}},
+		{"sender display name", "Sender <sender@example.com>", []string{"victim@example.com"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateSMTPEnvelope(tc.from, tc.recipients); err == nil {
+				t.Fatal("accepted an unsafe SMTP envelope")
+			}
+		})
+	}
+
+	if err := validateSMTPEnvelope("sender@example.com", []string{"victim@example.com"}); err != nil {
+		t.Fatalf("rejected a valid SMTP envelope: %v", err)
+	}
+}
+
+func TestSMTPTransportsRejectUnsafeEnvelopeBeforeConnecting(t *testing.T) {
+	if err := SMTPSendWithTimeout("not-a-host:25", nil,
+		"sender@example.com\r\nRCPT TO:<attacker@example.com>",
+		[]string{"victim@example.com"}, nil, time.Second); err == nil {
+		t.Fatal("SMTPSendWithTimeout accepted an unsafe envelope")
+	}
+	if err := SMTPSendWithImplicitTLS("not-a-host", 465, "", "",
+		"sender@example.com", []string{"victim@example.com\r\nX-Injected: yes"}, nil, time.Second); err == nil {
+		t.Fatal("SMTPSendWithImplicitTLS accepted an unsafe envelope")
+	}
+}
 
 // TestResolveSMTPTarget covers the fallback chain shared by every
 // outbound-send call site: payload.SMTPHost, then SMTP_HOST env var, then

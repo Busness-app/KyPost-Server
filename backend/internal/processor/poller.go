@@ -19,6 +19,7 @@ import (
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/config"
 	"kypost-server/backend/internal/contacts"
+	"kypost-server/backend/internal/fsutil"
 	"kypost-server/backend/internal/health"
 	"kypost-server/backend/internal/logging"
 	"kypost-server/backend/internal/mailcache"
@@ -192,11 +193,18 @@ func (p *Poller) lifetimeCtx() context.Context {
 }
 
 func (p *Poller) userStateDir(userID string) string {
-	return filepath.Join(p.stateDir, "users", userID)
+	return filepath.Join(p.stateDir, "users", safeUserPathComponent(userID))
 }
 
 func (p *Poller) userConfigDir(userID string) string {
-	return filepath.Join(p.configDir, "users", userID)
+	return filepath.Join(p.configDir, "users", safeUserPathComponent(userID))
+}
+
+func safeUserPathComponent(userID string) string {
+	if fsutil.SafePathComponent(userID) {
+		return userID
+	}
+	return "__invalid-user-id__"
 }
 
 func (p *Poller) userIMAPConfigPath(userID string) string {

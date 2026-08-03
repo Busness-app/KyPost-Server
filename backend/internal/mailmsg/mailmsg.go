@@ -29,6 +29,9 @@ type Message struct {
 	BCC     []string
 	Subject string
 	Body    string
+	// EncodedBody, when set, is RFC 2045 base64 text for Body. It is used by
+	// request-facing callers to keep raw compose text out of MIME construction.
+	EncodedBody string
 	// "plain" (default), "html", or "markup" (sent as text/markdown) —
 	// the same values /api/mail/send accepts.
 	Mode string
@@ -129,6 +132,10 @@ func FoldHeaderValue(value string) string {
 
 // Build renders the complete message bytes.
 func (m Message) Build() []byte {
+	bodyEncoded := m.EncodedBody
+	if bodyEncoded == "" {
+		bodyEncoded = base64.StdEncoding.EncodeToString([]byte(m.Body))
+	}
 	var msg bytes.Buffer
 	msg.WriteString("From: " + SanitizeHeaderValue(m.From) + "\r\n")
 	msg.WriteString("To: " + strings.Join(sanitizeHeaderValues(m.To), ", ") + "\r\n")
@@ -146,8 +153,9 @@ func (m Message) Build() []byte {
 
 	if len(m.Attachments) == 0 {
 		msg.WriteString("Content-Type: " + m.ContentType() + "\r\n")
+		msg.WriteString("Content-Transfer-Encoding: base64\r\n")
 		msg.WriteString("\r\n")
-		msg.WriteString(m.Body)
+		writeWrappedBase64(&msg, bodyEncoded)
 		return msg.Bytes()
 	}
 
@@ -156,9 +164,10 @@ func (m Message) Build() []byte {
 	msg.WriteString("\r\n")
 
 	text, _ := w.CreatePart(textproto.MIMEHeader{
-		"Content-Type": {m.ContentType()},
+		"Content-Type":              {m.ContentType()},
+		"Content-Transfer-Encoding": {"base64"},
 	})
-	_, _ = io.WriteString(text, m.Body)
+	writeWrappedBase64(text, bodyEncoded)
 
 	for _, a := range m.Attachments {
 		// Sanitized like every other header value here. mime/multipart writes
@@ -195,7 +204,10 @@ func (m Message) Build() []byte {
 
 // writeBase64Wrapped writes base64 content in RFC 2045 76-character lines.
 func writeBase64Wrapped(dst io.Writer, data []byte) {
-	encoded := base64.StdEncoding.EncodeToString(data)
+	writeWrappedBase64(dst, base64.StdEncoding.EncodeToString(data))
+}
+
+func writeWrappedBase64(dst io.Writer, encoded string) {
 	const lineLen = 76
 	for start := 0; start < len(encoded); start += lineLen {
 		end := min(start+lineLen, len(encoded))

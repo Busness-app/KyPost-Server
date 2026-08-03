@@ -7,7 +7,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// SafePathComponent reports whether value can be used as one directory or
+// file-name component. It rejects both platform separators so data written on
+// one OS cannot become a traversal when the volume is used on another.
+func SafePathComponent(value string) bool {
+	return value != "" && value != "." && value != ".." &&
+		filepath.Base(value) == value &&
+		!strings.ContainsAny(value, `/\\`) && !strings.ContainsRune(value, 0)
+}
 
 // AtomicWriteFile writes payload to path via a temp file + rename so readers
 // never observe a partially-written file, and fsyncs both the temp file and

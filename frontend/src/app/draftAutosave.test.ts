@@ -25,6 +25,7 @@ describe("hasContent", () => {
     // every opened compose window overwrites a real snapshot with nothing.
     expect(hasContent(draft({ body: "<p><br></p>" }))).toBe(false);
     expect(hasContent(draft({ body: "<p>&nbsp;</p>" }))).toBe(false);
+    expect(hasContent(draft({ body: "<p>&emsp;&#160;</p>" }))).toBe(false);
   });
 
   it("sees real body text through markup", () => {

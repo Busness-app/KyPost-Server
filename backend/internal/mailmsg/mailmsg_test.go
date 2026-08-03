@@ -41,8 +41,9 @@ func TestBuildSinglePart(t *testing.T) {
 		t.Fatalf("Bcc header must be absent when BCC is empty")
 	}
 	body, _ := io.ReadAll(msg.Body)
-	if string(body) != "The body" {
-		t.Fatalf("body = %q", body)
+	decoded, err := decodeBase64Lines(string(body))
+	if err != nil || string(decoded) != "The body" {
+		t.Fatalf("decoded body = %q (err %v)", decoded, err)
 	}
 }
 
@@ -89,9 +90,13 @@ func TestBuildMultipartRoundTrip(t *testing.T) {
 	if got := text.Header.Get("Content-Type"); got != "text/plain; charset=UTF-8" {
 		t.Fatalf("text part Content-Type = %q", got)
 	}
+	if got := text.Header.Get("Content-Transfer-Encoding"); got != "base64" {
+		t.Fatalf("text part transfer encoding = %q", got)
+	}
 	textBody, _ := io.ReadAll(text)
-	if string(textBody) != "See attached." {
-		t.Fatalf("text body = %q", textBody)
+	decodedText, err := decodeBase64Lines(string(textBody))
+	if err != nil || string(decodedText) != "See attached." {
+		t.Fatalf("decoded text body = %q (err %v)", decodedText, err)
 	}
 
 	attachment, err := reader.NextPart()

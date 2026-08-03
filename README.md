@@ -835,3 +835,5 @@ inside the container. On systems without systemd, schedule
 - `Dockerfile`: single image build (backend, frontend, Ollama runtime)
 - `docker-compose.yml`: local orchestration
 - `supervisord.conf`: in-container process supervision
+
+[![OctoCounts](https://api.octocounts.com/badge/Yoshiofthewire/KyPost-Server/branch/main)](https://octocounts.com/github/Yoshiofthewire/KyPost-Server/tree/main)

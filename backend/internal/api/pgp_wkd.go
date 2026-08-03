@@ -100,6 +100,14 @@ func fetchWKDKey(ctx context.Context, email string) (string, string, error) {
 
 	var lastErr error
 	for _, u := range wkdCandidateURLs(localPart, domain) {
+		allowedSchemes := []string{"https"}
+		if wkdBaseURLOverride != "" {
+			allowedSchemes = []string{"http", "https"}
+		}
+		if err := validateOutboundURL(u, allowedSchemes...); err != nil {
+			lastErr = fmt.Errorf("unsafe WKD URL: %w", err)
+			continue
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			lastErr = err

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net/mail"
 	"strings"
 
 	"kypost-server/backend/internal/contacts"
@@ -123,6 +124,11 @@ func (kr *keyResolver) pin(email, armored, fingerprint, source string) {
 //     never runs.
 //  5. Otherwise, tierNone.
 func (kr *keyResolver) resolve(ctx context.Context, email string) resolvedKey {
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || parsed.Address != strings.TrimSpace(email) {
+		return resolvedKey{Tier: tierNone}
+	}
+	email = parsed.Address
 	c, hasContact := findContact(kr.store, email)
 	pinnedFP := ""
 	if hasContact && c.PGPKey != "" {

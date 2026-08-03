@@ -50,7 +50,11 @@ func splitMessage(raw []byte) (envelope textproto.MIMEHeader, content []byte, er
 	}
 
 	var buf bytes.Buffer
-	buf.WriteString("Content-Type: " + contentType + "\r\n\r\n")
+	buf.WriteString("Content-Type: " + contentType + "\r\n")
+	if transferEncoding := header.Get("Content-Transfer-Encoding"); transferEncoding != "" {
+		buf.WriteString("Content-Transfer-Encoding: " + transferEncoding + "\r\n")
+	}
+	buf.WriteString("\r\n")
 	buf.Write(body.Bytes())
 
 	return header, buf.Bytes(), nil
@@ -482,6 +486,11 @@ func ParseContent(content []byte) (body, mode string, attachments []mailmsg.Atta
 
 	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") || params["boundary"] == "" {
+		if strings.EqualFold(header.Get("Content-Transfer-Encoding"), "base64") {
+			if decoded, decErr := decodeBase64Body(rest); decErr == nil {
+				rest = decoded
+			}
+		}
 		return string(rest), bodyMode(header.Get("Content-Type")), nil, nil
 	}
 
@@ -526,7 +535,7 @@ func parseMultipart(r io.Reader, boundary string, depth int, body, mode *string,
 			return fmt.Errorf("pgpmail: read part body: %w", err)
 		}
 		if strings.EqualFold(part.Header.Get("Content-Transfer-Encoding"), "base64") {
-			if decoded, decErr := base64.StdEncoding.DecodeString(string(partBody)); decErr == nil {
+			if decoded, decErr := decodeBase64Body(partBody); decErr == nil {
 				partBody = decoded
 			}
 		}
@@ -565,4 +574,8 @@ func parseMultipart(r io.Reader, boundary string, depth int, body, mode *string,
 		})
 	}
 	return nil
+}
+
+func decodeBase64Body(body []byte) ([]byte, error) {
+	return io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(body)))
 }

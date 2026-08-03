@@ -14,6 +14,7 @@ import (
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/contacts"
+	"kypost-server/backend/internal/fsutil"
 	"kypost-server/backend/internal/groups"
 	"kypost-server/backend/internal/mailcache"
 	"kypost-server/backend/internal/mailmsg"
@@ -138,11 +139,21 @@ type mailLockedOutError struct {
 func (e *mailLockedOutError) Error() string { return "device locked out" }
 
 func (s *Server) userConfigDir(userID string) string {
-	return filepath.Join(s.configDir, "users", userID)
+	return filepath.Join(s.configDir, "users", safeUserPathComponent(userID))
 }
 
 func (s *Server) userStateDir(userID string) string {
-	return filepath.Join(s.stateDir, "users", userID)
+	return filepath.Join(s.stateDir, "users", safeUserPathComponent(userID))
+}
+
+// safeUserPathComponent keeps malformed or legacy user records inside the
+// users directory. Valid IDs are opaque UUIDs, but path construction must not
+// rely on that invariant surviving hand-edited or migrated users.json files.
+func safeUserPathComponent(userID string) string {
+	if fsutil.SafePathComponent(userID) {
+		return userID
+	}
+	return "__invalid-user-id__"
 }
 
 func (s *Server) userIMAPConfigPath(userID string) string {

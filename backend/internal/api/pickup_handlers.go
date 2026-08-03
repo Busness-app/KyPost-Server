@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
-	"net/smtp"
 	"os"
 	"strconv"
 	"strings"
@@ -265,13 +264,7 @@ func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainB
 	}.Build()
 
 	recipients := []string{recipient}
-	var sendErr error
-	if smtpPort == 465 {
-		sendErr = mailmsg.SMTPSendWithImplicitTLS(smtpHost, smtpPort, smtpUsername, smtpPassword, from, recipients, notice, 45*time.Second)
-	} else {
-		auth := smtp.PlainAuth("", smtpUsername, smtpPassword, smtpHost)
-		sendErr = mailmsg.SMTPSendWithTimeout(addr, auth, from, recipients, notice, 45*time.Second)
-	}
+	sendErr := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, smtpUsername, smtpPassword, from, recipients, notice)
 	if sendErr != nil {
 		// Not every failure means the link went nowhere. If the server accepted
 		// the message and only the session teardown failed, the recipient has
@@ -393,8 +386,7 @@ func resolvePairingSecret(keyPath string, logger *logging.Logger) string {
 	key, err := cryptutil.LoadOrCreateKey(keyPath)
 	if err != nil {
 		if logger != nil {
-			logger.Error("could not generate or read the pairing secret; pickup links and PGP QR key-exchange stay disabled",
-				"path", keyPath, "error", err.Error())
+			logger.Error("could not generate or read the pairing secret; pickup links and PGP QR key-exchange stay disabled")
 		}
 		return ""
 	}
