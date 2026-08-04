@@ -6,6 +6,7 @@
 // ContactsPage already does it: it is a large bundle and no page needs it
 // until the user actually touches PGP.
 
+import { type BoundSignerKey } from "../api/pgp";
 import { requireUnlockedKey } from "./keyVault";
 import { parseMimeContent, type BodyMode } from "./mimeContent";
 
@@ -111,45 +112,62 @@ export type DecryptedMessage = {
 };
 
 /**
+ * Reads the bound signer keys and indexes each one's bound addresses by
+ * fingerprint, so a signature can be checked against the addresses the ADDRESS
+ * BOOK gives its key rather than against anything the key says about itself.
+ *
+ * Nothing here parses a User ID, and that is the point. The browser used to
+ * decide "does this key belong to the sender" by comparing the parsed email of
+ * each User ID — openpgp.js's parse, while the server had pinned the key using
+ * go-crypto's. The two disagree on adversarial User IDs in both directions, so
+ * the browser could vouch for a key the server's own binding rejected. Worse,
+ * the check was forgeable on its own terms whichever parser won: User IDs are
+ * self-asserted and a key may carry as many as its owner likes, so one key with
+ * `Mallory <mallory@evil.example>` and `Bob <bob@example.com>` is pinned under
+ * Mallory's contact and then verifies mail claiming to be from Bob.
+ *
+ * The server now sends the binding it applied — see boundSignerKeys in
+ * pgp_receive.go — and this compares address strings.
+ */
+async function readBoundSignerKeys(
+  pgp: OpenPGP,
+  signerKeys: BoundSignerKey[]
+): Promise<{ keys: PublicKey[]; addressesByFingerprint: Map<string, string[]> }> {
+  const keys: PublicKey[] = [];
+  const addressesByFingerprint = new Map<string, string[]>();
+  for (const entry of signerKeys) {
+    const trimmed = entry?.publicKey?.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      const key = await pgp.readKey({ armoredKey: trimmed });
+      keys.push(key);
+      addressesByFingerprint.set(
+        key.getFingerprint().toUpperCase(),
+        (entry.addresses ?? []).map((a) => a.trim().toLowerCase())
+      );
+    } catch {
+      // One unparseable contact key must not cost every other signer their
+      // verification.
+    }
+  }
+  return { keys, addressesByFingerprint };
+}
+
+/**
  * Decrypts a PGP/MIME payload the server handed through untouched, using the
  * unlocked key. Throws VaultLockedError if the vault is locked.
  *
- * signerPublicKeys are every known contact key: which one signed is not known
- * in advance, so all are offered and whichever actually produced the signature
- * is identified. senderAddress is what the verdict is then bound to — see the
- * comment at the verification loop. `verified` means "the sender signed this",
- * not "somebody did".
+ * signerKeys are the contact keys the server holds, each labelled with the
+ * addresses the address book binds it to. Which one signed is not known in
+ * advance, so all are offered and whichever actually produced the signature is
+ * identified — but `verified` is true only when that key is bound to
+ * senderAddress. `verified` means "the sender signed this", not "somebody did".
  */
-/**
- * Whether `key` carries `address` as the email of one of its User IDs.
- *
- * Compares the PARSED email of each User ID, never the raw User-ID string. That
- * distinction is the whole function.
- *
- * A User ID is free-form and self-certified: its owner chooses the entire text.
- * The previous check was `uid.includes("<" + address + ">")` over the raw string,
- * which the Go side does not agree with — go-crypto's parseUserId is a state
- * machine that stops after the FIRST bracketed address and ignores the rest,
- * while a substring test is order-independent. So a UID of
- *
- *     Mallory <mallory@evil.example> aka Bob <bob@example.com>
- *
- * parses server-side as mallory@evil.example — the Autocrypt harvest happily pins
- * it under the attacker's OWN contact, no prompt — while the browser's substring
- * test found <bob@example.com> and vouched for it as Bob. Two parsers, one string,
- * two answers, and the reader saw a green "signature verified" under a spoofed
- * From. Comparing the parsed email makes the browser agree with the parser that
- * did the pinning.
- */
-function keyCertifiesAddress(key: PublicKey, address: string): boolean {
-  return key.users.some(
-    (user) => user.userID?.email?.trim().toLowerCase() === address
-  );
-}
-
 export async function decryptMessage(
   payload: string,
-  signerPublicKeys: string[],
+  signerKeys: BoundSignerKey[],
   senderAddress: string
 ): Promise<DecryptedMessage> {
   const pgp = await openpgp();
@@ -158,7 +176,10 @@ export async function decryptMessage(
   const armored = extractArmoredMessage(payload);
   const message = await pgp.readMessage({ armoredMessage: armored });
 
-  const verificationKeys = await readPublicKeys(pgp, signerPublicKeys);
+  const { keys: verificationKeys, addressesByFingerprint } = await readBoundSignerKeys(
+    pgp,
+    signerKeys
+  );
   const result = await pgp.decrypt({
     message,
     decryptionKeys: privateKey,
@@ -185,11 +206,14 @@ export async function decryptMessage(
         // A cryptographically valid signature from SOME key in the address
         // book proves only that someone signed this. The badge claims the
         // SENDER signed it, so the key that actually produced the signature
-        // must carry the sender's address as a User ID. Without this, an
-        // attacker whose key the reader had auto-pinned — Autocrypt harvest
-        // and WKD auto-trust both pin without asking — could sign a message,
-        // put anyone in the From header, and be vouched for by the UI.
-        verified = Boolean(match && wanted && keyCertifiesAddress(match, wanted));
+        // must be one the address book binds to the sender's address. Without
+        // this, an attacker whose key the reader had auto-pinned — Autocrypt
+        // harvest and WKD auto-trust both pin without asking — could sign a
+        // message, put anyone in the From header, and be vouched for by the UI.
+        const bound = match
+          ? addressesByFingerprint.get(match.getFingerprint().toUpperCase())
+          : undefined;
+        verified = Boolean(wanted && bound?.includes(wanted));
         break;
       } catch {
         // Try the next signature; an unverifiable one is not fatal.

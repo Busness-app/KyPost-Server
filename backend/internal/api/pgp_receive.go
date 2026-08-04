@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net/mail"
 	"strings"
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
@@ -198,19 +199,108 @@ func (s *Server) verifyDetachedForUser(userID, body, sig, senderAddress string) 
 	return result.Verified, result.SignerFingerprint
 }
 
-// signerKeysForSender returns the candidate signer keys for a message claiming
-// to come from senderAddress: only those contact keys that carry that address as
-// the PARSED email of one of their User IDs.
+// boundSignerKey is one contact's public key together with the addresses the
+// ADDRESS BOOK says that key belongs to — the contact's own email addresses,
+// never anything the key asserts about itself.
 //
-// This is what binds "signature verified" to the sender on the server-custody
-// path. Offering the whole address book (allKnownPGPKeys) made Verified mean
-// "some contact of yours signed this", because DecryptMIME reports success
-// against whichever offered key produced the signature and has no address to
-// compare it to — its signature takes none. So any key in the book verified any
-// From, and the badge the client renders from PGPVerified said "signature
-// verified" under an address the signing key had nothing to do with. Run-4
-// reported this; the fix that followed was applied only to the browser, and this
-// path kept the old behaviour.
+// This shape exists because the browser needs the same binding the server
+// applies and must not re-derive it. See signerKeysForSender for why a key's
+// self-asserted User IDs are not a trust anchor, and boundSignerKeys for why
+// the browser is handed the answer rather than the inputs.
+type boundSignerKey struct {
+	Addresses []string `json:"addresses"`
+	PublicKey string   `json:"publicKey"`
+}
+
+// senderAddrSpec extracts the bare addr-spec from a From header value.
+//
+// The inbox path carries the RAW header — imap.Overview.Sender is
+// e.From.String(), which go-imap renders as `Name <addr>` whenever a display
+// name is present. Comparing that against an address matched nothing, so the
+// binding below silently returned no keys and the signature indicator vanished
+// for every legitimately signed message from a correspondent who has a display
+// name. Meanwhile a bare `From: bob@example.com` — the form an attacker
+// controls and therefore always chooses — went on matching. A binding that
+// only ever fires for the attacker is worse than no binding.
+//
+// mail.ParseAddressList is the primary parser. It rejects some headers that
+// arrive in real mail (unquoted specials in the display name), so the
+// angle-addr fallback covers those rather than failing the whole verification.
+func senderAddrSpec(sender string) string {
+	raw := strings.TrimSpace(sender)
+	if raw == "" {
+		return ""
+	}
+	if list, err := mail.ParseAddressList(raw); err == nil && len(list) > 0 {
+		return strings.ToLower(strings.TrimSpace(list[0].Address))
+	}
+	if open := strings.LastIndex(raw, "<"); open >= 0 {
+		if close := strings.Index(raw[open+1:], ">"); close >= 0 {
+			return strings.ToLower(strings.TrimSpace(raw[open+1 : open+1+close]))
+		}
+	}
+	return strings.ToLower(raw)
+}
+
+// contactBindsAddress reports whether the address book itself says this
+// contact is senderAddress — i.e. the address appears among the contact's own
+// email addresses.
+func contactBindsAddress(c contacts.Contact, senderAddress string) bool {
+	for _, e := range c.Emails {
+		if strings.ToLower(strings.TrimSpace(e.Value)) == senderAddress {
+			return true
+		}
+	}
+	return false
+}
+
+// keyMatchesPin reports whether a contact's stored key is the one its TOFU pin
+// names.
+//
+// An empty pin is accepted. Every write path has pinned since the fingerprint
+// backfill (contacts.applyUpsertLocked), but contacts stored before it exist
+// and refusing them would silently drop verification for the whole legacy
+// address book. An empty pin means "never pinned", not "pinned to nothing".
+func keyMatchesPin(c contacts.Contact) bool {
+	if c.PGPKeyFingerprint == "" {
+		return true
+	}
+	info, err := pgpmail.InspectPublicKey(c.PGPKey)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(info.Fingerprint, c.PGPKeyFingerprint)
+}
+
+// signerKeysForSender returns the candidate signer keys for a message claiming
+// to come from senderAddress: the keys of those CONTACTS whose own address list
+// contains that address.
+//
+// This is what binds "signature verified" to the sender. Getting the anchor
+// right has taken three attempts, so it is worth stating what each one assumed.
+//
+// Offering the whole address book (allKnownPGPKeys) made Verified mean "some
+// contact of yours signed this": DecryptMIME reports success against whichever
+// offered key produced the signature and has no address to compare it to.
+//
+// Narrowing to keys that carry the address as the parsed email of one of their
+// User IDs was the second attempt, and it is still forgeable, because a User ID
+// is self-asserted and a key may carry arbitrarily many. Mallory generates ONE
+// key with the User IDs `Mallory <mallory@evil.example>` and
+// `Bob <bob@example.com>` — the repo's own GenerateIdentity does it in one
+// variadic call, no packet crafting. The Autocrypt harvest validates the key
+// against her From, matches on the FIRST User ID, and pins it under her own
+// contact. She then signs a message with `From: bob@example.com`, the second
+// User ID satisfies the binding, and the badge goes green — even when the
+// reader holds and has manually verified Bob's real key. No code path anywhere
+// in the backend inspects a key's full User ID set, so every any-UID check
+// inherits this.
+//
+// The address book is the anchor because it is the only assertion here the USER
+// made. `c.Emails` says who a contact is; a User ID says only what its owner
+// typed. The fingerprint pin is checked alongside it so a key swapped under an
+// existing contact without updating its pin cannot inherit that contact's
+// binding.
 //
 // Narrowing the candidate set rather than post-checking the fingerprint means
 // there is no window where a wrong-key signature is ever considered valid.
@@ -218,29 +308,55 @@ func (s *Server) verifyDetachedForUser(userID, body, sig, senderAddress string) 
 // An empty result means nothing can verify, so Verified stays false — which is
 // the correct answer for a sender whose key we do not hold.
 func signerKeysForSender(store *contacts.Store, senderAddress string) []string {
-	address := strings.ToLower(strings.TrimSpace(senderAddress))
+	address := senderAddrSpec(senderAddress)
 	if address == "" {
 		return nil
 	}
 	var keys []string
 	for _, c := range store.List() {
-		if c.PGPKey != "" && pgpmail.ArmoredKeyCertifiesAddress(c.PGPKey, address) {
-			keys = append(keys, c.PGPKey)
+		if c.PGPKey == "" || !contactBindsAddress(c, address) || !keyMatchesPin(c) {
+			continue
 		}
+		keys = append(keys, c.PGPKey)
 	}
 	return keys
 }
 
-// allKnownPGPKeys returns every contact's armored public key.
+// boundSignerKeys returns every contact key the client may verify with, each
+// labelled with the addresses the address book binds it to.
 //
-// NOT for verification — see signerKeysForSender. Verification must offer only
-// keys bound to the claimed sender.
-func allKnownPGPKeys(store *contacts.Store) []string {
-	var keys []string
+// It replaces handing the browser a bare list of every key it might need
+// (allKnownPGPKeys), which forced the browser to redo the sender binding from
+// the keys' User IDs using openpgp.js — a different parser from the go-crypto
+// one that decided which contact each key was pinned to. The two disagree on
+// adversarial User IDs in both directions, so the browser could vouch for a key
+// the server's own binding rejects. Shipping the binding instead of the inputs
+// removes the second parser from the trust decision entirely; the browser
+// compares address strings the server derived.
+//
+// A key with no bound address is omitted rather than sent unlabelled: it could
+// only ever verify nothing, and an empty Addresses list is exactly the kind of
+// thing a client might read as "matches everything".
+func boundSignerKeys(store *contacts.Store) []boundSignerKey {
+	out := []boundSignerKey{}
 	for _, c := range store.List() {
-		if c.PGPKey != "" {
-			keys = append(keys, c.PGPKey)
+		if c.PGPKey == "" || !keyMatchesPin(c) {
+			continue
 		}
+		addresses := make([]string, 0, len(c.Emails))
+		seen := map[string]bool{}
+		for _, e := range c.Emails {
+			addr := strings.ToLower(strings.TrimSpace(e.Value))
+			if addr == "" || seen[addr] {
+				continue
+			}
+			seen[addr] = true
+			addresses = append(addresses, addr)
+		}
+		if len(addresses) == 0 {
+			continue
+		}
+		out = append(out, boundSignerKey{Addresses: addresses, PublicKey: c.PGPKey})
 	}
-	return keys
+	return out
 }

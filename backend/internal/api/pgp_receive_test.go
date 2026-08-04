@@ -348,3 +348,207 @@ func TestServerCustodyVerificationIsBoundToSender(t *testing.T) {
 			"bob@example.com; the badge would read 'signature verified' under a spoofed sender")
 	}
 }
+
+// pgpVictimWithIdentity sets up a test user holding a server-readable identity
+// and returns the user id, the identity, and the user's contacts store — the
+// four-step preamble every binding test below needs.
+func pgpVictimWithIdentity(t *testing.T) (string, *pgpmail.Identity, *contacts.Store, *Server) {
+	t.Helper()
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
+
+	recipient, err := pgpmail.GenerateIdentity("Recipient", "recipient@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	sealed, err := recipient.SealPrivateKey(srv.pgpPrivateKeyPath)
+	if err != nil {
+		t.Fatalf("SealPrivateKey: %v", err)
+	}
+	if _, err := srv.users.SetPGPIdentity(userID, recipient.Fingerprint, recipient.KeyID, recipient.ArmoredPublicKey, sealed, "generated", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentity: %v", err)
+	}
+	store, err := srv.userContactsStore(userID)
+	if err != nil {
+		t.Fatalf("userContactsStore: %v", err)
+	}
+	return userID, recipient, store, srv
+}
+
+// TestSecondUserIDDoesNotVerify is run-8 finding F1: the THIRD bypass of the
+// same badge, by a third mechanism.
+//
+// run-7's fix replaced a raw-substring User-ID test with a parsed-email one. It
+// changed the comparison and not the trust decision, which still asked "does any
+// User ID on any key in the book carry the sender's address". A User ID is
+// self-asserted and a key may carry arbitrarily many, so one key with two of
+// them defeats it — and this needs no crafted string or packet surgery, just
+// GenerateIdentity's own variadic additionalEmails.
+//
+// The reader here holds Bob's genuine key as well, which is the case that makes
+// this more than a nuisance: the attacker's signature won anyway, and the UI
+// suppresses the signer fingerprint on exactly the verified path.
+func TestSecondUserIDDoesNotVerify(t *testing.T) {
+	userID, recipient, contactsStore, srv := pgpVictimWithIdentity(t)
+
+	// One key, two User IDs. The harvest validates it against Mallory's From,
+	// matches on the first, and pins it under her own contact.
+	attacker, err := pgpmail.GenerateIdentity("Mallory", "mallory@evil.example", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity attacker: %v", err)
+	}
+	if _, err := contactsStore.Upsert(contacts.Contact{
+		FormattedName: "Mallory",
+		Emails:        []contacts.ContactValue{{Value: "mallory@evil.example"}},
+		PGPKey:        attacker.ArmoredPublicKey,
+	}); err != nil {
+		t.Fatalf("Upsert attacker contact: %v", err)
+	}
+
+	bob, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity bob: %v", err)
+	}
+	if _, err := contactsStore.Upsert(contacts.Contact{
+		FormattedName:  "Bob",
+		Emails:         []contacts.ContactValue{{Value: "bob@example.com"}},
+		PGPKey:         bob.ArmoredPublicKey,
+		PGPKeyVerified: true,
+	}); err != nil {
+		t.Fatalf("Upsert bob contact: %v", err)
+	}
+
+	// Sanity check on the premise: the attacker's key really does carry Bob's
+	// address as a User ID, so the old any-UID binding would have offered it.
+	if !pgpmail.ArmoredKeyCertifiesAddress(attacker.ArmoredPublicKey, "bob@example.com") {
+		t.Fatal("premise broken: the attacker key does not carry bob@example.com as a User ID")
+	}
+
+	plaintext := mailmsg.Message{
+		From:    "bob@example.com",
+		To:      []string{"recipient@example.com"},
+		Subject: "Wire the money",
+		Body:    "account details attached",
+		Mode:    "plain",
+	}.Build()
+	encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, attacker)
+	if err != nil {
+		t.Fatalf("EncryptMIME: %v", err)
+	}
+
+	content := imapadapter.MessageContent{PGPEncryptedPayload: extractArmoredPGPPayload(t, encrypted)}
+	result := srv.decryptPGPMessageContent(userID, "bob@example.com", content)
+
+	if result.PGPDecryptError != "" {
+		t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
+	}
+	if result.PGPVerified {
+		t.Fatalf("a key filed under mallory@evil.example verified a message claiming to be from "+
+			"bob@example.com, on the strength of a User ID it wrote for itself (signer %s, real Bob %s)",
+			result.PGPSignerFingerprint, bob.Fingerprint)
+	}
+}
+
+// TestSenderBindingAcceptsADisplayNameFrom is run-8 finding F3: run-7's binding
+// was fed imap.Overview.Sender, which is e.From.String() — `Name <addr>`
+// whenever a display name is present. Compared against a parsed User-ID email
+// that matched nothing, so the candidate set came back empty, DecryptMIME left
+// Signed as well as Verified false, and the signature indicator DISAPPEARED for
+// legitimately signed mail from any named correspondent.
+//
+// The bare-From form an attacker chooses was the only one that still went green.
+func TestSenderBindingAcceptsADisplayNameFrom(t *testing.T) {
+	userID, recipient, contactsStore, srv := pgpVictimWithIdentity(t)
+
+	sender, err := pgpmail.GenerateIdentity("Sender", "sender@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity sender: %v", err)
+	}
+	if _, err := contactsStore.Upsert(contacts.Contact{
+		FormattedName: "Sender",
+		Emails:        []contacts.ContactValue{{Value: "sender@example.com"}},
+		PGPKey:        sender.ArmoredPublicKey,
+	}); err != nil {
+		t.Fatalf("Upsert contact: %v", err)
+	}
+
+	plaintext := mailmsg.Message{
+		From:    "sender@example.com",
+		To:      []string{"recipient@example.com"},
+		Subject: "Secret",
+		Body:    "meet at dawn",
+		Mode:    "plain",
+	}.Build()
+	encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, sender)
+	if err != nil {
+		t.Fatalf("EncryptMIME: %v", err)
+	}
+	payload := extractArmoredPGPPayload(t, encrypted)
+
+	// Every form go-imap actually emits, including the quoted one a comma in
+	// the display name forces.
+	for _, from := range []string{
+		"sender@example.com",
+		"<sender@example.com>",
+		"Sender <sender@example.com>",
+		"Sender Person <sender@example.com>",
+		`"Person, Sender" <sender@example.com>`,
+	} {
+		t.Run(from, func(t *testing.T) {
+			content := imapadapter.MessageContent{PGPEncryptedPayload: payload}
+			result := srv.decryptPGPMessageContent(userID, from, content)
+			if result.PGPDecryptError != "" {
+				t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
+			}
+			if !result.PGPSigned {
+				t.Fatalf("From %q: PGPSigned false — no signer key was offered, so the "+
+					"indicator vanishes for legitimately signed mail", from)
+			}
+			if !result.PGPVerified {
+				t.Fatalf("From %q: PGPVerified false for the sender's own key", from)
+			}
+		})
+	}
+}
+
+// TestSignerKeysRequireTheContactPin covers the other half of the F1 anchor: a
+// key swapped under an existing contact without updating its TOFU pin must not
+// inherit that contact's binding. An absent pin is a legacy contact, not a
+// mismatch, and stays usable.
+func TestSignerKeysRequireTheContactPin(t *testing.T) {
+	_, _, contactsStore, _ := pgpVictimWithIdentity(t)
+
+	real, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	swapped, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+
+	created, err := contactsStore.Upsert(contacts.Contact{
+		FormattedName: "Bob",
+		Emails:        []contacts.ContactValue{{Value: "bob@example.com"}},
+		PGPKey:        real.ArmoredPublicKey,
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if got := signerKeysForSender(contactsStore, "bob@example.com"); len(got) != 1 {
+		t.Fatalf("pinned key should be offered, got %d keys", len(got))
+	}
+
+	// The stored key changes; the pin still names the old one.
+	created.PGPKey = swapped.ArmoredPublicKey
+	if _, err := contactsStore.Upsert(created); err != nil {
+		t.Fatalf("Upsert swapped: %v", err)
+	}
+	if got := signerKeysForSender(contactsStore, "bob@example.com"); len(got) != 0 {
+		t.Fatalf("a key that does not match the contact's pin was offered as a signer (%d keys)", len(got))
+	}
+}

@@ -169,6 +169,22 @@ export function wkdDomainRecord(claim: Pick<WKDDomainClaim, "domain" | "token">)
 
 // ---- end-to-end (client-protected) key handling ----------------------------
 
+/**
+ * A contact's public key together with the addresses the ADDRESS BOOK binds it
+ * to — the contact's own email addresses, never anything the key asserts about
+ * itself via its User IDs.
+ *
+ * The binding travels with the key deliberately. Handing the browser a bare
+ * list of keys made it re-derive "which key is the sender's" from the keys'
+ * User IDs, using a different OpenPGP parser from the one that decided which
+ * contact each key was pinned to, and against data the key's owner writes. See
+ * boundSignerKeys in backend/internal/api/pgp_receive.go.
+ */
+export type BoundSignerKey = {
+  addresses: string[];
+  publicKey: string;
+};
+
 /** The cold-start snapshot — see docs/E2E_PGP.md "Cold start". */
 export type PGPBootstrap = {
   hasIdentity: boolean;
@@ -184,7 +200,7 @@ export type PGPBootstrap = {
   unlockRequired: boolean;
   canDecryptServerSide: boolean;
   migrationAvailable: boolean;
-  signerPublicKeys: string[];
+  signerKeys: BoundSignerKey[];
   /**
    * Addresses a newly generated key must carry as User IDs — the IMAP
    * account address first, then verified send-as aliases. Empty means no
@@ -259,7 +275,7 @@ export type PGPMessagePayload = {
   encryptedPayload: string;
   signaturePayload: string;
   body: string;
-  signerPublicKeys: string[];
+  signerKeys: BoundSignerKey[];
 };
 
 /** Fetches one message's ciphertext for local decryption. */

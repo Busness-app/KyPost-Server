@@ -7,7 +7,12 @@
 // SecurityPage, ReadPage, and compose all read one source of truth instead of
 // each deciding for themselves and disagreeing.
 
-import { getPGPBootstrap, rewrapPGPPrivateKey, type PGPBootstrap } from "../api/pgp";
+import {
+  getPGPBootstrap,
+  rewrapPGPPrivateKey,
+  type BoundSignerKey,
+  type PGPBootstrap
+} from "../api/pgp";
 import {
   isUnlocked,
   lock,
@@ -114,10 +119,11 @@ export function lockPGPSession(): void {
 
 /**
  * The contact public keys the bootstrap handed over, for verifying inbound
- * signatures. Empty is normal (no contacts have keys yet), not an error.
+ * signatures, each with the addresses the address book binds it to. Empty is
+ * normal (no contacts have keys yet), not an error.
  */
-export function knownSignerKeys(): string[] {
-  return state.bootstrap?.signerPublicKeys ?? [];
+export function knownSignerKeys(): BoundSignerKey[] {
+  return state.bootstrap?.signerKeys ?? [];
 }
 
 /**
