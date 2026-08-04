@@ -1015,6 +1015,27 @@ func (s *Store) Create(ctx context.Context, username, password string, role Role
 // the same reason.
 var errNoChangeNeeded = errors.New("users: no change needed")
 
+// compactExpiredEnvelopes drops the wrapped-envelope slots whose transport TTL
+// has passed, reporting whether it removed any.
+//
+// Called from mutateGuarded so every write path compacts, rather than from the
+// two envelope endpoints — the leak's whole character was that the expired rows
+// were invisible to every reader, so the fix must not depend on someone
+// remembering to look.
+func compactExpiredEnvelopes(u *User) bool {
+	kept := u.PGPWrappedEnvelopes[:0]
+	for _, e := range u.PGPWrappedEnvelopes {
+		if !e.expired() {
+			kept = append(kept, e)
+		}
+	}
+	if len(kept) == len(u.PGPWrappedEnvelopes) {
+		return false
+	}
+	u.PGPWrappedEnvelopes = kept
+	return true
+}
+
 // mutate re-reads the store, applies fn to the matching user, and persists
 // the result. fn returns an error to abort without writing.
 func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
@@ -1047,6 +1068,17 @@ func (s *Store) mutateGuarded(id string, guard func(all []User, target User) err
 					return err
 				}
 			}
+			// Drop envelope slots whose transport TTL has passed, on whatever
+			// write happens to come next.
+			//
+			// WrappedEnvelopes() filters them on READ and the slot cap counts
+			// only live ones, so an expired row was invisible to every reader
+			// and to the bound that exists to cap an account's share of this
+			// file — but nothing removed it. Measured: 4 MiB per account per
+			// week, permanently, with the visible slot count pinned at 33 and
+			// no operator surface that could even see it. This is the one place
+			// every write passes.
+			compacted := compactExpiredEnvelopes(&f.Users[i])
 			if err := fn(&f.Users[i]); err != nil {
 				// A mutation that changes nothing must not cost a write. Every
 				// write here is a whole-file marshal + fsync under this lock,
@@ -1054,11 +1086,17 @@ func (s *Store) mutateGuarded(id string, guard func(all []User, target User) err
 				// unthrottled endpoint that re-sets a field to the value it
 				// already holds is a free instance-wide stall. See
 				// ErrNoChangeNeeded.
-				if errors.Is(err, errNoChangeNeeded) {
+				//
+				// ...unless the compaction above actually removed something, in
+				// which case there IS a change to persist and eliding the write
+				// would leave the expired rows on disk forever.
+				if errors.Is(err, errNoChangeNeeded) && !compacted {
 					updated = f.Users[i]
 					return nil
 				}
-				return err
+				if !errors.Is(err, errNoChangeNeeded) {
+					return err
+				}
 			}
 			f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			if err := s.writeFileUnlocked(f); err != nil {
@@ -1448,6 +1486,13 @@ func (s *Store) DeletePGPWrappedEnvelope(id, slot string) (User, error) {
 			if e.Slot != slot {
 				kept = append(kept, e)
 			}
+		}
+		// Deleting a slot that is not there is a no-op, so it must not cost a
+		// whole-file marshal + fsync under the global lock every authenticated
+		// request contends with. It did: this returned nil unconditionally and
+		// so always wrote, measured at 393 rewrites/s from one looping caller.
+		if len(kept) == len(u.PGPWrappedEnvelopes) {
+			return errNoChangeNeeded
 		}
 		u.PGPWrappedEnvelopes = kept
 		return nil

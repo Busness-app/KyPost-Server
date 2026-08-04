@@ -610,3 +610,104 @@ func TestExpiredSlotsDoNotCountTowardTheCap(t *testing.T) {
 		t.Fatalf("add after expiry should have succeeded, freeing headroom: %v", err)
 	}
 }
+
+// TestExpiredSlotsAreCompactedOnTheNextWrite is run-8 finding F5's new half.
+//
+// 73d846f made expired device envelopes invisible: WrappedEnvelopes() filters
+// them on read and the slot cap counts only live ones. Nothing removed them.
+// The rows stayed on disk, inside the file users.Store rewrites WHOLE on every
+// account mutation and every authenticated request reads through — 4 MiB per
+// account per week, permanently, with the visible slot count pinned and no
+// operator surface that could see it. The 32-slot cap, whose own comment exists
+// to bound each account's share of that shared cost, stopped bounding anything.
+func TestExpiredSlotsAreCompactedOnTheNextWrite(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+
+	for i := 0; i < 4; i++ {
+		if _, err := store.SetPGPWrappedEnvelope(id, fmt.Sprintf("device:%02d", i), "x", ""); err != nil {
+			t.Fatalf("add slot %d: %v", i, err)
+		}
+	}
+	// Age them all, exactly as TestExpiredSlotsDoNotCountTowardTheCap does:
+	// SetPGPWrappedEnvelope always stamps a future expiry, so a past one has to
+	// be written through the store's own mutate seam.
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := store.mutate(id, func(u *User) error {
+		for i := range u.PGPWrappedEnvelopes {
+			u.PGPWrappedEnvelopes[i].ExpiresAt = past
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age slots: %v", err)
+	}
+
+	// The rows are still THERE — invisible to WrappedEnvelopes(), but on disk.
+	// Read the raw field, not the filtered accessor, or this test cannot see
+	// the thing it is about.
+	before, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(before.PGPWrappedEnvelopes) != 4 {
+		t.Fatalf("test setup: expected 4 aged rows on disk, got %d", len(before.PGPWrappedEnvelopes))
+	}
+
+	// Any subsequent write — this one touches nothing to do with envelopes —
+	// must reclaim them.
+	if _, err := store.SetPushMFAEnabled(id, true); err != nil {
+		t.Fatalf("SetPushMFAEnabled: %v", err)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(after.PGPWrappedEnvelopes) != 0 {
+		t.Fatalf("%d expired rows survived a write; they are invisible to every reader "+
+			"and to the slot cap, so nothing else will ever remove them", len(after.PGPWrappedEnvelopes))
+	}
+}
+
+// TestDeletingAnAbsentSlotDoesNotWrite is run-8 finding F5's second live
+// amplifier. DELETE /api/pgp/identity/envelope/{slot} returned nil
+// unconditionally from its mutate fn, so it always paid a whole-file marshal
+// and two fsyncs under the global lock — measured at 393 rewrites/s from one
+// looping caller, against a file every authenticated request reads through.
+//
+// UpdatedAt is the observable: mutateGuarded stamps it only when it writes.
+func TestDeletingAnAbsentSlotDoesNotWrite(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, "x", ""); err != nil {
+		t.Fatalf("seed slot: %v", err)
+	}
+	before, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// The stamp has one-second resolution, so a write would have to land in the
+	// same second to hide. Wait past the boundary first.
+	time.Sleep(1100 * time.Millisecond)
+	if _, err := store.DeletePGPWrappedEnvelope(id, "device:never-existed"); err != nil {
+		t.Fatalf("deleting an absent slot should succeed: %v", err)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.UpdatedAt != before.UpdatedAt {
+		t.Fatalf("deleting a slot that was not there rewrote users.json (UpdatedAt %s -> %s)",
+			before.UpdatedAt, after.UpdatedAt)
+	}
+
+	// ...and a real delete still writes.
+	if _, err := store.DeletePGPWrappedEnvelope(id, EnvelopeSlotRecovery); err != nil {
+		t.Fatalf("DeletePGPWrappedEnvelope: %v", err)
+	}
+	deleted, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(deleted.WrappedEnvelopes()) != 1 {
+		t.Fatalf("a real delete did not remove the slot: %+v", deleted.WrappedEnvelopes())
+	}
+}

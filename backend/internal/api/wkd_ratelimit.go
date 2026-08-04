@@ -257,3 +257,28 @@ func (g *intervalGate) allow() bool {
 	g.last = now
 	return true
 }
+
+// accountWriteBurst/accountWriteRefillPerSec meter MUTATING withAuth requests
+// per account.
+//
+// The bound being defended is architectural, not per-endpoint: users.Store
+// rewrites users.json WHOLE, under a process mutex and a cross-process file
+// lock, on every account mutation — and every authenticated request reads that
+// same file through currentUser. Measured on real disk, one session looping
+// POST /api/mfa/totp/setup drove 335 whole-file rewrites/s and took a DIFFERENT
+// user's Get() from 1.58M/s to 6,770/s at 1 KiB, and to 11/s at 4 MiB.
+//
+// Eliding no-op writes (errNoChangeNeeded) is the cheaper fix where it applies,
+// and it is applied. It cannot apply to a route like TOTP setup, which mints a
+// fresh secret per call and so genuinely changes the file every time. That is
+// why this exists at the wrapper rather than at the endpoints: the next such
+// route gets the bound without anyone remembering to ask for it.
+//
+// Sized well above human use and far below abuse. A burst of 90 with 10/s
+// sustained covers any real session — the SPA's heaviest sequence is a handful
+// of writes behind one click — while cutting the measured attack by ~33x. It
+// meters only non-GET requests, so reading is untouched.
+const (
+	accountWriteBurst        = 90
+	accountWriteRefillPerSec = 10.0
+)

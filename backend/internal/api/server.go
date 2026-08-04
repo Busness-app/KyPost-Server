@@ -97,6 +97,12 @@ type Server struct {
 	passwordChangeLockout *failureLockout
 	deviceLockout         *failureLockout
 	wkdLimiter            *ipRateLimiter
+	// accountWriteLimiter meters MUTATING withAuth requests per account. Every
+	// such request is at least one whole-file users.json marshal + fsync under
+	// a global cross-process lock that every authenticated request also reads
+	// through, so an unthrottled mutating route is an instance-wide stall that
+	// one session can drive. See withAuth and accountWriteBurst.
+	accountWriteLimiter *ipRateLimiter
 	// pushPollLimiter meters the two unauthenticated push-MFA endpoints per IP.
 	// They were the only public routes with no meter, and both take mfa.Store's
 	// process-wide lock. See withPushPollRateLimit.
@@ -306,6 +312,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		passwordChangeLockout:    newFailureLockout(passwordChangeMaxFailures, passwordChangeLockoutFor),
 		deviceLockout:            newFailureLockout(deviceMaxFailures, deviceLockoutFor),
 		wkdLimiter:               newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
+		accountWriteLimiter:      newIPRateLimiter(accountWriteBurst, accountWriteRefillPerSec),
 		pushPollLimiter:          newIPRateLimiter(pushPollBurst, pushPollRefillPerSec),
 		loginParamsLimiter:       newIPRateLimiter(loginParamsBurst, loginParamsRefillPerSec),
 		deviceRescan:             newIntervalGate(deviceRescanInterval),

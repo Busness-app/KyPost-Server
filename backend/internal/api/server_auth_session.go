@@ -938,6 +938,25 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "password change required", "mustChangePassword": true})
 			return
 		}
+		// Per-account meter on MUTATING requests. A session is not a licence to
+		// drive whole-file users.json rewrites in a loop — every account
+		// mutation marshals and fsyncs the entire file under a global
+		// cross-process lock that every authenticated request also reads
+		// through, so one looping session stalls the instance. Reads are
+		// untouched. See accountWriteBurst.
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if ok, retryAfter := s.accountWriteLimiter.allow(ac.UserID); !ok {
+				seconds := int(retryAfter.Seconds()) + 1
+				w.Header().Set("Retry-After", strconv.Itoa(seconds))
+				writeJSON(w, http.StatusTooManyRequests, map[string]any{
+					"error":             "too many requests, slow down",
+					"retryAfterSeconds": seconds,
+				})
+				return
+			}
+		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	}
 }
