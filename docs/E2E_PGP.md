@@ -284,7 +284,7 @@ from nothing:
 | `canDecryptServerSide` | true only for legacy accounts |
 | `migrationAvailable` | offer the one-time migration |
 | `publicKey`, `fingerprint`, `keyId` | the identity itself |
-| `signerPublicKeys` | contact public keys, so signatures verify without waiting on a contacts sync |
+| `signerKeys` | contact public keys, each with the addresses the address book binds it to, so signatures verify without waiting on a contacts sync |
 | `payloadEndpoint` | where to fetch ciphertext; absent on older servers |
 | `envelopeSlots` | names of every sealing that exists for this identity (e.g. `password`, `recovery`, `device:*`) — always an array, never `null` |
 
@@ -490,8 +490,25 @@ nothing on the server to decrypt with.
 3. Messages arrive with `pgpEncrypted: true` and an empty `pgpDecryptError`.
    The ciphertext is **not** inlined in the inbox row — fetch it per message
    from `GET /api/mail/pgp-payload?mailbox=&messageId=<uid>`, which also
-   returns `signerPublicKeys` for verification. An earlier version of this
+   returns `signerKeys` for verification. An earlier version of this
    document said the payload arrived inline; it never did.
+
+   **A signature is verified only by a key the ADDRESS BOOK binds to the
+   sender.** Each entry in `signerKeys` is `{addresses, publicKey}`, where
+   `addresses` are the owning contact's own email addresses and the key has
+   been checked against that contact's TOFU fingerprint pin. Offer them all to
+   the OpenPGP library so the actual signer can be identified, then report
+   "verified" only when the key that produced the signature is bound to the
+   sender you are displaying.
+
+   Do **not** re-derive that binding from the keys themselves. A User ID is
+   free-form and self-certified, and a key may carry arbitrarily many, so "this
+   key claims the sender's address" is forgeable with one extra User ID — that
+   defeated two successive versions of this check. It is also parser-dependent:
+   openpgp.js and go-crypto disagree on adversarial User IDs in both
+   directions, so a client deriving its own answer can vouch for a key the
+   server's binding rejects. The server ships the binding precisely so no
+   second parser participates in the trust decision.
 4. Sending encrypted: build the ciphertext on device and POST to
    `/api/mail/send-pgp` with one delivery per recipient group, BCC recipients
    each in their own. Each delivery must be a **complete RFC 5322 message** —

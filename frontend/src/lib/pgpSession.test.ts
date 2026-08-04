@@ -29,7 +29,7 @@ function bootstrapFixture(overrides: Record<string, unknown> = {}) {
     unlockRequired: true,
     canDecryptServerSide: false,
     migrationAvailable: false,
-    signerPublicKeys: [],
+    signerKeys: [],
     suggestedUserIDs: ["me@example.com"],
     displayName: "me",
     payloadEndpoint: "/api/mail/pgp-payload",
