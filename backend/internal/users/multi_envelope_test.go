@@ -569,18 +569,44 @@ func TestRecoverySlotDoesNotExpire(t *testing.T) {
 }
 
 // An expired slot must not consume cap headroom — otherwise a device that
-// enrolled and went quiet permanently costs the user a slot.
+// enrolled and went quiet permanently costs the user a slot. This must go
+// through SetPGPWrappedEnvelope's own cap check (the `live` counter), not
+// just WrappedEnvelopes()'s read-side filter — that mechanism is already
+// covered by TestDeviceSlotExpires.
 func TestExpiredSlotsDoNotCountTowardTheCap(t *testing.T) {
-	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-	u := User{PGPPrivateKeyWrapped: `{"v":2,"pw":true}`}
-	for i := 0; i < maxWrappedEnvelopeSlots+5; i++ {
-		u.PGPWrappedEnvelopes = append(u.PGPWrappedEnvelopes, WrappedEnvelope{
-			Slot:      EnvelopeSlotDevicePrefix + string(rune('a'+i%26)) + string(rune('a'+i/26)),
-			Envelope:  "x",
-			ExpiresAt: past,
-		})
+	store, id := newClientProtectedUser(t)
+
+	// Fill to exactly the cap with live device slots, and confirm the cap
+	// still bites — this pins that the cap is not simply gone.
+	for i := 0; i < maxWrappedEnvelopeSlots; i++ {
+		slot := fmt.Sprintf("device:%02d", i)
+		if _, err := store.SetPGPWrappedEnvelope(id, slot, "x", ""); err != nil {
+			t.Fatalf("fill slot %d: %v", i, err)
+		}
 	}
-	if n := len(u.WrappedEnvelopes()); n != 1 {
-		t.Fatalf("expired slots leaked into the synthesised view: %d entries", n)
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:overflow", "x", ""); !errors.Is(err, ErrTooManyEnvelopeSlots) {
+		t.Fatalf("cap did not bite on a full table: %v", err)
+	}
+
+	// Age every slot into the past. SetPGPWrappedEnvelope always stamps a
+	// fresh future expiry, so there is no way to produce a past one through
+	// the public API — write it directly to the store's backing file via
+	// store.mutate, the same internal seam TestGetClonesWrappedEnvelopesFromCache
+	// above already uses for the same reason (no writer for this field exists
+	// yet through the public surface). No new test-only seam is added.
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := store.mutate(id, func(u *User) error {
+		for i := range u.PGPWrappedEnvelopes {
+			u.PGPWrappedEnvelopes[i].ExpiresAt = past
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age slots: %v", err)
+	}
+
+	// The table is still nominally full, but every slot is expired: this is
+	// the headroom actually freeing.
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:overflow", "x", ""); err != nil {
+		t.Fatalf("add after expiry should have succeeded, freeing headroom: %v", err)
 	}
 }
