@@ -153,6 +153,13 @@ type WrappedEnvelope struct {
 	Slot     string `json:"slot"`
 	Envelope string `json:"envelope"`
 	AddedAt  string `json:"addedAt,omitempty"`
+	// ExpiresAt is set only on device: slots, which carry a payload in flight
+	// rather than a durable sealing. The device that the envelope is for cannot
+	// delete it — deletion needs a session and the ceremony's last step runs on
+	// the device — so an expiry is how the server stops holding a copy whose
+	// journey is over. Empty means "never", which is right for password and
+	// recovery slots.
+	ExpiresAt string `json:"expiresAt,omitempty"`
 }
 
 // Envelope slot names. "password" is not writable through the slot API: it
@@ -184,6 +191,14 @@ const maxDeviceSlotIDLen = 128
 // one must keep working at the cap, or a user who reaches it can never
 // rotate a sealing again.
 const maxWrappedEnvelopeSlots = 32
+
+// DeviceEnvelopeTTL bounds how long the server keeps a device: transport copy.
+// Seven days matches the pickup-link retention window rather than introducing a
+// third number; if one moves, both should. It is generous on purpose — enrolling
+// at pairing completes in seconds, and this window only matters when the device
+// is offline during a deferred enrollment. A device that misses it re-runs the
+// ceremony; nothing is lost but the ceremony.
+const DeviceEnvelopeTTL = 7 * 24 * time.Hour
 
 // MaxWrappedEnvelopeBytes bounds a single client-wrapped envelope, whichever
 // field it lands in.
@@ -238,12 +253,27 @@ func (u User) WrappedEnvelopes() []WrappedEnvelope {
 		})
 	}
 	for _, e := range u.PGPWrappedEnvelopes {
-		if e.Slot == EnvelopeSlotPassword {
+		if e.Slot == EnvelopeSlotPassword || e.expired() {
 			continue
 		}
 		out = append(out, e)
 	}
 	return out
+}
+
+// expired reports whether this envelope's TTL has passed. An unparseable
+// ExpiresAt counts as expired: a timestamp the server cannot read is not
+// evidence that a payload is still wanted, and failing closed here costs a
+// re-run of the ceremony rather than leaving a blob around indefinitely.
+func (e WrappedEnvelope) expired() bool {
+	if e.ExpiresAt == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, e.ExpiresAt)
+	if err != nil {
+		return true
+	}
+	return time.Now().UTC().After(t)
 }
 
 // HasServerReadableKey reports whether the server can still decrypt this user's
@@ -1360,6 +1390,10 @@ func (s *Store) SetPGPWrappedEnvelope(id, slot, envelope, addedAt string) (User,
 	if strings.TrimSpace(envelope) == "" {
 		return User{}, errors.New("wrapped envelope is required")
 	}
+	expiresAt := ""
+	if strings.HasPrefix(slot, EnvelopeSlotDevicePrefix) {
+		expiresAt = time.Now().UTC().Add(DeviceEnvelopeTTL).Format(time.RFC3339)
+	}
 	return s.mutate(id, func(u *User) error {
 		if u.PGPFingerprint == "" {
 			return ErrNoPGPIdentity
@@ -1375,15 +1409,24 @@ func (s *Store) SetPGPWrappedEnvelope(id, slot, envelope, addedAt string) (User,
 			if u.PGPWrappedEnvelopes[i].Slot == slot {
 				u.PGPWrappedEnvelopes[i].Envelope = envelope
 				u.PGPWrappedEnvelopes[i].AddedAt = addedAt
+				u.PGPWrappedEnvelopes[i].ExpiresAt = expiresAt
 				return nil
 			}
 		}
 		// Past this point the slot is new, not a replace — the cap applies.
-		if len(u.PGPWrappedEnvelopes) >= maxWrappedEnvelopeSlots {
+		// Only live entries count, so an expired slot frees headroom: a device
+		// that enrolled once and went quiet must not cost the user a slot forever.
+		live := 0
+		for _, e := range u.PGPWrappedEnvelopes {
+			if !e.expired() {
+				live++
+			}
+		}
+		if live >= maxWrappedEnvelopeSlots {
 			return ErrTooManyEnvelopeSlots
 		}
 		u.PGPWrappedEnvelopes = append(u.PGPWrappedEnvelopes, WrappedEnvelope{
-			Slot: slot, Envelope: envelope, AddedAt: addedAt,
+			Slot: slot, Envelope: envelope, AddedAt: addedAt, ExpiresAt: expiresAt,
 		})
 		return nil
 	})

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidEnvelopeSlot(t *testing.T) {
@@ -519,5 +520,67 @@ func TestReplacingTheSameIdentityKeepsSlots(t *testing.T) {
 	if len(got.PGPWrappedEnvelopes) != 0 {
 		t.Fatalf("a real identity change must drop sealings of the old key: slots = %+v",
 			got.PGPWrappedEnvelopes)
+	}
+}
+
+// A device: slot is a payload in flight, not a record. Once the device has
+// fetched and re-sealed it locally the server's copy is dead weight, and the
+// device cannot delete it (no session). Expiry is how it goes away.
+func TestDeviceSlotExpires(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:abc", `{"v":2,"dev":1}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope: %v", err)
+	}
+	got, _ := store.Get(id)
+	if len(got.WrappedEnvelopes()) != 2 {
+		t.Fatalf("fresh device slot should be visible: %+v", got.WrappedEnvelopes())
+	}
+	// ExpiresAt must be stamped automatically — a caller is not trusted to remember.
+	if got.PGPWrappedEnvelopes[0].ExpiresAt == "" {
+		t.Fatal("SetPGPWrappedEnvelope did not stamp ExpiresAt on a device slot")
+	}
+
+	// Force it into the past and it must disappear from the synthesised view.
+	got.PGPWrappedEnvelopes[0].ExpiresAt = past
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:abc", `{"v":2,"dev":1}`, ""); err != nil {
+		t.Fatalf("re-set: %v", err)
+	}
+	expired := User{
+		PGPPrivateKeyWrapped: `{"v":2,"pw":true}`,
+		PGPWrappedEnvelopes:  []WrappedEnvelope{{Slot: "device:abc", Envelope: "x", ExpiresAt: past}},
+	}
+	if slots := expired.WrappedEnvelopes(); len(slots) != 1 || slots[0].Slot != EnvelopeSlotPassword {
+		t.Fatalf("expired device slot still visible: %+v", slots)
+	}
+}
+
+// The recovery slot is a durable sealing, not cargo. It must never expire.
+func TestRecoverySlotDoesNotExpire(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2,"rec":1}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope: %v", err)
+	}
+	got, _ := store.Get(id)
+	if got.PGPWrappedEnvelopes[0].ExpiresAt != "" {
+		t.Fatalf("recovery slot was given an expiry: %q", got.PGPWrappedEnvelopes[0].ExpiresAt)
+	}
+}
+
+// An expired slot must not consume cap headroom — otherwise a device that
+// enrolled and went quiet permanently costs the user a slot.
+func TestExpiredSlotsDoNotCountTowardTheCap(t *testing.T) {
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	u := User{PGPPrivateKeyWrapped: `{"v":2,"pw":true}`}
+	for i := 0; i < maxWrappedEnvelopeSlots+5; i++ {
+		u.PGPWrappedEnvelopes = append(u.PGPWrappedEnvelopes, WrappedEnvelope{
+			Slot:      EnvelopeSlotDevicePrefix + string(rune('a'+i%26)) + string(rune('a'+i/26)),
+			Envelope:  "x",
+			ExpiresAt: past,
+		})
+	}
+	if n := len(u.WrappedEnvelopes()); n != 1 {
+		t.Fatalf("expired slots leaked into the synthesised view: %d entries", n)
 	}
 }
