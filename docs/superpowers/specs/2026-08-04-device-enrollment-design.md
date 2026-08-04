@@ -164,8 +164,26 @@ device may publish a public key, but only a session may mint a sealing.** It is 
 what makes the planned passphrase-only tier enforceable — the server refuses to store a
 device envelope for such an account, and no device credential can route around it.
 
-**Revocation** is deleting the `device:<id>` slot, which already exists. The device
-retains a public key that seals nothing.
+**Revocation is weaker than "delete the slot", and this corrects a claim the parent
+spec makes.** Deleting `device:<id>` removes the server's copy. It does not reach the
+copy the device re-sealed under its own Keystore key, because the server has no reach
+into that. So:
+
+- **Before the device re-seals** — deleting the slot revokes it. That window is seconds
+  at pairing, and at most the seven-day TTL for a deferred enrollment.
+- **After the device re-seals** — the server cannot revoke it. Un-enrolling a lost phone
+  means **rotating the identity key**, which invalidates every sealing and forces
+  re-enrollment on every device.
+
+This is inherent to any design where a device holds a durable local sealing, not a flaw
+in the TTL — Signal has the same property, where unlinking a device stops future
+delivery but does not reach what it already holds. It is a real cost of device
+enrollment and the UI must not imply otherwise: "remove device" should say that it stops
+future sealings and does not erase what that device already has.
+
+The TTL helps here rather than hurting: it bounds how long the easy revocation window
+stays open, and makes the hard case explicit instead of letting "revocation is
+per-device" read as stronger than it is.
 
 ### A gap in Change 1
 
@@ -187,18 +205,53 @@ gains anything by obtaining it. The distinction to hold onto is the one Change 1
 established and this narrows rather than reverses — **a device may publish a public key
 and read what was sealed for it; only a session may mint or destroy a sealing.**
 
-### The server's copy is retained, deliberately
+### The transport copy expires; the enrollment record does not
 
 After step 7 the device holds a locally re-sealed copy and the server still holds the
-ECDH-sealed one. That copy is not deleted, for a plain reason: deleting it would need a
-session, and the ceremony's last step happens on the device, which has none. Inventing a
-device-authenticated delete to tidy up would hand a device the ability to destroy a
-sealing — exactly the capability the `withAuth` rule exists to withhold, spent on
-housekeeping.
+ECDH-sealed one. The server's copy **expires seven days after it is written**, reusing
+the pickup-link retention window rather than inventing a third number.
 
-Retention is harmless. The server cannot open it, and it grants nothing to any other
-caller. It costs one slot against the 32-slot cap per enrolled device, which is why
-that cap is 32 rather than a smaller number.
+A TTL rather than a delete, because expiry needs no caller. The ceremony's last step
+happens on the device, which has no session — and inventing a device-authenticated
+delete to tidy up would hand a device the power to destroy a sealing, exactly the
+capability the `withAuth` rule exists to withhold, spent on housekeeping. Nobody gains
+anything; the server simply stops serving it.
+
+Expiry is lazy: `WrappedEnvelopes()` already synthesises its result, so it filters
+expired transport copies there, and the slot-count cap excludes them. Seven days is
+generous — at-pairing enrollment completes in seconds, and the window only matters when
+the phone is offline during a deferred enrollment. A device that misses it re-runs
+enrollment; nothing is lost but the ceremony.
+
+**This is why the enrollment record cannot live in the slot.** If `device:<id>` were
+both the transport payload and the record of enrollment, expiry would make an enrolled
+device read as un-enrolled. So `NativeDevice` carries the durable marker — enrolled, and
+when — while the slot carries only the payload in flight. One is state, the other is
+cargo.
+
+### Keeping the marker honest
+
+The server's marker records that the browser sealed for this device. The device's own
+ability to decrypt is a different fact, and the two can diverge: reinstalling the app
+destroys the Keystore key, as does a biometric-enrollment change on some
+configurations. A marker that drifts optimistic is worse than none — it tells the user
+a device is protected when it cannot read anything.
+
+The device therefore reports its own enrollment state on the native registration call
+it already makes at pairing and on every FCM token refresh, based on whether it can
+still open its local envelope. One boolean on an existing call, no new endpoint, and
+the marker becomes self-healing rather than write-once.
+
+### Where the marker is shown
+
+- **The browser's device list** (Security page): each paired device shows whether it is
+  enrolled for encrypted mail, so a user can see at a glance which devices can read
+  their mail and which cannot.
+- **The device's own pairing screen**: an "encryption enrolled" indicator, so the state
+  is visible where the user pairs and manages the device rather than only in webmail.
+  The device renders this from its **local** ground truth — whether it can actually open
+  its envelope — not from the server's marker, because the local answer is the true one
+  and the whole point of the reporting above is to make the server agree with it.
 
 ## Failure and abandonment
 

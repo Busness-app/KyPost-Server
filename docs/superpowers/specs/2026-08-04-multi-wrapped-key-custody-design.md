@@ -168,8 +168,13 @@ of this handshake that is load-bearing on its own. Bind the device id and
 the PGP key fingerprint into the envelope's AAD as well, so a substituted or replayed
 envelope fails authentication rather than decrypting into the wrong account's key.
 
-Revocation is per-device: delete that entry. A lost phone costs one envelope, not the
-identity.
+Revocation is per-device — with a caveat this originally overstated, corrected while
+designing the enrollment ceremony (`2026-08-04-device-enrollment-design.md`). Deleting
+the entry removes the *server's* copy. It does not reach the copy a device has already
+re-sealed under its own secure-element key, because the server has no reach into that.
+So deletion revokes a device that has not yet completed enrollment; un-enrolling one
+that has means rotating the identity key. That is inherent to any design where a device
+holds a durable local sealing, and the UI must say what "remove device" actually does.
 
 ## Change 3: passphrase-only as an explicit tier
 
