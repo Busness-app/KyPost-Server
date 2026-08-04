@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { processEmailHtml, resolveBodyMode, sanitizeEmailHtml } from "./emailHtml";
+import { escapeHtmlText, processEmailHtml, resolveBodyMode, sanitizeEmailHtml } from "./emailHtml";
 
 // This is the function standing between a hostile email and the user's
 // session. It had a careful doc comment explaining why it matters and zero
@@ -420,5 +420,24 @@ describe("resolveBodyMode", () => {
   it("handles an empty or bracket-free body without calling it markup", () => {
     expect(resolveBodyMode("", undefined)).toBe("plain");
     expect(resolveBodyMode("just some ordinary text", undefined)).toBe("plain");
+  });
+});
+
+// run-7 finding F8: a plain-mode draft body bypassed sanitization on its way to
+// the compose editor's root innerHTML — a live DOM sink in the app document,
+// outside the sandboxed frame that protects the read view.
+describe("escapeHtmlText", () => {
+  it("neutralises markup in a plain-text body", () => {
+    const escaped = escapeHtmlText('<img src="x" onerror="window.__pwned=1">');
+    const root = document.createElement("div");
+    root.innerHTML = escaped;
+    expect(root.querySelector("img")).toBeNull();
+    expect(root.textContent).toBe('<img src="x" onerror="window.__pwned=1">');
+  });
+
+  it("preserves ordinary text verbatim", () => {
+    const root = document.createElement("div");
+    root.innerHTML = escapeHtmlText("5 > 3 && 2 < 4, \"quoted\"");
+    expect(root.textContent).toBe("5 > 3 && 2 < 4, \"quoted\"");
   });
 });

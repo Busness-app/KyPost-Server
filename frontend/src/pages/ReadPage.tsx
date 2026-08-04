@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
 import { useSearchParams } from "react-router";
-import { processEmailHtml } from "../lib/emailHtml";
+import { escapeHtmlText, processEmailHtml } from "../lib/emailHtml";
 import { EmailBodyFrame } from "./read/EmailBodyFrame";
 import { EncryptionCell } from "./read/EncryptionCell";
 import { displayBody } from "./read/body";
@@ -814,7 +814,15 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         // untrusted HTML entering the compose editor. Same pipeline too, so a
         // draft quoting a hostile message doesn't fetch remote content that the
         // read view refused to fetch.
-        body: draft.mode === "html" ? processEmailHtml(draft.body, false) : draft.body
+        //
+        // BOTH branches, not just the html one. A plain-mode body reaches the
+        // same innerHTML assignment, so handing it over raw made "<img src=x
+        // onerror=...>" live script in the app document — the one place the
+        // sandboxed read frame does not cover. Plain text becomes markup by
+        // being escaped, not by being sanitized: escaping is what preserves it
+        // verbatim, and running a plain body through the HTML sanitizer would
+        // silently eat anything that looked like a tag.
+        body: draft.mode === "html" ? processEmailHtml(draft.body, false) : escapeHtmlText(draft.body)
       });
       return;
     }

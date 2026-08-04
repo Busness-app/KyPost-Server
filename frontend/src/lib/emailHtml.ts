@@ -207,3 +207,24 @@ export function processEmailHtml(html: string, showImages: boolean): string {
 
   return sanitizeEmailHtml(root.innerHTML, !showImages);
 }
+
+/**
+ * Escapes plain text so it can be handed to a sink that parses HTML.
+ *
+ * For the compose editor, whose content is assigned to `editor.root.innerHTML`.
+ * A plain-text draft body used to go there raw, which made `<img src=x
+ * onerror=...>` in a plain message live script in the app document — the one
+ * sink the sandboxed read frame does not cover.
+ *
+ * Escaping, not sanitizing: the body is TEXT, so every angle bracket in it is
+ * content the user typed and must survive verbatim. Running it through the HTML
+ * sanitizer would instead delete anything shaped like a tag.
+ */
+export function escapeHtmlText(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
