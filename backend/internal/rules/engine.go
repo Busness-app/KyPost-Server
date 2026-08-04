@@ -50,20 +50,36 @@ type ActionResult struct {
 // out of Scope for input.Folder. It is pure — no IMAP calls — so it can be
 // unit tested without a fake mail client. A matched rule's "stop" action
 // halts the walk entirely, mirroring Sieve's script-global stop;.
-func Evaluate(input EvalInput, activeRules []Rule) Outcome {
+//
+// ctx is checked between rules, and inside a rule's condition walk. Rule
+// evaluation is unbounded CPU that a caller chooses the size of: 100 rules of
+// 300 regex conditions each, measured against a 100 KiB body, cost 95 s PER
+// MESSAGE, and POST /api/rules/run takes limit up to 500. Without a context
+// that is 11.5 minutes of work the server keeps doing after the client has
+// gone, on a host whose other job is running an LLM. Caching the compiled
+// patterns removes the compile cost but not the match cost, so cancellation is
+// a separate requirement, not a belt-and-braces addition.
+//
+// A cancelled walk returns whatever it had matched so far. Callers must treat
+// that as incomplete — see handleRulesRun, which stops the scan rather than
+// applying a partial outcome.
+func Evaluate(ctx context.Context, input EvalInput, activeRules []Rule) Outcome {
 	sorted := make([]Rule, len(activeRules))
 	copy(sorted, activeRules)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
 
 	var outcome Outcome
 	for _, r := range sorted {
+		if ctx.Err() != nil {
+			return outcome
+		}
 		if !r.Enabled {
 			continue
 		}
 		if !folderInScope(r.Scope, input.Folder) {
 			continue
 		}
-		if !matchGroup(r.Match, input) {
+		if !matchGroup(ctx, r.Match, input) {
 			continue
 		}
 		outcome.Matched = append(outcome.Matched, r.Name)
@@ -156,11 +172,18 @@ func folderInScope(scope RuleScope, folder string) bool {
 	return false
 }
 
-func matchGroup(g MatchGroup, input EvalInput) bool {
+// matchGroup evaluates one group. A cancelled ctx makes it report NO match,
+// whatever the op: a group that has not finished being evaluated has not
+// matched, and returning true there would apply a rule's actions on the
+// strength of a timeout.
+func matchGroup(ctx context.Context, g MatchGroup, input EvalInput) bool {
 	op := strings.ToLower(strings.TrimSpace(g.Op))
 	if op == "anyof" {
 		for _, c := range g.Conditions {
-			if conditionMatches(c, input) {
+			if ctx.Err() != nil {
+				return false
+			}
+			if conditionMatches(ctx, c, input) {
 				return true
 			}
 		}
@@ -169,17 +192,20 @@ func matchGroup(g MatchGroup, input EvalInput) bool {
 	// "allof" (and any unrecognized/empty Op) is AND semantics; vacuously
 	// true over zero conditions, matching boolean-algebra convention.
 	for _, c := range g.Conditions {
-		if !conditionMatches(c, input) {
+		if ctx.Err() != nil {
+			return false
+		}
+		if !conditionMatches(ctx, c, input) {
 			return false
 		}
 	}
 	return true
 }
 
-func conditionMatches(c Condition, input EvalInput) bool {
+func conditionMatches(ctx context.Context, c Condition, input EvalInput) bool {
 	var result bool
 	if c.Group != nil {
-		result = matchGroup(*c.Group, input)
+		result = matchGroup(ctx, *c.Group, input)
 	} else if strings.EqualFold(strings.TrimSpace(c.Field), "keyword") {
 		result = false
 		for _, kw := range input.Keywords {
@@ -223,14 +249,14 @@ func matchesValue(comparator, candidate, value string) bool {
 	case "is":
 		return strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(value))
 	case "matches":
-		re, err := regexp.Compile("(?is)^" + wildcardToRegexp(value) + "$")
-		if err != nil {
+		re := compilePattern("(?is)^" + wildcardToRegexp(value) + "$")
+		if re == nil {
 			return false
 		}
 		return re.MatchString(candidate)
 	case "regex":
-		re, err := regexp.Compile("(?is)" + value)
-		if err != nil {
+		re := compilePattern("(?is)" + value)
+		if re == nil {
 			return false
 		}
 		return re.MatchString(candidate)

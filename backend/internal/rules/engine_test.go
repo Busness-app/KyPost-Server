@@ -23,13 +23,13 @@ func TestEvaluate_AllofMatchesAllConditions(t *testing.T) {
 	}
 
 	matching := EvalInput{From: "billing@acme.com", Subject: "Your invoice is ready"}
-	outcome := Evaluate(matching, []Rule{rule})
+	outcome := Evaluate(context.Background(), matching, []Rule{rule})
 	if len(outcome.Matched) != 1 || outcome.Matched[0] != "from acme" {
 		t.Fatalf("expected rule to match, got %+v", outcome)
 	}
 
 	partial := EvalInput{From: "billing@acme.com", Subject: "Hello there"}
-	outcome = Evaluate(partial, []Rule{rule})
+	outcome = Evaluate(context.Background(), partial, []Rule{rule})
 	if len(outcome.Matched) != 0 {
 		t.Fatalf("expected allof to require both conditions, got %+v", outcome)
 	}
@@ -49,12 +49,12 @@ func TestEvaluate_AnyofMatchesAnyCondition(t *testing.T) {
 		Actions: []Action{{Type: "keyword", Value: "Urgent"}},
 	}
 
-	outcome := Evaluate(EvalInput{Subject: "need this ASAP please"}, []Rule{rule})
+	outcome := Evaluate(context.Background(), EvalInput{Subject: "need this ASAP please"}, []Rule{rule})
 	if len(outcome.Matched) != 1 {
 		t.Fatalf("expected anyof to match on second condition, got %+v", outcome)
 	}
 
-	outcome = Evaluate(EvalInput{Subject: "just saying hi"}, []Rule{rule})
+	outcome = Evaluate(context.Background(), EvalInput{Subject: "just saying hi"}, []Rule{rule})
 	if len(outcome.Matched) != 0 {
 		t.Fatalf("expected anyof to not match neither condition, got %+v", outcome)
 	}
@@ -73,12 +73,12 @@ func TestEvaluate_Negate(t *testing.T) {
 		Actions: []Action{{Type: "keyword", Value: "Other"}},
 	}
 
-	outcome := Evaluate(EvalInput{From: "someone@example.com"}, []Rule{rule})
+	outcome := Evaluate(context.Background(), EvalInput{From: "someone@example.com"}, []Rule{rule})
 	if len(outcome.Matched) != 1 {
 		t.Fatalf("expected negated condition to match non-acme sender, got %+v", outcome)
 	}
 
-	outcome = Evaluate(EvalInput{From: "billing@acme.com"}, []Rule{rule})
+	outcome = Evaluate(context.Background(), EvalInput{From: "billing@acme.com"}, []Rule{rule})
 	if len(outcome.Matched) != 0 {
 		t.Fatalf("expected negated condition to reject acme sender, got %+v", outcome)
 	}
@@ -95,12 +95,12 @@ func TestEvaluate_KeywordFieldMatchesAnyMessageKeyword(t *testing.T) {
 		Actions: []Action{{Type: "archive"}},
 	}
 
-	outcome := Evaluate(EvalInput{Keywords: []string{"Work", "VIP"}}, []Rule{rule})
+	outcome := Evaluate(context.Background(), EvalInput{Keywords: []string{"Work", "VIP"}}, []Rule{rule})
 	if len(outcome.Matched) != 1 {
 		t.Fatalf("expected keyword field to match against message keywords, got %+v", outcome)
 	}
 
-	outcome = Evaluate(EvalInput{Keywords: []string{"Work"}}, []Rule{rule})
+	outcome = Evaluate(context.Background(), EvalInput{Keywords: []string{"Work"}}, []Rule{rule})
 	if len(outcome.Matched) != 0 {
 		t.Fatalf("expected no match when keyword absent, got %+v", outcome)
 	}
@@ -115,12 +115,12 @@ func TestEvaluate_FolderScope(t *testing.T) {
 		Actions: []Action{{Type: "delete"}},
 	}
 
-	outcome := Evaluate(EvalInput{Subject: "x", Folder: "INBOX"}, []Rule{rule})
+	outcome := Evaluate(context.Background(), EvalInput{Subject: "x", Folder: "INBOX"}, []Rule{rule})
 	if len(outcome.Matched) != 0 {
 		t.Fatalf("expected rule out of scope for INBOX to not match, got %+v", outcome)
 	}
 
-	outcome = Evaluate(EvalInput{Subject: "x", Folder: "Archive/2026"}, []Rule{rule})
+	outcome = Evaluate(context.Background(), EvalInput{Subject: "x", Folder: "Archive/2026"}, []Rule{rule})
 	if len(outcome.Matched) != 1 {
 		t.Fatalf("expected rule in scope to match, got %+v", outcome)
 	}
@@ -133,7 +133,7 @@ func TestEvaluate_DisabledRuleNeverMatches(t *testing.T) {
 		Match:   MatchGroup{Op: "allof", Conditions: []Condition{{Field: "subject", Comparator: "contains", Value: "x"}}},
 		Actions: []Action{{Type: "delete"}},
 	}
-	outcome := Evaluate(EvalInput{Subject: "x"}, []Rule{rule})
+	outcome := Evaluate(context.Background(), EvalInput{Subject: "x"}, []Rule{rule})
 	if len(outcome.Matched) != 0 {
 		t.Fatalf("expected disabled rule to never match, got %+v", outcome)
 	}
@@ -155,7 +155,7 @@ func TestEvaluate_StopShortCircuitsRemainingRules(t *testing.T) {
 		Actions: []Action{{Type: "delete"}},
 	}
 
-	outcome := Evaluate(EvalInput{Subject: "x"}, []Rule{second, first})
+	outcome := Evaluate(context.Background(), EvalInput{Subject: "x"}, []Rule{second, first})
 	if !outcome.Stopped {
 		t.Fatalf("expected Stopped=true, got %+v", outcome)
 	}
@@ -183,7 +183,7 @@ func TestEvaluate_ActionOrderingAcrossMatchedRules(t *testing.T) {
 		Actions: []Action{{Type: "keyword", Value: "B"}},
 	}
 
-	outcome := Evaluate(EvalInput{Subject: "x"}, []Rule{second, first})
+	outcome := Evaluate(context.Background(), EvalInput{Subject: "x"}, []Rule{second, first})
 	if len(outcome.Applied) != 2 || outcome.Applied[0].Value != "A" || outcome.Applied[1].Value != "B" {
 		t.Fatalf("expected actions applied in rule Order regardless of input slice order, got %+v", outcome.Applied)
 	}

@@ -385,6 +385,17 @@ func (s *Server) handleRulesRun(w http.ResponseWriter, r *http.Request) {
 
 	result := rulesRunResult{Scanned: len(overviews)}
 	for _, ov := range overviews {
+		// Stop when the caller is gone. Rule evaluation is unbounded CPU the
+		// caller sizes — 100 rules of 300 regex conditions against a 100 KiB
+		// body measured at 95 s per message, and limit goes to 500, i.e. 11.5
+		// minutes of work per request that nothing was watching for. Four
+		// concurrent requests hold the whole `cpus 4.0` quota, and the poller
+		// shares it: tickSem has capacity 1 instance-wide, so every account's
+		// polling stretches behind it.
+		if err := r.Context().Err(); err != nil {
+			result.Scanned = result.Applied + result.Failed
+			break
+		}
 		body := ""
 		if bodies != nil {
 			body = bodies[ov.UID].Body
@@ -401,7 +412,7 @@ func (s *Server) handleRulesRun(w http.ResponseWriter, r *http.Request) {
 			Keywords:  ov.Keywords,
 			Folder:    mailbox,
 		}
-		outcome := rules.Evaluate(input, activeRules)
+		outcome := rules.Evaluate(r.Context(), input, activeRules)
 		if len(outcome.Matched) == 0 {
 			continue
 		}

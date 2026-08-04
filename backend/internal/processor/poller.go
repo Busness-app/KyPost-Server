@@ -1304,7 +1304,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		Keywords:  msg.Keywords,
 		Folder:    "INBOX",
 	}
-	outcome := rules.Evaluate(ruleInput, uc.rules)
+	outcome := rules.Evaluate(ctx, ruleInput, uc.rules)
 	if len(outcome.Matched) > 0 {
 		results := rules.ApplyOutcome(ctx, uc.mail, "INBOX", ruleInput, outcome)
 		detail := "rule(s) applied: " + strings.Join(outcome.Matched, ", ")
