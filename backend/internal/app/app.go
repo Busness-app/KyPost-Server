@@ -177,6 +177,7 @@ func startBackgroundSweepers(ctx context.Context, srv *api.Server) {
 	for _, sweep := range []func(context.Context){
 		srv.StartPickupSweeper,
 		srv.StartContactPhotoSweeper,
+		srv.StartEnvelopeSweeper,
 		srv.StartCooldownSweeper,
 		srv.StartMfaPushLimiterSweeper,
 		srv.StartSessionSweeper,

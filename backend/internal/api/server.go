@@ -773,6 +773,40 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 	}
 }
 
+// StartEnvelopeSweeper reclaims expired wrapped-envelope rows for every
+// account, hourly, alongside the other maintenance passes.
+//
+// users.Store compacts on any write already, which covers every account that is
+// being used. This covers the one that is not: a device envelope expires,
+// nothing else about that account ever changes, and the row stays in users.json
+// forever — invisible to WrappedEnvelopes(), invisible to the 32-slot cap, and
+// inside the file every authenticated request reads through. Compaction-on-write
+// is opportunistic; this is what makes the TTL a guarantee.
+//
+// Hourly against a seven-day TTL is deliberately coarse. Nothing reads an
+// expired row, so the only thing the interval controls is how long dead bytes
+// sit on disk, and a tighter one would take the global users.json lock more
+// often to reclaim the same bytes.
+func (s *Server) StartEnvelopeSweeper(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			removed, err := s.users.SweepExpiredEnvelopes()
+			if err != nil {
+				s.logger.Error("expired envelope sweep failed", "error", err.Error())
+				continue
+			}
+			if removed > 0 {
+				s.logger.Info("reclaimed expired pgp envelope slots", "removed", strconv.Itoa(removed))
+			}
+		}
+	}
+}
+
 // StartContactPhotoSweeper reclaims contact-photo files no live contact
 // references, for every user, on the same hourly cadence as the pickup sweep.
 //

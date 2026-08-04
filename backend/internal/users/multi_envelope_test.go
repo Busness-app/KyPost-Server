@@ -711,3 +711,110 @@ func TestDeletingAnAbsentSlotDoesNotWrite(t *testing.T) {
 		t.Fatalf("a real delete did not remove the slot: %+v", deleted.WrappedEnvelopes())
 	}
 }
+
+// TestSweepExpiredEnvelopesReclaimsIdleAccounts is the guarantee half of the
+// TTL. Compaction inside mutateGuarded covers every account that is being
+// written to; this covers the one that is not — a device envelope expires,
+// nothing else about the account ever changes, and the row stays in users.json
+// forever, invisible to WrappedEnvelopes() and to the slot cap but inside the
+// file every authenticated request reads through.
+func TestSweepExpiredEnvelopesReclaimsIdleAccounts(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+
+	for i := 0; i < 3; i++ {
+		if _, err := store.SetPGPWrappedEnvelope(id, fmt.Sprintf("device:%02d", i), "x", ""); err != nil {
+			t.Fatalf("add device slot %d: %v", i, err)
+		}
+	}
+	// A recovery slot, which never expires: the sweep must not take it.
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, "keep-me", ""); err != nil {
+		t.Fatalf("add recovery slot: %v", err)
+	}
+
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := store.mutate(id, func(u *User) error {
+		for i := range u.PGPWrappedEnvelopes {
+			if strings.HasPrefix(u.PGPWrappedEnvelopes[i].Slot, EnvelopeSlotDevicePrefix) {
+				u.PGPWrappedEnvelopes[i].ExpiresAt = past
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age device slots: %v", err)
+	}
+
+	before, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	// The account is now idle: nothing will write to it again, and the raw rows
+	// are still on disk.
+	// Four raw rows: recovery plus three device. The password sealing is the
+	// legacy PGPPrivateKeyWrapped field, which WrappedEnvelopes() surfaces as a
+	// synthetic entry and which is not a row here.
+	if len(before.PGPWrappedEnvelopes) != 4 {
+		t.Fatalf("test setup: expected 4 raw rows (recovery + 3 device), got %d",
+			len(before.PGPWrappedEnvelopes))
+	}
+	stamp := before.UpdatedAt
+
+	removed, err := store.SweepExpiredEnvelopes()
+	if err != nil {
+		t.Fatalf("SweepExpiredEnvelopes: %v", err)
+	}
+	if removed != 3 {
+		t.Fatalf("sweep removed %d rows, want 3", removed)
+	}
+
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(after.PGPWrappedEnvelopes) != 1 || after.PGPWrappedEnvelopes[0].Slot != EnvelopeSlotRecovery {
+		t.Fatalf("the sweep did not leave exactly the untimed recovery slot: %+v", after.PGPWrappedEnvelopes)
+	}
+	// And the password sealing is still reachable, so the account is not
+	// stranded by its own maintenance.
+	if len(after.WrappedEnvelopes()) != 2 {
+		t.Fatalf("expected the recovery and password sealings to remain: %+v", after.WrappedEnvelopes())
+	}
+	// A maintenance pass that removes rows nobody could see is not a
+	// modification anyone made.
+	if after.UpdatedAt != stamp {
+		t.Fatalf("the sweep bumped UpdatedAt (%s -> %s), reporting a change no observer can see",
+			stamp, after.UpdatedAt)
+	}
+}
+
+// A sweep with nothing to reclaim must not write at all: it runs hourly on
+// every instance, and users.json is rewritten whole under a global
+// cross-process lock that every authenticated request reads through.
+func TestSweepWithNothingExpiredDoesNotWrite(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:live", "x", ""); err != nil {
+		t.Fatalf("add slot: %v", err)
+	}
+	path := store.path
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	removed, err := store.SweepExpiredEnvelopes()
+	if err != nil {
+		t.Fatalf("SweepExpiredEnvelopes: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("sweep removed %d rows with nothing expired", removed)
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("an empty sweep rewrote users.json; it runs hourly and takes the global " +
+			"lock every authenticated request reads through")
+	}
+}

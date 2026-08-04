@@ -1036,6 +1036,52 @@ func compactExpiredEnvelopes(u *User) bool {
 	return true
 }
 
+// SweepExpiredEnvelopes drops every user's expired wrapped-envelope rows in a
+// single pass, returning how many it removed.
+//
+// mutateGuarded already compacts on any write, which handles every account that
+// is being used. This is for the account that is not: a device envelope expires,
+// nothing else about that account ever changes, and the row sits in users.json
+// forever — invisible to WrappedEnvelopes(), invisible to the slot cap, and
+// inside the file every authenticated request on the instance reads through.
+// Compaction-on-write is opportunistic; this is the guarantee.
+//
+// ONE read-modify-write for every user, not one per user. The whole cost being
+// reclaimed here is whole-file rewrites under a global cross-process lock, so a
+// sweep that took that lock once per account would be a smaller version of the
+// problem it exists to fix.
+//
+// It deliberately does NOT stamp UpdatedAt. The rows removed were already
+// invisible to every reader and to the cap, so from any observer's point of
+// view the account did not change; bumping the timestamp would report a
+// modification that no one made and nothing can see.
+func (s *Store) SweepExpiredEnvelopes() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	removed := 0
+	err := fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readFileUnlocked()
+		if err != nil {
+			return err
+		}
+		for i := range f.Users {
+			before := len(f.Users[i].PGPWrappedEnvelopes)
+			if compactExpiredEnvelopes(&f.Users[i]) {
+				removed += before - len(f.Users[i].PGPWrappedEnvelopes)
+			}
+		}
+		if removed == 0 {
+			return nil
+		}
+		return s.writeFileUnlocked(f)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
 // mutate re-reads the store, applies fn to the matching user, and persists
 // the result. fn returns an error to abort without writing.
 func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
