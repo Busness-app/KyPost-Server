@@ -67,7 +67,83 @@ func (s *Store) applyFile(cf mailCacheFile) {
 	if cf.Mailboxes == nil {
 		cf.Mailboxes = map[string]*mailboxWindow{}
 	}
+	dropStaleVerdicts(cf.Mailboxes)
 	s.mailboxes = cf.Mailboxes
+}
+
+// dropStaleVerdicts clears every cached signature verdict that was computed
+// under an older version of the binding rules.
+//
+// Here, at the single point where the file becomes in-memory state, so both
+// Snapshot and Sync see the cleaned window and no caller has to remember.
+//
+// The warm Body goes with the verdict, deliberately. Body is what makes a read
+// serve from cache instead of re-fetching, so leaving it would mean the entry
+// never re-verifies and the badge silently stays absent forever; dropping it
+// costs one IMAP fetch and gets a verdict under the current rules.
+func dropStaleVerdicts(mailboxes map[string]*mailboxWindow) {
+	for _, w := range mailboxes {
+		if w == nil {
+			continue
+		}
+		for i := range w.Entries {
+			if w.Entries[i].PGPVerdictSchemaVersion == PGPVerdictSchema {
+				continue
+			}
+			if !w.Entries[i].PGPSigned && !w.Entries[i].PGPVerified && w.Entries[i].PGPSignerFingerprint == "" {
+				continue
+			}
+			clearPGPVerdict(&w.Entries[i])
+		}
+	}
+}
+
+func clearPGPVerdict(e *Entry) {
+	e.PGPSigned = false
+	e.PGPVerified = false
+	e.PGPSignerFingerprint = ""
+	e.PGPVerdictSchemaVersion = 0
+	e.Body = ""
+	e.BodyMode = ""
+}
+
+// InvalidatePGPVerdicts drops every cached signature verdict for this user, in
+// every mailbox.
+//
+// Called when the address book changes a PGP key, because the address book is
+// what the verdict is anchored to: removing or replacing a contact's key — the
+// obvious remediation after discovering a forged badge — otherwise left the
+// old verdict standing for every message already in the 5,000-entry window,
+// so remediating the contact did not remediate the mail.
+//
+// Coarse on purpose. A verdict does not record which contact produced it, and
+// the alternative is a per-message re-verification pass over the window; the
+// cost of being coarse is one body re-fetch per signed message, on an action a
+// user takes rarely.
+func (s *Store) InvalidatePGPVerdicts() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return err
+	}
+	changed := false
+	for _, w := range s.mailboxes {
+		if w == nil {
+			continue
+		}
+		for i := range w.Entries {
+			e := &w.Entries[i]
+			if !e.PGPSigned && !e.PGPVerified && e.PGPSignerFingerprint == "" {
+				continue
+			}
+			clearPGPVerdict(e)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return s.persistLocked()
 }
 
 func (s *Store) refreshFromDiskLocked() error {
@@ -187,6 +263,10 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 			e.PGPSigned = prev.PGPSigned
 			e.PGPVerified = prev.PGPVerified
 			e.PGPSignerFingerprint = prev.PGPSignerFingerprint
+			// Carry the schema stamp with the verdict it describes. Without
+			// this, Sync launders an old verdict into an unstamped entry and
+			// dropStaleVerdicts can no longer tell it apart from a current one.
+			e.PGPVerdictSchemaVersion = prev.PGPVerdictSchemaVersion
 			e.PGPProtectedSubject = prev.PGPProtectedSubject
 			// Same rule; preserved alongside Body, or a flag flip strips the
 			// render mode off a body that is still there.
@@ -348,6 +428,13 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 	}
 
 	for _, in := range entries {
+		// Stamp the rules this verdict was produced under, so a later change
+		// to the binding invalidates it rather than replaying it. Only where
+		// there IS a verdict: an entry carrying none must not be stamped, or
+		// dropStaleVerdicts would have nothing to recognize later.
+		if in.PGPSigned || in.PGPVerified || in.PGPSignerFingerprint != "" {
+			in.PGPVerdictSchemaVersion = PGPVerdictSchema
+		}
 		idx, ok := byUID[in.UID]
 		if !ok {
 			win.Seq++

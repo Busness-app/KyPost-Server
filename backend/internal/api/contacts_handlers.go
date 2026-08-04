@@ -174,6 +174,7 @@ func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to create contact", http.StatusInternalServerError)
 			return
 		}
+		s.invalidatePGPVerdictsOnKeyChange(r, contacts.Contact{}, created)
 		writeJSON(w, http.StatusOK, created)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -241,8 +242,10 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to update contact", http.StatusInternalServerError)
 			return
 		}
+		s.invalidatePGPVerdictsOnKeyChange(r, existing, updated)
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
+		deleted, _ := store.Get(uid)
 		emails := discoveryCreatedEmails(store, uid)
 		removed, err := store.Delete(uid)
 		if err != nil {
@@ -253,6 +256,9 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 			if ac, ok := authFromContext(r); ok {
 				s.suppressDiscoveryOnDelete(ac.UserID, emails)
 			}
+		}
+		if removed {
+			s.invalidatePGPVerdictsOnKeyChange(r, deleted, contacts.Contact{})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 	default:
@@ -529,4 +535,33 @@ func parseNonNegativeInt64Query(r *http.Request, key string) int64 {
 		return 0
 	}
 	return v
+}
+
+// invalidatePGPVerdictsOnKeyChange clears the caller's cached signature
+// verdicts when a write changed a contact's PGP key.
+//
+// The verdict is anchored in the address book (see signerKeysForSender), so
+// removing or replacing a contact's key — the obvious remediation after
+// discovering a forged badge — has to reach the verdicts that key produced.
+// Without this the old verdict stood for every message already in the
+// 5,000-entry window, and remediating the contact did not remediate the mail.
+//
+// Best-effort: a stale verdict is worth logging about, not worth failing the
+// contact write the user asked for.
+func (s *Server) invalidatePGPVerdictsOnKeyChange(r *http.Request, before, after contacts.Contact) {
+	if before.PGPKey == after.PGPKey {
+		return
+	}
+	ac, ok := authFromContext(r)
+	if !ok {
+		return
+	}
+	cache, err := s.userMailCacheStore(ac.UserID)
+	if err != nil {
+		s.logger.Error("could not open the mail cache to invalidate pgp verdicts", "error", err.Error())
+		return
+	}
+	if err := cache.InvalidatePGPVerdicts(); err != nil {
+		s.logger.Error("failed to invalidate cached pgp verdicts after a contact key change", "error", err.Error())
+	}
 }

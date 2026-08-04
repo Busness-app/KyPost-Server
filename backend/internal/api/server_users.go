@@ -124,6 +124,22 @@ func (s *Server) handleUsersResetPassword(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Read the custody mode BEFORE the reset, so the audit line can record
+	// what the reset destroyed.
+	//
+	// A client-protected key is wrapped under the account password and the
+	// server cannot open it, so an admin reset makes it permanently
+	// unrecoverable — documented behaviour (docs/E2E_PGP.md) that the USER is
+	// warned about at SecurityPage, with two working recovery paths. The
+	// administrator was told nothing: the reset UI was a bare prompt, this
+	// handler never looked at PGPProtection, and the audit line recorded only
+	// user_id. So the admin could not know they were about to destroy data, and
+	// no record existed afterwards that they had.
+	destroysClientKey := false
+	if before, err := s.users.Get(id); err == nil {
+		destroysClientKey = before.PGPProtection() == users.PGPProtectionClient
+	}
+
 	u, err := s.users.SetPassword(r.Context(), id, req.Password, true)
 	if err != nil {
 		writeUserStoreError(w, err)
@@ -138,8 +154,19 @@ func (s *Server) handleUsersResetPassword(w http.ResponseWriter, r *http.Request
 		http.Error(w, "password reset completed but credential revocation failed; retry immediately", http.StatusInternalServerError)
 		return
 	}
-	s.logger.Info("user password reset by admin", "user_id", u.ID)
-	writeJSON(w, http.StatusOK, u.Public())
+	if destroysClientKey {
+		s.logger.Error("user password reset by admin destroyed a client-protected pgp key",
+			"user_id", u.ID, "pgp_fingerprint", u.PGPFingerprint)
+	} else {
+		s.logger.Info("user password reset by admin", "user_id", u.ID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user": u.Public(),
+		// So the admin UI can say what just happened, and warn before the next
+		// one. Public() cannot carry it: it describes the account, and this
+		// describes the effect of this request.
+		"pgpKeyDestroyed": destroysClientKey,
+	})
 }
 
 func (s *Server) handleUsersDeactivate(w http.ResponseWriter, r *http.Request) {
