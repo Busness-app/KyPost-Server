@@ -235,6 +235,19 @@ Implemented:
   uploads the envelope, the backup wraps it under a one-time recovery secret
   and hands the file to the browser. There is no bare `.asc` download and
   should not be one.
+- `PUT|GET|DELETE /api/pgp/identity/envelope/{slot}` write, read and delete one
+  non-password sealing of the private key — a recovery code today, an
+  enrolled device later (the `device:` slot prefix exists for that, no
+  endpoint mints one yet). All three are **session-only**, unlike the
+  `withMailAuth` routes above: a paired device authenticating with its own
+  device secret must not be able to mint a sealing of the account's private
+  key, which is the enforcement point a planned passphrase-only account tier
+  depends on. `PUT` refuses the `password` slot (400) — that field has
+  exactly one writer, `POST /api/pgp/identity/rewrap`, because that route
+  carries the guard against a server-custody account losing its only
+  readable key. `GET` 404s for a slot with nothing in it; `DELETE` of an
+  absent slot succeeds (`users.Store.DeletePGPWrappedEnvelope` is
+  deliberately idempotent).
 - The server derives fingerprint and key ID from the uploaded public key
   rather than trusting the client's claim — otherwise a client could get its
   own key published under someone else's identity through WKD or Autocrypt.

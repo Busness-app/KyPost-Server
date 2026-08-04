@@ -146,3 +146,80 @@ func TestBootstrapEnvelopeSlotsIsEmptyArrayNotNullForNoIdentity(t *testing.T) {
 		t.Fatalf("envelopeSlots = %s, want []", raw)
 	}
 }
+
+func TestEnvelopeSlotRoundTrip(t *testing.T) {
+	srv := newTestServer(t)
+	id := clientProtectedSlotUser(t, srv)
+
+	put := httptest.NewRequest(http.MethodPut, "/api/pgp/identity/envelope/recovery",
+		strings.NewReader(`{"envelope":"{\"v\":2,\"rec\":1}"}`))
+	put.SetPathValue("slot", "recovery")
+	authRequestAs(srv, put, id)
+	rec := httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPPutEnvelopeSlot)(rec, put)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "/api/pgp/identity/envelope/recovery", nil)
+	get.SetPathValue("slot", "recovery")
+	authRequestAs(srv, get, id)
+	rec = httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPGetEnvelopeSlot)(rec, get)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Slot     string `json:"slot"`
+		Envelope string `json:"envelope"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Slot != "recovery" || out.Envelope != `{"v":2,"rec":1}` {
+		t.Fatalf("round trip lost data: %+v", out)
+	}
+
+	del := httptest.NewRequest(http.MethodDelete, "/api/pgp/identity/envelope/recovery", nil)
+	del.SetPathValue("slot", "recovery")
+	authRequestAs(srv, del, id)
+	rec = httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPDeleteEnvelopeSlot)(rec, del)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := bootstrapSlots(t, srv, id); len(got) != 1 {
+		t.Fatalf("slots after delete = %v, want [password]", got)
+	}
+}
+
+// The password envelope has exactly one writer, POST /api/pgp/identity/rewrap,
+// because that route carries the guard that stops a server-custody account
+// having its only readable key cleared. A second door to the same field would
+// be a way around it.
+func TestEnvelopeSlotRefusesPasswordSlot(t *testing.T) {
+	srv := newTestServer(t)
+	id := clientProtectedSlotUser(t, srv)
+	put := httptest.NewRequest(http.MethodPut, "/api/pgp/identity/envelope/password",
+		strings.NewReader(`{"envelope":"x"}`))
+	put.SetPathValue("slot", "password")
+	authRequestAs(srv, put, id)
+	rec := httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPPutEnvelopeSlot)(rec, put)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetEnvelopeSlotMissingIs404(t *testing.T) {
+	srv := newTestServer(t)
+	id := clientProtectedSlotUser(t, srv)
+	get := httptest.NewRequest(http.MethodGet, "/api/pgp/identity/envelope/recovery", nil)
+	get.SetPathValue("slot", "recovery")
+	authRequestAs(srv, get, id)
+	rec := httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPGetEnvelopeSlot)(rec, get)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}

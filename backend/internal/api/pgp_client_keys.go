@@ -230,3 +230,71 @@ func (s *Server) handlePGPExportLegacyKey(w http.ResponseWriter, r *http.Request
 		"publicKey":  identity.ArmoredPublicKey,
 	})
 }
+
+// Envelope slots are the additional sealings of a client-protected private key
+// — a recovery code today, enrolled devices later. See
+// docs/superpowers/specs/2026-08-04-multi-wrapped-key-custody-design.md.
+//
+// All three are withAuth (session only), never withMailAuth. A paired device
+// must not be able to mint a sealing of the account key: that is the property
+// the passphrase-only tier is enforced by, and enforcing it at the route is the
+// only place the server can enforce it at all.
+
+func (s *Server) handlePGPPutEnvelopeSlot(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	var req struct {
+		Envelope string `json:"envelope"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxWrappedKeyBytes)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.users.SetPGPWrappedEnvelope(
+		ac.UserID, r.PathValue("slot"), strings.TrimSpace(req.Envelope),
+		time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		writeUserStoreError(w, err)
+		return
+	}
+	s.logger.Info("pgp envelope slot stored", "user_id", ac.UserID, "slot", r.PathValue("slot"))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handlePGPGetEnvelopeSlot(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	u, err := s.users.Get(ac.UserID)
+	if err != nil {
+		http.Error(w, "user unavailable", http.StatusInternalServerError)
+		return
+	}
+	slot := r.PathValue("slot")
+	for _, e := range u.WrappedEnvelopes() {
+		if e.Slot == slot {
+			writeJSON(w, http.StatusOK, map[string]any{"slot": e.Slot, "envelope": e.Envelope})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "no envelope in that slot"})
+}
+
+func (s *Server) handlePGPDeleteEnvelopeSlot(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if _, err := s.users.DeletePGPWrappedEnvelope(ac.UserID, r.PathValue("slot")); err != nil {
+		writeUserStoreError(w, err)
+		return
+	}
+	s.logger.Info("pgp envelope slot deleted", "user_id", ac.UserID, "slot", r.PathValue("slot"))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

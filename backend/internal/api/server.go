@@ -535,6 +535,14 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// to, or wipe the private half irrecoverably.
 	mux.HandleFunc("POST /api/pgp/identity/client", s.withAuth(s.handlePGPIdentityClient))
 	mux.HandleFunc("POST /api/pgp/identity/rewrap", s.withAuth(s.handlePGPRewrapKey))
+	// Envelope slots (recovery code today, enrolled devices later): write, read
+	// and delete one non-password sealing of the private key. Session-only for
+	// the same reason as the two routes above — a device secret must not be able
+	// to mint a sealing of the account key, which is the enforcement point the
+	// planned passphrase-only tier depends on.
+	mux.HandleFunc("PUT /api/pgp/identity/envelope/{slot}", s.withAuth(s.handlePGPPutEnvelopeSlot))
+	mux.HandleFunc("GET /api/pgp/identity/envelope/{slot}", s.withAuth(s.handlePGPGetEnvelopeSlot))
+	mux.HandleFunc("DELETE /api/pgp/identity/envelope/{slot}", s.withAuth(s.handlePGPDeleteEnvelopeSlot))
 	// export-legacy stays session-only on purpose. It is the one endpoint
 	// that returns a private key in the clear, and it re-verifies the account
 	// password before doing so — a device secret is not that password, and a

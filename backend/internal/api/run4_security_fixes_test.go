@@ -349,6 +349,44 @@ func TestDeviceCannotReplaceOrDestroyPGPIdentity(t *testing.T) {
 	}
 }
 
+// The envelope-slot endpoints (write/read/delete a non-password sealing of
+// the private key) are withAuth like the two routes above, and for the same
+// reason: a device secret must not be able to mint a sealing of the account
+// key. That is the enforcement point the planned passphrase-only account
+// tier depends on — if a paired device could add an envelope slot, that tier
+// would be unenforceable. Exercised through the full router (not the bare
+// handler) so a route-registration slip (withMailAuth instead of withAuth)
+// would be caught here too.
+func TestDeviceCannotReachEnvelopeSlotRoutes(t *testing.T) {
+	srv, u := newTestServerWithUser(t)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, u.ID, "attacker-device")
+
+	put := httptest.NewRequest(http.MethodPut, "/api/pgp/identity/envelope/recovery",
+		strings.NewReader(`{"envelope":"x"}`))
+	setDeviceHeaders(put, deviceID, deviceSecret)
+	putRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(putRec, put)
+	if putRec.Code == http.StatusOK {
+		t.Error("a paired device wrote a wrapped-envelope slot")
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "/api/pgp/identity/envelope/recovery", nil)
+	setDeviceHeaders(get, deviceID, deviceSecret)
+	getRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(getRec, get)
+	if getRec.Code == http.StatusOK {
+		t.Error("a paired device read a wrapped-envelope slot")
+	}
+
+	del := httptest.NewRequest(http.MethodDelete, "/api/pgp/identity/envelope/recovery", nil)
+	setDeviceHeaders(del, deviceID, deviceSecret)
+	delRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(delRec, del)
+	if delRec.Code == http.StatusOK {
+		t.Error("a paired device deleted a wrapped-envelope slot")
+	}
+}
+
 // run-4 finding H8: the "use my saved config" fallback was evaluated per
 // field, so a caller supplying only a host got the victim's stored username
 // and password sent to it. GET /api/imap/config deliberately never returns the
