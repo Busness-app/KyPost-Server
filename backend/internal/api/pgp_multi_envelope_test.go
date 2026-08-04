@@ -92,3 +92,57 @@ func TestBootstrapDoesNotServeNonPasswordEnvelopeBodies(t *testing.T) {
 		t.Fatalf("bootstrap leaked a non-password envelope body: %s", body)
 	}
 }
+
+// bootstrapEnvelopeSlotsRaw returns the exact bytes bootstrap wrote for the
+// "envelopeSlots" key, undecoded. []string and a nil slice both decode to a
+// zero-length Go slice, so a test built on bootstrapSlots's []string return
+// cannot tell "[]" from "null" apart — this exists so a test can.
+func bootstrapEnvelopeSlotsRaw(t *testing.T, srv *Server, userID string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/bootstrap", nil)
+	authRequestAs(srv, req, userID)
+	rec := httptest.NewRecorder()
+	srv.withMailAuth(srv.handlePGPBootstrap)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	raw, present := out["envelopeSlots"]
+	if !present {
+		t.Fatalf("envelopeSlots absent from response: %s", rec.Body.String())
+	}
+	return string(raw)
+}
+
+// A client that ranges over envelopeSlots (for (const s of resp.envelopeSlots))
+// breaks on null and works on []. This must hold for server-custody accounts
+// too, not just the client-protected accounts the tests above cover.
+func TestBootstrapEnvelopeSlotsIsEmptyArrayNotNullForServerCustody(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "legacy-server-slots", "legacy-server-slots-testpassword", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := srv.users.SetPGPIdentity(u.ID, "FPR", "KID", "pub", "sealed", "generated", "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentity: %v", err)
+	}
+	if raw := bootstrapEnvelopeSlotsRaw(t, srv, u.ID); raw != "[]" {
+		t.Fatalf("envelopeSlots = %s, want []", raw)
+	}
+}
+
+// Same rule for an account with no PGP identity at all (handlePGPBootstrap's
+// default branch).
+func TestBootstrapEnvelopeSlotsIsEmptyArrayNotNullForNoIdentity(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "no-pgp-slots", "no-pgp-slots-testpassword", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if raw := bootstrapEnvelopeSlotsRaw(t, srv, u.ID); raw != "[]" {
+		t.Fatalf("envelopeSlots = %s, want []", raw)
+	}
+}
