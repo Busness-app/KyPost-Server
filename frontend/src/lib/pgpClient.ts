@@ -10,6 +10,7 @@ import { requireUnlockedKey } from "./keyVault";
 import { parseMimeContent, type BodyMode } from "./mimeContent";
 
 type OpenPGP = typeof import("openpgp");
+type PublicKey = Awaited<ReturnType<OpenPGP["readKey"]>>;
 
 async function openpgp(): Promise<OpenPGP> {
   return import("openpgp");
@@ -119,6 +120,33 @@ export type DecryptedMessage = {
  * comment at the verification loop. `verified` means "the sender signed this",
  * not "somebody did".
  */
+/**
+ * Whether `key` carries `address` as the email of one of its User IDs.
+ *
+ * Compares the PARSED email of each User ID, never the raw User-ID string. That
+ * distinction is the whole function.
+ *
+ * A User ID is free-form and self-certified: its owner chooses the entire text.
+ * The previous check was `uid.includes("<" + address + ">")` over the raw string,
+ * which the Go side does not agree with — go-crypto's parseUserId is a state
+ * machine that stops after the FIRST bracketed address and ignores the rest,
+ * while a substring test is order-independent. So a UID of
+ *
+ *     Mallory <mallory@evil.example> aka Bob <bob@example.com>
+ *
+ * parses server-side as mallory@evil.example — the Autocrypt harvest happily pins
+ * it under the attacker's OWN contact, no prompt — while the browser's substring
+ * test found <bob@example.com> and vouched for it as Bob. Two parsers, one string,
+ * two answers, and the reader saw a green "signature verified" under a spoofed
+ * From. Comparing the parsed email makes the browser agree with the parser that
+ * did the pinning.
+ */
+function keyCertifiesAddress(key: PublicKey, address: string): boolean {
+  return key.users.some(
+    (user) => user.userID?.email?.trim().toLowerCase() === address
+  );
+}
+
 export async function decryptMessage(
   payload: string,
   signerPublicKeys: string[],
@@ -161,13 +189,7 @@ export async function decryptMessage(
         // attacker whose key the reader had auto-pinned — Autocrypt harvest
         // and WKD auto-trust both pin without asking — could sign a message,
         // put anyone in the From header, and be vouched for by the UI.
-        verified = Boolean(
-          match &&
-            wanted &&
-            match
-              .getUserIDs()
-              .some((uid) => uid.toLowerCase().includes(`<${wanted}>`))
-        );
+        verified = Boolean(match && wanted && keyCertifiesAddress(match, wanted));
         break;
       } catch {
         // Try the next signature; an unverifiable one is not fatal.

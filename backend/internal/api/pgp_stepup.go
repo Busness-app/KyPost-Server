@@ -45,6 +45,23 @@ func pgpStepUpRequired(u users.User) bool {
 // endpoint that says "wrong password" without limit is a password oracle
 // whatever else it is for.
 func (s *Server) confirmAccountCredential(w http.ResponseWriter, r *http.Request, userID, password, authSecret string) bool {
+	if !s.confirmAccountCredentialNoRecord(w, r, userID, password, authSecret) {
+		return false
+	}
+	s.mfaLockout.recordSuccess(userID)
+	return true
+}
+
+// confirmAccountCredentialNoRecord is confirmAccountCredential without clearing
+// the account's failure counter on success.
+//
+// For a caller that checks ONE factor, clearing on success is right: the caller
+// proved the credential, so accumulated failures are forgiven. For a caller that
+// goes on to check a SECOND factor on the same counter it is not — recordSuccess
+// deletes the entry outright, so the second check would start from zero on every
+// request and its throttle would never fire. Such a caller uses this and records
+// the success itself once every factor has passed. See handleAuthStepUp.
+func (s *Server) confirmAccountCredentialNoRecord(w http.ResponseWriter, r *http.Request, userID, password, authSecret string) bool {
 	u, err := s.users.Get(userID)
 	if err != nil {
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
@@ -65,7 +82,6 @@ func (s *Server) confirmAccountCredential(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return false
 	}
-	s.mfaLockout.recordSuccess(userID)
 	return true
 }
 

@@ -99,3 +99,34 @@ func TestStepUpAcceptsARecoveryCodeAndConsumesIt(t *testing.T) {
 		t.Fatalf("recovery codes remaining = %d, want %d", len(after.RecoveryCodesHash), recoveryCodeCount-1)
 	}
 }
+
+// TestStepUpSecondFactorIsThrottled is run-7 finding F6.
+//
+// handleAuthStepUp spends one per-account counter twice, once per factor.
+// confirmAccountCredential's recordSuccess DELETES the account's entry, so a
+// correct credential reset the counter before confirmSecondFactor spent it — and
+// the second factor was therefore never throttled at all, however many attempts
+// were made. The comment on that throttle ("six digits do not survive one")
+// described a control that was not running.
+func TestStepUpSecondFactorIsThrottled(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "ivy", "pw-ivy-testpassword", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	enrollTOTP(t, srv, u.ID)
+	const password = "pw-ivy-testpassword"
+
+	lastCode := 0
+	for i := 0; i < mfaMaxFailures+5; i++ {
+		// Correct password, wrong second factor — the shape that reset the counter.
+		resp := stepUpRequest(t, srv, u.ID, map[string]string{"password": password, "code": "000000"})
+		lastCode = resp.StatusCode
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return // throttled, as it must be
+		}
+	}
+	t.Fatalf("made %d wrong second-factor attempts at /api/auth/step-up with no 429 (last status %d); "+
+		"the per-account throttle is being reset by the credential check that runs before it",
+		mfaMaxFailures+5, lastCode)
+}

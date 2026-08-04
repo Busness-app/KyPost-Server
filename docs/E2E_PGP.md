@@ -235,6 +235,27 @@ Implemented:
   uploads the envelope, the backup wraps it under a one-time recovery secret
   and hands the file to the browser. There is no bare `.asc` download and
   should not be one.
+- `PUT|GET|DELETE /api/pgp/identity/envelope/{slot}` write, read and delete one
+  non-password sealing of the private key — a recovery code today, an
+  enrolled device later (the `device:` slot prefix exists for that, no
+  endpoint mints one yet). All three are **session-only**, unlike the
+  `withMailAuth` routes above: a paired device authenticating with its own
+  device secret must not be able to mint a sealing of the account's private
+  key, which is the enforcement point a planned passphrase-only account tier
+  depends on. `PUT` and `DELETE` additionally require the step-up credential
+  (`pgp_stepup.go`, same standard as `rewrap` and `DELETE /api/pgp/identity`):
+  installing a slot plants an envelope the server cannot validate, and
+  deleting one destroys a sealing that cannot be re-minted without the
+  unwrapped key, so neither is undoable from a session alone. `PUT` also
+  refuses the `password` slot (400) — that field has exactly one writer,
+  `POST /api/pgp/identity/rewrap`, because that route carries the guard
+  against a server-custody account losing its only readable key. `GET` is
+  **not** step-up-gated and serves whatever `WrappedEnvelopes()` returns for
+  the requested slot name, including the synthesised `password` slot — it is
+  not a disclosure, since `GET /api/pgp/identity/wrapped` already serves the
+  same bytes under this same weaker auth. `GET` 404s only when no envelope
+  exists under the requested slot name; `DELETE` of an absent slot succeeds
+  (`users.Store.DeletePGPWrappedEnvelope` is deliberately idempotent).
 - The server derives fingerprint and key ID from the uploaded public key
   rather than trusting the client's claim — otherwise a client could get its
   own key published under someone else's identity through WKD or Autocrypt.
@@ -265,6 +286,7 @@ from nothing:
 | `publicKey`, `fingerprint`, `keyId` | the identity itself |
 | `signerPublicKeys` | contact public keys, so signatures verify without waiting on a contacts sync |
 | `payloadEndpoint` | where to fetch ciphertext; absent on older servers |
+| `envelopeSlots` | names of every sealing that exists for this identity (e.g. `password`, `recovery`, `device:*`) — always an array, never `null` |
 
 Doing this as separate calls gives four chances to render a
 half-initialized UI — showing "no PGP identity" to someone who has one, or

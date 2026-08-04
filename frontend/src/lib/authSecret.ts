@@ -51,6 +51,12 @@ const AUTH_SECRET_BYTES = 32;
 export type LoginParams = {
   salt: string;
   iterations: number;
+  /**
+   * Which credential form the account stores. Present ONLY when the request was
+   * authenticated — the server will not disclose it for an arbitrary username,
+   * because that would be an account-existence oracle. See credentialFields.
+   */
+  derivation?: "legacy" | "pbkdf2";
 };
 
 // Mirrors users.MinLoginIterations on the server, which rejects anything lower.

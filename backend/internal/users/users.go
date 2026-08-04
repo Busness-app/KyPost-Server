@@ -3,6 +3,7 @@
 package users
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -111,9 +112,15 @@ type User struct {
 	// opaque to the server: it is stored, returned to the owning user, and
 	// never interpreted here.
 	PGPPrivateKeyWrapped string `json:"pgpPrivateKeyWrapped,omitempty"`
-	PGPKeyProtection     string `json:"pgpKeyProtection,omitempty"`
-	PGPKeySource         string `json:"pgpKeySource,omitempty"`
-	PGPKeyCreatedAt      string `json:"pgpKeyCreatedAt,omitempty"`
+	// PGPWrappedEnvelopes holds every sealing of the private key OTHER than the
+	// password one, which stays in PGPPrivateKeyWrapped above. Splitting them
+	// this way is what lets existing users.json files load unchanged: the legacy
+	// field is still the password envelope, and WrappedEnvelopes() presents both
+	// as one set. Each entry is opaque here, exactly like PGPPrivateKeyWrapped.
+	PGPWrappedEnvelopes []WrappedEnvelope `json:"pgpWrappedEnvelopes,omitempty"`
+	PGPKeyProtection    string            `json:"pgpKeyProtection,omitempty"`
+	PGPKeySource        string            `json:"pgpKeySource,omitempty"`
+	PGPKeyCreatedAt     string            `json:"pgpKeyCreatedAt,omitempty"`
 }
 
 // PGP key protection modes. See User's PGP block.
@@ -135,6 +142,110 @@ func (u User) PGPProtection() string {
 	return ""
 }
 
+// WrappedEnvelope is one sealing of an account's PGP private key.
+//
+// Several may exist for one identity, each sealed under a different
+// key-encryption key — the account password, a recovery code, an enrolled
+// device — so that losing any single one is survivable. Envelope is opaque to
+// this server in exactly the sense PGPPrivateKeyWrapped is: stored, returned to
+// the owning user, never interpreted.
+type WrappedEnvelope struct {
+	Slot     string `json:"slot"`
+	Envelope string `json:"envelope"`
+	AddedAt  string `json:"addedAt,omitempty"`
+}
+
+// Envelope slot names. "password" is not writable through the slot API: it
+// lives in PGPPrivateKeyWrapped and is written only by RewrapPGPPrivateKey,
+// which carries the ErrNotClientProtected guard that endpoint needs.
+const (
+	EnvelopeSlotPassword     = "password"
+	EnvelopeSlotRecovery     = "recovery"
+	EnvelopeSlotDevicePrefix = "device:"
+)
+
+// maxDeviceSlotIDLen bounds the caller-chosen half of a device slot name. The
+// name is echoed back to clients and used as a map-ish key, so it is bounded
+// and kept free of whitespace rather than trusted.
+const maxDeviceSlotIDLen = 128
+
+// maxWrappedEnvelopeSlots bounds how many non-password sealings one identity
+// may accumulate. Real use is one recovery slot plus one sealing per enrolled
+// device; 32 is generous for that (nobody enrolls 31 devices) and still small
+// next to users.json, which Store.mutate rewrites whole under a global file
+// lock on every write and which every authenticated request reads through —
+// an unbounded slot count is an unbounded per-account share of that shared,
+// instance-wide cost. This package only bounds the COUNT; the per-envelope
+// byte bound (128 KiB, `maxWrappedKeyBytes`) that turns a slot count into an
+// actual size budget is enforced by `io.LimitReader` in package `api`
+// (pgp_client_keys.go), which this package cannot see or enforce itself —
+// the two bounds are a dependency, not something this constant can reason
+// about alone. Enforced only when ADDING a slot; replacing an existing
+// one must keep working at the cap, or a user who reaches it can never
+// rotate a sealing again.
+const maxWrappedEnvelopeSlots = 32
+
+// MaxWrappedEnvelopeBytes bounds a single client-wrapped envelope, whichever
+// field it lands in.
+//
+// This used to live only in package api, as an io.LimitReader on the request
+// body, and maxWrappedEnvelopeSlots' reasoning depended on it — "32 slots x 128
+// KiB" is the budget that makes the slot count safe. That dependency did not
+// hold: PGPPrivateKeyWrapped has a second writer, SetDerivedAuthAndRewrapPGP via
+// POST /api/auth/password, whose reader allows 1 MiB and whose store path
+// checked nothing. So the field the comment reasons about could be eight times
+// the bound it reasons from.
+//
+// A byte bound that a package's own invariants depend on belongs in that
+// package. api keeps its LimitReader — refusing an oversized body before
+// buffering it is still worth doing — but the store no longer trusts it.
+const MaxWrappedEnvelopeBytes = 128 << 10
+
+// ErrWrappedEnvelopeTooLarge is returned for an envelope past
+// MaxWrappedEnvelopeBytes.
+var ErrWrappedEnvelopeTooLarge = fmt.Errorf("wrapped key envelope is too large: limit is %d bytes", MaxWrappedEnvelopeBytes)
+
+// ValidateWrappedEnvelope bounds an opaque client-wrapped envelope. An empty
+// envelope is allowed here: callers that require one check for it themselves.
+func ValidateWrappedEnvelope(envelope string) error {
+	if len(envelope) > MaxWrappedEnvelopeBytes {
+		return ErrWrappedEnvelopeTooLarge
+	}
+	return nil
+}
+
+// ValidEnvelopeSlot reports whether slot may be written through the slot API.
+func ValidEnvelopeSlot(slot string) bool {
+	if slot == EnvelopeSlotRecovery {
+		return true
+	}
+	id, ok := strings.CutPrefix(slot, EnvelopeSlotDevicePrefix)
+	return ok && id != "" && len(id) <= maxDeviceSlotIDLen && !strings.ContainsAny(id, " \t\r\n")
+}
+
+// WrappedEnvelopes returns every sealing of this identity's private key, with
+// PGPPrivateKeyWrapped synthesised as the password slot and listed first.
+//
+// A list entry claiming the password slot is ignored rather than merged: one
+// slot has one writer, and honouring it here would let the slot API replace the
+// password envelope without RewrapPGPPrivateKey's guard.
+func (u User) WrappedEnvelopes() []WrappedEnvelope {
+	out := make([]WrappedEnvelope, 0, len(u.PGPWrappedEnvelopes)+1)
+	if strings.TrimSpace(u.PGPPrivateKeyWrapped) != "" {
+		out = append(out, WrappedEnvelope{
+			Slot:     EnvelopeSlotPassword,
+			Envelope: u.PGPPrivateKeyWrapped,
+		})
+	}
+	for _, e := range u.PGPWrappedEnvelopes {
+		if e.Slot == EnvelopeSlotPassword {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 // HasServerReadableKey reports whether the server can still decrypt this user's
 // mail on their behalf. Every server-side PGP operation must check this and
 // refuse rather than assume — under client protection there is no usable key.
@@ -143,11 +254,18 @@ func (u User) HasServerReadableKey() bool {
 }
 
 // clone returns a deep copy of u. Every read served out of the Store's cache
-// goes through this: RecoveryCodesHash is a slice, so a plain struct copy would
-// share the cache's backing array and let a caller corrupt shared state.
+// goes through this, and it must deep-copy every field a plain struct copy
+// would still share with the cache's backing array — currently
+// RecoveryCodesHash and PGPWrappedEnvelopes, both slices, so a shallow copy
+// would let a caller corrupt shared state. WrappedEnvelope is all
+// value-typed strings, so a shallow slices.Clone is enough for it — there is
+// nothing under it left to alias.
 func (u User) clone() User {
 	if u.RecoveryCodesHash != nil {
 		u.RecoveryCodesHash = slices.Clone(u.RecoveryCodesHash)
+	}
+	if u.PGPWrappedEnvelopes != nil {
+		u.PGPWrappedEnvelopes = slices.Clone(u.PGPWrappedEnvelopes)
 	}
 	return u
 }
@@ -213,6 +331,20 @@ var (
 	ErrPGPFingerprintChanged = errors.New("the account's pgp key changed while this update was in flight")
 	ErrPasswordWeak          = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 	ErrUsernameInvalid       = errors.New("username must start with a letter or digit and may otherwise contain only letters, digits, dot, underscore and hyphen (max 64 characters)")
+	// ErrInvalidEnvelopeSlot is returned for a slot name the slot API does not
+	// write — an unknown name, or "password", which is owned by
+	// RewrapPGPPrivateKey so that its ErrNotClientProtected guard cannot be
+	// bypassed by writing the same envelope through a different door.
+	ErrInvalidEnvelopeSlot = errors.New("invalid wrapped-envelope slot")
+	// ErrNoPGPIdentity is returned when a slot write targets an account that has
+	// no PGP identity to seal. A client error, not a server one — it fell through
+	// to a 500 "user store error" before, which told the caller nothing and looked
+	// like a fault on this side.
+	ErrNoPGPIdentity = errors.New("no pgp identity to wrap")
+	// ErrTooManyEnvelopeSlots is returned when adding a new slot would exceed
+	// maxWrappedEnvelopeSlots. Never returned for a replace of an existing
+	// slot — see that constant's comment.
+	ErrTooManyEnvelopeSlots = fmt.Errorf("cannot add another wrapped-envelope slot: limit is %d", maxWrappedEnvelopeSlots)
 )
 
 // MinPasswordLen is the minimum length of any password this store accepts.
@@ -644,11 +776,25 @@ func (s *Store) writeFileUnlocked(f usersFile) error {
 	if f.Version == 0 {
 		f.Version = 1
 	}
-	b, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
+	// Encoder with HTML escaping OFF, not json.MarshalIndent.
+	//
+	// MarshalIndent escapes <, > and & to <, > and & — six bytes
+	// on disk for one byte of input. Every size bound on the way in
+	// (maxWrappedKeyBytes, the password handler's io.LimitReader) is applied to
+	// the REQUEST body, i.e. the wrong side of this encoder, so a field of
+	// literal '<' inflated 6x once it landed here. users.json is rewritten whole
+	// under a global lock on every mutation, so that inflation is a direct
+	// multiplier on how long every other request waits.
+	//
+	// The escaping bought nothing: this file is never interpolated into HTML.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(f); err != nil {
 		return err
 	}
-	if err := fsutil.AtomicWriteFile(s.path, b, 0o600); err != nil {
+	if err := fsutil.AtomicWriteFile(s.path, buf.Bytes(), 0o600); err != nil {
 		return err
 	}
 	s.invalidateCacheLocked()
@@ -710,8 +856,9 @@ func (s *Store) List() ([]User, error) {
 // The slice fn receives IS the cache's own backing array. It is passed to a
 // callback rather than returned so it cannot escape: a reader that keeps, sorts,
 // or writes through it corrupts what every subsequent request reads. fn must
-// clone anything it keeps (see User.clone, which also copies RecoveryCodesHash,
-// the one field a plain struct copy still shares).
+// clone anything it keeps (see User.clone, which deep-copies every field a
+// plain struct copy would still share with the cache — currently
+// RecoveryCodesHash and PGPWrappedEnvelopes).
 //
 // Mutators do NOT use this; see readFileUnlocked.
 func (s *Store) withCachedUsers(fn func(all []User)) error {
@@ -828,6 +975,16 @@ func (s *Store) Create(ctx context.Context, username, password string, role Role
 	return created, nil
 }
 
+// errNoChangeNeeded is returned by a mutate fn that found the stored value
+// already correct. mutateGuarded then skips the write and returns the user
+// unchanged, with no error — the caller cannot tell the difference, which is the
+// point: it turns "set this bit" into a no-op when the bit is already set.
+//
+// Deliberately unexported and never surfaced: it is a control-flow signal, not a
+// failure. ConsumeRecoveryCode's errRecoveryCodeNoMatch does the same job for
+// the same reason.
+var errNoChangeNeeded = errors.New("users: no change needed")
+
 // mutate re-reads the store, applies fn to the matching user, and persists
 // the result. fn returns an error to abort without writing.
 func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
@@ -861,6 +1018,16 @@ func (s *Store) mutateGuarded(id string, guard func(all []User, target User) err
 				}
 			}
 			if err := fn(&f.Users[i]); err != nil {
+				// A mutation that changes nothing must not cost a write. Every
+				// write here is a whole-file marshal + fsync under this lock,
+				// which every authenticated request contends with, so an
+				// unthrottled endpoint that re-sets a field to the value it
+				// already holds is a free instance-wide stall. See
+				// ErrNoChangeNeeded.
+				if errors.Is(err, errNoChangeNeeded) {
+					updated = f.Users[i]
+					return nil
+				}
 				return err
 			}
 			f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -1009,6 +1176,9 @@ func (s *Store) DisableTOTP(id string) (User, error) {
 // method only persists the bit.
 func (s *Store) SetPushMFAEnabled(id string, enabled bool) (User, error) {
 	return s.mutate(id, func(u *User) error {
+		if u.PushMFAEnabled == enabled {
+			return errNoChangeNeeded
+		}
 		u.PushMFAEnabled = enabled
 		return nil
 	})
@@ -1059,6 +1229,14 @@ func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, private
 		u.PGPKeyProtection = PGPProtectionServer
 		u.PGPKeySource = source
 		u.PGPKeyCreatedAt = createdAt
+		// Same reasoning as SetPGPIdentityClientProtected's clear below, restated
+		// rather than inherited so the two preconditions cannot drift apart. This
+		// path is only reachable for an account with no slots to begin with (the
+		// guard above refuses a client-protected account, and only a
+		// client-protected account can ever hold one), but clearing here means a
+		// future writer of this method cannot reintroduce the gap by relying on
+		// that invariant instead of restating it.
+		u.PGPWrappedEnvelopes = nil
 		return nil
 	})
 }
@@ -1103,10 +1281,14 @@ func (s *Store) UpdatePGPKeyMaterial(id, expectFingerprint, armoredPublicKey, pr
 // point — after this call no copy of the private key on this server is one this
 // server can open.
 func (s *Store) SetPGPIdentityClientProtected(id, fingerprint, keyID, armoredPublicKey, wrapped, source, createdAt string) (User, error) {
+	if err := ValidateWrappedEnvelope(wrapped); err != nil {
+		return User{}, err
+	}
 	if strings.TrimSpace(wrapped) == "" {
 		return User{}, errors.New("wrapped private key is required for client-protected identities")
 	}
 	return s.mutate(id, func(u *User) error {
+		previousFingerprint := u.PGPFingerprint
 		u.PGPFingerprint = fingerprint
 		u.PGPKeyID = keyID
 		u.PGPPublicKey = armoredPublicKey
@@ -1115,6 +1297,20 @@ func (s *Store) SetPGPIdentityClientProtected(id, fingerprint, keyID, armoredPub
 		u.PGPKeyProtection = PGPProtectionClient
 		u.PGPKeySource = source
 		u.PGPKeyCreatedAt = createdAt
+		// Every non-password slot seals the OLD key. Keeping them across an
+		// identity replacement would leave a recovery code that opens a key this
+		// account no longer advertises — the user is told their mail is
+		// recoverable, and it is not.
+		//
+		// Only when the identity actually CHANGED, though. This used to drop them
+		// unconditionally, so re-posting the same fingerprint — a retried request,
+		// a client that re-runs setup, a rewrap that routes through here —
+		// destroyed a live recovery sealing that was still perfectly valid, with a
+		// 200 and no log line. The fingerprint needed to tell the two apart is the
+		// argument right here, and UpdatePGPKeyMaterial already shows the pattern.
+		if !strings.EqualFold(strings.TrimSpace(previousFingerprint), strings.TrimSpace(fingerprint)) {
+			u.PGPWrappedEnvelopes = nil
+		}
 		return nil
 	})
 }
@@ -1124,6 +1320,9 @@ func (s *Store) SetPGPIdentityClientProtected(id, fingerprint, keyID, armoredPub
 // user changes their password: the wrapping key is derived from that password,
 // so the browser unwraps with the old one and rewraps with the new one.
 func (s *Store) RewrapPGPPrivateKey(id, wrapped string) (User, error) {
+	if err := ValidateWrappedEnvelope(wrapped); err != nil {
+		return User{}, err
+	}
 	if strings.TrimSpace(wrapped) == "" {
 		return User{}, errors.New("wrapped private key is required")
 	}
@@ -1145,6 +1344,73 @@ func (s *Store) RewrapPGPPrivateKey(id, wrapped string) (User, error) {
 	})
 }
 
+// SetPGPWrappedEnvelope adds or replaces one non-password sealing of the
+// private key. envelope is opaque here, exactly as in RewrapPGPPrivateKey.
+//
+// Replacing writes in place rather than appending: two entries for one slot
+// would leave the unlock path with no deterministic answer about which sealing
+// a given secret opens.
+func (s *Store) SetPGPWrappedEnvelope(id, slot, envelope, addedAt string) (User, error) {
+	if err := ValidateWrappedEnvelope(envelope); err != nil {
+		return User{}, err
+	}
+	if !ValidEnvelopeSlot(slot) {
+		return User{}, ErrInvalidEnvelopeSlot
+	}
+	if strings.TrimSpace(envelope) == "" {
+		return User{}, errors.New("wrapped envelope is required")
+	}
+	return s.mutate(id, func(u *User) error {
+		if u.PGPFingerprint == "" {
+			return ErrNoPGPIdentity
+		}
+		// Same guard, and same reason, as RewrapPGPPrivateKey: a server-custody
+		// account has no browser-held envelope, so an additional "sealing of the
+		// key" would seal nothing the user can open, while making the account look
+		// recoverable.
+		if u.PGPProtection() != PGPProtectionClient {
+			return ErrNotClientProtected
+		}
+		for i := range u.PGPWrappedEnvelopes {
+			if u.PGPWrappedEnvelopes[i].Slot == slot {
+				u.PGPWrappedEnvelopes[i].Envelope = envelope
+				u.PGPWrappedEnvelopes[i].AddedAt = addedAt
+				return nil
+			}
+		}
+		// Past this point the slot is new, not a replace — the cap applies.
+		if len(u.PGPWrappedEnvelopes) >= maxWrappedEnvelopeSlots {
+			return ErrTooManyEnvelopeSlots
+		}
+		u.PGPWrappedEnvelopes = append(u.PGPWrappedEnvelopes, WrappedEnvelope{
+			Slot: slot, Envelope: envelope, AddedAt: addedAt,
+		})
+		return nil
+	})
+}
+
+// DeletePGPWrappedEnvelope removes one non-password sealing — a revoked device,
+// or a recovery code the user is replacing.
+//
+// Deleting an absent slot succeeds: the caller's goal is that the slot is gone,
+// and it already is. Refusing the password slot is what keeps this from being a
+// way to make an account permanently unopenable.
+func (s *Store) DeletePGPWrappedEnvelope(id, slot string) (User, error) {
+	if !ValidEnvelopeSlot(slot) {
+		return User{}, ErrInvalidEnvelopeSlot
+	}
+	return s.mutate(id, func(u *User) error {
+		kept := u.PGPWrappedEnvelopes[:0]
+		for _, e := range u.PGPWrappedEnvelopes {
+			if e.Slot != slot {
+				kept = append(kept, e)
+			}
+		}
+		u.PGPWrappedEnvelopes = kept
+		return nil
+	})
+}
+
 // ClearPGPIdentity removes a user's PGP identity entirely.
 func (s *Store) ClearPGPIdentity(id string) (User, error) {
 	return s.mutate(id, func(u *User) error {
@@ -1156,6 +1422,9 @@ func (s *Store) ClearPGPIdentity(id string) (User, error) {
 		u.PGPKeyProtection = ""
 		u.PGPKeySource = ""
 		u.PGPKeyCreatedAt = ""
+		// No identity survives this call, so no slot can seal a key this account
+		// still advertises. Same rationale as SetPGPIdentityClientProtected.
+		u.PGPWrappedEnvelopes = nil
 		return nil
 	})
 }
@@ -1624,6 +1893,9 @@ func (s *Store) SetDerivedAuthAndRewrapPGP(ctx context.Context, id, authSecret, 
 		return User{}, err
 	}
 	if err := validateLoginIterations(iterations); err != nil {
+		return User{}, err
+	}
+	if err := ValidateWrappedEnvelope(rewrapped); err != nil {
 		return User{}, err
 	}
 	hash, err := HashPassword(ctx, authSecret)

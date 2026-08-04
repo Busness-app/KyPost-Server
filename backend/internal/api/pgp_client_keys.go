@@ -230,3 +230,118 @@ func (s *Server) handlePGPExportLegacyKey(w http.ResponseWriter, r *http.Request
 		"publicKey":  identity.ArmoredPublicKey,
 	})
 }
+
+// Envelope slots are the additional sealings of a client-protected private key
+// — a recovery code today, enrolled devices later. See
+// docs/superpowers/specs/2026-08-04-multi-wrapped-key-custody-design.md.
+//
+// All three are withAuth (session only), never withMailAuth. A paired device
+// must not be able to mint a sealing of the account key: that is the property
+// the passphrase-only tier is enforced by, and enforcing it at the route is the
+// only place the server can enforce it at all.
+//
+// PUT and DELETE additionally require requirePGPStepUp (pgp_stepup.go), the
+// same standard as identity/client, rewrap, and DELETE /api/pgp/identity:
+// installing a slot plants an envelope the server cannot validate, and
+// deleting one destroys a sealing that cannot be re-minted without the
+// unwrapped key. Neither is undoable, so a session alone is not enough.
+//
+// GET is unchanged, but NOT for the reason this comment used to give. It said
+// GET "serves the same bytes" as GET /api/pgp/identity/wrapped, which is true
+// only of the synthesised password slot; once a recovery or device slot exists
+// those are different bytes, and /wrapped never serves them. The real reason is
+// that every slot's key-encryption key is at least as strong as the password
+// one: the design seals `recovery` under a 128-bit random secret and `device:*`
+// under a non-extractable secure-element ECDH key, so a session that can already
+// fetch the password envelope gains no weaker offline target by fetching these.
+
+func (s *Server) handlePGPPutEnvelopeSlot(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	var req struct {
+		Envelope string `json:"envelope"`
+		// Step-up credential (pgp_stepup.go). Installing a slot mints or
+		// replaces a sealing of the private key: a stolen session must not be
+		// able to plant an envelope the server cannot validate, and the user
+		// would only discover it was bogus when they actually needed it.
+		Password   string `json:"password,omitempty"`
+		AuthSecret string `json:"authSecret,omitempty"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxWrappedKeyBytes)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	envelope := strings.TrimSpace(req.Envelope)
+	if envelope == "" {
+		http.Error(w, "envelope is required", http.StatusBadRequest)
+		return
+	}
+	if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
+		return
+	}
+	if _, err := s.users.SetPGPWrappedEnvelope(
+		ac.UserID, r.PathValue("slot"), envelope,
+		time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		writeUserStoreError(w, err)
+		return
+	}
+	s.logger.Info("pgp envelope slot stored", "user_id", ac.UserID, "slot", r.PathValue("slot"))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handlePGPGetEnvelopeSlot(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	u, err := s.users.Get(ac.UserID)
+	if err != nil {
+		http.Error(w, "user unavailable", http.StatusInternalServerError)
+		return
+	}
+	slot := r.PathValue("slot")
+	for _, e := range u.WrappedEnvelopes() {
+		if e.Slot == slot {
+			writeJSON(w, http.StatusOK, map[string]any{"slot": e.Slot, "envelope": e.Envelope})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "no envelope in that slot"})
+}
+
+func (s *Server) handlePGPDeleteEnvelopeSlot(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	var req struct {
+		// Step-up credential (pgp_stepup.go). Deleting a sealing that cannot
+		// be re-minted without the unwrapped key is not undoable, the same
+		// reasoning as DELETE /api/pgp/identity — so a caller must prove the
+		// account credential, not just present a session cookie. Decoding the
+		// body is mandatory: a request with no body at all fails to decode
+		// and is refused (400) rather than silently treated as "no
+		// credential needed."
+		Password   string `json:"password,omitempty"`
+		AuthSecret string `json:"authSecret,omitempty"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxWrappedKeyBytes)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
+		return
+	}
+	if _, err := s.users.DeletePGPWrappedEnvelope(ac.UserID, r.PathValue("slot")); err != nil {
+		writeUserStoreError(w, err)
+		return
+	}
+	s.logger.Info("pgp envelope slot deleted", "user_id", ac.UserID, "slot", r.PathValue("slot"))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

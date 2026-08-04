@@ -1,6 +1,8 @@
 package api
 
 import (
+	"strings"
+
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/mailmsg"
@@ -46,7 +48,7 @@ type pgpDecryptResult struct {
 // and the browser unwraps its own key and decrypts there. A server that
 // could still read this would not be end-to-end encrypted, whatever the
 // README said.
-func (s *Server) decryptPGPPayload(userID, payload string) pgpDecryptResult {
+func (s *Server) decryptPGPPayload(userID, payload, senderAddress string) pgpDecryptResult {
 	u, err := s.users.Get(userID)
 	if err != nil || u.PGPFingerprint == "" {
 		return pgpDecryptResult{DecryptError: "no pgp identity configured for this account"}
@@ -68,7 +70,7 @@ func (s *Server) decryptPGPPayload(userID, payload string) pgpDecryptResult {
 
 	var signerKeys []string
 	if contactsStore, cerr := s.userContactsStore(userID); cerr == nil {
-		signerKeys = allKnownPGPKeys(contactsStore)
+		signerKeys = signerKeysForSender(contactsStore, senderAddress)
 	}
 
 	result, err := pgpmail.DecryptMIME(payload, identity, signerKeys)
@@ -99,9 +101,9 @@ func (s *Server) decryptPGPPayload(userID, payload string) pgpDecryptResult {
 // is able to, and otherwise leaves the ciphertext for the client. On any
 // failure it returns c with a PGPDecryptError set rather than erroring the
 // whole inbox fetch — one bad message must not break the list.
-func (s *Server) decryptPGPMessageContent(userID string, c imapadapter.MessageContent) imapadapter.MessageContent {
+func (s *Server) decryptPGPMessageContent(userID, senderAddress string, c imapadapter.MessageContent) imapadapter.MessageContent {
 	c.PGPEncrypted = true
-	r := s.decryptPGPPayload(userID, c.PGPEncryptedPayload)
+	r := s.decryptPGPPayload(userID, c.PGPEncryptedPayload, senderAddress)
 	if r.KeepPayload {
 		return c
 	}
@@ -127,7 +129,7 @@ func (s *Server) decryptPGPMessageContent(userID string, c imapadapter.MessageCo
 // (non-delta) inbox path.
 func (s *Server) decryptPGPUnreadMessage(userID string, msg imapadapter.UnreadMessage) imapadapter.UnreadMessage {
 	msg.PGPEncrypted = true
-	r := s.decryptPGPPayload(userID, msg.PGPEncryptedPayload)
+	r := s.decryptPGPPayload(userID, msg.PGPEncryptedPayload, msg.Sender)
 	if r.KeepPayload {
 		return msg
 	}
@@ -150,18 +152,18 @@ func (s *Server) decryptPGPUnreadMessage(userID string, msg imapadapter.UnreadMe
 
 // verifySignedOnlyMessageContent verifies c's PGPSignaturePayload — a
 // detached signature from an RFC 3156 multipart/signed (signed but not
-// encrypted) message — against every known contact's public key, the same
-// signer lookup decryptPGPPayload uses. This needs only public keys, so it
+// encrypted) message — against the contact keys bound to the claimed sender,
+// the same signer lookup decryptPGPPayload uses. This needs only public keys, so it
 // works identically under both protection modes. Verification is
 // best-effort per pgpmail.VerifyDetached's doc comment: third-party MIME
 // canonicalization can differ from what was actually signed, so a
 // verification failure just leaves PGPVerified false rather than erroring
 // the whole inbox fetch.
-func (s *Server) verifySignedOnlyMessageContent(userID string, c imapadapter.MessageContent) imapadapter.MessageContent {
+func (s *Server) verifySignedOnlyMessageContent(userID, senderAddress string, c imapadapter.MessageContent) imapadapter.MessageContent {
 	c.PGPSigned = true
 	sig := c.PGPSignaturePayload
 	c.PGPSignaturePayload = ""
-	verified, fingerprint := s.verifyDetachedForUser(userID, c.Body, sig)
+	verified, fingerprint := s.verifyDetachedForUser(userID, c.Body, sig, senderAddress)
 	c.PGPVerified = verified
 	c.PGPSignerFingerprint = fingerprint
 	return c
@@ -174,18 +176,18 @@ func (s *Server) verifySignedOnlyUnreadMessage(userID string, msg imapadapter.Un
 	msg.PGPSigned = true
 	sig := msg.PGPSignaturePayload
 	msg.PGPSignaturePayload = ""
-	verified, fingerprint := s.verifyDetachedForUser(userID, msg.Body, sig)
+	verified, fingerprint := s.verifyDetachedForUser(userID, msg.Body, sig, msg.Sender)
 	msg.PGPVerified = verified
 	msg.PGPSignerFingerprint = fingerprint
 	return msg
 }
 
-func (s *Server) verifyDetachedForUser(userID, body, sig string) (verified bool, fingerprint string) {
+func (s *Server) verifyDetachedForUser(userID, body, sig, senderAddress string) (verified bool, fingerprint string) {
 	contactsStore, err := s.userContactsStore(userID)
 	if err != nil {
 		return false, ""
 	}
-	signerKeys := allKnownPGPKeys(contactsStore)
+	signerKeys := signerKeysForSender(contactsStore, senderAddress)
 	if len(signerKeys) == 0 {
 		return false, ""
 	}
@@ -196,11 +198,43 @@ func (s *Server) verifyDetachedForUser(userID, body, sig string) (verified bool,
 	return result.Verified, result.SignerFingerprint
 }
 
-// allKnownPGPKeys returns every contact's armored public key, offered as the
-// candidate signer set when verifying an inbound signed-and-encrypted
-// message: the sender isn't known in advance, so all are tried — DecryptMIME
-// only reports success against whichever key actually produced the
-// signature.
+// signerKeysForSender returns the candidate signer keys for a message claiming
+// to come from senderAddress: only those contact keys that carry that address as
+// the PARSED email of one of their User IDs.
+//
+// This is what binds "signature verified" to the sender on the server-custody
+// path. Offering the whole address book (allKnownPGPKeys) made Verified mean
+// "some contact of yours signed this", because DecryptMIME reports success
+// against whichever offered key produced the signature and has no address to
+// compare it to — its signature takes none. So any key in the book verified any
+// From, and the badge the client renders from PGPVerified said "signature
+// verified" under an address the signing key had nothing to do with. Run-4
+// reported this; the fix that followed was applied only to the browser, and this
+// path kept the old behaviour.
+//
+// Narrowing the candidate set rather than post-checking the fingerprint means
+// there is no window where a wrong-key signature is ever considered valid.
+//
+// An empty result means nothing can verify, so Verified stays false — which is
+// the correct answer for a sender whose key we do not hold.
+func signerKeysForSender(store *contacts.Store, senderAddress string) []string {
+	address := strings.ToLower(strings.TrimSpace(senderAddress))
+	if address == "" {
+		return nil
+	}
+	var keys []string
+	for _, c := range store.List() {
+		if c.PGPKey != "" && pgpmail.ArmoredKeyCertifiesAddress(c.PGPKey, address) {
+			keys = append(keys, c.PGPKey)
+		}
+	}
+	return keys
+}
+
+// allKnownPGPKeys returns every contact's armored public key.
+//
+// NOT for verification — see signerKeysForSender. Verification must offer only
+// keys bound to the claimed sender.
 func allKnownPGPKeys(store *contacts.Store) []string {
 	var keys []string
 	for _, c := range store.List() {

@@ -107,7 +107,10 @@ func (s *Server) pgpInnerAttachments(r *http.Request, armored []byte) ([]mailmsg
 	if !ok {
 		return nil, false
 	}
-	result := s.decryptPGPPayload(ac.UserID, string(armored))
+	// No sender address, so no signer keys are offered and the signature verdict
+	// comes back false. That is correct here: this path reads only Attachments,
+	// and a verdict nothing consumes must not be computed from an unbound key set.
+	result := s.decryptPGPPayload(ac.UserID, string(armored), "")
 	if result.KeepPayload || result.DecryptError != "" {
 		return nil, false
 	}

@@ -108,6 +108,12 @@ func (s *Store) Upsert(g Group) (Group, error) {
 	g.UpdatedAt = now
 
 	if g.ID == "" {
+		// The same ceiling EnsureByName enforces. It used to live only there, so
+		// POST /api/groups — which calls straight into Upsert — walked past it.
+		// A cap enforced on one of two create paths is not a cap.
+		if len(s.groups) >= MaxGroupsPerUser {
+			return Group{}, ErrTooManyGroups
+		}
 		id, err := fsutil.NewUUIDv4()
 		if err != nil {
 			return Group{}, err

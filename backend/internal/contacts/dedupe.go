@@ -167,7 +167,18 @@ func mergeGroup(members []Contact) (survivor Contact, absorbed []string) {
 	survivor.Notes = firstNonEmpty(byNewest, func(c Contact) string { return c.Notes })
 	survivor.Birthday = firstNonEmpty(byNewest, func(c Contact) string { return c.Birthday })
 	survivor.PhotoRef = firstNonEmpty(byNewest, func(c Contact) string { return c.PhotoRef })
-	survivor.PGPKey = firstNonEmpty(byNewest, func(c Contact) string { return c.PGPKey })
+	// The key and its provenance move together, or not at all.
+	//
+	// Taking PGPKey from the newest member while leaving the survivor's
+	// fingerprint, source and verified flag in place left a contact whose pin
+	// named a key it no longer held: "manual/verified" attached to whichever key
+	// the newest duplicate happened to carry. That is the exact state
+	// carryPGPProvenance calls "worse than dropping it" — tierKeyChanged then
+	// compares against a fingerprint no key has — and it is reachable by anything
+	// that can create a duplicate, including a hostile upstream CardDAV server,
+	// which cannot overwrite a local contact by UID but can certainly add one.
+	survivor.PGPKey, survivor.PGPKeyFingerprint, survivor.PGPKeySource, survivor.PGPKeyVerified =
+		mergePGPProvenance(survivor, byNewest)
 	survivor.PhoneticGivenName = firstNonEmpty(byNewest, func(c Contact) string { return c.PhoneticGivenName })
 	survivor.PhoneticFamilyName = firstNonEmpty(byNewest, func(c Contact) string { return c.PhoneticFamilyName })
 	survivor.Department = firstNonEmpty(byNewest, func(c Contact) string { return c.Department })
@@ -330,4 +341,24 @@ func (u *unionFind) union(a, b int) {
 	if ra != rb {
 		u.parent[rb] = ra
 	}
+}
+
+// mergePGPProvenance picks the key a merged contact keeps, together with the
+// provenance that describes THAT key.
+//
+// The survivor keeps its own key when it has one: a contact that was already
+// carrying key material — very often one the user verified by hand — must not
+// have it replaced by a duplicate that arrived later from a sync. Only when the
+// survivor has no key at all does the newest member's key move across, and then
+// its provenance moves with it.
+func mergePGPProvenance(survivor Contact, byNewest []Contact) (key, fingerprint, source string, verified bool) {
+	if survivor.PGPKey != "" {
+		return survivor.PGPKey, survivor.PGPKeyFingerprint, survivor.PGPKeySource, survivor.PGPKeyVerified
+	}
+	for _, c := range byNewest {
+		if c.PGPKey != "" {
+			return c.PGPKey, c.PGPKeyFingerprint, c.PGPKeySource, c.PGPKeyVerified
+		}
+	}
+	return "", "", "", false
 }

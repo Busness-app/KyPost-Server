@@ -28,6 +28,15 @@ import (
 // it (users.MinLoginIterations). Raising this affects new credentials only.
 const clientLoginIterations = 600_000
 
+// Wire values for the "derivation" hint handleLoginParams returns to an
+// AUTHENTICATED caller, telling it which credential form to send back. Spelled
+// out rather than reusing users.AuthDerivation*, whose legacy value is the empty
+// string and so cannot be distinguished from a field the server did not send.
+const (
+	derivationLegacy  = "legacy"
+	derivationDerived = "pbkdf2"
+)
+
 // handleLoginParams returns the salt and work factor a client must use to derive
 // its auth secret for a given username. Public and unauthenticated: it runs
 // before any credential exists.
@@ -63,16 +72,41 @@ func (s *Server) handleLoginParams(w http.ResponseWriter, r *http.Request) {
 	// already have a session, and making them echo their own username back invites a
 	// caller to pass someone else's. Falling through to the synthetic salt for the
 	// empty string would hand them a salt that cannot reproduce their credential.
+	authenticated := false
 	if username == "" {
 		if ac, ok := s.currentUser(r); ok {
 			username = ac.Username
+			authenticated = true
 		}
 	}
 	salt, iterations := s.loginParamsFor(username)
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"salt":       salt,
 		"iterations": iterations,
-	})
+	}
+	// Which credential form this account actually stores — but ONLY for a caller
+	// who has already proved they are that account.
+	//
+	// The client cannot otherwise know whether to send the plaintext password or
+	// the derived secret, and guessing wrong is a hard failure: verifyAccountCredential
+	// picks by what the ACCOUNT stores, never by what arrived. Answering it for an
+	// arbitrary username would be exactly the existence oracle the synthetic salt
+	// exists to prevent — "legacy or nonexistent" and "converted" are
+	// indistinguishable today only because nothing distinguishes them. Answering it
+	// for the authenticated caller discloses nothing: they are already that user.
+	//
+	// Unauthenticated callers (sign-in) get no such field and must send both forms;
+	// see credentialFields in frontend/src/api/auth.ts.
+	// Explicit wire values rather than users.AuthDerivation*: the legacy constant
+	// is the empty string, which a client cannot tell from an absent field.
+	if authenticated {
+		derivation := derivationLegacy
+		if u, err := s.users.GetByUsername(username); err == nil && u.UsesDerivedAuth() {
+			derivation = derivationDerived
+		}
+		body["derivation"] = derivation
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // loginParamsFor resolves the salt and iteration count for a username, without

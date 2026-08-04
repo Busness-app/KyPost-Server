@@ -509,3 +509,37 @@ func TestCompileRule(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateMatchShapeBoundsConditionValue is run-7 finding F5.
+//
+// maxMatchConditions bounded how many conditions run; nothing bounded what each
+// one cost. matchesValue compiles Value as a regex per condition per evaluation,
+// so 300 conditions x a few KB of alternation — well inside every count cap —
+// measured at ~37s per message, inside the capacity-1 instance-wide poll
+// semaphore, uninterruptible because Evaluate takes no context.
+//
+// This is the "cap :regex pattern length" item run-4's remediation asked for.
+func TestValidateMatchShapeBoundsConditionValue(t *testing.T) {
+	oversized := MatchGroup{
+		Op: "anyof",
+		Conditions: []Condition{
+			{Field: "subject", Comparator: "regex", Value: strings.Repeat("(?:aa|bb)", 400)},
+		},
+	}
+	if err := ValidateMatchShape(oversized); err == nil {
+		t.Fatal("a multi-kilobyte regex condition value was accepted; 300 of these per rule is " +
+			"tens of seconds of uninterruptible CPU per message on the shared poller")
+	}
+
+	// A realistic rule must still pass.
+	ok := MatchGroup{
+		Op: "allof",
+		Conditions: []Condition{
+			{Field: "from", Comparator: "contains", Value: "newsletter@example.com"},
+			{Field: "subject", Comparator: "regex", Value: "^\\[ANN\\] .*"},
+		},
+	}
+	if err := ValidateMatchShape(ok); err != nil {
+		t.Fatalf("an ordinary rule was rejected: %v", err)
+	}
+}

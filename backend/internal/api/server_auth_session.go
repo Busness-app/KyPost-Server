@@ -810,6 +810,23 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	// spend a strike — the whole point of MustChangePassword is that the user
 	// may not have a password to prove.
 	mustVerify := !u.MustChangePassword || strings.TrimSpace(offeredCurrent) != ""
+	// ...except when the request ALSO replaces the client-wrapped PGP envelope.
+	//
+	// The MustChangePassword exemption exists because a user handed a temporary
+	// password may have no "old" credential to prove. That reasoning covers
+	// setting a new password; it does not cover overwriting the sealed private
+	// key, which is irreversible and unverifiable — the server cannot open the
+	// envelope, so a bogus one is only discovered when the key is next needed, and
+	// every message encrypted to that key is gone.
+	//
+	// Without this, a session hijacked between an admin reset and the owner's
+	// first password change could set an attacker-chosen credential AND strand the
+	// key, using a request that proves nothing. Every sibling path that writes the
+	// same field (identity/rewrap, identity/client, the envelope slots) is behind
+	// requirePGPStepUp already; this one was not.
+	if strings.TrimSpace(req.RewrappedPGPKey) != "" {
+		mustVerify = true
+	}
 	if mustVerify {
 		// Keyed on user AND client IP, like the login lockout and for the same reason:
 		// on the user alone, an attacker holding a stolen cookie burns the whole budget

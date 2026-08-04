@@ -349,6 +349,61 @@ func TestDeviceCannotReplaceOrDestroyPGPIdentity(t *testing.T) {
 	}
 }
 
+// The envelope-slot endpoints (write/read/delete a non-password sealing of
+// the private key) are withAuth like the two routes above, and for the same
+// reason: a device secret must not be able to mint a sealing of the account
+// key. That is the enforcement point the planned passphrase-only account
+// tier depends on — if a paired device could add an envelope slot, that tier
+// would be unenforceable. Exercised through the full router (not the bare
+// handler) so a route-registration slip (withMailAuth instead of withAuth)
+// would be caught here too.
+//
+// The fixture matters as much as the assertion. A user with no PGP identity
+// (the shape newTestServerWithUser produces) makes this test pass by
+// accident: SetPGPWrappedEnvelope 500s on "no pgp identity to wrap" and an
+// empty WrappedEnvelopes() 404s on GET, so a misregistered withMailAuth route
+// would ALSO answer non-200 for a reason that has nothing to do with auth —
+// the assertion could not tell "correctly blocked" from "reached the handler
+// and failed anyway" apart. This uses clientProtectedSlotUser, whose identity
+// makes PUT a genuine add (200, if reachable), and pre-populates the recovery
+// slot directly through the store before the GET check, so a reachable GET
+// would return real content (200) rather than an identity-shaped 404. DELETE
+// needed no such fix: DeletePGPWrappedEnvelope is unconditional even without
+// an identity, so it was already a genuine 200-if-reachable check.
+func TestDeviceCannotReachEnvelopeSlotRoutes(t *testing.T) {
+	srv := newTestServer(t)
+	userID := clientProtectedSlotUser(t, srv)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "attacker-device")
+
+	put := httptest.NewRequest(http.MethodPut, "/api/pgp/identity/envelope/recovery",
+		strings.NewReader(`{"envelope":"{\"v\":2,\"rec\":1}"}`))
+	setDeviceHeaders(put, deviceID, deviceSecret)
+	putRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(putRec, put)
+	if putRec.Code != http.StatusUnauthorized {
+		t.Errorf("a paired device's PUT to a wrapped-envelope slot got %d, want %d (blocked by auth)", putRec.Code, http.StatusUnauthorized)
+	}
+
+	if _, err := srv.users.SetPGPWrappedEnvelope(userID, "recovery", `{"v":2,"rec":1}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope (fixture): %v", err)
+	}
+	get := httptest.NewRequest(http.MethodGet, "/api/pgp/identity/envelope/recovery", nil)
+	setDeviceHeaders(get, deviceID, deviceSecret)
+	getRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(getRec, get)
+	if getRec.Code != http.StatusUnauthorized {
+		t.Errorf("a paired device's GET of a wrapped-envelope slot got %d, want %d (blocked by auth)", getRec.Code, http.StatusUnauthorized)
+	}
+
+	del := httptest.NewRequest(http.MethodDelete, "/api/pgp/identity/envelope/recovery", nil)
+	setDeviceHeaders(del, deviceID, deviceSecret)
+	delRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(delRec, del)
+	if delRec.Code != http.StatusUnauthorized {
+		t.Errorf("a paired device's DELETE of a wrapped-envelope slot got %d, want %d (blocked by auth)", delRec.Code, http.StatusUnauthorized)
+	}
+}
+
 // run-4 finding H8: the "use my saved config" fallback was evaluated per
 // field, so a caller supplying only a host got the victim's stored username
 // and password sent to it. GET /api/imap/config deliberately never returns the

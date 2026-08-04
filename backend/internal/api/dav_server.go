@@ -618,7 +618,12 @@ func contactFromVCard(uid string, card vcard.Card) parsedVCardContact {
 			continue
 		}
 		for _, f := range fields {
-			c.CustomFields = append(c.CustomFields, contacts.ContactCustomField{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
+			// Capped like every other repeatable family. This one was missed when
+			// maxValuesPerField was introduced, and X-CUSTOM- is unbounded in the
+			// number of distinct keys as well as values, so one 6 MB card stored
+			// 200,000 entries — re-parsed on every contacts read thereafter,
+			// including the poller's Autocrypt harvest inside the shared tick.
+			c.CustomFields = appendCappedValue(c.CustomFields, contacts.ContactCustomField{Label: f.Params.Get(vcard.ParamType), Value: f.Value})
 		}
 	}
 	if pgp := card.Value(vcard.FieldKey); pgp != "" {

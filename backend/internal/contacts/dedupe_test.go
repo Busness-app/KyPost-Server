@@ -191,3 +191,60 @@ func TestStoreDedupe(t *testing.T) {
 		t.Errorf("second Dedupe MergedCount = %d, want 0", rep2.MergedCount)
 	}
 }
+
+// TestMergeDoesNotAttachStaleProvenanceToAnotherKey is run-7 finding F9.
+//
+// mergeGroup took PGPKey from the newest duplicate but left the survivor's
+// fingerprint/source/verified in place, producing a contact whose pin named a
+// key it no longer held — "manual/verified" stamped onto whatever a later
+// duplicate carried. Anything that can create a duplicate can reach it,
+// including a hostile upstream CardDAV server, which cannot overwrite a local
+// contact by UID but can certainly add one.
+func TestMergeDoesNotAttachStaleProvenanceToAnotherKey(t *testing.T) {
+	verified := Contact{
+		UID: "victim", CreatedAt: "2026-01-01T00:00:00Z", Rev: 1,
+		FormattedName: "Bob",
+		Emails:        []ContactValue{{Value: "bob@example.com"}},
+		PGPKey:        "VICTIM-KEY", PGPKeyFingerprint: "VICTIMFPR",
+		PGPKeySource: "manual", PGPKeyVerified: true,
+	}
+	planted := Contact{
+		UID: "attacker", CreatedAt: "2026-06-01T00:00:00Z", Rev: 2,
+		FormattedName: "Bob",
+		Emails:        []ContactValue{{Value: "bob@example.com"}},
+		PGPKey:        "ATTACKER-KEY",
+	}
+
+	survivor, _ := mergeGroup([]Contact{verified, planted})
+
+	if survivor.PGPKey != "VICTIM-KEY" {
+		t.Errorf("a planted duplicate replaced a key the survivor already held: PGPKey = %q", survivor.PGPKey)
+	}
+	if survivor.PGPKeyFingerprint != "VICTIMFPR" || survivor.PGPKeySource != "manual" || !survivor.PGPKeyVerified {
+		t.Errorf("the survivor's own provenance was disturbed: fpr=%q source=%q verified=%v",
+			survivor.PGPKeyFingerprint, survivor.PGPKeySource, survivor.PGPKeyVerified)
+	}
+}
+
+// A survivor with no key of its own still adopts one — together with the
+// provenance that describes it, never the survivor's own.
+func TestMergeAdoptsKeyAndItsProvenanceTogether(t *testing.T) {
+	bare := Contact{
+		UID: "bare", CreatedAt: "2026-01-01T00:00:00Z", Rev: 1,
+		FormattedName: "Bob",
+		Emails:        []ContactValue{{Value: "bob@example.com"}},
+	}
+	withKey := Contact{
+		UID: "withkey", CreatedAt: "2026-06-01T00:00:00Z", Rev: 2,
+		FormattedName: "Bob",
+		Emails:        []ContactValue{{Value: "bob@example.com"}},
+		PGPKey:        "SOME-KEY", PGPKeyFingerprint: "SOMEFPR", PGPKeySource: "wkd",
+	}
+
+	survivor, _ := mergeGroup([]Contact{bare, withKey})
+
+	if survivor.PGPKey != "SOME-KEY" || survivor.PGPKeyFingerprint != "SOMEFPR" || survivor.PGPKeySource != "wkd" {
+		t.Fatalf("key and provenance must move together: key=%q fpr=%q source=%q",
+			survivor.PGPKey, survivor.PGPKeyFingerprint, survivor.PGPKeySource)
+	}
+}
