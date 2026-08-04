@@ -714,8 +714,12 @@ func (s *Store) createInitial(f usersFile) (won bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	// 0o700, matching fsutil.AtomicWriteFile's 0o700 for this same class of
+	// data. This directory holds users.json — every account record, the sealed
+	// TOTP secrets, the scrypt password hashes and the wrapped PGP envelopes —
+	// and was created world-readable while the file written into it was not.
 	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return false, err
 	}
 	tmp, err := os.CreateTemp(dir, ".users.json.tmp.*")

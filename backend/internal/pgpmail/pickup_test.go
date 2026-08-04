@@ -65,3 +65,20 @@ func TestPickupStoreSweepRemovesOldRecords(t *testing.T) {
 		t.Fatalf("expected record swept (not found), got %v", err)
 	}
 }
+
+// recordPath is the only path sink in the codebase with no lexical guard of its
+// own. Every call site HMAC-authenticates the id first, so a traversing id
+// cannot currently arrive — but that safety is a property of a different
+// package held by five separate callers, and this is cheap.
+func TestRecordPathRejectsTraversal(t *testing.T) {
+	s := NewPickupStore("/tmp/pickup", "/tmp/key")
+	for _, id := range []string{"../../etc/passwd", "..", ".", "", "a/b", `a\b`, "a\x00b"} {
+		if got := s.recordPath(id); got != "" {
+			t.Errorf("recordPath(%q) = %q, want \"\" — it escapes or names something other than "+
+				"one record in baseDir", id, got)
+		}
+	}
+	if got := s.recordPath("valid-id-123"); got == "" {
+		t.Fatal("recordPath rejected an ordinary id")
+	}
+}

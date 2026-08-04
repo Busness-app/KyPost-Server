@@ -137,3 +137,32 @@ func resetPatternCache() {
 	compiled = map[string]*regexp.Regexp{}
 	compiledMu.Unlock()
 }
+
+// validateMatchGroupShape incremented its shared counter only for LEAF
+// conditions. That did not bypass the total cap — count is a shared pointer
+// across the recursion, so 400 leaves over two groups are still rejected — but
+// it left the GROUP nodes unbounded: a tree of nothing but empty groups, each
+// carrying its own Op string, passes a leaf count of zero at any width. Storage
+// rather than CPU (24.2 ms/message, 1/57th of the in-cap leaf path), but
+// storage an account can grow without limit inside a file rewritten whole.
+func TestGroupNodesCountTowardTheConditionCap(t *testing.T) {
+	group := MatchGroup{Op: "anyof"}
+	for i := 0; i < maxMatchConditions+10; i++ {
+		group.Conditions = append(group.Conditions, Condition{Group: &MatchGroup{Op: "allof"}})
+	}
+	count := 0
+	if err := validateMatchGroupShape(group, 0, &count); err == nil {
+		t.Fatalf("%d empty group nodes were accepted; only leaves were counted, so a match "+
+			"tree of pure groups is unbounded", len(group.Conditions))
+	}
+
+	// A tree at the cap still passes, so this is a bound and not a ban.
+	ok := MatchGroup{Op: "anyof"}
+	for i := 0; i < maxMatchConditions; i++ {
+		ok.Conditions = append(ok.Conditions, Condition{Field: "subject", Comparator: "is", Value: "x"})
+	}
+	count = 0
+	if err := validateMatchGroupShape(ok, 0, &count); err != nil {
+		t.Fatalf("a match at exactly the cap was rejected: %v", err)
+	}
+}

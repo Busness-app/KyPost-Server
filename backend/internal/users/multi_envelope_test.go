@@ -818,3 +818,30 @@ func TestSweepWithNothingExpiredDoesNotWrite(t *testing.T) {
 			"lock every authenticated request reads through")
 	}
 }
+
+// users.json holds every account record: the sealed TOTP secrets, the scrypt
+// password hashes and the wrapped PGP envelopes. Its directory was created
+// 0o755 while fsutil.AtomicWriteFile writes the file itself 0o700 — the
+// container runs as a non-root user, so a world-readable directory is a real
+// difference in who can list it.
+func TestUsersDirectoryIsNotWorldReadable(t *testing.T) {
+	// A config dir this store has to CREATE. Pointing at t.TempDir() directly
+	// would measure the test harness's permissions, not ours — MkdirAll leaves
+	// an existing directory alone.
+	dir := filepath.Join(t.TempDir(), "config")
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	if _, err := store.List(); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	info, err := os.Stat(filepath.Dir(store.path))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("the directory holding users.json is mode %04o, matching neither "+
+			"fsutil.AtomicWriteFile's 0o700 for the file inside it nor what the data is", perm)
+	}
+}

@@ -72,7 +72,19 @@ func NewPickupStore(baseDir, keyPath string) *PickupStore {
 	return &PickupStore{baseDir: baseDir, keyPath: keyPath}
 }
 
+// recordPath is the file backing one pickup record.
+//
+// The lexical guard is defence in depth, and deliberately so. Every one of the
+// five call sites HMAC-authenticates the id before reaching here, so a
+// traversing id cannot currently arrive — but that safety is a property of a
+// different package, held by five separate callers, and this is the only path
+// sink in the codebase with nothing of its own. An empty string is returned for
+// a rejected id so callers fail on the open rather than touching a path outside
+// baseDir.
 func (s *PickupStore) recordPath(id string) string {
+	if !fsutil.SafePathComponent(id) {
+		return ""
+	}
 	return filepath.Join(s.baseDir, id+".json")
 }
 

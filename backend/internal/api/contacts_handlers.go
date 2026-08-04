@@ -57,6 +57,23 @@ type contactPayload struct {
 	Pronouns           string                        `json:"pronouns,omitempty"`
 }
 
+// capValues bounds one repeatable field to maxValuesPerField entries.
+//
+// The JSON contact path accepted unbounded arrays — 20,000 emails on one
+// contact went in — while the vCard path that writes the SAME records has
+// capped every repeatable family at 64 since it was written. The asymmetry is
+// the whole point: two write paths, one shared file, one bound. It is not a
+// cross-user issue (contacts.json is per-user, so this is self-DoS), which is
+// why it is a consistency fix rather than a finding, but a client that can
+// write a record the other writer refuses to produce is a bug waiting to be
+// found through the reader they share.
+func capValues[T any](in []T) []T {
+	if len(in) <= maxValuesPerField {
+		return in
+	}
+	return in[:maxValuesPerField]
+}
+
 func (p contactPayload) toContact(uid string) contacts.Contact {
 	return contacts.Contact{
 		UID:           uid,
@@ -69,25 +86,25 @@ func (p contactPayload) toContact(uid string) contacts.Contact {
 		Nickname:      p.Nickname,
 		Org:           p.Org,
 		Title:         p.Title,
-		Emails:        p.Emails,
-		Phones:        p.Phones,
-		Addresses:     p.Addresses,
+		Emails:        capValues(p.Emails),
+		Phones:        capValues(p.Phones),
+		Addresses:     capValues(p.Addresses),
 		Notes:         p.Notes,
 		Birthday:      p.Birthday,
 		// PhotoRef is intentionally NOT copied from the payload. It names a
 		// file the server writes and later serves; callers do not get to
 		// choose it. Callers that need to preserve an existing photo across an
 		// update get it carried forward by the store, not echoed by the client.
-		GroupIDs:           p.GroupIDs,
+		GroupIDs:           capValues(p.GroupIDs),
 		PGPKey:             p.PGPKey,
-		IMs:                p.IMs,
-		Websites:           p.Websites,
-		Relations:          p.Relations,
-		Events:             p.Events,
+		IMs:                capValues(p.IMs),
+		Websites:           capValues(p.Websites),
+		Relations:          capValues(p.Relations),
+		Events:             capValues(p.Events),
 		PhoneticGivenName:  p.PhoneticGivenName,
 		PhoneticFamilyName: p.PhoneticFamilyName,
 		Department:         p.Department,
-		CustomFields:       p.CustomFields,
+		CustomFields:       capValues(p.CustomFields),
 		Pronouns:           p.Pronouns,
 	}
 }

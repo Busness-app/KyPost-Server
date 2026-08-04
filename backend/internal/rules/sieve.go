@@ -359,15 +359,25 @@ func validateMatchGroupShape(m MatchGroup, depth int, count *int) error {
 		return fmt.Errorf("match nesting exceeds maximum depth of %d", maxTestNestingDepth)
 	}
 	for _, c := range m.Conditions {
+		// Every node counts, group or leaf.
+		//
+		// Only leaves used to, which did NOT bypass the 300-condition cap —
+		// count is a shared pointer across the recursion, so 400 leaves spread
+		// over two groups are still rejected. What it left unbounded was the
+		// group nodes themselves: a tree of nothing but empty groups, each with
+		// its own Op string, passes a leaf count of zero at any width. Measured
+		// at 24.2 ms/message, 1/57th of the in-cap leaf path, so this is a
+		// storage bound rather than a CPU one — but it is one an account can
+		// grow without limit inside a file the rules store rewrites whole.
+		*count++
+		if *count > maxMatchConditions {
+			return fmt.Errorf("match has more than %d total conditions", maxMatchConditions)
+		}
 		if c.Group != nil {
 			if err := validateMatchGroupShape(*c.Group, depth+1, count); err != nil {
 				return err
 			}
 			continue
-		}
-		*count++
-		if *count > maxMatchConditions {
-			return fmt.Errorf("match has more than %d total conditions", maxMatchConditions)
 		}
 		if len(c.Value) > maxConditionValueBytes {
 			return fmt.Errorf("match condition value exceeds maximum length of %d bytes", maxConditionValueBytes)
