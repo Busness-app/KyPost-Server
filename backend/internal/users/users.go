@@ -283,6 +283,11 @@ var (
 	ErrPGPFingerprintChanged = errors.New("the account's pgp key changed while this update was in flight")
 	ErrPasswordWeak          = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 	ErrUsernameInvalid       = errors.New("username must start with a letter or digit and may otherwise contain only letters, digits, dot, underscore and hyphen (max 64 characters)")
+	// ErrInvalidEnvelopeSlot is returned for a slot name the slot API does not
+	// write — an unknown name, or "password", which is owned by
+	// RewrapPGPPrivateKey so that its ErrNotClientProtected guard cannot be
+	// bypassed by writing the same envelope through a different door.
+	ErrInvalidEnvelopeSlot = errors.New("invalid wrapped-envelope slot")
 )
 
 // MinPasswordLen is the minimum length of any password this store accepts.
@@ -1212,6 +1217,66 @@ func (s *Store) RewrapPGPPrivateKey(id, wrapped string) (User, error) {
 		}
 		u.PGPPrivateKeyWrapped = wrapped
 		u.PGPKeyProtection = PGPProtectionClient
+		return nil
+	})
+}
+
+// SetPGPWrappedEnvelope adds or replaces one non-password sealing of the
+// private key. envelope is opaque here, exactly as in RewrapPGPPrivateKey.
+//
+// Replacing writes in place rather than appending: two entries for one slot
+// would leave the unlock path with no deterministic answer about which sealing
+// a given secret opens.
+func (s *Store) SetPGPWrappedEnvelope(id, slot, envelope, addedAt string) (User, error) {
+	if !ValidEnvelopeSlot(slot) {
+		return User{}, ErrInvalidEnvelopeSlot
+	}
+	if strings.TrimSpace(envelope) == "" {
+		return User{}, errors.New("wrapped envelope is required")
+	}
+	return s.mutate(id, func(u *User) error {
+		if u.PGPFingerprint == "" {
+			return errors.New("no pgp identity to wrap")
+		}
+		// Same guard, and same reason, as RewrapPGPPrivateKey: a server-custody
+		// account has no browser-held envelope, so an additional "sealing of the
+		// key" would seal nothing the user can open, while making the account look
+		// recoverable.
+		if u.PGPProtection() != PGPProtectionClient {
+			return ErrNotClientProtected
+		}
+		for i := range u.PGPWrappedEnvelopes {
+			if u.PGPWrappedEnvelopes[i].Slot == slot {
+				u.PGPWrappedEnvelopes[i].Envelope = envelope
+				u.PGPWrappedEnvelopes[i].AddedAt = addedAt
+				return nil
+			}
+		}
+		u.PGPWrappedEnvelopes = append(u.PGPWrappedEnvelopes, WrappedEnvelope{
+			Slot: slot, Envelope: envelope, AddedAt: addedAt,
+		})
+		return nil
+	})
+}
+
+// DeletePGPWrappedEnvelope removes one non-password sealing — a revoked device,
+// or a recovery code the user is replacing.
+//
+// Deleting an absent slot succeeds: the caller's goal is that the slot is gone,
+// and it already is. Refusing the password slot is what keeps this from being a
+// way to make an account permanently unopenable.
+func (s *Store) DeletePGPWrappedEnvelope(id, slot string) (User, error) {
+	if !ValidEnvelopeSlot(slot) {
+		return User{}, ErrInvalidEnvelopeSlot
+	}
+	return s.mutate(id, func(u *User) error {
+		kept := u.PGPWrappedEnvelopes[:0]
+		for _, e := range u.PGPWrappedEnvelopes {
+			if e.Slot != slot {
+				kept = append(kept, e)
+			}
+		}
+		u.PGPWrappedEnvelopes = kept
 		return nil
 	})
 }

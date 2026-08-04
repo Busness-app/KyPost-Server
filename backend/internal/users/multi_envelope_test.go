@@ -2,6 +2,7 @@ package users
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -118,5 +119,119 @@ func TestGetClonesWrappedEnvelopesFromCache(t *testing.T) {
 	if second.PGPWrappedEnvelopes[0].Envelope != "original" {
 		t.Fatalf("clone() shared the cache's backing array: second Get saw %q, want %q",
 			second.PGPWrappedEnvelopes[0].Envelope, "original")
+	}
+}
+
+func newClientProtectedUser(t *testing.T) (*Store, string) {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	u, err := store.Create(context.Background(), "slotuser", "pw-slotuser-testpassword", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.SetPGPIdentityClientProtected(u.ID, "FPR", "KID",
+		"-----BEGIN PGP PUBLIC KEY BLOCK-----\n...\n-----END PGP PUBLIC KEY BLOCK-----",
+		`{"v":2,"pw":true}`, "generated", "2026-08-04T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentityClientProtected: %v", err)
+	}
+	return store, u.ID
+}
+
+func TestSetPGPWrappedEnvelopeAddsAndReplaces(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2,"rec":1}`, "2026-08-04T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope: %v", err)
+	}
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.PGPWrappedEnvelopes) != 1 || got.PGPWrappedEnvelopes[0].Envelope != `{"v":2,"rec":1}` {
+		t.Fatalf("after add: %+v", got.PGPWrappedEnvelopes)
+	}
+
+	// Replacing the same slot must overwrite in place, not append a second one:
+	// two entries for one slot means an unlock path with no deterministic answer.
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2,"rec":2}`, "2026-08-05T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope replace: %v", err)
+	}
+	got, _ = store.Get(id)
+	if len(got.PGPWrappedEnvelopes) != 1 || got.PGPWrappedEnvelopes[0].Envelope != `{"v":2,"rec":2}` {
+		t.Fatalf("after replace: %+v", got.PGPWrappedEnvelopes)
+	}
+	// The password envelope is untouched by slot writes.
+	if got.PGPPrivateKeyWrapped != `{"v":2,"pw":true}` {
+		t.Fatalf("password envelope was disturbed: %q", got.PGPPrivateKeyWrapped)
+	}
+}
+
+func TestSetPGPWrappedEnvelopeRejectsPasswordSlot(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	_, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotPassword, `{"v":2}`, "")
+	if !errors.Is(err, ErrInvalidEnvelopeSlot) {
+		t.Fatalf("err = %v, want ErrInvalidEnvelopeSlot", err)
+	}
+}
+
+func TestSetPGPWrappedEnvelopeRejectsUnknownSlot(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, "nonsense", `{"v":2}`, ""); !errors.Is(err, ErrInvalidEnvelopeSlot) {
+		t.Fatalf("err = %v, want ErrInvalidEnvelopeSlot", err)
+	}
+}
+
+func TestSetPGPWrappedEnvelopeRequiresClientProtection(t *testing.T) {
+	dir := t.TempDir()
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	u, err := store.Create(context.Background(), "legacy", "pw-legacy-testpassword", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.SetPGPIdentity(u.ID, "FPR", "KID", "pub", "sealed", "generated", "2026-08-04T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentity: %v", err)
+	}
+	// A server-custody account has no browser envelope, so an extra sealing of
+	// "the key" would seal nothing the user holds.
+	if _, err := store.SetPGPWrappedEnvelope(u.ID, EnvelopeSlotRecovery, `{"v":2}`, ""); !errors.Is(err, ErrNotClientProtected) {
+		t.Fatalf("err = %v, want ErrNotClientProtected", err)
+	}
+}
+
+func TestDeletePGPWrappedEnvelope(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope: %v", err)
+	}
+	if _, err := store.DeletePGPWrappedEnvelope(id, EnvelopeSlotRecovery); err != nil {
+		t.Fatalf("DeletePGPWrappedEnvelope: %v", err)
+	}
+	got, _ := store.Get(id)
+	if len(got.PGPWrappedEnvelopes) != 0 {
+		t.Fatalf("still present: %+v", got.PGPWrappedEnvelopes)
+	}
+	// Deleting an absent slot is not an error: the caller's goal is "this slot
+	// is gone", and that is already true.
+	if _, err := store.DeletePGPWrappedEnvelope(id, EnvelopeSlotRecovery); err != nil {
+		t.Fatalf("second delete: %v", err)
+	}
+	// The password envelope survives, so the account is never left unopenable.
+	got, _ = store.Get(id)
+	if got.PGPPrivateKeyWrapped == "" {
+		t.Fatal("delete removed the password envelope")
+	}
+}
+
+func TestDeletePGPWrappedEnvelopeRejectsPasswordSlot(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.DeletePGPWrappedEnvelope(id, EnvelopeSlotPassword); !errors.Is(err, ErrInvalidEnvelopeSlot) {
+		t.Fatalf("err = %v, want ErrInvalidEnvelopeSlot", err)
 	}
 }
