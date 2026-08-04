@@ -63,11 +63,16 @@ func TestContactCreateBackfillsPGPKeyFingerprint(t *testing.T) {
 	}
 }
 
-// TestContactUpdateBackfillsPGPKeyFingerprint drives PUT
-// /api/contacts/{id} against a legacy contact that already carries an
-// armored key but no fingerprint (as if it predates fingerprint pinning) and
-// confirms an unrelated update backfills the fingerprint without touching
-// PGPKeySource/PGPKeyVerified.
+// TestContactUpdateBackfillsPGPKeyFingerprint drives PUT /api/contacts/{id}
+// against a contact carrying an armored key, and confirms the fingerprint is
+// pinned without PGPKeySource/PGPKeyVerified being touched.
+//
+// run-7 finding F10: the pin is now applied by the STORE, on every write path,
+// rather than by the two handlers that remembered to call
+// backfillPGPKeyFingerprint. So a contact can no longer be created unpinned
+// through Upsert at all — the setup below asserts that stronger property, where
+// it used to assert the gap. The four paths that never pinned (vCard import,
+// CardDAV PUT, mobile sync, outbound CardDAV pull) are the reason it moved.
 func TestContactUpdateBackfillsPGPKeyFingerprint(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
@@ -91,8 +96,9 @@ func TestContactUpdateBackfillsPGPKeyFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert existing: %v", err)
 	}
-	if existing.PGPKeyFingerprint != "" {
-		t.Fatalf("test setup: expected empty fingerprint, got %q", existing.PGPKeyFingerprint)
+	// Pinned on create, by the store, whichever path the write came from.
+	if existing.PGPKeyFingerprint != id.Fingerprint {
+		t.Fatalf("create left the TOFU pin unset: got %q, want %q", existing.PGPKeyFingerprint, id.Fingerprint)
 	}
 
 	payload := map[string]any{

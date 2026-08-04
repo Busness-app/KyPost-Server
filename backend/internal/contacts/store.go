@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ProtonMail/gopenpgp/v3/crypto"
+
 	"kypost-server/backend/internal/fsutil"
 )
 
@@ -261,6 +263,20 @@ func (s *Store) upsertLocked(c Contact) (Contact, error) {
 // Split out so ApplyBatch can apply many changes and persist once. The single-
 // change path is unchanged: upsertLocked above is this plus a persist.
 func (s *Store) applyUpsertLocked(c Contact) (Contact, error) {
+	// Pin the TOFU fingerprint here, where EVERY write path passes, rather than
+	// at the two handlers that remembered to.
+	//
+	// carryPGPProvenance below covers the update case: a write that resends an
+	// existing key without provenance keeps the pin it already had. It cannot
+	// cover the CREATE case, because there is nothing yet to carry from — and
+	// create is exactly what vCard import, CardDAV PUT, mobile sync and the
+	// outbound CardDAV pull do. Those four never called backfillPGPKeyFingerprint,
+	// so a key arriving by any of them was stored with an empty fingerprint, and
+	// the resolver's key_changed refusal is gated on the pin being non-empty. A
+	// contact populated by import or sync — i.e. most of them — therefore had no
+	// protection against silent WKD key substitution once its stored key expired.
+	c = pinPGPKeyFingerprint(c)
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	s.seq++
 	c.Rev = s.seq
@@ -738,4 +754,26 @@ func (s *Store) ApplyBatch(ops []BatchOp) error {
 		return err
 	}
 	return nil
+}
+
+// pinPGPKeyFingerprint fills in a contact's TOFU fingerprint from its own key
+// material when the caller supplied a key but no pin.
+//
+// Fingerprint only. PGPKeySource and PGPKeyVerified are the caller's to set:
+// deriving a fingerprint from bytes that are already present asserts nothing
+// about where they came from or whether anyone checked them.
+//
+// An unparseable key keeps an empty fingerprint rather than failing the write —
+// the armored text is still stored verbatim, which is what every existing caller
+// expects.
+func pinPGPKeyFingerprint(c Contact) Contact {
+	if c.PGPKey == "" || c.PGPKeyFingerprint != "" {
+		return c
+	}
+	key, err := crypto.NewKeyFromArmored(c.PGPKey)
+	if err != nil {
+		return c
+	}
+	c.PGPKeyFingerprint = key.GetFingerprint()
+	return c
 }
