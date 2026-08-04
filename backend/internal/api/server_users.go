@@ -271,7 +271,8 @@ func writeUserStoreError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	if errors.Is(err, users.ErrInvalidEnvelopeSlot) || errors.Is(err, users.ErrTooManyEnvelopeSlots) {
+	if errors.Is(err, users.ErrInvalidEnvelopeSlot) || errors.Is(err, users.ErrTooManyEnvelopeSlots) ||
+		errors.Is(err, users.ErrWrappedEnvelopeTooLarge) || errors.Is(err, users.ErrNoPGPIdentity) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

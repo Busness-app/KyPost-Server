@@ -244,10 +244,16 @@ func (s *Server) handlePGPExportLegacyKey(w http.ResponseWriter, r *http.Request
 // same standard as identity/client, rewrap, and DELETE /api/pgp/identity:
 // installing a slot plants an envelope the server cannot validate, and
 // deleting one destroys a sealing that cannot be re-minted without the
-// unwrapped key. Neither is undoable, so a session alone is not enough. GET
-// is unchanged — it is no more sensitive than GET /api/pgp/identity/wrapped,
-// which already serves the same bytes under this same weaker (session-only,
-// no step-up) auth.
+// unwrapped key. Neither is undoable, so a session alone is not enough.
+//
+// GET is unchanged, but NOT for the reason this comment used to give. It said
+// GET "serves the same bytes" as GET /api/pgp/identity/wrapped, which is true
+// only of the synthesised password slot; once a recovery or device slot exists
+// those are different bytes, and /wrapped never serves them. The real reason is
+// that every slot's key-encryption key is at least as strong as the password
+// one: the design seals `recovery` under a 128-bit random secret and `device:*`
+// under a non-extractable secure-element ECDH key, so a session that can already
+// fetch the password envelope gains no weaker offline target by fetching these.
 
 func (s *Server) handlePGPPutEnvelopeSlot(w http.ResponseWriter, r *http.Request) {
 	ac, ok := authFromContext(r)

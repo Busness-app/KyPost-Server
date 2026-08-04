@@ -1,10 +1,14 @@
 package users
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -359,5 +363,161 @@ func TestClearPGPIdentityDropsSlots(t *testing.T) {
 	got, _ := store.Get(id)
 	if len(got.PGPWrappedEnvelopes) != 0 {
 		t.Fatalf("slots survived ClearPGPIdentity: %+v", got.PGPWrappedEnvelopes)
+	}
+}
+
+// TestWrappedEnvelopeByteBoundIsEnforcedByTheStore is run-7 finding F4.
+//
+// maxWrappedEnvelopeSlots' safety argument is "32 slots x 128 KiB", but the byte
+// half of that product lived only in package api as an io.LimitReader on the
+// request body — and PGPPrivateKeyWrapped has a second writer, POST
+// /api/auth/password, whose reader allowed 1 MiB. A package's own invariant
+// cannot depend on a bound another package may or may not apply.
+func TestWrappedEnvelopeByteBoundIsEnforcedByTheStore(t *testing.T) {
+	store := newTestStore(t)
+	u, err := store.Create(context.Background(), "someone", "correct-horse-battery-staple", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	oversized := strings.Repeat("<", MaxWrappedEnvelopeBytes+1)
+
+	if _, err := store.SetPGPIdentityClientProtected(u.ID, "FPR", "KID", "PUB", oversized, "generated", ""); !errors.Is(err, ErrWrappedEnvelopeTooLarge) {
+		t.Errorf("SetPGPIdentityClientProtected: err = %v, want ErrWrappedEnvelopeTooLarge", err)
+	}
+	if _, err := store.RewrapPGPPrivateKey(u.ID, oversized); !errors.Is(err, ErrWrappedEnvelopeTooLarge) {
+		t.Errorf("RewrapPGPPrivateKey: err = %v, want ErrWrappedEnvelopeTooLarge", err)
+	}
+	if _, err := store.SetPGPWrappedEnvelope(u.ID, EnvelopeSlotRecovery, oversized, ""); !errors.Is(err, ErrWrappedEnvelopeTooLarge) {
+		t.Errorf("SetPGPWrappedEnvelope: err = %v, want ErrWrappedEnvelopeTooLarge", err)
+	}
+	// The path the audit actually found unbounded.
+	if _, err := store.SetDerivedAuthAndRewrapPGP(context.Background(), u.ID,
+		strings.Repeat("a", 64), base64.StdEncoding.EncodeToString([]byte("0123456789abcdef")),
+		600_000, false, oversized); !errors.Is(err, ErrWrappedEnvelopeTooLarge) {
+		t.Errorf("SetDerivedAuthAndRewrapPGP: err = %v, want ErrWrappedEnvelopeTooLarge", err)
+	}
+}
+
+// TestUsersFileIsNotHTMLEscaped is the other half of F4: the byte bounds above
+// are applied to input, but json.MarshalIndent escaped '<' to '<' on
+// OUTPUT, so a bounded field still landed on disk six times its size.
+func TestUsersFileIsNotHTMLEscaped(t *testing.T) {
+	store := newTestStore(t)
+	path := store.path
+	u, err := store.Create(context.Background(), "someone", "correct-horse-battery-staple", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	const payloadLen = 4096
+	envelope := strings.Repeat("<", payloadLen)
+	if _, err := store.SetPGPIdentityClientProtected(u.ID, "FPR", "KID", "PUB", envelope, "generated", ""); err != nil {
+		t.Fatalf("SetPGPIdentityClientProtected: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if bytes.Contains(raw, []byte("\\u003c")) {
+		t.Fatal("users.json still HTML-escapes '<' to \\u003c, inflating every stored byte 6x " +
+			"in a file that is rewritten whole under a global lock on every mutation")
+	}
+	// The whole point is the size on disk, so assert it directly: 4 KiB in must
+	// not become 24 KiB out.
+	if len(raw) > payloadLen*2 {
+		t.Fatalf("users.json is %d bytes for a %d-byte envelope; the encoder is inflating it",
+			len(raw), payloadLen)
+	}
+	if !bytes.Contains(raw, []byte(envelope)) {
+		t.Fatal("the envelope did not round-trip verbatim")
+	}
+}
+
+// TestSetPushMFAEnabledSkipsRedundantWrite is the third part of F4: an
+// unthrottled session-only endpoint that rewrites the whole file on every call,
+// even when it changes nothing, is a free instance-wide stall.
+func TestSetPushMFAEnabledSkipsRedundantWrite(t *testing.T) {
+	store := newTestStore(t)
+	path := store.path
+	u, err := store.Create(context.Background(), "someone", "correct-horse-battery-staple", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.SetPushMFAEnabled(u.ID, false); err != nil {
+		t.Fatalf("SetPushMFAEnabled: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	// Re-set the value it already holds, the shape of the attack.
+	for i := 0; i < 5; i++ {
+		got, err := store.SetPushMFAEnabled(u.ID, false)
+		if err != nil {
+			t.Fatalf("SetPushMFAEnabled: %v", err)
+		}
+		if got.ID != u.ID {
+			t.Fatalf("a no-op mutation must still return the user, got %+v", got)
+		}
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("re-setting PushMFAEnabled to its current value rewrote users.json; a whole-file " +
+			"marshal+fsync under the global lock must not be reachable by an unthrottled no-op")
+	}
+	// And a real change still writes.
+	if _, err := store.SetPushMFAEnabled(u.ID, true); err != nil {
+		t.Fatalf("SetPushMFAEnabled(true): %v", err)
+	}
+	got, err := store.Get(u.ID)
+	if err != nil || !got.PushMFAEnabled {
+		t.Fatalf("a genuine change must still persist: %+v err=%v", got, err)
+	}
+}
+
+// TestReplacingTheSameIdentityKeepsSlots covers the run-7 hardening note: the
+// slot wipe is justified by "every non-password slot seals the OLD key", but the
+// code never checked that the key actually changed. Re-posting the identical
+// identity — a retried request, a client re-running setup — silently destroyed a
+// live recovery sealing, with a 200 and no log line.
+func TestReplacingTheSameIdentityKeepsSlots(t *testing.T) {
+	store := newTestStore(t)
+	u, err := store.Create(context.Background(), "someone", "correct-horse-battery-staple", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.SetPGPIdentityClientProtected(u.ID, "FPR-A", "KID", "PUB", `{"v":2}`, "generated", ""); err != nil {
+		t.Fatalf("SetPGPIdentityClientProtected: %v", err)
+	}
+	if _, err := store.SetPGPWrappedEnvelope(u.ID, EnvelopeSlotRecovery, "RECOVERY-SEALED", ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope: %v", err)
+	}
+
+	// Same fingerprint: the sealing is still valid and must survive.
+	if _, err := store.SetPGPIdentityClientProtected(u.ID, "FPR-A", "KID", "PUB", `{"v":2,"rewrapped":true}`, "generated", ""); err != nil {
+		t.Fatalf("re-post same identity: %v", err)
+	}
+	got, err := store.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.PGPWrappedEnvelopes) != 1 {
+		t.Fatalf("re-posting the SAME identity destroyed a live recovery sealing: slots = %+v",
+			got.PGPWrappedEnvelopes)
+	}
+
+	// A genuinely different key must still drop them.
+	if _, err := store.SetPGPIdentityClientProtected(u.ID, "FPR-B", "KID", "PUB", `{"v":2}`, "generated", ""); err != nil {
+		t.Fatalf("replace identity: %v", err)
+	}
+	got, err = store.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.PGPWrappedEnvelopes) != 0 {
+		t.Fatalf("a real identity change must drop sealings of the old key: slots = %+v",
+			got.PGPWrappedEnvelopes)
 	}
 }
