@@ -111,9 +111,15 @@ type User struct {
 	// opaque to the server: it is stored, returned to the owning user, and
 	// never interpreted here.
 	PGPPrivateKeyWrapped string `json:"pgpPrivateKeyWrapped,omitempty"`
-	PGPKeyProtection     string `json:"pgpKeyProtection,omitempty"`
-	PGPKeySource         string `json:"pgpKeySource,omitempty"`
-	PGPKeyCreatedAt      string `json:"pgpKeyCreatedAt,omitempty"`
+	// PGPWrappedEnvelopes holds every sealing of the private key OTHER than the
+	// password one, which stays in PGPPrivateKeyWrapped above. Splitting them
+	// this way is what lets existing users.json files load unchanged: the legacy
+	// field is still the password envelope, and WrappedEnvelopes() presents both
+	// as one set. Each entry is opaque here, exactly like PGPPrivateKeyWrapped.
+	PGPWrappedEnvelopes []WrappedEnvelope `json:"pgpWrappedEnvelopes,omitempty"`
+	PGPKeyProtection    string            `json:"pgpKeyProtection,omitempty"`
+	PGPKeySource        string            `json:"pgpKeySource,omitempty"`
+	PGPKeyCreatedAt     string            `json:"pgpKeyCreatedAt,omitempty"`
 }
 
 // PGP key protection modes. See User's PGP block.
@@ -133,6 +139,65 @@ func (u User) PGPProtection() string {
 		return PGPProtectionServer
 	}
 	return ""
+}
+
+// WrappedEnvelope is one sealing of an account's PGP private key.
+//
+// Several may exist for one identity, each sealed under a different
+// key-encryption key — the account password, a recovery code, an enrolled
+// device — so that losing any single one is survivable. Envelope is opaque to
+// this server in exactly the sense PGPPrivateKeyWrapped is: stored, returned to
+// the owning user, never interpreted.
+type WrappedEnvelope struct {
+	Slot     string `json:"slot"`
+	Envelope string `json:"envelope"`
+	AddedAt  string `json:"addedAt,omitempty"`
+}
+
+// Envelope slot names. "password" is not writable through the slot API: it
+// lives in PGPPrivateKeyWrapped and is written only by RewrapPGPPrivateKey,
+// which carries the ErrNotClientProtected guard that endpoint needs.
+const (
+	EnvelopeSlotPassword     = "password"
+	EnvelopeSlotRecovery     = "recovery"
+	EnvelopeSlotDevicePrefix = "device:"
+)
+
+// maxDeviceSlotIDLen bounds the caller-chosen half of a device slot name. The
+// name is echoed back to clients and used as a map-ish key, so it is bounded
+// and kept free of whitespace rather than trusted.
+const maxDeviceSlotIDLen = 128
+
+// ValidEnvelopeSlot reports whether slot may be written through the slot API.
+func ValidEnvelopeSlot(slot string) bool {
+	if slot == EnvelopeSlotRecovery {
+		return true
+	}
+	id, ok := strings.CutPrefix(slot, EnvelopeSlotDevicePrefix)
+	return ok && id != "" && len(id) <= maxDeviceSlotIDLen && !strings.ContainsAny(id, " \t\r\n")
+}
+
+// WrappedEnvelopes returns every sealing of this identity's private key, with
+// PGPPrivateKeyWrapped synthesised as the password slot and listed first.
+//
+// A list entry claiming the password slot is ignored rather than merged: one
+// slot has one writer, and honouring it here would let the slot API replace the
+// password envelope without RewrapPGPPrivateKey's guard.
+func (u User) WrappedEnvelopes() []WrappedEnvelope {
+	out := make([]WrappedEnvelope, 0, len(u.PGPWrappedEnvelopes)+1)
+	if strings.TrimSpace(u.PGPPrivateKeyWrapped) != "" {
+		out = append(out, WrappedEnvelope{
+			Slot:     EnvelopeSlotPassword,
+			Envelope: u.PGPPrivateKeyWrapped,
+		})
+	}
+	for _, e := range u.PGPWrappedEnvelopes {
+		if e.Slot == EnvelopeSlotPassword {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // HasServerReadableKey reports whether the server can still decrypt this user's
