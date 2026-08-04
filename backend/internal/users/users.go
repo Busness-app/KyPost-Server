@@ -1135,6 +1135,14 @@ func (s *Store) SetPGPIdentity(id, fingerprint, keyID, armoredPublicKey, private
 		u.PGPKeyProtection = PGPProtectionServer
 		u.PGPKeySource = source
 		u.PGPKeyCreatedAt = createdAt
+		// Same reasoning as SetPGPIdentityClientProtected's clear below, restated
+		// rather than inherited so the two preconditions cannot drift apart. This
+		// path is only reachable for an account with no slots to begin with (the
+		// guard above refuses a client-protected account, and only a
+		// client-protected account can ever hold one), but clearing here means a
+		// future writer of this method cannot reintroduce the gap by relying on
+		// that invariant instead of restating it.
+		u.PGPWrappedEnvelopes = nil
 		return nil
 	})
 }
@@ -1191,6 +1199,11 @@ func (s *Store) SetPGPIdentityClientProtected(id, fingerprint, keyID, armoredPub
 		u.PGPKeyProtection = PGPProtectionClient
 		u.PGPKeySource = source
 		u.PGPKeyCreatedAt = createdAt
+		// Every non-password slot seals the OLD key. Keeping them across an
+		// identity replacement would leave a recovery code that opens a key this
+		// account no longer advertises — the user is told their mail is
+		// recoverable, and it is not.
+		u.PGPWrappedEnvelopes = nil
 		return nil
 	})
 }
@@ -1292,6 +1305,9 @@ func (s *Store) ClearPGPIdentity(id string) (User, error) {
 		u.PGPKeyProtection = ""
 		u.PGPKeySource = ""
 		u.PGPKeyCreatedAt = ""
+		// No identity survives this call, so no slot can seal a key this account
+		// still advertises. Same rationale as SetPGPIdentityClientProtected.
+		u.PGPWrappedEnvelopes = nil
 		return nil
 	})
 }

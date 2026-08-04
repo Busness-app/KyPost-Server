@@ -269,3 +269,36 @@ func TestDeletePGPWrappedEnvelopeRejectsPasswordSlot(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalidEnvelopeSlot", err)
 	}
 }
+
+// A new identity means every non-password slot seals a key this account no
+// longer advertises. Leaving them would tell the user a recovery code still
+// opens their mail when it opens a key nobody encrypts to any more.
+func TestSetPGPIdentityClientProtectedDropsStaleSlots(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2,"old":true}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope: %v", err)
+	}
+	if _, err := store.SetPGPIdentityClientProtected(id, "FPR2", "KID2",
+		"-----BEGIN PGP PUBLIC KEY BLOCK-----\n...\n-----END PGP PUBLIC KEY BLOCK-----",
+		`{"v":2,"pw":2}`, "generated", "2026-08-06T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentityClientProtected: %v", err)
+	}
+	got, _ := store.Get(id)
+	if len(got.PGPWrappedEnvelopes) != 0 {
+		t.Fatalf("stale slots survived an identity replacement: %+v", got.PGPWrappedEnvelopes)
+	}
+}
+
+func TestClearPGPIdentityDropsSlots(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope: %v", err)
+	}
+	if _, err := store.ClearPGPIdentity(id); err != nil {
+		t.Fatalf("ClearPGPIdentity: %v", err)
+	}
+	got, _ := store.Get(id)
+	if len(got.PGPWrappedEnvelopes) != 0 {
+		t.Fatalf("slots survived ClearPGPIdentity: %+v", got.PGPWrappedEnvelopes)
+	}
+}
