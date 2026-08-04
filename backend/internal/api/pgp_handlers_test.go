@@ -58,7 +58,8 @@ func TestPGPIdentityGenerateCarriesVerifiedSendAsAliases(t *testing.T) {
 		t.Fatalf("Create pending alias: %v", err)
 	}
 
-	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", nil)
+	genBody, _ := json.Marshal(map[string]string{"password": stepUpPassword(t, srv, userID)})
+	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", bytes.NewReader(genBody))
 	authRequest(srv, genReq)
 	genRec := httptest.NewRecorder()
 	srv.withAuth(srv.handlePGPIdentityGenerate)(genRec, genReq)
@@ -90,7 +91,8 @@ func TestPGPIdentityGenerateThenGetThenDelete(t *testing.T) {
 		t.Fatalf("writeIMAPConfigPayload: %v", err)
 	}
 
-	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", nil)
+	genBody, _ := json.Marshal(map[string]string{"password": stepUpPassword(t, srv, userID)})
+	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", bytes.NewReader(genBody))
 	authRequest(srv, genReq)
 	genRec := httptest.NewRecorder()
 	srv.withAuth(srv.handlePGPIdentityGenerate)(genRec, genReq)
@@ -177,6 +179,9 @@ func TestPGPIdentityImportWithPassphrase(t *testing.T) {
 	body, _ := json.Marshal(map[string]string{
 		"armoredPrivateKey": armoredLocked,
 		"passphrase":        "s3cret",
+		// Creating an identity is gated on the account credential, first one
+		// or not — see requirePGPStepUp.
+		"password": password,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/import", bytes.NewReader(body))
 	authRequest(srv, req)
@@ -212,6 +217,7 @@ func TestPGPIdentityImportWithPassphrase(t *testing.T) {
 
 func TestPGPIdentityImportRevokedKeyReportsRevoked(t *testing.T) {
 	srv := newTestServer(t)
+	password := stepUpPassword(t, srv, srv.mustBootstrapUserID(t))
 
 	key, err := crypto.PGP().KeyGeneration().AddUserId("Revoked", "revoked@example.com").New().GenerateKey()
 	if err != nil {
@@ -225,7 +231,10 @@ func TestPGPIdentityImportRevokedKeyReportsRevoked(t *testing.T) {
 		t.Fatalf("Armor: %v", err)
 	}
 
-	body, _ := json.Marshal(map[string]string{"armoredPrivateKey": armored})
+	body, _ := json.Marshal(map[string]string{
+		"armoredPrivateKey": armored,
+		"password":          password,
+	})
 	req := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/import", bytes.NewReader(body))
 	authRequest(srv, req)
 	rec := httptest.NewRecorder()

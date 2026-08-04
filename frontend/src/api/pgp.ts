@@ -38,17 +38,19 @@ export function getPGPIdentity(): Promise<PGPIdentity> {
 }
 
 /**
- * Step-up credential for the operations that replace or destroy an existing
- * PGP identity.
+ * Step-up credential for the operations that create, replace or destroy a PGP
+ * identity.
  *
  * A session cookie is a bearer token, and everything else it authorises ends
- * with the session. A replaced published key does not: it goes out over WKD and
+ * with the session. A published key does not: it goes out over WKD and
  * Autocrypt, so every future correspondent encrypts to it. Deleting the
  * identity is worse and cannot be undone at all.
  *
- * credentialFields sends only the form the account can verify. Omit `password`
- * entirely (pass "") for a first-time setup, which the server does not gate:
- * there is no key to redirect and none to strand.
+ * That includes the FIRST identity, which the server used to leave ungated on
+ * the reasoning that a keyless account has nothing to lose. It has: the key the
+ * operation publishes. Every caller here must send a credential.
+ *
+ * credentialFields sends only the form the account can verify.
  */
 async function stepUp(password: string): Promise<Record<string, string>> {
   if (!password) return {};

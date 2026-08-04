@@ -290,10 +290,22 @@ export function SecurityPage() {
     ) {
       return;
     }
+    // Creating a published identity is gated on the account credential, first
+    // one or not: a session alone used to be enough, and an attacker holding a
+    // stolen cookie could install their own key as this account's published
+    // identity — WKD serves it and Autocrypt advertises it, both on by default,
+    // so the substitution outlives the session that made it.
+    const password = window.prompt(
+      "Enter your account password to confirm.\n\nThis publishes a new key for your address: " +
+        "WKD serves it and your outgoing mail advertises it."
+    );
+    if (!password) {
+      return;
+    }
     setPgpBusy(true);
     setPgpStatus("");
     try {
-      const id = await generatePGPIdentity();
+      const id = await generatePGPIdentity(password);
       setPgpIdentity(id);
       await loadPGPSession();
       setPgpStatus("PGP identity generated. This server holds the key and can read your encrypted mail.");

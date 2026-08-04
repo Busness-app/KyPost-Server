@@ -302,38 +302,69 @@ func TestPGPDeleteEnvelopeSlotRequiresTheAccountPassword(t *testing.T) {
 	}
 }
 
-// First-time setup is deliberately NOT gated. An account with no identity has
-// no key to redirect and none to strand, so a credential prompt there protects
-// nothing and would land in the middle of onboarding.
-func TestFirstPGPIdentityNeedsNoStepUp(t *testing.T) {
+// TestFirstPGPIdentityNeedsStepUp is run-8 finding F6, and reverses what this
+// test used to assert.
+//
+// The carve-out was "an account with no identity yet has nothing to lose". That
+// is true of the asset the operation destroys and false of the asset it
+// CREATES. A hijacked session could install an attacker-held key as the
+// victim's published identity with no credential of any kind; PublishWKD and
+// AdvertiseAutocrypt both default true, so the victim's own outbound mail then
+// advertises it and correspondents encrypt to it. A five-minute hijack bought a
+// permanent published-key substitution that outlives the session — the exact
+// durability the same file cites to justify gating identity replacement.
+//
+// The onboarding cost it was avoiding does not exist: every client-custody path
+// already holds the password, because it wraps the private key with it.
+func TestFirstPGPIdentityNeedsStepUp(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
-	stepUpPassword(t, srv, userID)
+	password := stepUpPassword(t, srv, userID)
 
 	id, err := pgpmail.GenerateIdentity("Alice", "alice@example.com")
 	if err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
 	}
+	install := func(body map[string]string) *httptest.ResponseRecorder {
+		return pgpRequest(t, srv, http.MethodPost, "/api/pgp/identity/client", body, srv.handlePGPIdentityClient)
+	}
 
-	rec := pgpRequest(t, srv, http.MethodPost, "/api/pgp/identity/client", map[string]string{
+	rec := install(map[string]string{
 		"publicKey": id.ArmoredPublicKey,
 		"wrapped":   `{"v":1,"blob":"opaque"}`,
 		"source":    "generated",
-	}, srv.handlePGPIdentityClient)
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a session alone published a PGP identity for this account: %d %s", rec.Code, rec.Body.String())
+	}
+	if u, err := srv.users.Get(userID); err != nil {
+		t.Fatalf("users.Get: %v", err)
+	} else if u.PGPFingerprint != "" {
+		t.Fatalf("an unconfirmed request installed a published key: %s", u.PGPFingerprint)
+	}
 
+	rec = install(map[string]string{
+		"publicKey": id.ArmoredPublicKey,
+		"wrapped":   `{"v":1,"blob":"opaque"}`,
+		"source":    "generated",
+		"password":  password,
+	})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("first-time PGP setup demanded a password: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("the owner could not set up their own first identity: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
 // TestFirstLoginExemptionDoesNotCoverTheEnvelope is run-7 finding F7.
 //
-// POST /api/auth/password skips credential verification entirely when
-// MustChangePassword is set and no old credential is offered. That is intended
-// for the credential itself — a user handed a temporary password may have nothing
-// to prove — but the same request also writes PGPPrivateKeyWrapped, which is
-// irreversible and which the server cannot validate. A session hijacked in that
-// window could strand the key and take the account with one unproven request.
+// POST /api/auth/password used to skip credential verification entirely when
+// MustChangePassword was set and no old credential was offered, which let a
+// hijacked session overwrite PGPPrivateKeyWrapped — irreversible, and
+// unvalidatable by a server that cannot open the envelope.
+//
+// run-8 F4 then removed the exemption outright, so the credential half is
+// refused on the same terms. This test keeps both halves: the unproven request
+// is rejected AND writes nothing, and the genuine first-login change still
+// works when the temporary password is presented.
 func TestFirstLoginExemptionDoesNotCoverTheEnvelope(t *testing.T) {
 	srv := newTestServer(t)
 	u, err := srv.users.Create(context.Background(), "jules", "pw-jules-testpassword", users.RoleUser)
@@ -371,8 +402,20 @@ func TestFirstLoginExemptionDoesNotCoverTheEnvelope(t *testing.T) {
 		t.Fatalf("the envelope was replaced without any credential being proved: %q", after.PGPPrivateKeyWrapped)
 	}
 
-	// The credential-only first-login change must still work.
+	// A credential-only change with NO old credential is now refused too — run-8
+	// F4. It was a password reset for anyone holding a cookie.
 	rec = changePasswordAs(t, srv, u.ID, map[string]any{
+		"newAuthSecret": strings.Repeat("b", 64),
+		"newLoginSalt":  base64.StdEncoding.EncodeToString([]byte("fedcba9876543210")),
+		"newIterations": 600000,
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a password change proving nothing returned %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Presenting the temporary password, it works.
+	rec = changePasswordAs(t, srv, u.ID, map[string]any{
+		"oldPassword":   "temporary-password-xyz",
 		"newAuthSecret": strings.Repeat("b", 64),
 		"newLoginSalt":  base64.StdEncoding.EncodeToString([]byte("fedcba9876543210")),
 		"newIterations": 600000,

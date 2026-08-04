@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -520,7 +521,8 @@ func TestWKDServedAliasKeyIsAcceptedByDiscovery(t *testing.T) {
 	}
 
 	// Generate the key only now, with the alias already verified.
-	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", nil)
+	genBody, _ := json.Marshal(map[string]string{"password": stepUpPassword(t, srv, userID)})
+	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", bytes.NewReader(genBody))
 	authRequest(srv, genReq)
 	genRec := httptest.NewRecorder()
 	srv.withAuth(srv.handlePGPIdentityGenerate)(genRec, genReq)
