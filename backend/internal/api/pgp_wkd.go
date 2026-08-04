@@ -70,11 +70,65 @@ func validateDiscoveredKey(armored, email string) (string, error) {
 // scheme+host so lookups hit an httptest.Server. Mirrors keyserverBaseURL.
 var wkdBaseURLOverride string
 
+// validWKDDomain reports whether domain is a bare DNS hostname, and so is safe
+// to concatenate into a URL.
+//
+// The domain reaches us from a recipient address the user typed, and
+// mail.ParseAddress is much more permissive than DNS: '/', '?', '#' and '@'
+// are all valid atext, so "a@evil.com/admin" is an address as far as the mail
+// parser is concerned. Concatenated verbatim it yields
+// https://evil.com/admin/.well-known/..., which hands the user the path of a
+// request this server makes. The SSRF guard cannot catch that — the host is
+// genuinely the public host it looks like; it is the rest of the URL that has
+// been rewritten — and by the time the string has been through url.Parse an
+// injected path is indistinguishable from a real one. So it has to be caught
+// here, before any URL exists.
+//
+// Deliberately syntax only. Whether a syntactically fine hostname is one we
+// may actually talk to (localhost, 169.254.169.254, anything resolving into
+// private space) is validateOutboundURL and ssrfSafeDialContext's decision,
+// and duplicating it here would mean two rules to keep in agreement.
+func validWKDDomain(domain string) bool {
+	// 253 is the longest name representable in a 255-byte wire-format QNAME.
+	if domain == "" || len(domain) > 253 {
+		return false
+	}
+	// A single label is a valid hostname but never a valid mail domain, and
+	// accepting one lets a bare token like "ev" (from "a@ev/il.com", whose
+	// host truncates at the slash) be resolved through the container's DNS
+	// search domain into an internal name.
+	if !strings.Contains(domain, ".") {
+		return false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z',
+				c >= '0' && c <= '9', c == '-':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // wkdCandidateURLs returns the advanced-method URL first, then the
-// direct-method URL, for the given local-part/domain.
+// direct-method URL, for the given local-part/domain. It returns no candidates
+// at all for a domain that is not a plain hostname — see validWKDDomain.
 func wkdCandidateURLs(localPart, domain string) []string {
 	hu := wkdHashLocalPart(localPart)
 	l := url.QueryEscape(localPart)
+	if wkdBaseURLOverride == "" && !validWKDDomain(domain) {
+		return nil
+	}
 	if wkdBaseURLOverride != "" {
 		// Tests: single host serves the direct-method path.
 		return []string{
@@ -98,8 +152,16 @@ func fetchWKDKey(ctx context.Context, email string) (string, string, error) {
 	localPart, domain := email[:at], email[at+1:]
 	client := newSSRFSafeHTTPClient(10 * time.Second)
 
+	candidates := wkdCandidateURLs(localPart, domain)
+	if len(candidates) == 0 {
+		// Distinguished from "no key published" on purpose: this address can
+		// never be looked up, so a caller retrying or caching a negative
+		// result is answering a different question.
+		return "", "", fmt.Errorf("invalid WKD domain %q", domain)
+	}
+
 	var lastErr error
-	for _, u := range wkdCandidateURLs(localPart, domain) {
+	for _, u := range candidates {
 		allowedSchemes := []string{"https"}
 		if wkdBaseURLOverride != "" {
 			allowedSchemes = []string{"http", "https"}
