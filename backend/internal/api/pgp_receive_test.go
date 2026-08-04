@@ -105,7 +105,7 @@ func TestDecryptPGPMessageContentRoundTrip(t *testing.T) {
 
 	payload := extractArmoredPGPPayload(t, encrypted)
 	content := imapadapter.MessageContent{PGPEncryptedPayload: payload}
-	result := srv.decryptPGPMessageContent(userID, content)
+	result := srv.decryptPGPMessageContent(userID, "sender@example.com", content)
 
 	if result.PGPDecryptError != "" {
 		t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
@@ -133,7 +133,7 @@ func TestDecryptPGPMessageContentNoIdentityConfigured(t *testing.T) {
 	userID := all[0].ID
 
 	content := imapadapter.MessageContent{PGPEncryptedPayload: "-----BEGIN PGP MESSAGE-----\nbogus\n-----END PGP MESSAGE-----"}
-	result := srv.decryptPGPMessageContent(userID, content)
+	result := srv.decryptPGPMessageContent(userID, "sender@example.com", content)
 	if result.PGPDecryptError == "" {
 		t.Fatal("expected a decrypt error when no pgp identity is configured")
 	}
@@ -211,7 +211,7 @@ func TestVerifySignedOnlyMessageContentRoundTrip(t *testing.T) {
 
 	t.Run("verifies against the exact signed bytes", func(t *testing.T) {
 		content := imapadapter.MessageContent{Body: exactSignedContent, PGPSignaturePayload: armoredSig}
-		result := srv.verifySignedOnlyMessageContent(userID, content)
+		result := srv.verifySignedOnlyMessageContent(userID, "sender@example.com", content)
 
 		if !result.PGPSigned {
 			t.Fatal("expected PGPSigned to be true")
@@ -229,7 +229,7 @@ func TestVerifySignedOnlyMessageContentRoundTrip(t *testing.T) {
 
 	t.Run("best-effort: a body that doesn't byte-match leaves it unverified, not erroring", func(t *testing.T) {
 		content := imapadapter.MessageContent{Body: "trust me", PGPSignaturePayload: armoredSig}
-		result := srv.verifySignedOnlyMessageContent(userID, content)
+		result := srv.verifySignedOnlyMessageContent(userID, "sender@example.com", content)
 
 		if !result.PGPSigned {
 			t.Fatal("expected PGPSigned to stay true even when verification can't confirm the signature")
@@ -269,11 +269,82 @@ func TestVerifySignedOnlyMessageContentUnknownSigner(t *testing.T) {
 		Body:                "Content-Type: text/plain; charset=UTF-8\r\n\r\ntrust me",
 		PGPSignaturePayload: armoredSig,
 	}
-	result := srv.verifySignedOnlyMessageContent(userID, content)
+	result := srv.verifySignedOnlyMessageContent(userID, "sender@example.com", content)
 	if !result.PGPSigned {
 		t.Fatal("expected PGPSigned to be true")
 	}
 	if result.PGPVerified {
 		t.Fatal("expected PGPVerified to be false when the signer isn't a known contact")
+	}
+}
+
+// TestServerCustodyVerificationIsBoundToSender is run-7 finding F3, the
+// server-side remainder of run-4's "signature verified with no key↔sender
+// binding".
+//
+// The run-4 fix was applied to the browser only. This path kept offering
+// allKnownPGPKeys — every contact key in the book — to DecryptMIME, which takes
+// no address and so reports "some offered key signed this". Any contact key
+// therefore verified any From, and PGPVerified drove the same green badge.
+func TestServerCustodyVerificationIsBoundToSender(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
+
+	recipient, err := pgpmail.GenerateIdentity("Recipient", "recipient@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	sealed, err := recipient.SealPrivateKey(srv.pgpPrivateKeyPath)
+	if err != nil {
+		t.Fatalf("SealPrivateKey: %v", err)
+	}
+	if _, err := srv.users.SetPGPIdentity(userID, recipient.Fingerprint, recipient.KeyID, recipient.ArmoredPublicKey, sealed, "generated", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentity: %v", err)
+	}
+
+	attacker, aerr := pgpmail.GenerateIdentity("Mallory", "mallory@evil.example")
+	if err := aerr; err != nil {
+		t.Fatalf("GenerateIdentity attacker: %v", err)
+	}
+	contactsStore, err := srv.userContactsStore(userID)
+	if err != nil {
+		t.Fatalf("userContactsStore: %v", err)
+	}
+	// The attacker's key is in the address book under the attacker's OWN address,
+	// which is exactly what the Autocrypt harvest does automatically.
+	if _, err := contactsStore.Upsert(contacts.Contact{
+		FormattedName: "Mallory",
+		Emails:        []contacts.ContactValue{{Value: "mallory@evil.example"}},
+		PGPKey:        attacker.ArmoredPublicKey,
+	}); err != nil {
+		t.Fatalf("Upsert contact: %v", err)
+	}
+
+	// Signed by Mallory, encrypted to the victim, claiming to be from Bob.
+	plaintext := mailmsg.Message{
+		From:    "bob@example.com",
+		To:      []string{"recipient@example.com"},
+		Subject: "Wire the money",
+		Body:    "account details attached",
+		Mode:    "plain",
+	}.Build()
+	encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, attacker)
+	if err != nil {
+		t.Fatalf("EncryptMIME: %v", err)
+	}
+
+	content := imapadapter.MessageContent{PGPEncryptedPayload: extractArmoredPGPPayload(t, encrypted)}
+	result := srv.decryptPGPMessageContent(userID, "bob@example.com", content)
+
+	if result.PGPDecryptError != "" {
+		t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
+	}
+	if result.PGPVerified {
+		t.Fatal("a key held for mallory@evil.example verified a message claiming to be from " +
+			"bob@example.com; the badge would read 'signature verified' under a spoofed sender")
 	}
 }

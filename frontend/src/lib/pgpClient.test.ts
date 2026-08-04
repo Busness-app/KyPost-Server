@@ -153,3 +153,67 @@ describe("the Sent copy is encrypted to the sender's own key (run-4 M5)", () => 
     }
   }, 30000);
 });
+
+// run-7 finding F1: the H7 fix above was implemented as a raw-substring test,
+// `uid.toLowerCase().includes("<" + sender + ">")`, over the UNPARSED User-ID
+// string. A User ID is free-form and self-certified, and the Go backend parses it
+// differently: go-crypto's parseUserId stops after the FIRST bracketed address,
+// while a substring test is order-independent. So a single crafted UID
+//
+//     Mallory <mallory@evil.example> aka Bob <bob@example.com>
+//
+// parsed server-side as mallory@evil.example — the Autocrypt harvest pinned it
+// under the ATTACKER's own contact with no prompt — while the browser found
+// <bob@example.com> inside the raw string and rendered "signature verified" under
+// a spoofed From, with the real signer's fingerprint suppressed (ReadPage only
+// shows it when !verified).
+//
+// The fix compares the PARSED User-ID email. openpgp.js declines to parse a
+// multi-address User ID at all (name/email/comment all come back ""), so a UID the
+// two parsers could disagree about now certifies no address whatsoever.
+describe("signature binding uses the parsed User ID, not a substring of it", () => {
+  async function generateFreeformKey(rawName: string, email: string): Promise<TestKey> {
+    const { publicKey, privateKey } = await openpgp.generateKey({
+      type: "ecc",
+      curve: "curve25519Legacy",
+      userIDs: [{ name: rawName, email }],
+      format: "armored"
+    });
+    return { publicKey, privateKey };
+  }
+
+  it("refuses a key whose User ID merely CONTAINS the sender address", async () => {
+    // Parses server-side as mallory@evil.example; contains "<bob@example.com>".
+    const attacker = await generateFreeformKey(
+      "Mallory <mallory@evil.example> aka Bob",
+      "bob@example.com"
+    );
+    const victim = await generateTestKey("Victim", "victim@example.com");
+
+    const ciphertext = await encryptSignedFor(victim.publicKey, attacker.privateKey, "hello");
+
+    unlockWithArmoredKey(victim.privateKey);
+    try {
+      const result = await decryptMessage(ciphertext, [attacker.publicKey], "bob@example.com");
+
+      expect(result.signed).toBe(true);
+      expect(result.verified).toBe(false);
+    } finally {
+      lock();
+    }
+  }, 30000);
+
+  it("still reports verified for an ordinary well-formed key", async () => {
+    const bob = await generateTestKey("Bob", "bob@example.com");
+    const victim = await generateTestKey("Victim", "victim@example.com");
+    const ciphertext = await encryptSignedFor(victim.publicKey, bob.privateKey, "hello");
+
+    unlockWithArmoredKey(victim.privateKey);
+    try {
+      const result = await decryptMessage(ciphertext, [bob.publicKey], "bob@example.com");
+      expect(result.verified).toBe(true);
+    } finally {
+      lock();
+    }
+  }, 30000);
+});

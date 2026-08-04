@@ -451,11 +451,18 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			http.Error(w, "failed to fetch inbox", http.StatusBadGateway)
 			return
 		}
+		// The signature verdict is bound to the claimed sender, so the body fetched
+		// by UID has to be paired back up with the From address the same UID's
+		// metadata carries — see signerKeysForSender.
+		senderByUID := make(map[int]string, len(result.New))
+		for _, e := range result.New {
+			senderByUID[e.UID] = e.Sender
+		}
 		for uid, c := range contents {
 			if c.PGPEncryptedPayload != "" {
-				contents[uid] = s.decryptPGPMessageContent(userID, c)
+				contents[uid] = s.decryptPGPMessageContent(userID, senderByUID[uid], c)
 			} else if c.PGPSignaturePayload != "" {
-				contents[uid] = s.verifySignedOnlyMessageContent(userID, c)
+				contents[uid] = s.verifySignedOnlyMessageContent(userID, senderByUID[uid], c)
 			}
 		}
 		// Attach the freshly fetched bodies back onto the cache (metadata

@@ -47,6 +47,36 @@ func hasUserIDEmail(entity *openpgp.Entity, target string) bool {
 	return false
 }
 
+// ArmoredKeyCertifiesAddress reports whether the armored public key carries
+// address as the PARSED email of one of its User IDs.
+//
+// The parsed email, never a substring of the raw User-ID text. A User ID is
+// free-form and self-certified, so "the sender's address appears somewhere in
+// it" proves nothing: a UID of
+//
+//	Mallory <mallory@evil.example> aka Bob <bob@example.com>
+//
+// contains bob@example.com but parses — here and in every other binding check in
+// this codebase — as mallory@evil.example. Matching on the parsed field is what
+// makes this agree with the checks that decide which contact a key is pinned to.
+//
+// An unparseable or absent key returns false: it certifies nothing.
+func ArmoredKeyCertifiesAddress(armoredPublicKey, address string) bool {
+	target := normalizeAddress(address)
+	if target == "" || strings.TrimSpace(armoredPublicKey) == "" {
+		return false
+	}
+	key, err := crypto.NewKeyFromArmored(armoredPublicKey)
+	if err != nil {
+		return false
+	}
+	entity := key.GetEntity()
+	if entity == nil {
+		return false
+	}
+	return hasUserIDEmail(entity, target)
+}
+
 // GenerateIdentity creates a new OpenPGP keypair for name/email using
 // gopenpgp's default profile (EdDSA/Curve25519 + SHA256, RFC4880-compatible
 // and interoperable with the openpgp.js keys already used client-side for
