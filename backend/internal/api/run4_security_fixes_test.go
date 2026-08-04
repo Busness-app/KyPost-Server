@@ -380,8 +380,8 @@ func TestDeviceCannotReachEnvelopeSlotRoutes(t *testing.T) {
 	setDeviceHeaders(put, deviceID, deviceSecret)
 	putRec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(putRec, put)
-	if putRec.Code == http.StatusOK {
-		t.Error("a paired device wrote a wrapped-envelope slot")
+	if putRec.Code != http.StatusUnauthorized {
+		t.Errorf("a paired device's PUT to a wrapped-envelope slot got %d, want %d (blocked by auth)", putRec.Code, http.StatusUnauthorized)
 	}
 
 	if _, err := srv.users.SetPGPWrappedEnvelope(userID, "recovery", `{"v":2,"rec":1}`, ""); err != nil {
@@ -391,16 +391,16 @@ func TestDeviceCannotReachEnvelopeSlotRoutes(t *testing.T) {
 	setDeviceHeaders(get, deviceID, deviceSecret)
 	getRec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(getRec, get)
-	if getRec.Code == http.StatusOK {
-		t.Error("a paired device read a wrapped-envelope slot")
+	if getRec.Code != http.StatusUnauthorized {
+		t.Errorf("a paired device's GET of a wrapped-envelope slot got %d, want %d (blocked by auth)", getRec.Code, http.StatusUnauthorized)
 	}
 
 	del := httptest.NewRequest(http.MethodDelete, "/api/pgp/identity/envelope/recovery", nil)
 	setDeviceHeaders(del, deviceID, deviceSecret)
 	delRec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(delRec, del)
-	if delRec.Code == http.StatusOK {
-		t.Error("a paired device deleted a wrapped-envelope slot")
+	if delRec.Code != http.StatusUnauthorized {
+		t.Errorf("a paired device's DELETE of a wrapped-envelope slot got %d, want %d (blocked by auth)", delRec.Code, http.StatusUnauthorized)
 	}
 }
 

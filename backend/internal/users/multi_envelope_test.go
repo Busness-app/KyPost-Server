@@ -155,6 +155,9 @@ func TestSetPGPWrappedEnvelopeAddsAndReplaces(t *testing.T) {
 	if len(got.PGPWrappedEnvelopes) != 1 || got.PGPWrappedEnvelopes[0].Envelope != `{"v":2,"rec":1}` {
 		t.Fatalf("after add: %+v", got.PGPWrappedEnvelopes)
 	}
+	if got.PGPWrappedEnvelopes[0].AddedAt != "2026-08-04T00:00:00Z" {
+		t.Fatalf("after add: AddedAt = %q, want 2026-08-04T00:00:00Z", got.PGPWrappedEnvelopes[0].AddedAt)
+	}
 
 	// Replacing the same slot must overwrite in place, not append a second one:
 	// two entries for one slot means an unlock path with no deterministic answer.
@@ -164,6 +167,12 @@ func TestSetPGPWrappedEnvelopeAddsAndReplaces(t *testing.T) {
 	got, _ = store.Get(id)
 	if len(got.PGPWrappedEnvelopes) != 1 || got.PGPWrappedEnvelopes[0].Envelope != `{"v":2,"rec":2}` {
 		t.Fatalf("after replace: %+v", got.PGPWrappedEnvelopes)
+	}
+	// A stale AddedAt would pass a check that only compares Envelope, and the
+	// browser renders this value as "recovery code created on X" — a rotated
+	// slot must report the rotation's own timestamp, not the original add's.
+	if got.PGPWrappedEnvelopes[0].AddedAt != "2026-08-05T00:00:00Z" {
+		t.Fatalf("after replace: AddedAt = %q, want 2026-08-05T00:00:00Z (stale timestamp)", got.PGPWrappedEnvelopes[0].AddedAt)
 	}
 	// The password envelope is untouched by slot writes.
 	if got.PGPPrivateKeyWrapped != `{"v":2,"pw":true}` {

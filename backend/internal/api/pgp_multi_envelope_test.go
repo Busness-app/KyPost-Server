@@ -152,7 +152,7 @@ func TestEnvelopeSlotRoundTrip(t *testing.T) {
 	id := clientProtectedSlotUser(t, srv)
 
 	put := httptest.NewRequest(http.MethodPut, "/api/pgp/identity/envelope/recovery",
-		strings.NewReader(`{"envelope":"{\"v\":2,\"rec\":1}"}`))
+		strings.NewReader(`{"envelope":"{\"v\":2,\"rec\":1}","password":"pw-slotapi-testpassword"}`))
 	put.SetPathValue("slot", "recovery")
 	authRequestAs(srv, put, id)
 	rec := httptest.NewRecorder()
@@ -180,7 +180,8 @@ func TestEnvelopeSlotRoundTrip(t *testing.T) {
 		t.Fatalf("round trip lost data: %+v", out)
 	}
 
-	del := httptest.NewRequest(http.MethodDelete, "/api/pgp/identity/envelope/recovery", nil)
+	del := httptest.NewRequest(http.MethodDelete, "/api/pgp/identity/envelope/recovery",
+		strings.NewReader(`{"password":"pw-slotapi-testpassword"}`))
 	del.SetPathValue("slot", "recovery")
 	authRequestAs(srv, del, id)
 	rec = httptest.NewRecorder()
@@ -201,7 +202,7 @@ func TestEnvelopeSlotRefusesPasswordSlot(t *testing.T) {
 	srv := newTestServer(t)
 	id := clientProtectedSlotUser(t, srv)
 	put := httptest.NewRequest(http.MethodPut, "/api/pgp/identity/envelope/password",
-		strings.NewReader(`{"envelope":"x"}`))
+		strings.NewReader(`{"envelope":"x","password":"pw-slotapi-testpassword"}`))
 	put.SetPathValue("slot", "password")
 	authRequestAs(srv, put, id)
 	rec := httptest.NewRecorder()

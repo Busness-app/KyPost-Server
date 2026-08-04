@@ -174,7 +174,12 @@ const maxDeviceSlotIDLen = 128
 // next to users.json, which Store.mutate rewrites whole under a global file
 // lock on every write and which every authenticated request reads through —
 // an unbounded slot count is an unbounded per-account share of that shared,
-// instance-wide cost. Enforced only when ADDING a slot; replacing an existing
+// instance-wide cost. This package only bounds the COUNT; the per-envelope
+// byte bound (128 KiB, `maxWrappedKeyBytes`) that turns a slot count into an
+// actual size budget is enforced by `io.LimitReader` in package `api`
+// (pgp_client_keys.go), which this package cannot see or enforce itself —
+// the two bounds are a dependency, not something this constant can reason
+// about alone. Enforced only when ADDING a slot; replacing an existing
 // one must keep working at the cap, or a user who reaches it can never
 // rotate a sealing again.
 const maxWrappedEnvelopeSlots = 32
@@ -219,10 +224,12 @@ func (u User) HasServerReadableKey() bool {
 }
 
 // clone returns a deep copy of u. Every read served out of the Store's cache
-// goes through this: RecoveryCodesHash and PGPWrappedEnvelopes are slices, so a
-// plain struct copy would share the cache's backing array and let a caller
-// corrupt shared state. WrappedEnvelope is all value-typed strings, so a
-// shallow slices.Clone is enough — there is nothing under it left to alias.
+// goes through this, and it must deep-copy every field a plain struct copy
+// would still share with the cache's backing array — currently
+// RecoveryCodesHash and PGPWrappedEnvelopes, both slices, so a shallow copy
+// would let a caller corrupt shared state. WrappedEnvelope is all
+// value-typed strings, so a shallow slices.Clone is enough for it — there is
+// nothing under it left to alias.
 func (u User) clone() User {
 	if u.RecoveryCodesHash != nil {
 		u.RecoveryCodesHash = slices.Clone(u.RecoveryCodesHash)
@@ -800,9 +807,9 @@ func (s *Store) List() ([]User, error) {
 // The slice fn receives IS the cache's own backing array. It is passed to a
 // callback rather than returned so it cannot escape: a reader that keeps, sorts,
 // or writes through it corrupts what every subsequent request reads. fn must
-// clone anything it keeps (see User.clone, which also copies
-// RecoveryCodesHash and PGPWrappedEnvelopes, the fields a plain struct copy
-// still shares).
+// clone anything it keeps (see User.clone, which deep-copies every field a
+// plain struct copy would still share with the cache — currently
+// RecoveryCodesHash and PGPWrappedEnvelopes).
 //
 // Mutators do NOT use this; see readFileUnlocked.
 func (s *Store) withCachedUsers(fn func(all []User)) error {

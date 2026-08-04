@@ -239,6 +239,15 @@ func (s *Server) handlePGPExportLegacyKey(w http.ResponseWriter, r *http.Request
 // must not be able to mint a sealing of the account key: that is the property
 // the passphrase-only tier is enforced by, and enforcing it at the route is the
 // only place the server can enforce it at all.
+//
+// PUT and DELETE additionally require requirePGPStepUp (pgp_stepup.go), the
+// same standard as identity/client, rewrap, and DELETE /api/pgp/identity:
+// installing a slot plants an envelope the server cannot validate, and
+// deleting one destroys a sealing that cannot be re-minted without the
+// unwrapped key. Neither is undoable, so a session alone is not enough. GET
+// is unchanged — it is no more sensitive than GET /api/pgp/identity/wrapped,
+// which already serves the same bytes under this same weaker (session-only,
+// no step-up) auth.
 
 func (s *Server) handlePGPPutEnvelopeSlot(w http.ResponseWriter, r *http.Request) {
 	ac, ok := authFromContext(r)
@@ -248,13 +257,27 @@ func (s *Server) handlePGPPutEnvelopeSlot(w http.ResponseWriter, r *http.Request
 	}
 	var req struct {
 		Envelope string `json:"envelope"`
+		// Step-up credential (pgp_stepup.go). Installing a slot mints or
+		// replaces a sealing of the private key: a stolen session must not be
+		// able to plant an envelope the server cannot validate, and the user
+		// would only discover it was bogus when they actually needed it.
+		Password   string `json:"password,omitempty"`
+		AuthSecret string `json:"authSecret,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxWrappedKeyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	envelope := strings.TrimSpace(req.Envelope)
+	if envelope == "" {
+		http.Error(w, "envelope is required", http.StatusBadRequest)
+		return
+	}
+	if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
+		return
+	}
 	if _, err := s.users.SetPGPWrappedEnvelope(
-		ac.UserID, r.PathValue("slot"), strings.TrimSpace(req.Envelope),
+		ac.UserID, r.PathValue("slot"), envelope,
 		time.Now().UTC().Format(time.RFC3339),
 	); err != nil {
 		writeUserStoreError(w, err)
@@ -289,6 +312,24 @@ func (s *Server) handlePGPDeleteEnvelopeSlot(w http.ResponseWriter, r *http.Requ
 	ac, ok := authFromContext(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	var req struct {
+		// Step-up credential (pgp_stepup.go). Deleting a sealing that cannot
+		// be re-minted without the unwrapped key is not undoable, the same
+		// reasoning as DELETE /api/pgp/identity — so a caller must prove the
+		// account credential, not just present a session cookie. Decoding the
+		// body is mandatory: a request with no body at all fails to decode
+		// and is refused (400) rather than silently treated as "no
+		// credential needed."
+		Password   string `json:"password,omitempty"`
+		AuthSecret string `json:"authSecret,omitempty"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxWrappedKeyBytes)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
 		return
 	}
 	if _, err := s.users.DeletePGPWrappedEnvelope(ac.UserID, r.PathValue("slot")); err != nil {
