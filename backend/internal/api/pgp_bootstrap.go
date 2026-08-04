@@ -69,6 +69,16 @@ func (s *Server) handlePGPBootstrap(w http.ResponseWriter, r *http.Request) {
 		resp["unlockRequired"] = true
 		resp["canDecryptServerSide"] = false
 		resp["migrationAvailable"] = false
+		// Slot NAMES only. The browser needs to know a recovery envelope exists
+		// to decide between "recover with your code" and "set one up"; it does
+		// not need the sealed bytes until it is actually unlocking, and putting a
+		// second brute-forceable envelope in every cold-start response would be a
+		// cost with no matching benefit.
+		slots := []string{}
+		for _, e := range u.WrappedEnvelopes() {
+			slots = append(slots, e.Slot)
+		}
+		resp["envelopeSlots"] = slots
 	case users.PGPProtectionServer:
 		// Legacy: the server still decrypts, so the client has nothing to
 		// unlock — but it should offer the one-time migration.
@@ -76,11 +86,13 @@ func (s *Server) handlePGPBootstrap(w http.ResponseWriter, r *http.Request) {
 		resp["unlockRequired"] = false
 		resp["canDecryptServerSide"] = true
 		resp["migrationAvailable"] = true
+		resp["envelopeSlots"] = []string{}
 	default:
 		resp["wrappedPrivateKey"] = ""
 		resp["unlockRequired"] = false
 		resp["canDecryptServerSide"] = false
 		resp["migrationAvailable"] = false
+		resp["envelopeSlots"] = []string{}
 	}
 
 	// Contact public keys, so a freshly-started client can verify inbound
