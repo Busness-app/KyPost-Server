@@ -357,12 +357,26 @@ func TestDeviceCannotReplaceOrDestroyPGPIdentity(t *testing.T) {
 // would be unenforceable. Exercised through the full router (not the bare
 // handler) so a route-registration slip (withMailAuth instead of withAuth)
 // would be caught here too.
+//
+// The fixture matters as much as the assertion. A user with no PGP identity
+// (the shape newTestServerWithUser produces) makes this test pass by
+// accident: SetPGPWrappedEnvelope 500s on "no pgp identity to wrap" and an
+// empty WrappedEnvelopes() 404s on GET, so a misregistered withMailAuth route
+// would ALSO answer non-200 for a reason that has nothing to do with auth —
+// the assertion could not tell "correctly blocked" from "reached the handler
+// and failed anyway" apart. This uses clientProtectedSlotUser, whose identity
+// makes PUT a genuine add (200, if reachable), and pre-populates the recovery
+// slot directly through the store before the GET check, so a reachable GET
+// would return real content (200) rather than an identity-shaped 404. DELETE
+// needed no such fix: DeletePGPWrappedEnvelope is unconditional even without
+// an identity, so it was already a genuine 200-if-reachable check.
 func TestDeviceCannotReachEnvelopeSlotRoutes(t *testing.T) {
-	srv, u := newTestServerWithUser(t)
-	deviceID, deviceSecret := pairNativeDevice(t, srv, u.ID, "attacker-device")
+	srv := newTestServer(t)
+	userID := clientProtectedSlotUser(t, srv)
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "attacker-device")
 
 	put := httptest.NewRequest(http.MethodPut, "/api/pgp/identity/envelope/recovery",
-		strings.NewReader(`{"envelope":"x"}`))
+		strings.NewReader(`{"envelope":"{\"v\":2,\"rec\":1}"}`))
 	setDeviceHeaders(put, deviceID, deviceSecret)
 	putRec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(putRec, put)
@@ -370,6 +384,9 @@ func TestDeviceCannotReachEnvelopeSlotRoutes(t *testing.T) {
 		t.Error("a paired device wrote a wrapped-envelope slot")
 	}
 
+	if _, err := srv.users.SetPGPWrappedEnvelope(userID, "recovery", `{"v":2,"rec":1}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope (fixture): %v", err)
+	}
 	get := httptest.NewRequest(http.MethodGet, "/api/pgp/identity/envelope/recovery", nil)
 	setDeviceHeaders(get, deviceID, deviceSecret)
 	getRec := httptest.NewRecorder()

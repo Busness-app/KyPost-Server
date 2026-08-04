@@ -168,6 +168,17 @@ const (
 // and kept free of whitespace rather than trusted.
 const maxDeviceSlotIDLen = 128
 
+// maxWrappedEnvelopeSlots bounds how many non-password sealings one identity
+// may accumulate. Real use is one recovery slot plus one sealing per enrolled
+// device; 32 is generous for that (nobody enrolls 31 devices) and still small
+// next to users.json, which Store.mutate rewrites whole under a global file
+// lock on every write and which every authenticated request reads through —
+// an unbounded slot count is an unbounded per-account share of that shared,
+// instance-wide cost. Enforced only when ADDING a slot; replacing an existing
+// one must keep working at the cap, or a user who reaches it can never
+// rotate a sealing again.
+const maxWrappedEnvelopeSlots = 32
+
 // ValidEnvelopeSlot reports whether slot may be written through the slot API.
 func ValidEnvelopeSlot(slot string) bool {
 	if slot == EnvelopeSlotRecovery {
@@ -288,6 +299,10 @@ var (
 	// RewrapPGPPrivateKey so that its ErrNotClientProtected guard cannot be
 	// bypassed by writing the same envelope through a different door.
 	ErrInvalidEnvelopeSlot = errors.New("invalid wrapped-envelope slot")
+	// ErrTooManyEnvelopeSlots is returned when adding a new slot would exceed
+	// maxWrappedEnvelopeSlots. Never returned for a replace of an existing
+	// slot — see that constant's comment.
+	ErrTooManyEnvelopeSlots = fmt.Errorf("cannot add another wrapped-envelope slot: limit is %d", maxWrappedEnvelopeSlots)
 )
 
 // MinPasswordLen is the minimum length of any password this store accepts.
@@ -1264,6 +1279,10 @@ func (s *Store) SetPGPWrappedEnvelope(id, slot, envelope, addedAt string) (User,
 				u.PGPWrappedEnvelopes[i].AddedAt = addedAt
 				return nil
 			}
+		}
+		// Past this point the slot is new, not a replace — the cap applies.
+		if len(u.PGPWrappedEnvelopes) >= maxWrappedEnvelopeSlots {
+			return ErrTooManyEnvelopeSlots
 		}
 		u.PGPWrappedEnvelopes = append(u.PGPWrappedEnvelopes, WrappedEnvelope{
 			Slot: slot, Envelope: envelope, AddedAt: addedAt,

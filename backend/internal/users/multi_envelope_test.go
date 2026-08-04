@@ -3,6 +3,7 @@ package users
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -202,6 +203,55 @@ func TestSetPGPWrappedEnvelopeRequiresClientProtection(t *testing.T) {
 	// "the key" would seal nothing the user holds.
 	if _, err := store.SetPGPWrappedEnvelope(u.ID, EnvelopeSlotRecovery, `{"v":2}`, ""); !errors.Is(err, ErrNotClientProtected) {
 		t.Fatalf("err = %v, want ErrNotClientProtected", err)
+	}
+}
+
+// Adding fills to maxWrappedEnvelopeSlots must be refused past the cap, but a
+// REPLACE of a slot already held must keep working exactly at the cap — a
+// user who reaches it still needs to rotate a compromised recovery code or
+// re-pair a device, and the cap exists to bound growth, not to lock them out
+// of the slots they already have.
+func TestSetPGPWrappedEnvelopeEnforcesCapOnAddNotReplace(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2,"rec":1}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope recovery: %v", err)
+	}
+	for i := 0; i < maxWrappedEnvelopeSlots-1; i++ {
+		slot := fmt.Sprintf("device:d%d", i)
+		if _, err := store.SetPGPWrappedEnvelope(id, slot, `{"v":2}`, ""); err != nil {
+			t.Fatalf("SetPGPWrappedEnvelope(%s): %v", slot, err)
+		}
+	}
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.PGPWrappedEnvelopes) != maxWrappedEnvelopeSlots {
+		t.Fatalf("len = %d, want %d (at cap)", len(got.PGPWrappedEnvelopes), maxWrappedEnvelopeSlots)
+	}
+
+	// One more NEW slot must be refused.
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:one-too-many", `{"v":2}`, ""); !errors.Is(err, ErrTooManyEnvelopeSlots) {
+		t.Fatalf("err = %v, want ErrTooManyEnvelopeSlots", err)
+	}
+	got, _ = store.Get(id)
+	if len(got.PGPWrappedEnvelopes) != maxWrappedEnvelopeSlots {
+		t.Fatalf("a refused add still changed the slot count: len = %d", len(got.PGPWrappedEnvelopes))
+	}
+
+	// Replacing an EXISTING slot must still succeed at the cap.
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2,"rec":2}`, ""); err != nil {
+		t.Fatalf("replace at cap: %v", err)
+	}
+	got, _ = store.Get(id)
+	if len(got.PGPWrappedEnvelopes) != maxWrappedEnvelopeSlots {
+		t.Fatalf("replace at cap changed slot count: len = %d", len(got.PGPWrappedEnvelopes))
+	}
+	for _, e := range got.PGPWrappedEnvelopes {
+		if e.Slot == EnvelopeSlotRecovery && e.Envelope != `{"v":2,"rec":2}` {
+			t.Fatalf("replace at cap did not take effect: %+v", e)
+		}
 	}
 }
 
