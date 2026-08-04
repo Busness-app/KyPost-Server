@@ -229,6 +229,40 @@ func TestDeletePGPWrappedEnvelope(t *testing.T) {
 	}
 }
 
+// The filter's whole job is the e.Slot != slot condition. With only one slot
+// ever populated, a bug that deleted every envelope regardless of slot would
+// pass every other test here — so this one populates two distinct slots
+// (covering both accepted shapes: EnvelopeSlotRecovery and a device: slot),
+// deletes one, and checks the other survives with its original value.
+func TestDeletePGPWrappedEnvelopeLeavesOtherSlotsIntact(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2,"rec":1}`, "2026-08-04T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope recovery: %v", err)
+	}
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:abc123", `{"v":2,"dev":1}`, "2026-08-04T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope device: %v", err)
+	}
+
+	if _, err := store.DeletePGPWrappedEnvelope(id, EnvelopeSlotRecovery); err != nil {
+		t.Fatalf("DeletePGPWrappedEnvelope: %v", err)
+	}
+
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.PGPWrappedEnvelopes) != 1 {
+		t.Fatalf("len = %d, want 1: %+v", len(got.PGPWrappedEnvelopes), got.PGPWrappedEnvelopes)
+	}
+	if got.PGPWrappedEnvelopes[0].Slot != "device:abc123" || got.PGPWrappedEnvelopes[0].Envelope != `{"v":2,"dev":1}` {
+		t.Fatalf("surviving slot corrupted or wrong: %+v", got.PGPWrappedEnvelopes[0])
+	}
+	// The password envelope is untouched by a slot delete.
+	if got.PGPPrivateKeyWrapped != `{"v":2,"pw":true}` {
+		t.Fatalf("password envelope was disturbed: %q", got.PGPPrivateKeyWrapped)
+	}
+}
+
 func TestDeletePGPWrappedEnvelopeRejectsPasswordSlot(t *testing.T) {
 	store, id := newClientProtectedUser(t)
 	if _, err := store.DeletePGPWrappedEnvelope(id, EnvelopeSlotPassword); !errors.Is(err, ErrInvalidEnvelopeSlot) {
