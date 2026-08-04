@@ -208,11 +208,16 @@ func (u User) HasServerReadableKey() bool {
 }
 
 // clone returns a deep copy of u. Every read served out of the Store's cache
-// goes through this: RecoveryCodesHash is a slice, so a plain struct copy would
-// share the cache's backing array and let a caller corrupt shared state.
+// goes through this: RecoveryCodesHash and PGPWrappedEnvelopes are slices, so a
+// plain struct copy would share the cache's backing array and let a caller
+// corrupt shared state. WrappedEnvelope is all value-typed strings, so a
+// shallow slices.Clone is enough — there is nothing under it left to alias.
 func (u User) clone() User {
 	if u.RecoveryCodesHash != nil {
 		u.RecoveryCodesHash = slices.Clone(u.RecoveryCodesHash)
+	}
+	if u.PGPWrappedEnvelopes != nil {
+		u.PGPWrappedEnvelopes = slices.Clone(u.PGPWrappedEnvelopes)
 	}
 	return u
 }
@@ -775,8 +780,9 @@ func (s *Store) List() ([]User, error) {
 // The slice fn receives IS the cache's own backing array. It is passed to a
 // callback rather than returned so it cannot escape: a reader that keeps, sorts,
 // or writes through it corrupts what every subsequent request reads. fn must
-// clone anything it keeps (see User.clone, which also copies RecoveryCodesHash,
-// the one field a plain struct copy still shares).
+// clone anything it keeps (see User.clone, which also copies
+// RecoveryCodesHash and PGPWrappedEnvelopes, the fields a plain struct copy
+// still shares).
 //
 // Mutators do NOT use this; see readFileUnlocked.
 func (s *Store) withCachedUsers(fn func(all []User)) error {

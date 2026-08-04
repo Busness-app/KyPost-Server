@@ -1,6 +1,10 @@
 package users
 
-import "testing"
+import (
+	"context"
+	"path/filepath"
+	"testing"
+)
 
 func TestValidEnvelopeSlot(t *testing.T) {
 	tests := []struct {
@@ -71,5 +75,48 @@ func TestWrappedEnvelopesIgnoresPasswordSlotInList(t *testing.T) {
 func TestWrappedEnvelopesEmptyWhenNoIdentity(t *testing.T) {
 	if got := (User{}).WrappedEnvelopes(); len(got) != 0 {
 		t.Fatalf("len = %d, want 0", len(got))
+	}
+}
+
+// clone() must deep-copy PGPWrappedEnvelopes for the same reason it deep-copies
+// RecoveryCodesHash: Get and List hand callers a value read straight out of the
+// Store's cache, and a slice field left shallow-copied still aliases the
+// cache's own backing array. Mutating a slot through one Get's result must not
+// be visible to the next Get — that's the store's read-your-writes contract for
+// every OTHER caller, not just this one connection.
+func TestGetClonesWrappedEnvelopesFromCache(t *testing.T) {
+	dir := t.TempDir()
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	u, err := store.Create(context.Background(), "dana", "pw-dana-testpassword", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// No writer for PGPWrappedEnvelopes exists yet (Task 2+ adds one); mutate
+	// sets the field directly through the store's own file-locked path, exactly
+	// as a future slot-writer would.
+	if _, err := store.mutate(u.ID, func(u *User) error {
+		u.PGPWrappedEnvelopes = []WrappedEnvelope{{Slot: EnvelopeSlotRecovery, Envelope: "original"}}
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+
+	first, err := store.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	first.PGPWrappedEnvelopes[0].Envelope = "corrupted"
+
+	second, err := store.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if second.PGPWrappedEnvelopes[0].Envelope != "original" {
+		t.Fatalf("clone() shared the cache's backing array: second Get saw %q, want %q",
+			second.PGPWrappedEnvelopes[0].Envelope, "original")
 	}
 }
