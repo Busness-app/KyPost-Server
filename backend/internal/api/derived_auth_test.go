@@ -328,3 +328,86 @@ func hkdfExtract(salt, ikm []byte) []byte {
 	mac.Write(ikm)
 	return mac.Sum(nil)
 }
+
+// TestSPARequestShapeSignsInLegacyAccount pins the composition the shipped client
+// actually produces, which is the thing the other tests in this file do not cover.
+//
+// The regression it guards against: the SPA inferred "legacy" from an empty
+// login-params salt and sent authSecret ALONE. But loginParamsFor never returns an
+// empty salt — a legacy or nonexistent account gets a stable SYNTHETIC one, so the
+// endpoint cannot be used to enumerate accounts. The inference was therefore always
+// false, every legacy account got a 401, and since Create, the bootstrap admin and
+// SetPassword all produce legacy accounts, a fresh install had no account that could
+// sign in at all.
+//
+// Asserting on credentialFields' OUTPUT SHAPE rather than on a hand-written body is
+// the point: a test that sends both fields by hand passes whatever the client does.
+func TestSPARequestShapeSignsInLegacyAccount(t *testing.T) {
+	srv := newTestServer(t)
+	const pw = "correct-horse-battery-staple"
+	if _, err := srv.users.Create(context.Background(), "legacy-user", pw, users.RoleUser); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	salt, iterations := loginParams(t, srv, "legacy-user")
+	if salt == "" {
+		t.Fatal("login-params returned an empty salt for a legacy account; the synthetic-salt " +
+			"anti-enumeration property is what makes the client unable to detect legacy accounts")
+	}
+	authSecret := deriveAuthSecretForTest(t, pw, salt, iterations)
+
+	// Unauthenticated sign-in: the server does not disclose the derivation, so the
+	// client sends BOTH forms and lets the server pick.
+	rec := postLogin(t, srv, map[string]any{
+		"username":        "legacy-user",
+		"password":        pw,
+		"authSecret":      authSecret,
+		"loginSalt":       salt,
+		"loginIterations": iterations,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sign-in with both credential forms: status %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// And the shape that broke it, against a SECOND still-legacy account (the first
+	// one converted on the successful sign-in above, so it would no longer show the
+	// bug).
+	if _, err := srv.users.Create(context.Background(), "legacy-user2", pw, users.RoleUser); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	salt2, iterations2 := loginParams(t, srv, "legacy-user2")
+	rec = postLogin(t, srv, map[string]any{
+		"username":        "legacy-user2",
+		"authSecret":      deriveAuthSecretForTest(t, pw, salt2, iterations2),
+		"loginSalt":       salt2,
+		"loginIterations": iterations2,
+	})
+	if rec.Code == http.StatusOK {
+		t.Fatal("authSecret alone authenticated a legacy account; that form cannot be verified " +
+			"against a hash that covers the plaintext")
+	}
+}
+
+// TestLoginParamsDisclosesDerivationOnlyToTheAccountItself is the property that lets
+// the authenticated flows (step-up, re-auth, password change) send exactly one
+// credential form without re-introducing an account-existence oracle.
+func TestLoginParamsDisclosesDerivationOnlyToTheAccountItself(t *testing.T) {
+	srv := newTestServer(t)
+	if _, err := srv.users.Create(context.Background(), "someone", "correct-horse-battery-staple", users.RoleUser); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	for _, username := range []string{"someone", "no-such-account"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/login-params?username="+username, nil)
+		rec := httptest.NewRecorder()
+		srv.handleLoginParams(rec, req)
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, ok := out["derivation"]; ok {
+			t.Fatalf("unauthenticated login-params for %q disclosed the derivation; that tells an "+
+				"attacker whether the username names a converted (and therefore existing) account", username)
+		}
+	}
+}

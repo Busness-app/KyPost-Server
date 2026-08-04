@@ -297,7 +297,11 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       const iterations = defaultIterations();
       const salt = newLoginSalt();
       const newAuthSecret = await deriveNewCredential(newPassword, salt, iterations);
-      const oldCredential = await deriveCredential(username, currentPassword);
+      // Empty username: this flow always runs with a session (/api/auth/password
+      // is withAuth), so the server answers for the caller AND tells us which
+      // credential form it stores — which keeps a converted account's plaintext
+      // password off the wire here. See credentialFields.
+      const oldCredential = await deriveCredential("", currentPassword);
       const rewrappedPgpKey = await rewrappedEnvelopeFor(currentPassword, newPassword);
 
       await postJSON<{ ok: boolean }>("/api/auth/password", {
