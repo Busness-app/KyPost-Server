@@ -307,7 +307,26 @@ const maxTestNestingDepth = 32
 // milliseconds — several orders of magnitude past anything a human-composed
 // or GUI-round-tripped rule (realistically well under 20 conditions) would
 // ever need.
+//
+// That ~8.9µs/condition figure is the `contains` comparator, and it is only
+// true while a condition's COST is bounded too — see maxConditionValueBytes.
 const maxMatchConditions = 300
+
+// maxConditionValueBytes bounds a single leaf condition's Value.
+//
+// maxMatchConditions bounds how MANY conditions run; this bounds what each one
+// costs. Without it the pair did not bound anything: the `matches` and `regex`
+// comparators compile Value as a regular expression on every evaluation of every
+// condition (engine.matchesValue), and Value was unbounded below the handler's
+// 1 MiB body limit. A 3,200-byte alternation, 300 of them per rule, 100 rules —
+// all within the counts above — measured at 37 SECONDS per message, against a
+// documented budget of "a few milliseconds". Rule evaluation is not
+// context-cancellable and runs inside the capacity-1 instance-wide poll
+// semaphore, so that is every account's mail polling stalled by one user.
+//
+// 512 matches maxActionValueBytes and is far past any real pattern; the GUI's
+// longest round-tripped value is a folder name.
+const maxConditionValueBytes = 512
 
 // ValidateMatchShape walks m (and any nested Condition.Group) and rejects it
 // once its nesting depth exceeds maxTestNestingDepth or its total leaf-
@@ -349,6 +368,9 @@ func validateMatchGroupShape(m MatchGroup, depth int, count *int) error {
 		*count++
 		if *count > maxMatchConditions {
 			return fmt.Errorf("match has more than %d total conditions", maxMatchConditions)
+		}
+		if len(c.Value) > maxConditionValueBytes {
+			return fmt.Errorf("match condition value exceeds maximum length of %d bytes", maxConditionValueBytes)
 		}
 	}
 	return nil
