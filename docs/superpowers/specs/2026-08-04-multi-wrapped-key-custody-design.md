@@ -119,6 +119,22 @@ offline recovery code stops being the primary mechanism and becomes the
 single-device fallback, which is the right place for a secret people are bad at
 storing.
 
+**Ordering is load-bearing, and no server-side check can enforce it.** Creating an
+identity clears every non-password slot — deliberately, because those envelopes seal
+the key being replaced (see `SetPGPIdentityClientProtected`). So a client must
+`POST /api/pgp/identity/client` **before** it `PUT`s the recovery slot. Reversed, the
+recovery envelope is silently discarded and the user is told they hold a recovery
+code that opens nothing — precisely the failure this design's "recovery codes get
+lost" cost describes, arriving through a code path rather than through the user. The
+server cannot detect the mistake: both calls are individually valid, and it cannot
+read either envelope to notice one is orphaned. This is a contract the browser plan
+has to honour and test.
+
+The server side of this change shipped on `feat/multi-wrapped-key-custody`. The write
+endpoints require a step-up credential (account password or auth secret), matching
+every neighbouring key-material write — the plan file for that work predates this and
+documents the `PUT` body without it.
+
 Server-side this is a schema change on `User` (a list replacing
 `PGPPrivateKeyWrapped`, with the old field readable as a one-entry list so existing
 accounts need no migration pass) and a rewrap endpoint that replaces one entry
