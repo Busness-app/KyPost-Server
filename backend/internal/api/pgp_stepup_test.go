@@ -3,12 +3,15 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"kypost-server/backend/internal/pgpmail"
+	"kypost-server/backend/internal/users"
 )
 
 // Replacing or destroying a PGP identity used to need nothing but a session
@@ -321,4 +324,79 @@ func TestFirstPGPIdentityNeedsNoStepUp(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first-time PGP setup demanded a password: %d %s", rec.Code, rec.Body.String())
 	}
+}
+
+// TestFirstLoginExemptionDoesNotCoverTheEnvelope is run-7 finding F7.
+//
+// POST /api/auth/password skips credential verification entirely when
+// MustChangePassword is set and no old credential is offered. That is intended
+// for the credential itself — a user handed a temporary password may have nothing
+// to prove — but the same request also writes PGPPrivateKeyWrapped, which is
+// irreversible and which the server cannot validate. A session hijacked in that
+// window could strand the key and take the account with one unproven request.
+func TestFirstLoginExemptionDoesNotCoverTheEnvelope(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "jules", "pw-jules-testpassword", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := srv.users.SetPGPIdentityClientProtected(
+		u.ID, "FPR", "KID", "PUB", `{"v":2,"ciphertext":"VICTIM"}`, "generated", "2026-08-04T00:00:00Z",
+	); err != nil {
+		t.Fatalf("SetPGPIdentityClientProtected: %v", err)
+	}
+	// Exactly the post-admin-reset state: a live session, MustChangePassword set.
+	if _, err := srv.users.SetPassword(context.Background(), u.ID, "temporary-password-xyz", true); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	// NOT doJSONAuth: it clears MustChangePassword to model an onboarded session,
+	// which is precisely the state under test here.
+	rec := changePasswordAs(t, srv, u.ID, map[string]any{
+		"newAuthSecret":   strings.Repeat("a", 64),
+		"newLoginSalt":    base64.StdEncoding.EncodeToString([]byte("0123456789abcdef")),
+		"newIterations":   600000,
+		"rewrappedPgpKey": `{"v":2,"ciphertext":"ATTACKER"}`,
+	})
+	if rec.Code == http.StatusOK {
+		t.Fatal("an unverified request overwrote the client-sealed PGP envelope; the " +
+			"MustChangePassword exemption must not extend to key material")
+	}
+
+	after, err := srv.users.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.PGPPrivateKeyWrapped != `{"v":2,"ciphertext":"VICTIM"}` {
+		t.Fatalf("the envelope was replaced without any credential being proved: %q", after.PGPPrivateKeyWrapped)
+	}
+
+	// The credential-only first-login change must still work.
+	rec = changePasswordAs(t, srv, u.ID, map[string]any{
+		"newAuthSecret": strings.Repeat("b", 64),
+		"newLoginSalt":  base64.StdEncoding.EncodeToString([]byte("fedcba9876543210")),
+		"newIterations": 600000,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("the ordinary first-login password change was broken: %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// changePasswordAs posts to handleChangePassword with an auth context injected
+// directly, preserving MustChangePassword — unlike doJSONAuth, which clears it.
+func changePasswordAs(t *testing.T, srv *Server, userID string, payload map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/password", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "203.0.113.7:5000"
+	u, err := srv.users.Get(userID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	req = req.WithContext(context.WithValue(req.Context(), authContextKey{},
+		AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}))
+	rec := httptest.NewRecorder()
+	srv.handleChangePassword(rec, req)
+	return rec
 }

@@ -64,7 +64,18 @@ func (s *Server) handleAuthStepUp(w http.ResponseWriter, r *http.Request) {
 	// second factor is only worth checking once the first one holds, and
 	// checking it first would turn this into a free TOTP oracle for anyone
 	// holding a stolen session.
-	if !s.confirmAccountCredential(w, r, ac.UserID, req.Password, req.AuthSecret) {
+	// Deliberately WITHOUT clearing the throttle on success: this endpoint spends
+	// the same per-account counter twice, once per factor, and clearing it between
+	// them left the second factor with no throttle at all.
+	//
+	// confirmAccountCredential's recordSuccess DELETES the account's entry
+	// (failureLockout.recordSuccess), so a correct credential reset the counter to
+	// zero and confirmSecondFactor's tryAttempt then started from one — every
+	// request, forever. mfaMaxFailures could never be reached, and the comment on
+	// confirmSecondFactor's throttle ("six digits do not survive one") described a
+	// control that was not running. The success is recorded once, below, after
+	// BOTH factors hold.
+	if !s.confirmAccountCredentialNoRecord(w, r, ac.UserID, req.Password, req.AuthSecret) {
 		return
 	}
 	u, err := s.users.Get(ac.UserID)
@@ -75,6 +86,7 @@ func (s *Server) handleAuthStepUp(w http.ResponseWriter, r *http.Request) {
 	if u.TOTPEnabled && !s.confirmSecondFactor(w, r, u, strings.TrimSpace(req.Code)) {
 		return
 	}
+	s.mfaLockout.recordSuccess(ac.UserID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
