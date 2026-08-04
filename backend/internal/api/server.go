@@ -656,6 +656,15 @@ func (s *Server) Prepare() {
 	// ReadTimeout stays tight because it covers the whole request INCLUDING the
 	// body, and almost every route reads at most a few KB. The handful that accept
 	// a multi-megabyte upload extend it per-request via withUploadDeadline.
+	// MaxHeaderBytes is set explicitly because net/http's default is 1 MiB and
+	// it is a TOTAL per-connection budget with no per-header limit — one request
+	// may carry a single 1,024,000-byte header value. Any handler that retains
+	// something derived from a header (deviceAuthFromRequest's lockout key was
+	// the concrete case) then holds a caller-chosen megabyte, and the compose
+	// file publishes this port directly with a mem_limit well below what a few
+	// thousand of those cost. 64 KiB is far above any real request here: the
+	// largest legitimate headers are the session cookie pair and an
+	// Authorization line.
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
 		Handler:           s.routes(),
@@ -663,6 +672,7 @@ func (s *Server) Prepare() {
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      10 * time.Minute,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	// Optional inbound TLS — see tls.go. The error is stashed rather than returned
