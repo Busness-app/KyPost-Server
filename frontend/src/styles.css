@@ -2712,6 +2712,32 @@ pre {
   border-bottom: 0;
 }
 
+/* Same story as the inbox's select column (see .inbox-select-hit): a bare 13px
+   checkbox is a 13px target. The label grows to fill the cell — 40x33 instead of
+   13x13 — via negative margin cancelling equal padding, so the checkbox does not
+   move and the header stays aligned with the rows.
+
+   Worth more here than it looks: the row's own onClick opens the contact, and
+   this cell already stops that from propagating, so before this the cell's spare
+   space did nothing at all on click. One value pair covers both the th and the
+   td because `.contacts-table th` and `td` share `10px 12px`, and neither has a
+   responsive override — if either gains one, this has to follow it. */
+.contacts-col-select {
+  width: 40px;
+  text-align: center;
+}
+
+.contacts-select-hit {
+  /* flex, not inline-flex: inline shrink-wraps to the checkbox and leaves the
+     column's spare width unclickable. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  margin: -10px -12px;
+  padding: 10px 12px;
+}
+
 .contacts-row {
   cursor: pointer;
   transition: background 140ms ease;
