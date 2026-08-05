@@ -64,5 +64,21 @@ updates:
         dependency-type: development
         patterns:
           - "*"
+    # quill 2.0.3 is the whole affected range of GHSA-v3m3-f69x-jf25 (XSS via
+    # the HTML export feature) and the advisory has no first_patched_version --
+    # 2.0.3 is the newest release, so "upgrade to the fix" is not yet an option
+    # and 2.0.2 is the safe version. Dependabot proposed the bump anyway (#77),
+    # because it tracks releases, not advisories against them. The runtime
+    # audit gate in ci.yml runs at --audit-level=low precisely so this cannot
+    # be merged, but a PR that can only ever fail CI gets re-opened every week
+    # and trains people to ignore a red frontend job.
+    #
+    # Pinned to the single bad version, not the minor: 2.0.4 is how this gets
+    # fixed and must still be proposed the day it lands. Delete this entry
+    # then -- and the paragraph in ci.yml that explains the audit level with
+    # this advisory as its example.
+    ignore:
+      - dependency-name: "quill"
+        versions: ["2.0.3"]
     commit-message:
       prefix: "chore(deps)"
