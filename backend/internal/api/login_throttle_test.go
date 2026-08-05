@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"kypost-server/backend/internal/captcha"
@@ -251,5 +252,60 @@ func TestSuccessfulLoginClearsTheIPBudget(t *testing.T) {
 	if stillTracked {
 		t.Error("the address still carries failure state after a successful login; a shared " +
 			"egress would accumulate its way to a lockout")
+	}
+}
+
+// TestLoginLockoutKeysAreBoundedInLength pins the memory half of the lockout
+// table's cost.
+//
+// The key is built from users.NormalizeUsername(req.Username), which folds case
+// and trims but does NOT bound length, against a 64 KiB request body. The
+// comment at the key's construction worries about exactly this ("padding makes
+// that key space unbounded") and then bounds case and whitespace only.
+//
+// loginLockoutHardCap bounds the entry COUNT at 50,000. With ~65 KB keys that is
+// ~3.1 GiB in one map inside an 8 GiB container — 500x the sizing the cap
+// assumes. Bounding the count is not bounding the memory unless the keys are
+// bounded too.
+func TestLoginLockoutKeysAreBoundedInLength(t *testing.T) {
+	srv := newTestServer(t)
+	srv.captchaVerifier = stubVerifier{ok: false}
+
+	long := strings.Repeat("a", 65000)
+	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": long, "password": "irrelevant", "captchaToken": "wrong"})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+
+	srv.loginLockout.mu.Lock()
+	defer srv.loginLockout.mu.Unlock()
+	for k := range srv.loginLockout.entries {
+		if len(k) > maxLockoutKeyComponentBytes*2 {
+			t.Fatalf("lockout table retained a %d-byte key; an unauthenticated caller "+
+				"sizes the key space", len(k))
+		}
+	}
+}
+
+// TestLoginLockoutStillSeparatesDistinctUsernames guards against over-clamping
+// into a collision: two different accounts must not share one strike budget,
+// or three failures against a decoy would lock out a real user.
+func TestLoginLockoutStillSeparatesDistinctUsernames(t *testing.T) {
+	srv := newTestServer(t)
+	srv.captchaVerifier = stubVerifier{ok: false}
+
+	for _, name := range []string{"alice", "bob"} {
+		rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+			map[string]string{"username": name, "password": "irrelevant", "captchaToken": "wrong"})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: status = %d, want 401", name, rec.Code)
+		}
+	}
+
+	srv.loginLockout.mu.Lock()
+	defer srv.loginLockout.mu.Unlock()
+	if len(srv.loginLockout.entries) != 2 {
+		t.Fatalf("entries = %d, want 2: distinct usernames must not collide", len(srv.loginLockout.entries))
 	}
 }

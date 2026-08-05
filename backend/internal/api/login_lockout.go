@@ -79,7 +79,32 @@ const (
 	// seconds of derivation work (loginKDFDutyCycle), roughly one attempt a second,
 	// so lockoutFor buys an attacker on the order of a thousand keys.
 	loginLockoutHardCap = 50_000
+	// maxLockoutKeyComponentBytes bounds the caller-supplied half of a lockout
+	// key.
+	//
+	// loginLockoutHardCap bounds how MANY entries the table holds; nothing
+	// bounded how LARGE each one is. The username reaches the key through
+	// users.NormalizeUsername, which folds case and trims but does not truncate,
+	// against a 64 KiB request body — so an unauthenticated caller sized the key
+	// space directly. At the hard cap that is the difference between ~6 MiB of
+	// keys and ~3.1 GiB of them, inside an 8 GiB container shared with Ollama.
+	//
+	// 128 bytes is far longer than any username the store will accept, so real
+	// keys are unaffected and distinct accounts cannot be collided into a shared
+	// strike budget by padding — the property the normalisation comment at the
+	// key's construction site is protecting.
+	maxLockoutKeyComponentBytes = 128
 )
+
+// clampLockoutKeyComponent bounds one caller-supplied component of a lockout
+// key. Applied at every site that keys a lockout on something a request
+// controls, so the bound cannot be forgotten at the next one.
+func clampLockoutKeyComponent(s string) string {
+	if len(s) <= maxLockoutKeyComponentBytes {
+		return s
+	}
+	return s[:maxLockoutKeyComponentBytes]
+}
 
 type loginLockoutEntry struct {
 	failures    int

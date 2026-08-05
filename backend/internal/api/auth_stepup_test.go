@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -129,4 +130,43 @@ func TestStepUpSecondFactorIsThrottled(t *testing.T) {
 	t.Fatalf("made %d wrong second-factor attempts at /api/auth/step-up with no 429 (last status %d); "+
 		"the per-account throttle is being reset by the credential check that runs before it",
 		mfaMaxFailures+5, lastCode)
+}
+
+// TestStepUpFailuresDoNotDenyTheOwnersSecondFactor pins the separation between
+// two throttles that share one counter.
+//
+// confirmAccountCredentialNoRecord spends s.mfaLockout — the counter that gates
+// completion of the sign-in SECOND FACTOR — on a PASSWORD check, and does not
+// cancel it when the password is wrong. mfaLockout is keyed on the bare user ID
+// (deliberately: login_lockout.go explains that a password holder can mint
+// unlimited fresh challenges, so the TOTP code budget must be account-wide or
+// six digits are brute-forceable online).
+//
+// The consequence is that someone holding only a stolen session — no password,
+// no second factor — exhausts the owner's TOTP and recovery-code budget from
+// their own machine. The control becomes the attack, which is the exact failure
+// passwordChangeLockout's comment says it composes the client IP to avoid.
+//
+// Note the fix is NOT to compose the IP into mfaLockout: that would reopen the
+// online brute-force window it is account-wide to close. The two throttles must
+// simply stop sharing one counter.
+func TestStepUpFailuresDoNotDenyTheOwnersSecondFactor(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "victim", "correct-horse-battery", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// A session thief burns the step-up budget with wrong passwords.
+	for i := 0; i < mfaMaxFailures+2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/step-up", nil)
+		rec := httptest.NewRecorder()
+		srv.confirmAccountCredentialNoRecord(rec, req, u.ID, "wrong-password", "")
+	}
+
+	// The owner's second factor must still be reachable.
+	if allowed, _ := srv.mfaLockout.tryAttempt(u.ID); !allowed {
+		t.Fatal("a session thief's wrong-password attempts locked the owner out of " +
+			"their own sign-in second factor and recovery codes")
+	}
 }
