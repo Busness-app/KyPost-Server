@@ -473,6 +473,17 @@ body {
   z-index: 2;
 }
 
+/* The select column holds a checkbox, not a label, so its header keeps the
+   column's centering rather than the left-alignment every text heading wants.
+   Two classes deliberately: the <th> carries `inbox-col-heading` and
+   `inbox-col-select` both, those have equal specificity, and `inbox-col-heading`
+   is declared second — so its `text-align: left` silently won and the select-all
+   box sat 4.5px, half the slack in a 22px content box around a 13px checkbox,
+   left of every row checkbox under it. */
+.inbox-col-heading.inbox-col-select {
+  text-align: center;
+}
+
 .inbox-col-time {
   min-width: 130px;
 }
