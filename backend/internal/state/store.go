@@ -1163,6 +1163,44 @@ func (s *Store) SetNativeDeviceEncryptionEnrolled(deviceID string, enrolled bool
 	return nil
 }
 
+// ClearDeviceEnrollments resets the enrollment columns on every device in this
+// user's store, returning how many rows changed.
+//
+// Called when the account's PGP identity is written or cleared. Every non-password
+// envelope slot seals the OLD key, so users.Store clears PGPWrappedEnvelopes on
+// each identity write — but the enrollment record lives here, in a different
+// store that users.Store cannot reach, and was left behind. The result was a
+// device reporting itself enrolled, with a stale published key, naming an
+// envelope that no longer existed.
+//
+// That matters most in the flow it breaks: rotating the identity is the
+// documented way to un-enroll a lost phone, because the server cannot reach the
+// copy that phone re-sealed locally. Leaving the marker set meant the Security
+// page went on showing that phone as protected right after the user acted to
+// revoke it.
+//
+// The published key is cleared alongside the marker, not just the marker. It
+// was published for a superseded identity, and forcing the device to re-publish
+// makes re-enrollment start from device ground truth rather than from a server
+// record nobody has re-verified.
+//
+// The pairing itself is untouched — push, sync and the approver flag all keep
+// working. Rotation invalidates a sealing, not a device.
+func (s *Store) ClearDeviceEnrollments() (int, error) {
+	res, err := s.db.Exec(
+		`UPDATE native_devices
+		 SET enrollment_public_key = '', enrollment_key_at = '',
+		     encryption_enrolled = 0, updated_at = ?
+		 WHERE enrollment_public_key != '' OR enrollment_key_at != ''
+		    OR encryption_enrolled != 0`,
+		time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // SetNativeDeviceMFAApprover flips a device's MFAApprover flag. It returns
 // updated=false (and no error) when no device matches deviceID.
 func (s *Store) SetNativeDeviceMFAApprover(deviceID string, approver bool) (bool, error) {

@@ -115,6 +115,11 @@ func (s *Server) handlePGPIdentityClient(w http.ResponseWriter, r *http.Request)
 		writeUserStoreError(w, err)
 		return
 	}
+	// SetPGPIdentityClientProtected cleared PGPWrappedEnvelopes, including any
+	// device: slot. The enrollment record in the other store goes with it —
+	// this is the custody mode device enrollment exists for, so it is the path
+	// where a stale "enrolled" marker is most likely to be believed.
+	s.clearDeviceEnrollmentsFor(u.ID, "client-protected identity "+source)
 	s.logger.Info("pgp identity stored with client-side protection",
 		"user_id", u.ID, "fingerprint", u.PGPFingerprint, "source", source)
 	writeJSON(w, http.StatusOK, u.Public())
