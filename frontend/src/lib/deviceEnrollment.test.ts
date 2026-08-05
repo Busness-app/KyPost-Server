@@ -4,6 +4,7 @@ import {
   CODE_BUCKET_SECONDS,
   bucketFor,
   deriveEnrollmentCode,
+  explainEnrollmentFailure,
   formatEnrollmentCode,
   importDevicePublicKey,
   normalizeEnrollmentCode,
@@ -168,5 +169,68 @@ describe("importDevicePublicKey", () => {
   it("rejects a well-formed-looking point that is not on the curve", async () => {
     // Right length and marker, but the coordinates are not a curve point.
     await expect(importDevicePublicKey(VECTOR_KEY_B64)).rejects.toThrow();
+  });
+});
+
+describe("explainEnrollmentFailure", () => {
+  it("reads a code from an older bucket as expired", async () => {
+    const stale = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET - 6);
+    const why = await explainEnrollmentFailure(
+      VECTOR_KEY_B64,
+      VECTOR_DEVICE_ID,
+      stale,
+      VECTOR_UNIX_SECONDS
+    );
+    expect(why).toBe("expired");
+  });
+
+  it("reads a code derived from a different key as a mismatch", async () => {
+    const other = new Uint8Array(RAW_KEY);
+    other[1] = 0x09;
+    const otherB64 = btoa(String.fromCharCode(...other));
+    const substituted = await deriveEnrollmentCode(otherB64, VECTOR_DEVICE_ID, VECTOR_BUCKET);
+
+    const why = await explainEnrollmentFailure(
+      VECTOR_KEY_B64,
+      VECTOR_DEVICE_ID,
+      substituted,
+      VECTOR_UNIX_SECONDS
+    );
+    expect(why).toBe("mismatch");
+  });
+
+  it("reads a short entry as malformed rather than alarming", async () => {
+    const why = await explainEnrollmentFailure(
+      VECTOR_KEY_B64,
+      VECTOR_DEVICE_ID,
+      "5R9K6",
+      VECTOR_UNIX_SECONDS
+    );
+    expect(why).toBe("malformed");
+  });
+
+  it("reads a code far past the diagnostic window as a mismatch", async () => {
+    const ancient = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET - 400);
+    const why = await explainEnrollmentFailure(
+      VECTOR_KEY_B64,
+      VECTOR_DEVICE_ID,
+      ancient,
+      VECTOR_UNIX_SECONDS
+    );
+    expect(why).toBe("mismatch");
+  });
+
+  // The load-bearing property. The diagnostic exists to CHOOSE COPY, and this
+  // pins that widening it never widens the gate: a code it calls "expired" is
+  // still one verifyEnrollmentCode refuses.
+  it("does not make the gate accept anything it refused", async () => {
+    const stale = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET - 6);
+
+    expect(
+      await explainEnrollmentFailure(VECTOR_KEY_B64, VECTOR_DEVICE_ID, stale, VECTOR_UNIX_SECONDS)
+    ).toBe("expired");
+    expect(
+      await verifyEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, stale, VECTOR_UNIX_SECONDS)
+    ).toBe(false);
   });
 });

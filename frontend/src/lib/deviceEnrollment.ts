@@ -295,3 +295,60 @@ export async function sealEnvelopeForDevice(
     ct: bytesToBase64(ct),
   };
 }
+
+/**
+ * How many buckets back the diagnostic looks: 15, or 30 minutes.
+ *
+ * Long enough to cover a user who started the ceremony and walked away, short
+ * enough that the walk stays cheap. This bound is NOT a security parameter —
+ * widening it cannot make anything sealable, because nothing downstream of this
+ * function seals. See explainEnrollmentFailure.
+ */
+const DIAGNOSTIC_BUCKETS = 15;
+
+export type EnrollmentFailure = "malformed" | "expired" | "mismatch";
+
+/**
+ * Why verifyEnrollmentCode said no — for CHOOSING ERROR COPY, never for deciding.
+ *
+ * The gate cannot distinguish a stale code from a substituted key: both are
+ * simply `false`. But they mean opposite things to the person typing. One says
+ * the code timed out and the phone should mint another; the other says the key
+ * this server handed over is not the key on that phone. Showing the second
+ * message for the first cause teaches users to ignore the only alarm this
+ * feature has.
+ *
+ * CALL THIS ONLY AFTER verifyEnrollmentCode HAS ALREADY REFUSED. It is
+ * deliberately a separate function rather than a richer return type on the
+ * gate: the gate still accepts the current and previous bucket and nothing
+ * else, so no conclusion reached here can widen what gets sealed. A single
+ * function that both decided and explained would be one careless edit away from
+ * accepting what it was only ever meant to describe.
+ */
+export async function explainEnrollmentFailure(
+  publicKeyB64: string,
+  deviceId: string,
+  typed: string,
+  nowUnixSeconds: number = Math.floor(Date.now() / 1000),
+): Promise<EnrollmentFailure> {
+  const candidate = normalizeEnrollmentCode(typed);
+  if (candidate.length !== CODE_LENGTH) return "malformed";
+  for (const ch of candidate) {
+    if (!CROCKFORD.includes(ch)) return "malformed";
+  }
+
+  // Starts at current-2: the gate already tried the current and previous
+  // buckets, so reaching here means neither matched.
+  const current = bucketFor(nowUnixSeconds);
+  for (let back = 2; back <= DIAGNOSTIC_BUCKETS; back += 1) {
+    let expected: string;
+    try {
+      expected = await deriveEnrollmentCode(publicKeyB64, deviceId, current - back);
+    } catch {
+      // A key that will not decode cannot have produced this code honestly.
+      return "mismatch";
+    }
+    if (codesEqual(expected, candidate)) return "expired";
+  }
+  return "mismatch";
+}
