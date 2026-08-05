@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
 import { normalizeConfig, uniqueLabels, type AppConfig } from "../api/config";
+import { listNativeDevices, type NativeDevice } from "../api/devices";
 import { ContentPreviewWarningDialog } from "../components/ContentPreviewWarningDialog";
 
 type LabelsResponse = {
@@ -41,22 +42,6 @@ type PairingStatusResponse = {
   pairingTtlSeconds?: number;
   configurationError?: string;
   configured: boolean;
-};
-
-type NativeDevice = {
-  deviceId: string;
-  platform: string;
-  pushToken: string;
-  deviceName?: string;
-  appVersion?: string;
-  userAgent?: string;
-  registeredAt?: string;
-  updatedAt?: string;
-  transport?: string;
-};
-
-type NativeDevicesResponse = {
-  devices: NativeDevice[];
 };
 
 // Per-user delivery preferences, stored server-side per account (the global
@@ -430,7 +415,7 @@ export function NotificationsPage() {
 
   async function refreshNativeDevices() {
     try {
-      const next = await getJSON<NativeDevicesResponse>("/api/notifications/native/devices");
+      const next = await listNativeDevices();
       setNativeDevices(Array.isArray(next.devices) ? next.devices : []);
     } catch {
       setNativeDevices([]);

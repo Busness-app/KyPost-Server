@@ -100,10 +100,27 @@ function decodePart(body: string, encoding: string): string {
   }
 }
 
-/** Splits a multipart body on its boundary, discarding preamble and epilogue. */
+/**
+ * Splits a multipart body on its boundary, discarding preamble and epilogue.
+ *
+ * RFC 2046 5.1.1 defines the delimiter as `CRLF--boundary`, so it is only
+ * significant at the START OF A LINE, and Go's multipart.Reader enforces that.
+ * Splitting on the bare token instead also matched a copy of it inside a part's
+ * own text — and since the sender chooses the boundary, they could embed it
+ * mid-sentence to truncate what a client-protected reader saw while a
+ * server-protected reader saw the message whole, both under one signature.
+ *
+ * The opening delimiter legitimately begins the body with no preceding newline
+ * (Go special-cases this at total==0), so normalise that case rather than
+ * loosening the match. Both CRLF and bare LF are accepted because Go's reader
+ * accepts whichever it sees first. See testdata/mime-corpus.json, which both
+ * this suite and backend/internal/pgpmail execute.
+ */
 function splitParts(body: string, boundary: string): string[] {
-  const delimiter = `--${boundary}`;
-  const segments = body.split(delimiter);
+  const opening = `--${boundary}`;
+  const escaped = opening.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const anchored = body.startsWith(opening) ? `\n${body}` : body;
+  const segments = anchored.split(new RegExp(`\\r?\\n${escaped}`));
   // segments[0] is the preamble; the final segment starts with "--" (the close
   // delimiter) or is the epilogue. Neither is a part.
   return segments.slice(1).filter((segment) => !segment.startsWith("--"));

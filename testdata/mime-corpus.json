@@ -1,0 +1,84 @@
+{
+  "$comment": [
+    "Shared MIME corpus, executed by BOTH backend/internal/pgpmail (Go) and",
+    "frontend/src/lib/mimeContent.test.ts (TypeScript).",
+    "",
+    "Two independent parsers exist because the server never sees a",
+    "client-protected account's plaintext, so the browser must re-implement what",
+    "the server does. They are required to agree byte-for-byte on which part is",
+    "the display body, because buildPGPDeliveries encrypts ONE plaintext to every",
+    "To/CC key in a single call: recipients on different custody modes receive",
+    "identical ciphertext under ONE signature. A disagreement therefore makes one",
+    "signature authenticate two different messages, which is exactly what the",
+    "'signature verified' badge exists to deny.",
+    "",
+    "Audit run-10 found two such disagreements. Add a case here whenever either",
+    "parser changes; a divergence must fail a test rather than ship."
+  ],
+  "cases": [
+    {
+      "name": "named by Content-Type name= only is not a body candidate",
+      "why": "run-10 finding 1. Go's part.FileName() reads only Content-Disposition, so this part read as unnamed server-side and named browser-side, and the two picked different bodies.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"F1\"\r\n\r\n--F1\r\nContent-Type: text/plain; name=\"decoy.txt\"\r\n\r\nNAMED-VIA-CONTENT-TYPE\r\n--F1\r\nContent-Type: text/plain\r\n\r\nTHE-REAL-BODY\r\n--F1--\r\n",
+      "expectBody": "THE-REAL-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "named by Content-Disposition filename= only is not a body candidate",
+      "mime": "Content-Type: multipart/mixed; boundary=\"F1\"\r\n\r\n--F1\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=\"decoy.txt\"\r\n\r\nNAMED-VIA-DISPOSITION\r\n--F1\r\nContent-Type: text/plain\r\n\r\nTHE-REAL-BODY\r\n--F1--\r\n",
+      "expectBody": "THE-REAL-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "named by both headers is not a body candidate",
+      "mime": "Content-Type: multipart/mixed; boundary=\"F1\"\r\n\r\n--F1\r\nContent-Type: text/plain; name=\"a.txt\"\r\nContent-Disposition: attachment; filename=\"b.txt\"\r\n\r\nNAMED-BY-BOTH\r\n--F1\r\nContent-Type: text/plain\r\n\r\nTHE-REAL-BODY\r\n--F1--\r\n",
+      "expectBody": "THE-REAL-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "named by neither header wins as the body",
+      "mime": "Content-Type: multipart/mixed; boundary=\"F1\"\r\n\r\n--F1\r\nContent-Type: text/plain\r\n\r\nFIRST-UNNAMED-WINS\r\n--F1\r\nContent-Type: text/plain\r\n\r\nSECOND-IS-DROPPED\r\n--F1--\r\n",
+      "expectBody": "FIRST-UNNAMED-WINS",
+      "expectMode": "plain"
+    },
+    {
+      "name": "a boundary token inside a part's own text is not a delimiter",
+      "why": "run-10 finding 2. RFC 2046 5.1.1 makes the delimiter CRLF-anchored; the browser split on the bare token and truncated the body there.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"F1\"\r\n\r\n--F1\r\nContent-Type: text/plain\r\n\r\nPayment is due --F1 unless cancelled in writing.\r\n--F1--\r\n",
+      "expectBody": "Payment is due --F1 unless cancelled in writing.",
+      "expectMode": "plain"
+    },
+    {
+      "name": "bare LF line endings parse the same as CRLF",
+      "why": "Go's reader adopts whichever newline it sees first; the browser must not require CRLF.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"F1\"\n\n--F1\nContent-Type: text/plain\n\nLF-ONLY-BODY\n--F1--\n",
+      "expectBody": "LF-ONLY-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "a preamble before the first delimiter is discarded",
+      "mime": "Content-Type: multipart/mixed; boundary=\"F1\"\r\n\r\nThis is a MIME preamble for non-aware clients.\r\n--F1\r\nContent-Type: text/plain\r\n\r\nBODY-AFTER-PREAMBLE\r\n--F1--\r\n",
+      "expectBody": "BODY-AFTER-PREAMBLE",
+      "expectMode": "plain"
+    },
+    {
+      "name": "text/html wins as html mode",
+      "mime": "Content-Type: multipart/alternative; boundary=\"F1\"\r\n\r\n--F1\r\nContent-Type: text/html\r\n\r\n<p>HTML-BODY</p>\r\n--F1--\r\n",
+      "expectBody": "<p>HTML-BODY</p>",
+      "expectMode": "html"
+    },
+    {
+      "name": "nested multipart is walked in document order",
+      "mime": "Content-Type: multipart/mixed; boundary=\"OUT\"\r\n\r\n--OUT\r\nContent-Type: multipart/alternative; boundary=\"IN\"\r\n\r\n--IN\r\nContent-Type: text/plain\r\n\r\nNESTED-BODY\r\n--IN--\r\n\r\n--OUT--\r\n",
+      "expectBody": "NESTED-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "text/rfc822-headers is never the display body",
+      "why": "The protected-headers legacy-display part repeats Subject/From; rendering it shows the user a header dump.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"F1\"\r\n\r\n--F1\r\nContent-Type: text/rfc822-headers\r\n\r\nSubject: Protected Subject\r\n--F1\r\nContent-Type: text/plain\r\n\r\nBODY-NOT-HEADERS\r\n--F1--\r\n",
+      "expectBody": "BODY-NOT-HEADERS",
+      "expectMode": "plain"
+    }
+  ]
+}
