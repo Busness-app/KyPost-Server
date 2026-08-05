@@ -220,6 +220,21 @@ describe("explainEnrollmentFailure", () => {
     expect(why).toBe("mismatch");
   });
 
+  // Pins the exact boundary of DIAGNOSTIC_BUCKETS (15), the one number this
+  // function owns. current-6 and current-400 above bracket it loosely; this
+  // is the edge itself, one bucket on either side.
+  it("reads current-15 as expired and current-16 as a mismatch", async () => {
+    const atEdge = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET - 15);
+    expect(
+      await explainEnrollmentFailure(VECTOR_KEY_B64, VECTOR_DEVICE_ID, atEdge, VECTOR_UNIX_SECONDS)
+    ).toBe("expired");
+
+    const pastEdge = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET - 16);
+    expect(
+      await explainEnrollmentFailure(VECTOR_KEY_B64, VECTOR_DEVICE_ID, pastEdge, VECTOR_UNIX_SECONDS)
+    ).toBe("mismatch");
+  });
+
   // The load-bearing property. The diagnostic exists to CHOOSE COPY, and this
   // pins that widening it never widens the gate: a code it calls "expired" is
   // still one verifyEnrollmentCode refuses.

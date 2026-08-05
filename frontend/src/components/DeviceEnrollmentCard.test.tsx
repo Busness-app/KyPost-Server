@@ -224,9 +224,14 @@ describe("the gate", () => {
     // finished the instant the click's await resolves — the happy-path test
     // below proves that with its own vi.waitFor. Asserting the absence of the
     // PUT before the ceremony has settled would be vacuous; waiting for the
-    // rendered refusal first proves the chain reached its end, so the absence
-    // assertion after it means what it says.
+    // rendered refusal first proves the chain reached its message, but under a
+    // warn-then-seal shape the message can paint before the PUT fires — so
+    // also wait for `busy` to clear (the Cancel button is disabled by `busy`
+    // alone) before trusting the absence assertion below.
     expect(await screen.findByText(/not the key on that device/i)).toBeTruthy();
+    await vi.waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(false)
+    );
     expect(putDeviceEnvelope).not.toHaveBeenCalled();
   });
 
@@ -250,13 +255,26 @@ describe("the gate", () => {
   // change what gets sealed to.
   it("seals to the key it verified, not to a later one", async () => {
     listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
-    renderCard();
+    const { rerender } = renderCard();
     await startCeremony();
 
-    // The server flips its answer after the dialog is open.
+    // The server flips its answer after the dialog is open, and a refetch
+    // actually lands before submit — otherwise `devices` would still hold
+    // HONEST_KEY at submit time regardless of where the implementation reads
+    // the key from, and this test would be blind to the mutation it exists to
+    // catch.
     listNativeDevices.mockResolvedValue({
       devices: [device({ enrollmentPublicKey: SUBSTITUTED_KEY })]
     });
+    rerender(
+      <DeviceEnrollmentCard
+        fingerprint="CCCC3333DDDD4444"
+        clientProtected
+        unlocked
+        onRequestUnlock={() => {}}
+      />
+    );
+    await vi.waitFor(() => expect(listNativeDevices).toHaveBeenCalledTimes(2));
 
     await submitCeremony(await codeFor(HONEST_KEY));
 
@@ -280,9 +298,13 @@ describe("the gate", () => {
     await submitCeremony(await codeFor(HONEST_KEY));
 
     // Awaited first for the same reason as the mismatch test above: it proves
-    // the ceremony has settled before the absence assertion is asked to mean
-    // anything.
+    // the ceremony has reached the message. Then wait for `busy` to clear
+    // (Cancel disables only on `busy`) before trusting the absence assertion —
+    // under a warn-then-seal shape the message can paint before the PUT fires.
     expect(await screen.findByText(/unlock your key/i)).toBeTruthy();
+    await vi.waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(false)
+    );
     expect(putDeviceEnvelope).not.toHaveBeenCalled();
     expect(screen.queryByText(/not the key on that device/i)).toBeNull();
   });
@@ -308,6 +330,12 @@ describe("the gate", () => {
     // The submit button is disabled until the entry actually changes.
     expect(screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")).toBe(
       true
+    );
+    // `busy` clearing is what proves the async chain actually finished, not
+    // just that the mismatch message painted — see the gate's "issues no PUT"
+    // test for why that distinction matters under a warn-then-seal shape.
+    await vi.waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(false)
     );
     expect(putDeviceEnvelope).not.toHaveBeenCalled();
   });
@@ -359,8 +387,15 @@ describe("the failure taxonomy", () => {
     );
     await submitCeremony(stale);
 
-    expect(putDeviceEnvelope).not.toHaveBeenCalled();
+    // Wait for the message, then for `busy` to clear (Cancel disables only on
+    // `busy`), before trusting the absence of the PUT — see the gate's
+    // "issues no PUT" test above for why the ordering matters under a
+    // warn-then-seal shape.
     expect(await screen.findByText(/expired/i)).toBeTruthy();
+    await vi.waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(false)
+    );
+    expect(putDeviceEnvelope).not.toHaveBeenCalled();
     expect(screen.queryByText(/not the key on that device/i)).toBeNull();
   });
 
@@ -394,8 +429,15 @@ describe("the failure taxonomy", () => {
       if (submit) await userEvent.click(submit);
     }
 
-    expect(putDeviceEnvelope).not.toHaveBeenCalled();
+    // Wait for the abort message, then for `busy` to clear, before trusting
+    // the absence of the PUT — same reasoning as the gate's "issues no PUT"
+    // test: the Cancel button disables on `busy` alone, so it is the
+    // observable that proves `submit` ran its `finally`.
     expect(await screen.findByText(/start enrollment again on the device/i)).toBeTruthy();
+    await vi.waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(false)
+    );
+    expect(putDeviceEnvelope).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Verify and enroll" })).toBeNull();
   });
 

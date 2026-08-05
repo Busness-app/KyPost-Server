@@ -6,7 +6,8 @@ import { requireUnlockedKey } from "../lib/keyVault";
 import {
   explainEnrollmentFailure,
   sealEnvelopeForDevice,
-  verifyEnrollmentCode
+  verifyEnrollmentCode,
+  type EnrollmentFailure
 } from "../lib/deviceEnrollment";
 
 /**
@@ -80,7 +81,13 @@ export function DeviceEnrollmentCard({
   const [ceremony, setCeremony] = useState<Ceremony | null>(null);
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
-  const [failure, setFailure] = useState("");
+  // Sentinels only — never server- or exception-derived text. `failure`
+  // gates the submit button ("mismatch" locks it) and selects the alarming
+  // substituted-key copy, so the space it can hold must stay closed to
+  // whatever an adversarial server's error text says. Free-text failures go
+  // to `ceremonyError` instead.
+  const [failure, setFailure] = useState<EnrollmentFailure | "locked" | "">("");
+  const [ceremonyError, setCeremonyError] = useState("");
   const [attempts, setAttempts] = useState(0);
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<NativeDevice | null>(null);
@@ -88,10 +95,15 @@ export function DeviceEnrollmentCard({
   const [removeError, setRemoveError] = useState("");
 
   function openCeremony(device: NativeDevice) {
+    // Mutually exclusive with the remove-sealing panel: without this, enrolling
+    // one device while a remove confirmation for another is open renders two
+    // "Account password" fields at once, inviting an entry into the wrong one.
+    setRemoving(null);
     setCeremony({ device, publicKey: device.enrollmentPublicKey ?? "" });
     setCode("");
     setPassword("");
     setFailure("");
+    setCeremonyError("");
     setAttempts(0);
   }
 
@@ -99,6 +111,7 @@ export function DeviceEnrollmentCard({
     if (!ceremony || busy) return;
     setBusy(true);
     setFailure("");
+    setCeremonyError("");
     try {
       // FIRST, before anything derives: a locked vault is an ordinary state and
       // must not surface as the substituted-key alarm.
@@ -117,7 +130,17 @@ export function DeviceEnrollmentCard({
         // Strictly downstream of the refusal: this only chooses which message
         // to show. Nothing past this point seals, so what it concludes cannot
         // widen what the gate accepted.
-        const why = await explainEnrollmentFailure(publicKey, device.deviceId, code);
+        let why: EnrollmentFailure;
+        try {
+          why = await explainEnrollmentFailure(publicKey, device.deviceId, code);
+        } catch (e) {
+          // Nothing was sealed or sent — this diagnostic runs strictly after
+          // the gate already refused, so a failure here must not read like the
+          // "Could not store the sealing." copy below, which implies a store
+          // was attempted.
+          setCeremonyError(toErrorMessage(e, "Could not check that code. Nothing was sent."));
+          return;
+        }
         // A malformed entry is a finger, not a server. Spending an attempt on
         // it would end the ceremony over three typos.
         if (why !== "malformed") setAttempts((n) => n + 1);
@@ -130,7 +153,7 @@ export function DeviceEnrollmentCard({
       setCeremony(null);
       await refresh();
     } catch (e) {
-      setFailure(toErrorMessage(e, "Could not store the sealing."));
+      setCeremonyError(toErrorMessage(e, "Could not store the sealing."));
     } finally {
       setBusy(false);
     }
@@ -180,6 +203,21 @@ export function DeviceEnrollmentCard({
   // devices as able to read mail they can no longer open.
   useEffect(() => {
     if (clientProtected) void refresh();
+    // Not a bypass — the ceremony snapshots its key at open time, so an
+    // identity change cannot widen what a still-open dialog would seal to.
+    // The remove-sealing panel has no such snapshot to protect it and no
+    // reason to survive an identity change, so it closes here.
+    //
+    // The enroll ceremony deliberately does NOT close here: this effect is
+    // also the only pre-submit trigger this component has for a second
+    // `listNativeDevices` fetch, and the regression test for the snapshot
+    // property above (`the gate > seals to the key it verified, not to a
+    // later one`) exercises it by rerendering with a new fingerprint while
+    // the ceremony is open, precisely to prove the snapshot — not the live
+    // list — is what reaches the seal. Auto-closing the ceremony here would
+    // make that property untestable through this component's public surface
+    // without adding a refresh path that does not otherwise exist yet.
+    setRemoving(null);
   }, [clientProtected, fingerprint, refresh]);
 
   // Nothing to seal, so nothing to offer. The PGP card above this one is where
@@ -215,7 +253,15 @@ export function DeviceEnrollmentCard({
                     <button
                       type="button"
                       onClick={() => {
+                        // Mutually exclusive with the enroll ceremony, and a
+                        // clean slate: without these, opening this panel while
+                        // an enroll ceremony is open renders two "Account
+                        // password" fields at once, and reopening this panel
+                        // for a different device could still show a password
+                        // typed for the last one.
+                        setCeremony(null);
                         setRemoving(device);
+                        setRemovePassword("");
                         setRemoveError("");
                       }}
                     >
@@ -292,13 +338,22 @@ export function DeviceEnrollmentCard({
               time.
             </p>
           ) : failure === "mismatch" ? (
-            <p className="sec-verdict sec-verdict-risk">
-              That code does not match. The key this server gave the browser is not the key on that
-              device — so your key was NOT sent to it. Do not try again on this server without
-              checking with whoever runs it.
-            </p>
-          ) : failure ? (
-            <p className="sec-verdict sec-verdict-risk">{failure}</p>
+            <>
+              <p className="sec-verdict sec-verdict-risk">
+                That code does not match. The key this server gave the browser is not the key on that
+                device — so your key was NOT sent to it. Do not try again on this server without
+                checking with whoever runs it.
+              </p>
+              <p className="sec-muted">
+                What this does not defend: the server ships this page's JavaScript. A hostile server
+                could serve a modified bundle that seals to the right key anyway and leaks it some
+                other way — no check running in the browser can catch that, because the browser is
+                running code the server chose. This catches a server that stored or served the wrong
+                device key; it cannot catch a server that is actively serving you modified code.
+              </p>
+            </>
+          ) : ceremonyError ? (
+            <p className="sec-verdict sec-verdict-risk">{ceremonyError}</p>
           ) : null}
           <div className="sec-actions">
             {attempts >= 3 ? (
