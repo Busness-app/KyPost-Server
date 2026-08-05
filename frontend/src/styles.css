@@ -435,6 +435,10 @@ body {
 .inbox-table {
   width: 100%;
   border-collapse: collapse;
+  /* One source of truth for row-cell padding. The select column's hit target is
+     sized from it too, and the narrow-viewport override below changes it — so a
+     literal in either place silently desyncs the two at that breakpoint. */
+  --inbox-cell-pad: 10px;
 }
 
 .inbox-col-select {
@@ -587,13 +591,48 @@ body {
 
 .inbox-cell {
   border-bottom: 1px solid var(--line);
-  padding: 10px;
+  padding: var(--inbox-cell-pad);
   vertical-align: top;
 }
 
 .inbox-checkbox {
   margin: 0;
   vertical-align: middle;
+}
+
+/* A 13px checkbox is a 13px target: a miss most of the time on a phone, and a
+   fussy one with a mouse. The label around it grows to fill its whole cell —
+   42x33 rather than 13x13, about nine times the area — and a <label> forwards
+   the click to its input natively, so this needs no handler.
+
+   Negative margin cancelling equal padding, rather than simply a bigger box: it
+   expands the target outward from where the checkbox already sits, so nothing
+   moves and the alignment with the header holds.
+
+   The values mirror each cell's own padding, which is what keeps the target
+   inside its cell. Both directions of getting that wrong are real: overshooting
+   sideways spills into the encryption column, and overshooting the header
+   downward would put the select-all target over the first row's checkbox, where
+   the sticky header's z-index would win the click. */
+.inbox-select-hit {
+  /* flex, not inline-flex: inline shrink-wraps to the checkbox and leaves the
+     column's spare width unclickable. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.inbox-cell.inbox-col-select .inbox-select-hit {
+  margin: calc(-1 * var(--inbox-cell-pad));
+  padding: var(--inbox-cell-pad);
+}
+
+/* Literals here, deliberately: `.inbox-col-heading` sets its own `9px 10px` and
+   has no responsive override, so these mirror a value that does not move. */
+.inbox-col-heading.inbox-col-select .inbox-select-hit {
+  margin: -9px -10px;
+  padding: 9px 10px;
 }
 
 .inbox-subject-button {
@@ -4126,8 +4165,8 @@ pre {
     display: none;
   }
 
-  .inbox-cell {
-    padding: 8px;
+  .inbox-table {
+    --inbox-cell-pad: 8px;
   }
 
   .inbox-row-meta {
