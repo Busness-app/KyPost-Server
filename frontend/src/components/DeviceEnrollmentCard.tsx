@@ -312,6 +312,11 @@ export function DeviceEnrollmentCard({
                 // non-click-through-able: the only way past a mismatch is to
                 // type something different.
                 setFailure("");
+                // Before the state split these were one variable, so editing
+                // the code also cleared a transport error. Only clearing
+                // `failure` here would leave "Could not store the sealing."
+                // on screen while the user retypes.
+                setCeremonyError("");
               }}
             />
           </label>

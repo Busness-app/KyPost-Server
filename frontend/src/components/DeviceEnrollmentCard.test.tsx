@@ -406,8 +406,15 @@ describe("the failure taxonomy", () => {
 
     await submitCeremony("5R9K6");
 
-    expect(putDeviceEnvelope).not.toHaveBeenCalled();
+    // Wait for the message, then for `busy` to clear (Cancel disables only on
+    // `busy`), before trusting the absence of the PUT — see the gate's
+    // "issues no PUT" test above for why the ordering matters under a
+    // warn-then-seal shape.
     expect(await screen.findByText(/ten characters/i)).toBeTruthy();
+    await vi.waitFor(() =>
+      expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(false)
+    );
+    expect(putDeviceEnvelope).not.toHaveBeenCalled();
     expect(screen.queryByText(/not the key on that device/i)).toBeNull();
   });
 
@@ -509,5 +516,100 @@ describe("revocation", () => {
     // itself must still be visible underneath the still-open confirmation.
     expect(screen.getByText("Pixel")).toBeTruthy();
     expect(screen.queryByText(/could not read your paired devices/i)).toBeNull();
+  });
+});
+
+describe("panel exclusivity", () => {
+  function twoDevices() {
+    return {
+      devices: [
+        device({
+          deviceId: "d1",
+          deviceName: "Pixel",
+          enrollmentPublicKey: HONEST_KEY,
+          encryptionEnrolled: false
+        }),
+        device({
+          deviceId: "d2",
+          deviceName: "iPhone",
+          enrollmentPublicKey: HONEST_KEY,
+          encryptionEnrolled: true
+        })
+      ]
+    };
+  }
+
+  // Without this, an open remove confirmation and a newly opened enroll
+  // ceremony would render two "Account password" fields at once, inviting a
+  // credential typed into the wrong one — a security-relevant UI hazard, not
+  // just visual clutter. Assert on the count of fields sharing that label,
+  // which is the property that actually matters here.
+  it("closes an open remove confirmation when an enroll ceremony opens", async () => {
+    listNativeDevices.mockResolvedValue(twoDevices());
+    renderCard();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
+    expect(screen.getAllByLabelText("Account password")).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "Enroll" }));
+    expect(screen.getAllByLabelText("Account password")).toHaveLength(1);
+  });
+
+  // The other direction of the same hazard: opening a remove confirmation
+  // while an enroll ceremony is already open must not leave both rendered.
+  it("closes an open enroll ceremony when a remove confirmation opens", async () => {
+    listNativeDevices.mockResolvedValue(twoDevices());
+    renderCard();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Enroll" }));
+    expect(screen.getAllByLabelText("Account password")).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "Remove sealing" }));
+    expect(screen.getAllByLabelText("Account password")).toHaveLength(1);
+  });
+
+  // A clean slate on reopen: without this, reopening the remove confirmation
+  // for a different device could still show a password typed for the last
+  // one — the same "wrong field" hazard as the mutual exclusion above, but
+  // arriving from the panel's own history instead of the sibling panel.
+  it("clears the typed password when the remove confirmation reopens for a different device", async () => {
+    listNativeDevices.mockResolvedValue(twoDevices());
+    renderCard();
+
+    const removeButtons = await screen.findAllByRole("button", { name: "Remove sealing" });
+    await userEvent.click(removeButtons[0]);
+    await userEvent.type(screen.getByLabelText("Account password"), "hunter2");
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await userEvent.click(screen.getAllByRole("button", { name: "Remove sealing" })[0]);
+    expect((screen.getByLabelText("Account password") as HTMLInputElement).value).toBe("");
+  });
+});
+
+describe("the remove panel and the identity-change refetch", () => {
+  // The remove-sealing panel has no key snapshot to protect it and no reason
+  // to survive an identity change, unlike the enroll ceremony (see the gate's
+  // "seals to the key it verified, not to a later one" test, and the comment
+  // on the identity-change effect, for why THAT one deliberately stays open).
+  it("closes an open remove confirmation when the identity changes", async () => {
+    listNativeDevices.mockResolvedValue({
+      devices: [device({ enrollmentPublicKey: HONEST_KEY, encryptionEnrolled: true })]
+    });
+    const { rerender } = renderCard();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
+    expect(screen.getByLabelText("Account password")).toBeTruthy();
+
+    listNativeDevices.mockResolvedValue({ devices: [] });
+    rerender(
+      <DeviceEnrollmentCard
+        fingerprint="CCCC3333DDDD4444"
+        clientProtected
+        unlocked
+        onRequestUnlock={() => {}}
+      />
+    );
+
+    await vi.waitFor(() => expect(screen.queryByLabelText("Account password")).toBeNull());
   });
 });
