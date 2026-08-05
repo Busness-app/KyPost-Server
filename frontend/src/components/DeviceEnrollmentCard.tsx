@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { toErrorMessage } from "../api/client";
 import { listNativeDevices, type NativeDevice } from "../api/devices";
+import { putDeviceEnvelope } from "../api/pgp";
+import { requireUnlockedKey } from "../lib/keyVault";
+import { sealEnvelopeForDevice, verifyEnrollmentCode } from "../lib/deviceEnrollment";
 
 /**
  * "Encrypted mail on your devices" — the browser half of device enrollment.
@@ -48,6 +51,20 @@ function deviceLabel(device: NativeDevice): string {
   return device.deviceName?.trim() || device.platform || device.deviceId;
 }
 
+/**
+ * One run of the ceremony.
+ *
+ * `publicKey` is snapshotted here rather than read from the device list at seal
+ * time, and that is not a convenience. Verifying against one fetch and sealing
+ * against another would let a server answer honestly once and hostilely once —
+ * the comparison passes on bytes that are never sealed to, which is the exact
+ * attack the comparison exists to catch, arriving through a refetch.
+ */
+type Ceremony = {
+  device: NativeDevice;
+  publicKey: string;
+};
+
 export function DeviceEnrollmentCard({
   fingerprint,
   clientProtected,
@@ -56,6 +73,52 @@ export function DeviceEnrollmentCard({
 }: DeviceEnrollmentCardProps) {
   const [devices, setDevices] = useState<NativeDevice[]>([]);
   const [error, setError] = useState("");
+  const [ceremony, setCeremony] = useState<Ceremony | null>(null);
+  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [failure, setFailure] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  function openCeremony(device: NativeDevice) {
+    setCeremony({ device, publicKey: device.enrollmentPublicKey ?? "" });
+    setCode("");
+    setPassword("");
+    setFailure("");
+  }
+
+  async function submit() {
+    if (!ceremony || busy) return;
+    setBusy(true);
+    setFailure("");
+    try {
+      // FIRST, before anything derives: a locked vault is an ordinary state and
+      // must not surface as the substituted-key alarm.
+      let armored: string;
+      try {
+        armored = requireUnlockedKey();
+      } catch {
+        setFailure("locked");
+        return;
+      }
+
+      const { device, publicKey } = ceremony;
+
+      // THE GATE. Everything below it is unreachable without a match.
+      if (!(await verifyEnrollmentCode(publicKey, device.deviceId, code))) {
+        setFailure("mismatch");
+        return;
+      }
+
+      const envelope = await sealEnvelopeForDevice(publicKey, device.deviceId, fingerprint, armored);
+      await putDeviceEnvelope(device.deviceId, envelope, password);
+      setCeremony(null);
+      await refresh();
+    } catch (e) {
+      setFailure(toErrorMessage(e, "Could not store the sealing."));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const refresh = useCallback(async () => {
     try {
@@ -114,7 +177,7 @@ export function DeviceEnrollmentCard({
                 ) : state === "available" ? (
                   <>
                     <p className="sec-muted">Not enrolled. It cannot read your encrypted mail.</p>
-                    <button type="button" onClick={() => {}}>
+                    <button type="button" onClick={() => openCeremony(device)}>
                       Enroll
                     </button>
                   </>
@@ -135,6 +198,57 @@ export function DeviceEnrollmentCard({
           </button>{" "}
           before enrolling a device.
         </p>
+      ) : null}
+      {ceremony ? (
+        <div className="sec-modal">
+          <h4>Enroll {deviceLabel(ceremony.device)}</h4>
+          <p className="sec-muted">
+            Start enrollment on that device and type the ten-character code it shows. The code is
+            good for two to four minutes depending on when the device generated it.
+          </p>
+          <label>
+            Code from your device
+            <input
+              value={code}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(e) => {
+                setCode(e.target.value);
+                // Clearing the refusal on edit is what makes it
+                // non-click-through-able: the only way past a mismatch is to
+                // type something different.
+                setFailure("");
+              }}
+            />
+          </label>
+          <label>
+            Account password
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </label>
+          {failure === "locked" ? (
+            <p className="sec-muted">
+              Unlock your key before enrolling this device. Nothing was sent.
+            </p>
+          ) : failure === "mismatch" ? (
+            <p className="sec-warn">
+              That code does not match. The key this server gave the browser is not the key on that
+              device — so your key was NOT sent to it. Do not try again on this server without
+              checking with whoever runs it.
+            </p>
+          ) : failure ? (
+            <p className="sec-warn">{failure}</p>
+          ) : null}
+          <button type="button" disabled={busy || !!failure} onClick={() => void submit()}>
+            Verify and enroll
+          </button>
+          <button type="button" disabled={busy} onClick={() => setCeremony(null)}>
+            Cancel
+          </button>
+        </div>
       ) : null}
     </div>
   );
