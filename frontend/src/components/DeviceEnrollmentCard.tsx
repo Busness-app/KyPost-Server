@@ -3,7 +3,11 @@ import { toErrorMessage } from "../api/client";
 import { listNativeDevices, type NativeDevice } from "../api/devices";
 import { putDeviceEnvelope } from "../api/pgp";
 import { requireUnlockedKey } from "../lib/keyVault";
-import { sealEnvelopeForDevice, verifyEnrollmentCode } from "../lib/deviceEnrollment";
+import {
+  explainEnrollmentFailure,
+  sealEnvelopeForDevice,
+  verifyEnrollmentCode
+} from "../lib/deviceEnrollment";
 
 /**
  * "Encrypted mail on your devices" — the browser half of device enrollment.
@@ -77,6 +81,7 @@ export function DeviceEnrollmentCard({
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [failure, setFailure] = useState("");
+  const [attempts, setAttempts] = useState(0);
   const [busy, setBusy] = useState(false);
 
   function openCeremony(device: NativeDevice) {
@@ -84,6 +89,7 @@ export function DeviceEnrollmentCard({
     setCode("");
     setPassword("");
     setFailure("");
+    setAttempts(0);
   }
 
   async function submit() {
@@ -105,7 +111,14 @@ export function DeviceEnrollmentCard({
 
       // THE GATE. Everything below it is unreachable without a match.
       if (!(await verifyEnrollmentCode(publicKey, device.deviceId, code))) {
-        setFailure("mismatch");
+        // Strictly downstream of the refusal: this only chooses which message
+        // to show. Nothing past this point seals, so what it concludes cannot
+        // widen what the gate accepted.
+        const why = await explainEnrollmentFailure(publicKey, device.deviceId, code);
+        // A malformed entry is a finger, not a server. Spending an attempt on
+        // it would end the ceremony over three typos.
+        if (why !== "malformed") setAttempts((n) => n + 1);
+        setFailure(why);
         return;
       }
 
@@ -233,6 +246,16 @@ export function DeviceEnrollmentCard({
             <p className="sec-muted">
               Unlock your key before enrolling this device. Nothing was sent.
             </p>
+          ) : failure === "malformed" ? (
+            <p className="sec-muted">
+              The code is ten characters, shown as XXXXX-XXXXX. Type all of it.
+            </p>
+          ) : failure === "expired" ? (
+            <p className="sec-muted">
+              That code has expired. Ask the device for a fresh one and type it. If this keeps
+              happening, check that the device's clock is correct — a clock running fast fails every
+              time.
+            </p>
           ) : failure === "mismatch" ? (
             <p className="sec-verdict sec-verdict-risk">
               That code does not match. The key this server gave the browser is not the key on that
@@ -243,22 +266,26 @@ export function DeviceEnrollmentCard({
             <p className="sec-verdict sec-verdict-risk">{failure}</p>
           ) : null}
           <div className="sec-actions">
-            {/*
-              Locked only by a mismatch, deliberately. A rejected step-up
-              credential, a locked vault or a transport error are ordinary
-              retryable failures — dead-ending the button behind them would
-              force the user to re-enter a code that is only valid for one or
-              two 120-second buckets, making the forced retry likely to fail as
-              expired. A mismatch is the one refusal that must not be
-              click-through-able.
-            */}
-            <button
-              type="button"
-              disabled={busy || failure === "mismatch"}
-              onClick={() => void submit()}
-            >
-              Verify and enroll
-            </button>
+            {attempts >= 3 ? (
+              <p className="sec-muted">
+                Too many failed attempts. Start enrollment again on the device to get a new code.
+              </p>
+            ) : (
+              // Locked only by a mismatch, deliberately. A rejected step-up
+              // credential, a locked vault or a transport error are ordinary
+              // retryable failures — dead-ending the button behind them would
+              // force the user to re-enter a code that is only valid for one or
+              // two 120-second buckets, making the forced retry likely to fail as
+              // expired. A mismatch is the one refusal that must not be
+              // click-through-able.
+              <button
+                type="button"
+                disabled={busy || failure === "mismatch"}
+                onClick={() => void submit()}
+              >
+                Verify and enroll
+              </button>
+            )}
             <button type="button" disabled={busy} onClick={() => setCeremony(null)}>
               Cancel
             </button>

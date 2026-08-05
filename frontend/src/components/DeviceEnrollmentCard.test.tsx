@@ -341,3 +341,76 @@ describe("the gate", () => {
     ).toBe(true);
   });
 });
+
+describe("the failure taxonomy", () => {
+  it("reports an expired code as expiry, not as a substituted key", async () => {
+    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
+    renderCard();
+    await startCeremony();
+
+    const stale = await deriveEnrollmentCode(
+      HONEST_KEY,
+      "d1",
+      bucketFor(Math.floor(Date.now() / 1000)) - 5
+    );
+    await submitCeremony(stale);
+
+    expect(putDeviceEnvelope).not.toHaveBeenCalled();
+    expect(await screen.findByText(/expired/i)).toBeTruthy();
+    expect(screen.queryByText(/not the key on that device/i)).toBeNull();
+  });
+
+  it("names a short entry as incomplete rather than as a mismatch", async () => {
+    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
+    renderCard();
+    await startCeremony();
+
+    await submitCeremony("5R9K6");
+
+    expect(putDeviceEnvelope).not.toHaveBeenCalled();
+    expect(await screen.findByText(/ten characters/i)).toBeTruthy();
+    expect(screen.queryByText(/not the key on that device/i)).toBeNull();
+  });
+
+  // Three, not one. The MFA control allows a single attempt because guessing
+  // is cheap there; here guessing fifty bits is hopeless and typos are not.
+  it("aborts the ceremony after three real attempts", async () => {
+    listNativeDevices.mockResolvedValue({
+      devices: [device({ enrollmentPublicKey: SUBSTITUTED_KEY })]
+    });
+    renderCard();
+    await startCeremony();
+
+    for (let i = 0; i < 3; i += 1) {
+      const field = screen.getByLabelText("Code from your device");
+      await userEvent.clear(field);
+      await userEvent.type(field, await codeFor(HONEST_KEY));
+      if (i === 0) await userEvent.type(screen.getByLabelText("Account password"), "hunter2");
+      const submit = screen.queryByRole("button", { name: "Verify and enroll" });
+      if (submit) await userEvent.click(submit);
+    }
+
+    expect(putDeviceEnvelope).not.toHaveBeenCalled();
+    expect(await screen.findByText(/start enrollment again on the device/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Verify and enroll" })).toBeNull();
+  });
+
+  // A malformed entry is the user's finger, not the server's key. Spending an
+  // attempt on it would end the ceremony over three typos.
+  it("does not spend an attempt on a malformed entry", async () => {
+    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
+    renderCard();
+    await startCeremony();
+
+    for (let i = 0; i < 4; i += 1) {
+      const field = screen.getByLabelText("Code from your device");
+      await userEvent.clear(field);
+      await userEvent.type(field, "5R9K6");
+      if (i === 0) await userEvent.type(screen.getByLabelText("Account password"), "hunter2");
+      await userEvent.click(screen.getByRole("button", { name: "Verify and enroll" }));
+    }
+
+    expect(screen.queryByText(/start enrollment again on the device/i)).toBeNull();
+    expect(screen.getByRole("button", { name: "Verify and enroll" })).toBeTruthy();
+  });
+});
