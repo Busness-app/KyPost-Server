@@ -70,10 +70,16 @@ func (s *Server) handlePGPPublishEnrollmentKey(w http.ResponseWriter, r *http.Re
 // handlePGPDeviceEnvelope serves the ONE envelope sealed for the calling device.
 //
 // It takes no slot parameter, by design. The general GET on
-// /api/pgp/identity/envelope/{slot} stays session-only because a device asking
-// for another device's sealing — or for the password slot — is exactly what
-// that rule withholds. Here the slot name is built from the verified device
-// record, so there is no input to abuse.
+// /api/pgp/identity/envelope/{slot} stays session-only so a device cannot ask
+// for ANOTHER DEVICE'S sealing. Here the slot name is built from the verified
+// device record, so there is no input to abuse.
+//
+// Note what that rule does NOT withhold: the password-wrapped envelope is
+// already reachable on a device credential, via GET /api/pgp/identity/wrapped
+// and GET /api/pgp/bootstrap, both of which are withMailAuth. That is
+// deliberate and documented (docs/E2E_PGP.md) — the blob is useless without the
+// password-derived key. An earlier version of this comment claimed the opposite
+// and contradicted the docs.
 //
 // Serving this one envelope to this one device is safe: it is sealed to a key
 // whose private half is non-extractable from that device's secure element, so
