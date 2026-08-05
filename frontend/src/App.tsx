@@ -1,4 +1,4 @@
-import { type DragEvent, useEffect, useRef, useState } from "react";
+import { type DragEvent, type ReactElement, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import Quill from "quill";
 import "quill/dist/quill.snow.css";
@@ -1010,7 +1010,10 @@ export function App() {
     );
   }
 
-  function protect(element: JSX.Element, adminOnly = false) {
+  // ReactElement, not the global JSX.Element: @types/react 19 stopped
+  // declaring a global JSX namespace, so the old spelling only resolved while
+  // the types lagged a major behind the react 19 runtime we actually ship.
+  function protect(element: ReactElement, adminOnly = false) {
     if (!auth?.authenticated) {
       return <Navigate to="/login" replace />;
     }
