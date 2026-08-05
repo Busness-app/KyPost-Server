@@ -165,3 +165,144 @@ func TestCopyIfMissing_ReadErrorLogged(t *testing.T) {
 		t.Fatalf("expected error log for read error, but got:\n%s", logContent)
 	}
 }
+
+// legacyMigrationEnv builds the shared fixture for the two regression tests
+// below: an installation with a legacy global IMAP credential and legacy
+// mailbox state, plus its first admin.
+func legacyMigrationEnv(t *testing.T) (logger *logging.Logger, usersStore *users.Store, configDir, stateDir, adminID string) {
+	t.Helper()
+	configDir, stateDir = t.TempDir(), t.TempDir()
+	logger, err := logging.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+	t.Cleanup(func() { logger.Close() })
+
+	// config.SecretFile reads IMAP_CONFIG_FILE, which is how a real legacy
+	// install points at this file.
+	t.Setenv("IMAP_CONFIG_FILE", filepath.Join(configDir, "imap-config.json"))
+	if err := os.WriteFile(filepath.Join(configDir, "imap-config.json"), []byte(`{"sealed":"CREDENTIAL"}`), 0o600); err != nil {
+		t.Fatalf("write legacy imap-config.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "state.json"), []byte(`{"lastCheckpoint":"42","processed":{}}`), 0o600); err != nil {
+		t.Fatalf("write state.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "decisions.json"), []byte(`[]`), 0o600); err != nil {
+		t.Fatalf("write decisions.json: %v", err)
+	}
+
+	usersStore, err = users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	admin, err := usersStore.FirstAdmin()
+	if err != nil {
+		t.Fatalf("FirstAdmin: %v", err)
+	}
+	return logger, usersStore, configDir, stateDir, admin.ID
+}
+
+// TestDeletedIMAPCredentialsDoNotResurrect is run-8 finding F7.
+//
+// migrateLegacySingleUserData runs on EVERY app.Run — twice per container
+// start under supervisord, forever — and copyIfMissing skipped only when the
+// destination existed, never retiring the source. DELETE /api/imap/config is a
+// bare os.Remove, so a credential the user withdrew (usually because it leaked)
+// was restored on the next boot and the poller resumed using it.
+//
+// Variant B is the same root cause: FirstAdminFrom skips inactive admins, so
+// deactivating the legacy owner re-pointed the migration and wrote their sealed
+// IMAP/SMTP credential into the NEXT admin's config directory. The sealing key
+// is instance-wide, so that admin's webmail could read and send as them — no
+// request, no audit row.
+func TestDeletedIMAPCredentialsDoNotResurrect(t *testing.T) {
+	logger, usersStore, configDir, stateDir, adminID := legacyMigrationEnv(t)
+	legacyIMAP := filepath.Join(configDir, "imap-config.json")
+	adminIMAP := filepath.Join(configDir, "users", adminID, "imap-config.json")
+
+	if err := migrateLegacySingleUserData(logger, usersStore, configDir, stateDir, config.UserNotificationSettings{}, false); err != nil {
+		t.Fatalf("first migration: %v", err)
+	}
+	if _, err := os.Stat(adminIMAP); err != nil {
+		t.Fatalf("the legacy credential was not migrated at all: %v", err)
+	}
+	if _, err := os.Stat(legacyIMAP); err == nil {
+		t.Fatal("the legacy source survived the migration that consumed it")
+	}
+
+	// The user withdraws the credential, exactly as DELETE /api/imap/config
+	// does it.
+	if err := os.Remove(adminIMAP); err != nil {
+		t.Fatalf("remove migrated config: %v", err)
+	}
+
+	// Next boot.
+	if err := migrateLegacySingleUserData(logger, usersStore, configDir, stateDir, config.UserNotificationSettings{}, false); err != nil {
+		t.Fatalf("second migration: %v", err)
+	}
+	if _, err := os.Stat(adminIMAP); err == nil {
+		t.Fatal("a deleted IMAP credential came back on the next start; the poller resumes " +
+			"with the password the user withdrew")
+	}
+}
+
+// TestTuningSourceIsNotConsumed pins the other half of F7's fix. copyIfMissing
+// is shared with the TUNING.md candidate loop, whose source is the
+// image-shipped prompt the classifier reads on EVERY run. Retiring that one
+// would silently disable tuning instance-wide, so only the IMAP credential is a
+// one-shot handover.
+func TestTuningSourceIsNotConsumed(t *testing.T) {
+	logger, usersStore, configDir, stateDir, _ := legacyMigrationEnv(t)
+	tuning := filepath.Join(configDir, "TUNING.md")
+	if err := os.WriteFile(tuning, []byte("## Allowed Labels\n- Important\n"), 0o600); err != nil {
+		t.Fatalf("write TUNING.md: %v", err)
+	}
+
+	if err := migrateLegacySingleUserData(logger, usersStore, configDir, stateDir, config.UserNotificationSettings{}, false); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := os.Stat(tuning); err != nil {
+		t.Fatalf("the shipped TUNING.md was retired; the classifier reads it on every run: %v", err)
+	}
+}
+
+// TestOpenStoresMigratesBeforeStateNewConsumesTheSource is run-8 finding F14.
+//
+// state.New's migrateJSONIfPresent imports the legacy root state.json /
+// decisions.json into the root state.db and RENAMES them to .migrated. Run
+// opened the state store FIRST, so migrateLegacySingleUserData found no source,
+// copyIfMissing returned silently, and the per-user copy could not happen on any
+// real installation — the data landed in the root state.db, which holds only
+// install-wide flags. Observable on a pre-2026-07-29 upgrade as the admin's
+// decisions feed disappearing and every UNSEEN message being re-processed,
+// re-classified and re-notified once.
+//
+// This goes through openStores, which is the whole sequence Run runs. Calling
+// the migration directly — what migrate_test.go above does — cannot see the
+// defect, which is why it stayed green.
+func TestOpenStoresMigratesBeforeStateNewConsumesTheSource(t *testing.T) {
+	logger, _, configDir, stateDir, _ := legacyMigrationEnv(t)
+
+	usersStore, store, err := openStores(logger, configDir, stateDir, config.UserNotificationSettings{}, false)
+	if err != nil {
+		t.Fatalf("openStores: %v", err)
+	}
+	defer store.Close()
+	admin, err := usersStore.FirstAdmin()
+	if err != nil {
+		t.Fatalf("FirstAdmin: %v", err)
+	}
+
+	userStateDir := filepath.Join(stateDir, "users", admin.ID)
+	for _, name := range []string{"state.json", "decisions.json"} {
+		if _, err := os.Stat(filepath.Join(userStateDir, name)); err != nil {
+			t.Fatalf("%s never reached the admin's per-user state dir: %v — state.New renamed "+
+				"the source out from under the migration", name, err)
+		}
+	}
+
+	// And state.New still did its own job: the legacy sources are retired.
+	if _, err := os.Stat(filepath.Join(stateDir, "state.json")); err == nil {
+		t.Fatal("state.New did not consume the legacy root state.json")
+	}
+}

@@ -109,13 +109,35 @@ export function UsersPage() {
   }
 
   function resetPassword(user: ManagedUser) {
+    // The admin has to be told what this can destroy. A client-protected PGP
+    // key is wrapped under the account password and the server cannot open it,
+    // so a reset makes it permanently unrecoverable — the user is warned about
+    // this on their own security page, and the administrator doing it was told
+    // nothing, before or after.
+    if (
+      !window.confirm(
+        `Reset ${user.username}'s password?\n\n` +
+          "If their PGP key is end-to-end protected, it is wrapped under the password they " +
+          "chose and this server cannot rewrap it. Resetting makes that key — and every " +
+          "message encrypted to it, including their own Sent copies — permanently " +
+          "unreadable unless they hold a recovery backup.\n\n" +
+          "Prefer having them change it themselves if they still can."
+      )
+    ) {
+      return;
+    }
     const password = window.prompt(`New temporary password for ${user.username}:`);
     if (!password || !password.trim()) {
       return;
     }
     void withRowBusy(user, async () => {
-      await resetUserPassword(user.id, password);
-      setStatus(`Password reset for ${user.username}. They must change it on next login.`);
+      const result = await resetUserPassword(user.id, password);
+      setStatus(
+        result.pgpKeyDestroyed
+          ? `Password reset for ${user.username}. Their end-to-end PGP key is now unrecoverable — ` +
+            "tell them to restore from their recovery backup or generate a new identity."
+          : `Password reset for ${user.username}. They must change it on next login.`
+      );
     });
   }
 

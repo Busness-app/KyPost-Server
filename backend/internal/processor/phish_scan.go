@@ -256,10 +256,20 @@ func (p *Poller) flagAppImpersonation(ctx context.Context, uc userCtx, msg imapa
 	// flagged: fail-safe in verdict, fail-soft in consequence — the only cost is an
 	// advisory banner on legitimate mail, and the https link still opens. Logged at
 	// Info, not Error, because it is not a malfunction.
+	//
+	// verifyDKIMCoversHeader, not verifyDKIMForDomain. The comment above asserts
+	// "the pair means the account itself sent the message", and a d= match alone
+	// does not carry that: a signature need not cover From at all, and a message
+	// carrying TWO From headers can present the signed one to the verifier and
+	// the forged one to every other reader. The sibling that handles this
+	// correctly is already imported in this package and already gates alias
+	// verification for exactly this reason. The cost of a miss here is only an
+	// advisory banner, which is why this was a hardening note and not a finding
+	// — but the assertion the code makes should be the one it checks.
 	if ownDomain := domainOf(ownAddress); ownDomain != "" && sameAddress(msg.Sender, ownAddress) {
 		if uid, err := strconv.Atoi(strings.TrimSpace(msg.ID)); err == nil {
 			if raw, err := uc.mail.FetchRawMessage(ctx, uid); err == nil && len(raw) > 0 {
-				if verifyDKIMForDomain(raw, ownDomain) {
+				if verifyDKIMCoversHeader(raw, ownDomain, "From") {
 					p.log.Info(
 						"app-impersonation scan: message is DKIM-authenticated and from the account's own address, not flagging",
 						"user_id", uc.id, "message_id", msg.ID, "domain", ownDomain, "reason", finding.Reason,

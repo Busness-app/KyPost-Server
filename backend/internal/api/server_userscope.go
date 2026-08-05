@@ -30,9 +30,29 @@ import (
 // userContactsStore/userGroupsStore/userRulesStore/userMailCacheStore getters
 // below, which otherwise differ only in which map and constructor they use.
 func getOrCreateUserStore[T any](mu *sync.Mutex, cache map[string]T, lastSeen map[string]time.Time, userID string, construct func() (T, error)) (T, error) {
+	return acquireUserStore(mu, cache, lastSeen, userID, construct, true)
+}
+
+// acquireUserStore is getOrCreateUserStore with control over whether the access
+// counts as the user being seen.
+//
+// touch=false exists for the server's own maintenance passes. rescanDeviceIndex
+// opens EVERY user's store on every rebuild, and a rebuild is triggered — under
+// a 30-second throttle — by any caller presenting an unknown device id, i.e. by
+// an unauthenticated request. Stamping there meant that on any instance with
+// device traffic every user looked freshly active twice a minute, so
+// sweepIdleUserStores could never evict anything and the idle TTL it enforces
+// was unreachable. The bookkeeping recorded the server's own polling as user
+// activity.
+//
+// The store is still constructed and cached when absent; only the "recently
+// seen" claim is withheld, because it would not be true.
+func acquireUserStore[T any](mu *sync.Mutex, cache map[string]T, lastSeen map[string]time.Time, userID string, construct func() (T, error), touch bool) (T, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	lastSeen[userID] = time.Now()
+	if touch {
+		lastSeen[userID] = time.Now()
+	}
 	if st, ok := cache[userID]; ok {
 		return st, nil
 	}
@@ -42,7 +62,22 @@ func getOrCreateUserStore[T any](mu *sync.Mutex, cache map[string]T, lastSeen ma
 		return zero, err
 	}
 	cache[userID] = st
+	// A store this pass constructed still needs an entry, or it is invisible to
+	// the sweep and leaks for the process lifetime. Stamp it only if it is new,
+	// so a genuinely idle user's existing timestamp is not refreshed.
+	if _, known := lastSeen[userID]; !known {
+		lastSeen[userID] = time.Now()
+	}
 	return st, nil
+}
+
+// userStoreForMaintenance is userStore for the server's own background passes:
+// it opens the store without claiming the user was active. See
+// acquireUserStore.
+func (s *Server) userStoreForMaintenance(userID string) (*state.Store, error) {
+	return acquireUserStore(&s.userMu, s.userStores, s.userLastSeen, userID, func() (*state.Store, error) {
+		return state.New(s.userStateDir(userID))
+	}, false)
 }
 
 // userStoreIdleTTL is how long a user's cached stores survive with no requests
@@ -747,7 +782,10 @@ func (s *Server) revokeUserDevices(userID string) error {
 func (s *Server) rescanDeviceIndex() {
 	next := map[string]string{}
 	for _, userID := range s.knownUserIDs() {
-		store, err := s.userStore(userID)
+		// Not userStore: this pass touches every account and is driven by an
+		// unauthenticated caller's unknown device id, so counting it as user
+		// activity made the idle-store sweep unreachable.
+		store, err := s.userStoreForMaintenance(userID)
 		if err != nil {
 			continue
 		}

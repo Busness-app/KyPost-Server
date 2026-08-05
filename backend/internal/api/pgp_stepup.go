@@ -1,10 +1,6 @@
 package api
 
-import (
-	"net/http"
-
-	"kypost-server/backend/internal/users"
-)
+import "net/http"
 
 // Step-up authentication for the operations that replace or destroy a PGP
 // identity.
@@ -17,20 +13,24 @@ import (
 // the identity is worse still and is not undoable at all — mail already
 // encrypted to that key stays unreadable.
 //
-// So these three take the same standard the one endpoint that hands back a
-// private key already took (handlePGPExportLegacyKey): the account password,
-// re-entered now, not merely a session that once involved one.
+// So these take the same standard the one endpoint that hands back a private
+// key already took (handlePGPExportLegacyKey): the account password, re-entered
+// now, not merely a session that once involved one.
 //
-// It does NOT gate first-time setup. An account with no identity yet has
-// nothing to lose to this attack — there is no key to replace and none to
-// strand — and requiring a password to create one would put a credential prompt
-// in the middle of onboarding to protect nothing.
-
-// pgpStepUpRequired reports whether this account already has a PGP identity, and
-// so whether replacing or destroying it needs a fresh credential.
-func pgpStepUpRequired(u users.User) bool {
-	return u.PGPProtection() != "" || u.PGPFingerprint != ""
-}
+// This includes FIRST-TIME setup, and it did not. The carve-out reasoned that
+// "an account with no identity yet has nothing to lose", which is true of the
+// asset the operation destroys and false of the asset it creates. A hijacked
+// session could POST /api/pgp/identity/client with no credential of any kind
+// and install an attacker-held key as the victim's published identity;
+// PublishWKD and AdvertiseAutocrypt both default true, so the victim's outbound
+// mail then advertises it and WKD serves it to every correspondent. A
+// five-minute hijack became a permanent published-key substitution that
+// outlives the session — precisely the durability property cited two paragraphs
+// up to justify gating identity REPLACEMENT.
+//
+// The onboarding cost the carve-out was avoiding turns out not to exist: every
+// client-custody path already had the password in hand, because it wraps the
+// private key with it.
 
 // confirmAccountCredential verifies a re-entered account credential, writing
 // the response and returning false if it does not check out.
@@ -85,18 +85,9 @@ func (s *Server) confirmAccountCredentialNoRecord(w http.ResponseWriter, r *http
 	return true
 }
 
-// requirePGPStepUp gates an operation that would replace or destroy an existing
-// PGP identity. It returns true when the caller may proceed: either because
-// there is no identity to protect yet, or because they just proved the account
-// credential.
+// requirePGPStepUp gates an operation that creates, replaces or destroys a PGP
+// identity. It returns true when the caller may proceed, which now means only
+// one thing: they just proved the account credential.
 func (s *Server) requirePGPStepUp(w http.ResponseWriter, r *http.Request, userID, password, authSecret string) bool {
-	u, err := s.users.Get(userID)
-	if err != nil {
-		http.Error(w, "user unavailable", http.StatusInternalServerError)
-		return false
-	}
-	if !pgpStepUpRequired(u) {
-		return true
-	}
 	return s.confirmAccountCredential(w, r, userID, password, authSecret)
 }

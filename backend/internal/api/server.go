@@ -97,6 +97,12 @@ type Server struct {
 	passwordChangeLockout *failureLockout
 	deviceLockout         *failureLockout
 	wkdLimiter            *ipRateLimiter
+	// accountWriteLimiter meters MUTATING withAuth requests per account. Every
+	// such request is at least one whole-file users.json marshal + fsync under
+	// a global cross-process lock that every authenticated request also reads
+	// through, so an unthrottled mutating route is an instance-wide stall that
+	// one session can drive. See withAuth and accountWriteBurst.
+	accountWriteLimiter *ipRateLimiter
 	// pushPollLimiter meters the two unauthenticated push-MFA endpoints per IP.
 	// They were the only public routes with no meter, and both take mfa.Store's
 	// process-wide lock. See withPushPollRateLimit.
@@ -306,6 +312,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		passwordChangeLockout:    newFailureLockout(passwordChangeMaxFailures, passwordChangeLockoutFor),
 		deviceLockout:            newFailureLockout(deviceMaxFailures, deviceLockoutFor),
 		wkdLimiter:               newIPRateLimiter(wkdRateBurst, wkdRateRefillPerSec),
+		accountWriteLimiter:      newIPRateLimiter(accountWriteBurst, accountWriteRefillPerSec),
 		pushPollLimiter:          newIPRateLimiter(pushPollBurst, pushPollRefillPerSec),
 		loginParamsLimiter:       newIPRateLimiter(loginParamsBurst, loginParamsRefillPerSec),
 		deviceRescan:             newIntervalGate(deviceRescanInterval),
@@ -656,6 +663,15 @@ func (s *Server) Prepare() {
 	// ReadTimeout stays tight because it covers the whole request INCLUDING the
 	// body, and almost every route reads at most a few KB. The handful that accept
 	// a multi-megabyte upload extend it per-request via withUploadDeadline.
+	// MaxHeaderBytes is set explicitly because net/http's default is 1 MiB and
+	// it is a TOTAL per-connection budget with no per-header limit — one request
+	// may carry a single 1,024,000-byte header value. Any handler that retains
+	// something derived from a header (deviceAuthFromRequest's lockout key was
+	// the concrete case) then holds a caller-chosen megabyte, and the compose
+	// file publishes this port directly with a mem_limit well below what a few
+	// thousand of those cost. 64 KiB is far above any real request here: the
+	// largest legitimate headers are the session cookie pair and an
+	// Authorization line.
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
 		Handler:           s.routes(),
@@ -663,6 +679,7 @@ func (s *Server) Prepare() {
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      10 * time.Minute,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 
 	// Optional inbound TLS — see tls.go. The error is stashed rather than returned
@@ -751,6 +768,40 @@ func (s *Server) StartPickupSweeper(ctx context.Context) {
 			// it.
 			if err := s.pickupStore.Sweep(pickupLinkTTL); err != nil {
 				s.logger.Error("pickup sweep failed", "error", err.Error())
+			}
+		}
+	}
+}
+
+// StartEnvelopeSweeper reclaims expired wrapped-envelope rows for every
+// account, hourly, alongside the other maintenance passes.
+//
+// users.Store compacts on any write already, which covers every account that is
+// being used. This covers the one that is not: a device envelope expires,
+// nothing else about that account ever changes, and the row stays in users.json
+// forever — invisible to WrappedEnvelopes(), invisible to the 32-slot cap, and
+// inside the file every authenticated request reads through. Compaction-on-write
+// is opportunistic; this is what makes the TTL a guarantee.
+//
+// Hourly against a seven-day TTL is deliberately coarse. Nothing reads an
+// expired row, so the only thing the interval controls is how long dead bytes
+// sit on disk, and a tighter one would take the global users.json lock more
+// often to reclaim the same bytes.
+func (s *Server) StartEnvelopeSweeper(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			removed, err := s.users.SweepExpiredEnvelopes()
+			if err != nil {
+				s.logger.Error("expired envelope sweep failed", "error", err.Error())
+				continue
+			}
+			if removed > 0 {
+				s.logger.Info("reclaimed expired pgp envelope slots", "removed", strconv.Itoa(removed))
 			}
 		}
 	}

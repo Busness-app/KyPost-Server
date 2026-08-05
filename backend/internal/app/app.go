@@ -79,19 +79,10 @@ func Run(args []string) error {
 	}
 	defer logger.Close()
 
-	store, err := state.New(paths.StateDir)
-	if err != nil {
-		return fmt.Errorf("create state store: %w", err)
-	}
-
 	configDir := config.ConfigDir()
-	usersStore, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
+	usersStore, store, err := openStores(logger, configDir, paths.StateDir, legacyPrefs, legacyPrefsOK)
 	if err != nil {
-		return fmt.Errorf("load users store: %w", err)
-	}
-
-	if err := migrateLegacySingleUserData(logger, usersStore, configDir, paths.StateDir, legacyPrefs, legacyPrefsOK); err != nil {
-		logger.Error("legacy single-user data migration failed", "error", err.Error())
+		return err
 	}
 
 	clearAllMFAIfRequested(logger, usersStore, paths.StateDir)
@@ -186,6 +177,7 @@ func startBackgroundSweepers(ctx context.Context, srv *api.Server) {
 	for _, sweep := range []func(context.Context){
 		srv.StartPickupSweeper,
 		srv.StartContactPhotoSweeper,
+		srv.StartEnvelopeSweeper,
 		srv.StartCooldownSweeper,
 		srv.StartMfaPushLimiterSweeper,
 		srv.StartSessionSweeper,

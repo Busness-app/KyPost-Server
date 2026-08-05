@@ -801,62 +801,58 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		}
 		return users.VerifyPassword(r.Context(), u, req.OldPassword)
 	}
-	offeredCurrent := req.OldAuthSecret
-	if !u.UsesDerivedAuth() {
-		offeredCurrent = req.OldPassword
-	}
-	// Whether this request verifies anything at all. A first-login change with
-	// no old credential offered is the one case that does not, and it must not
-	// spend a strike — the whole point of MustChangePassword is that the user
-	// may not have a password to prove.
-	mustVerify := !u.MustChangePassword || strings.TrimSpace(offeredCurrent) != ""
-	// ...except when the request ALSO replaces the client-wrapped PGP envelope.
+	// This request always verifies the current credential. There is no
+	// MustChangePassword exemption, and there was one.
 	//
-	// The MustChangePassword exemption exists because a user handed a temporary
-	// password may have no "old" credential to prove. That reasoning covers
-	// setting a new password; it does not cover overwriting the sealed private
-	// key, which is irreversible and unverifiable — the server cannot open the
-	// envelope, so a bogus one is only discovered when the key is next needed, and
-	// every message encrypted to that key is gone.
+	// The exemption's stated reasoning — "a user handed a temporary password may
+	// have nothing to prove" — is false as implemented. Every path to a session
+	// on such an account runs through handleLogin, or through an MFA completion
+	// whose challenge is minted only after a successful password login, so the
+	// caller demonstrably HAS the temporary password. The shipped SPA proves it
+	// too: LoginPage refuses to submit this form without a current password and
+	// always sends credentialFields(oldCredential, "old").
 	//
-	// Without this, a session hijacked between an admin reset and the owner's
-	// first password change could set an attacker-chosen credential AND strand the
-	// key, using a request that proves nothing. Every sibling path that writes the
-	// same field (identity/rewrap, identity/client, the envelope slots) is behind
-	// requirePGPStepUp already; this one was not.
-	if strings.TrimSpace(req.RewrappedPGPKey) != "" {
-		mustVerify = true
+	// What the exemption actually bought was a password reset for anyone holding
+	// a cookie. A request carrying only {newAuthSecret, newLoginSalt,
+	// newIterations} verified nothing, returned 200, installed the attacker's
+	// secret, killed the temporary password, cleared MustChangePassword, and
+	// then revokeAllUserCredentialsExcept evicted the owner while preserving the
+	// attacker — against every admin-created and admin-reset account, for the
+	// whole forced-change window. csrf_token is deliberately non-HttpOnly, so
+	// XSS reaches this. 2f0e9d9 gated the recoverable half (the PGP rewrap, an
+	// irreversible write) and left the credential half open.
+	//
+	// The existing test's own comment named the risk: "Inverted, this branch
+	// turns the endpoint into a password reset for anyone holding a cookie."
+	//
+	// Keyed on user AND client IP, like the login lockout and for the same reason:
+	// on the user alone, an attacker holding a stolen cookie burns the whole budget
+	// from their own machine and locks the real owner out of changing their
+	// password — during the incident where changing it is the remedy. Keyed on the
+	// pair, a thief locks out only themselves.
+	lockKey := ac.UserID + "\x00" + lockoutKeyForIP(clientIP(r))
+	if allowed, retryAfter := s.passwordChangeLockout.tryAttempt(lockKey); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":             "too many failed attempts, try again later",
+			"retryAfterSeconds": int(retryAfter.Seconds()) + 1,
+		})
+		return
 	}
-	if mustVerify {
-		// Keyed on user AND client IP, like the login lockout and for the same reason:
-		// on the user alone, an attacker holding a stolen cookie burns the whole budget
-		// from their own machine and locks the real owner out of changing their
-		// password — during the incident where changing it is the remedy. Keyed on the
-		// pair, a thief locks out only themselves.
-		lockKey := ac.UserID + "\x00" + lockoutKeyForIP(clientIP(r))
-		if allowed, retryAfter := s.passwordChangeLockout.tryAttempt(lockKey); !allowed {
-			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{
-				"error":             "too many failed attempts, try again later",
-				"retryAfterSeconds": int(retryAfter.Seconds()) + 1,
-			})
-			return
-		}
-		ok, err := verifyCurrent()
-		if err != nil {
-			// Shed before the derivation ran. Refund: no credential was
-			// examined, so this attempt must not count against the budget.
-			s.passwordChangeLockout.cancelAttempt(lockKey)
-			writeKDFBusy(w)
-			return
-		}
-		if !ok {
-			// tryAttempt already spent the strike.
-			http.Error(w, "invalid credentials", http.StatusUnauthorized)
-			return
-		}
-		s.passwordChangeLockout.recordSuccess(lockKey)
+	okCurrent, err := verifyCurrent()
+	if err != nil {
+		// Shed before the derivation ran. Refund: no credential was
+		// examined, so this attempt must not count against the budget.
+		s.passwordChangeLockout.cancelAttempt(lockKey)
+		writeKDFBusy(w)
+		return
 	}
+	if !okCurrent {
+		// tryAttempt already spent the strike.
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	s.passwordChangeLockout.recordSuccess(lockKey)
 
 	// Prefer the derived form when the client supplied it. The plaintext branch
 	// stays only for clients that have not converted; it is the one that still
@@ -941,6 +937,25 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if ac.MustChangePassword && !mustChangePasswordExemptPaths[r.URL.Path] {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "password change required", "mustChangePassword": true})
 			return
+		}
+		// Per-account meter on MUTATING requests. A session is not a licence to
+		// drive whole-file users.json rewrites in a loop — every account
+		// mutation marshals and fsyncs the entire file under a global
+		// cross-process lock that every authenticated request also reads
+		// through, so one looping session stalls the instance. Reads are
+		// untouched. See accountWriteBurst.
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if ok, retryAfter := s.accountWriteLimiter.allow(ac.UserID); !ok {
+				seconds := int(retryAfter.Seconds()) + 1
+				w.Header().Set("Retry-After", strconv.Itoa(seconds))
+				writeJSON(w, http.StatusTooManyRequests, map[string]any{
+					"error":             "too many requests, slow down",
+					"retryAfterSeconds": seconds,
+				})
+				return
+			}
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	}

@@ -38,17 +38,19 @@ export function getPGPIdentity(): Promise<PGPIdentity> {
 }
 
 /**
- * Step-up credential for the operations that replace or destroy an existing
- * PGP identity.
+ * Step-up credential for the operations that create, replace or destroy a PGP
+ * identity.
  *
  * A session cookie is a bearer token, and everything else it authorises ends
- * with the session. A replaced published key does not: it goes out over WKD and
+ * with the session. A published key does not: it goes out over WKD and
  * Autocrypt, so every future correspondent encrypts to it. Deleting the
  * identity is worse and cannot be undone at all.
  *
- * credentialFields sends only the form the account can verify. Omit `password`
- * entirely (pass "") for a first-time setup, which the server does not gate:
- * there is no key to redirect and none to strand.
+ * That includes the FIRST identity, which the server used to leave ungated on
+ * the reasoning that a keyless account has nothing to lose. It has: the key the
+ * operation publishes. Every caller here must send a credential.
+ *
+ * credentialFields sends only the form the account can verify.
  */
 async function stepUp(password: string): Promise<Record<string, string>> {
   if (!password) return {};
@@ -169,6 +171,22 @@ export function wkdDomainRecord(claim: Pick<WKDDomainClaim, "domain" | "token">)
 
 // ---- end-to-end (client-protected) key handling ----------------------------
 
+/**
+ * A contact's public key together with the addresses the ADDRESS BOOK binds it
+ * to — the contact's own email addresses, never anything the key asserts about
+ * itself via its User IDs.
+ *
+ * The binding travels with the key deliberately. Handing the browser a bare
+ * list of keys made it re-derive "which key is the sender's" from the keys'
+ * User IDs, using a different OpenPGP parser from the one that decided which
+ * contact each key was pinned to, and against data the key's owner writes. See
+ * boundSignerKeys in backend/internal/api/pgp_receive.go.
+ */
+export type BoundSignerKey = {
+  addresses: string[];
+  publicKey: string;
+};
+
 /** The cold-start snapshot — see docs/E2E_PGP.md "Cold start". */
 export type PGPBootstrap = {
   hasIdentity: boolean;
@@ -184,7 +202,7 @@ export type PGPBootstrap = {
   unlockRequired: boolean;
   canDecryptServerSide: boolean;
   migrationAvailable: boolean;
-  signerPublicKeys: string[];
+  signerKeys: BoundSignerKey[];
   /**
    * Addresses a newly generated key must carry as User IDs — the IMAP
    * account address first, then verified send-as aliases. Empty means no
@@ -259,7 +277,7 @@ export type PGPMessagePayload = {
   encryptedPayload: string;
   signaturePayload: string;
   body: string;
-  signerPublicKeys: string[];
+  signerKeys: BoundSignerKey[];
 };
 
 /** Fetches one message's ciphertext for local decryption. */

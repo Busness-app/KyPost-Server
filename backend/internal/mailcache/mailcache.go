@@ -20,6 +20,23 @@ import (
 
 // Entry is one cached message's metadata (and, opportunistically, body) for
 // a mailbox window.
+// PGPVerdictSchema is the version of the signature-binding rules a cached
+// PGPVerified/PGPSigned/PGPSignerFingerprint was computed under. BUMP IT
+// whenever that binding changes.
+//
+// There was no version and no invalidation hook anywhere in this package, and
+// Sync explicitly carries the verdict forward while the delta branch serves it
+// with no body fetch and no re-verification. So a verdict survived the upgrade
+// that was written to correct it: the fix did not apply retroactively to the
+// artifacts it existed for, and a reader looking at a message in the 5,000-entry
+// window still saw the green badge the old rules produced.
+//
+// 2 is the address-book anchor: a key verifies for the addresses its CONTACT
+// carries, checked against that contact's TOFU pin. 1 was the any-User-ID
+// binding, forgeable with a second self-asserted User ID. 0 is "written before
+// this field existed", i.e. also 1 or earlier.
+const PGPVerdictSchema = 2
+
 type Entry struct {
 	UID int `json:"uid"`
 
@@ -78,6 +95,13 @@ type Entry struct {
 	PGPSigned            bool   `json:"pgpSigned,omitempty"`
 	PGPVerified          bool   `json:"pgpVerified,omitempty"`
 	PGPSignerFingerprint string `json:"pgpSignerFingerprint,omitempty"`
+
+	// PGPVerdictSchema is the version of the signature-binding rules the
+	// three fields above were computed under. Entries stamped with anything
+	// else have their verdict — and their warm body, so the next read
+	// recomputes rather than showing nothing — dropped when the file is
+	// loaded. See PGPVerdictSchema (the constant).
+	PGPVerdictSchemaVersion int `json:"pgpVerdictSchema,omitempty"`
 
 	// PGPProtectedSubject is the real subject recovered from a decrypted
 	// message's protected headers, warm-path-only like the other PGP fields.

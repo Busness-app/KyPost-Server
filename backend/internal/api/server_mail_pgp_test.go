@@ -99,7 +99,10 @@ func TestMailSendBlocksSigningWithRevokedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Armor: %v", err)
 	}
-	importBody, _ := json.Marshal(map[string]string{"armoredPrivateKey": armored})
+	importBody, _ := json.Marshal(map[string]string{
+		"armoredPrivateKey": armored,
+		"password":          stepUpPassword(t, srv, srv.mustBootstrapUserID(t)),
+	})
 	importReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/import", bytes.NewReader(importBody))
 	authRequest(srv, importReq)
 	importRec := httptest.NewRecorder()

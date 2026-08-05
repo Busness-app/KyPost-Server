@@ -124,13 +124,25 @@ func TestPasswordChangeSuccessClearsTheStrikes(t *testing.T) {
 	}
 }
 
-// TestPasswordChangeFirstLoginSpendsNoStrike pins the mustVerify branch.
+// TestPasswordChangeOnMustChangeStillRequiresTheCurrentCredential is run-8
+// finding F4.
 //
-// A MustChangePassword account offering no old credential is the one request
-// that verifies nothing, and it must not consume the budget — the point of the
-// flag is that the user may have no password to prove. Inverted, this branch
-// turns the endpoint into a password reset for anyone holding a cookie.
-func TestPasswordChangeFirstLoginSpendsNoStrike(t *testing.T) {
+// The endpoint used to skip verification entirely for a MustChangePassword
+// account that offered no old credential, on the reasoning that "a user handed
+// a temporary password may have nothing to prove". The test that pinned that
+// branch named the consequence in its own comment — "Inverted, this branch
+// turns the endpoint into a password reset for anyone holding a cookie" — and
+// the reasoning does not hold: every session on such an account was minted by
+// handleLogin or by an MFA completion whose challenge follows a successful
+// password login, and the shipped SPA always sends the old credential.
+//
+// So a request carrying only the NEW credential returned 200: the attacker's
+// secret authenticated, the temporary password died, MustChangePassword
+// cleared, and revokeAllUserCredentialsExcept evicted the owner. Every
+// admin-created and admin-reset account was exposed for its whole forced-change
+// window. 2f0e9d9 closed the identical hole on the PGP-rewrap half of the same
+// request and left this one.
+func TestPasswordChangeOnMustChangeStillRequiresTheCurrentCredential(t *testing.T) {
 	srv := newTestServer(t)
 	u, err := srv.users.Create(context.Background(), "newcomer", "temporary-issued-password", users.RoleUser)
 	if err != nil {
@@ -147,12 +159,23 @@ func TestPasswordChangeFirstLoginSpendsNoStrike(t *testing.T) {
 	}
 
 	const home = "198.51.100.4"
-	// Well past the budget. Each of these verifies nothing, so none may count.
-	for i := 0; i < passwordChangeMaxFailures*2; i++ {
-		rec := changePassword(t, srv, u, home, "", "")
-		if rec.Code == http.StatusTooManyRequests {
-			t.Fatalf("attempt %d hit the lockout; a first-login change that offers no old "+
-				"credential verifies nothing and must not spend a strike", i+1)
-		}
+	rec := changePassword(t, srv, u, home, "", "attacker-chosen-password-9876")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a password change offering NO current credential returned %d (%s); "+
+			"the endpoint is a password reset for anyone holding a cookie",
+			rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+
+	// The temporary password must still work, i.e. nothing was written.
+	reloaded, err := srv.users.Get(u.ID)
+	if err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	if !reloaded.MustChangePassword {
+		t.Fatal("MustChangePassword was cleared by a request that proved nothing")
+	}
+	if rec := changePassword(t, srv, reloaded, home, "temporary-issued-password", "the-real-new-password-1234"); rec.Code != http.StatusOK && rec.Code != http.StatusNoContent {
+		t.Fatalf("the genuine first-login change with the temporary password got %d (%s)",
+			rec.Code, strings.TrimSpace(rec.Body.String()))
 	}
 }

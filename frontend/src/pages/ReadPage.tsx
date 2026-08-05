@@ -136,7 +136,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         const payload = await getPGPMessagePayload(sourceMailbox, message.messageId);
         const result = await decryptMessage(
           payload.encryptedPayload,
-          payload.signerPublicKeys ?? [],
+          payload.signerKeys ?? [],
           firstAddressFromText(message.sender || "")
         );
         if (cancelled) return;

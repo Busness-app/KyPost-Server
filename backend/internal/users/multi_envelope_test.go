@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidEnvelopeSlot(t *testing.T) {
@@ -519,5 +520,328 @@ func TestReplacingTheSameIdentityKeepsSlots(t *testing.T) {
 	if len(got.PGPWrappedEnvelopes) != 0 {
 		t.Fatalf("a real identity change must drop sealings of the old key: slots = %+v",
 			got.PGPWrappedEnvelopes)
+	}
+}
+
+// A device: slot is a payload in flight, not a record. Once the device has
+// fetched and re-sealed it locally the server's copy is dead weight, and the
+// device cannot delete it (no session). Expiry is how it goes away.
+func TestDeviceSlotExpires(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:abc", `{"v":2,"dev":1}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope: %v", err)
+	}
+	got, _ := store.Get(id)
+	if len(got.WrappedEnvelopes()) != 2 {
+		t.Fatalf("fresh device slot should be visible: %+v", got.WrappedEnvelopes())
+	}
+	// ExpiresAt must be stamped automatically — a caller is not trusted to remember.
+	if got.PGPWrappedEnvelopes[0].ExpiresAt == "" {
+		t.Fatal("SetPGPWrappedEnvelope did not stamp ExpiresAt on a device slot")
+	}
+
+	// Force it into the past and it must disappear from the synthesised view.
+	got.PGPWrappedEnvelopes[0].ExpiresAt = past
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:abc", `{"v":2,"dev":1}`, ""); err != nil {
+		t.Fatalf("re-set: %v", err)
+	}
+	expired := User{
+		PGPPrivateKeyWrapped: `{"v":2,"pw":true}`,
+		PGPWrappedEnvelopes:  []WrappedEnvelope{{Slot: "device:abc", Envelope: "x", ExpiresAt: past}},
+	}
+	if slots := expired.WrappedEnvelopes(); len(slots) != 1 || slots[0].Slot != EnvelopeSlotPassword {
+		t.Fatalf("expired device slot still visible: %+v", slots)
+	}
+}
+
+// The recovery slot is a durable sealing, not cargo. It must never expire.
+func TestRecoverySlotDoesNotExpire(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, `{"v":2,"rec":1}`, ""); err != nil {
+		t.Fatalf("SetPGPWrappedEnvelope: %v", err)
+	}
+	got, _ := store.Get(id)
+	if got.PGPWrappedEnvelopes[0].ExpiresAt != "" {
+		t.Fatalf("recovery slot was given an expiry: %q", got.PGPWrappedEnvelopes[0].ExpiresAt)
+	}
+}
+
+// An expired slot must not consume cap headroom — otherwise a device that
+// enrolled and went quiet permanently costs the user a slot. This must go
+// through SetPGPWrappedEnvelope's own cap check (the `live` counter), not
+// just WrappedEnvelopes()'s read-side filter — that mechanism is already
+// covered by TestDeviceSlotExpires.
+func TestExpiredSlotsDoNotCountTowardTheCap(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+
+	// Fill to exactly the cap with live device slots, and confirm the cap
+	// still bites — this pins that the cap is not simply gone.
+	for i := 0; i < maxWrappedEnvelopeSlots; i++ {
+		slot := fmt.Sprintf("device:%02d", i)
+		if _, err := store.SetPGPWrappedEnvelope(id, slot, "x", ""); err != nil {
+			t.Fatalf("fill slot %d: %v", i, err)
+		}
+	}
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:overflow", "x", ""); !errors.Is(err, ErrTooManyEnvelopeSlots) {
+		t.Fatalf("cap did not bite on a full table: %v", err)
+	}
+
+	// Age every slot into the past. SetPGPWrappedEnvelope always stamps a
+	// fresh future expiry, so there is no way to produce a past one through
+	// the public API — write it directly to the store's backing file via
+	// store.mutate, the same internal seam TestGetClonesWrappedEnvelopesFromCache
+	// above already uses for the same reason (no writer for this field exists
+	// yet through the public surface). No new test-only seam is added.
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := store.mutate(id, func(u *User) error {
+		for i := range u.PGPWrappedEnvelopes {
+			u.PGPWrappedEnvelopes[i].ExpiresAt = past
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age slots: %v", err)
+	}
+
+	// The table is still nominally full, but every slot is expired: this is
+	// the headroom actually freeing.
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:overflow", "x", ""); err != nil {
+		t.Fatalf("add after expiry should have succeeded, freeing headroom: %v", err)
+	}
+}
+
+// TestExpiredSlotsAreCompactedOnTheNextWrite is run-8 finding F5's new half.
+//
+// 73d846f made expired device envelopes invisible: WrappedEnvelopes() filters
+// them on read and the slot cap counts only live ones. Nothing removed them.
+// The rows stayed on disk, inside the file users.Store rewrites WHOLE on every
+// account mutation and every authenticated request reads through — 4 MiB per
+// account per week, permanently, with the visible slot count pinned and no
+// operator surface that could see it. The 32-slot cap, whose own comment exists
+// to bound each account's share of that shared cost, stopped bounding anything.
+func TestExpiredSlotsAreCompactedOnTheNextWrite(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+
+	for i := 0; i < 4; i++ {
+		if _, err := store.SetPGPWrappedEnvelope(id, fmt.Sprintf("device:%02d", i), "x", ""); err != nil {
+			t.Fatalf("add slot %d: %v", i, err)
+		}
+	}
+	// Age them all, exactly as TestExpiredSlotsDoNotCountTowardTheCap does:
+	// SetPGPWrappedEnvelope always stamps a future expiry, so a past one has to
+	// be written through the store's own mutate seam.
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := store.mutate(id, func(u *User) error {
+		for i := range u.PGPWrappedEnvelopes {
+			u.PGPWrappedEnvelopes[i].ExpiresAt = past
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age slots: %v", err)
+	}
+
+	// The rows are still THERE — invisible to WrappedEnvelopes(), but on disk.
+	// Read the raw field, not the filtered accessor, or this test cannot see
+	// the thing it is about.
+	before, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(before.PGPWrappedEnvelopes) != 4 {
+		t.Fatalf("test setup: expected 4 aged rows on disk, got %d", len(before.PGPWrappedEnvelopes))
+	}
+
+	// Any subsequent write — this one touches nothing to do with envelopes —
+	// must reclaim them.
+	if _, err := store.SetPushMFAEnabled(id, true); err != nil {
+		t.Fatalf("SetPushMFAEnabled: %v", err)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(after.PGPWrappedEnvelopes) != 0 {
+		t.Fatalf("%d expired rows survived a write; they are invisible to every reader "+
+			"and to the slot cap, so nothing else will ever remove them", len(after.PGPWrappedEnvelopes))
+	}
+}
+
+// TestDeletingAnAbsentSlotDoesNotWrite is run-8 finding F5's second live
+// amplifier. DELETE /api/pgp/identity/envelope/{slot} returned nil
+// unconditionally from its mutate fn, so it always paid a whole-file marshal
+// and two fsyncs under the global lock — measured at 393 rewrites/s from one
+// looping caller, against a file every authenticated request reads through.
+//
+// UpdatedAt is the observable: mutateGuarded stamps it only when it writes.
+func TestDeletingAnAbsentSlotDoesNotWrite(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, "x", ""); err != nil {
+		t.Fatalf("seed slot: %v", err)
+	}
+	before, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// The stamp has one-second resolution, so a write would have to land in the
+	// same second to hide. Wait past the boundary first.
+	time.Sleep(1100 * time.Millisecond)
+	if _, err := store.DeletePGPWrappedEnvelope(id, "device:never-existed"); err != nil {
+		t.Fatalf("deleting an absent slot should succeed: %v", err)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.UpdatedAt != before.UpdatedAt {
+		t.Fatalf("deleting a slot that was not there rewrote users.json (UpdatedAt %s -> %s)",
+			before.UpdatedAt, after.UpdatedAt)
+	}
+
+	// ...and a real delete still writes.
+	if _, err := store.DeletePGPWrappedEnvelope(id, EnvelopeSlotRecovery); err != nil {
+		t.Fatalf("DeletePGPWrappedEnvelope: %v", err)
+	}
+	deleted, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(deleted.WrappedEnvelopes()) != 1 {
+		t.Fatalf("a real delete did not remove the slot: %+v", deleted.WrappedEnvelopes())
+	}
+}
+
+// TestSweepExpiredEnvelopesReclaimsIdleAccounts is the guarantee half of the
+// TTL. Compaction inside mutateGuarded covers every account that is being
+// written to; this covers the one that is not — a device envelope expires,
+// nothing else about the account ever changes, and the row stays in users.json
+// forever, invisible to WrappedEnvelopes() and to the slot cap but inside the
+// file every authenticated request reads through.
+func TestSweepExpiredEnvelopesReclaimsIdleAccounts(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+
+	for i := 0; i < 3; i++ {
+		if _, err := store.SetPGPWrappedEnvelope(id, fmt.Sprintf("device:%02d", i), "x", ""); err != nil {
+			t.Fatalf("add device slot %d: %v", i, err)
+		}
+	}
+	// A recovery slot, which never expires: the sweep must not take it.
+	if _, err := store.SetPGPWrappedEnvelope(id, EnvelopeSlotRecovery, "keep-me", ""); err != nil {
+		t.Fatalf("add recovery slot: %v", err)
+	}
+
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := store.mutate(id, func(u *User) error {
+		for i := range u.PGPWrappedEnvelopes {
+			if strings.HasPrefix(u.PGPWrappedEnvelopes[i].Slot, EnvelopeSlotDevicePrefix) {
+				u.PGPWrappedEnvelopes[i].ExpiresAt = past
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("age device slots: %v", err)
+	}
+
+	before, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	// The account is now idle: nothing will write to it again, and the raw rows
+	// are still on disk.
+	// Four raw rows: recovery plus three device. The password sealing is the
+	// legacy PGPPrivateKeyWrapped field, which WrappedEnvelopes() surfaces as a
+	// synthetic entry and which is not a row here.
+	if len(before.PGPWrappedEnvelopes) != 4 {
+		t.Fatalf("test setup: expected 4 raw rows (recovery + 3 device), got %d",
+			len(before.PGPWrappedEnvelopes))
+	}
+	stamp := before.UpdatedAt
+
+	removed, err := store.SweepExpiredEnvelopes()
+	if err != nil {
+		t.Fatalf("SweepExpiredEnvelopes: %v", err)
+	}
+	if removed != 3 {
+		t.Fatalf("sweep removed %d rows, want 3", removed)
+	}
+
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(after.PGPWrappedEnvelopes) != 1 || after.PGPWrappedEnvelopes[0].Slot != EnvelopeSlotRecovery {
+		t.Fatalf("the sweep did not leave exactly the untimed recovery slot: %+v", after.PGPWrappedEnvelopes)
+	}
+	// And the password sealing is still reachable, so the account is not
+	// stranded by its own maintenance.
+	if len(after.WrappedEnvelopes()) != 2 {
+		t.Fatalf("expected the recovery and password sealings to remain: %+v", after.WrappedEnvelopes())
+	}
+	// A maintenance pass that removes rows nobody could see is not a
+	// modification anyone made.
+	if after.UpdatedAt != stamp {
+		t.Fatalf("the sweep bumped UpdatedAt (%s -> %s), reporting a change no observer can see",
+			stamp, after.UpdatedAt)
+	}
+}
+
+// A sweep with nothing to reclaim must not write at all: it runs hourly on
+// every instance, and users.json is rewritten whole under a global
+// cross-process lock that every authenticated request reads through.
+func TestSweepWithNothingExpiredDoesNotWrite(t *testing.T) {
+	store, id := newClientProtectedUser(t)
+	if _, err := store.SetPGPWrappedEnvelope(id, "device:live", "x", ""); err != nil {
+		t.Fatalf("add slot: %v", err)
+	}
+	path := store.path
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	removed, err := store.SweepExpiredEnvelopes()
+	if err != nil {
+		t.Fatalf("SweepExpiredEnvelopes: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("sweep removed %d rows with nothing expired", removed)
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("an empty sweep rewrote users.json; it runs hourly and takes the global " +
+			"lock every authenticated request reads through")
+	}
+}
+
+// users.json holds every account record: the sealed TOTP secrets, the scrypt
+// password hashes and the wrapped PGP envelopes. Its directory was created
+// 0o755 while fsutil.AtomicWriteFile writes the file itself 0o700 — the
+// container runs as a non-root user, so a world-readable directory is a real
+// difference in who can list it.
+func TestUsersDirectoryIsNotWorldReadable(t *testing.T) {
+	// A config dir this store has to CREATE. Pointing at t.TempDir() directly
+	// would measure the test harness's permissions, not ours — MkdirAll leaves
+	// an existing directory alone.
+	dir := filepath.Join(t.TempDir(), "config")
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	if _, err := store.List(); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	info, err := os.Stat(filepath.Dir(store.path))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("the directory holding users.json is mode %04o, matching neither "+
+			"fsutil.AtomicWriteFile's 0o700 for the file inside it nor what the data is", perm)
 	}
 }

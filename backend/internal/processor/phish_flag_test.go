@@ -65,11 +65,46 @@ func newPhishTestStore(t *testing.T) *state.Store {
 // withDKIMResult forces the DKIM gate's answer. The real verifier resolves the
 // signing domain's key from live DNS, which no unit test can satisfy; the crypto
 // itself is covered in internal/adapters/imap/dkim_verify_test.go.
+//
+// It stubs verifyDKIMCoversHeader, which is what the gate calls: a d= match
+// alone does not establish that the account sent the message, because a
+// signature need not cover From and a two-From message can present the signed
+// copy to the verifier and the forged one to every other reader.
 func withDKIMResult(t *testing.T, verified bool) {
 	t.Helper()
-	original := verifyDKIMForDomain
-	verifyDKIMForDomain = func([]byte, string) bool { return verified }
-	t.Cleanup(func() { verifyDKIMForDomain = original })
+	original := verifyDKIMCoversHeader
+	verifyDKIMCoversHeader = func([]byte, string, string) bool { return verified }
+	t.Cleanup(func() { verifyDKIMCoversHeader = original })
+}
+
+// TestAppImpersonationGateRequiresTheSignatureToCoverFrom pins WHICH verifier
+// the gate uses. A d=-only match satisfies verifyDKIMForDomain and must not
+// satisfy this gate, whose comment claims the message came from the account
+// itself.
+func TestAppImpersonationGateRequiresTheSignatureToCoverFrom(t *testing.T) {
+	original := verifyDKIMCoversHeader
+	var gotHeader string
+	verifyDKIMCoversHeader = func(_ []byte, _ string, header string) bool {
+		gotHeader = header
+		return true
+	}
+	t.Cleanup(func() { verifyDKIMCoversHeader = original })
+
+	p := newPhishTestPoller(t)
+	uc := userCtx{
+		id:    "u1",
+		store: newPhishTestStore(t),
+		mail:  &phishStubClient{raw: map[int][]byte{42: []byte("raw message")}},
+	}
+	msg := imapadapter.Message{ID: "42", Subject: "Notice", Sender: ownAccountAddress, Body: phishingBody}
+	if p.flagAppImpersonation(context.Background(), uc, msg, ownAccountAddress) {
+		t.Fatal("a message the stub authenticated was flagged anyway")
+	}
+
+	if gotHeader != "From" {
+		t.Fatalf("the gate asked for header %q; a signature that does not cover From does not "+
+			"establish that the account sent the message", gotHeader)
+	}
 }
 
 const phishingBody = "Confirm: kypost://native-pair?sub=v&srv=https://evil.example&pt=z"

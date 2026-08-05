@@ -33,6 +33,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// this response copy — the live s.cfg is never mutated.
 		cfg.Classifier.APIKeySet = cfg.Classifier.APIKey != ""
 		cfg.Classifier.APIKey = ""
+		// GET is withAuth while PUT is withAdmin, and that asymmetry is
+		// load-bearing: NotificationsPage is a non-admin page and consumes this.
+		// But the whole document went out, so a non-admin learned
+		// classifier.baseUrl — frequently an internal-network host they have no
+		// other route to discover — and the exact redaction.patterns regexes
+		// stripped from mail before it reaches the model, which tells them
+		// precisely which PII shapes SURVIVE redaction. Neither is needed by any
+		// non-admin surface.
+		if ac, ok := authFromContext(r); !ok || ac.Role != users.RoleAdmin {
+			cfg.Classifier.BaseURL = ""
+			cfg.Classifier.ClassifyPath = ""
+			cfg.Redaction.Patterns = nil
+		}
 		writeJSON(w, http.StatusOK, cfg)
 	case http.MethodPut:
 		var next config.Config

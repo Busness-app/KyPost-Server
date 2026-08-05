@@ -601,7 +601,9 @@ func contactFromVCard(uid string, card vcard.Card) parsedVCardContact {
 		c.Relations = appendCappedValue(c.Relations, contacts.ContactRelation{Label: f.Params.Get(vcard.ParamType), Name: f.Value})
 	}
 	if anniv := card.Value(vcard.FieldAnniversary); anniv != "" {
-		c.Events = append(c.Events, contacts.ContactEvent{Label: "anniversary", Date: anniv})
+		// appendCappedValue like every sibling: this was the one remaining bare
+		// append in this function, and a bound with one hole in it is not a bound.
+		c.Events = appendCappedValue(c.Events, contacts.ContactEvent{Label: "anniversary", Date: anniv})
 	}
 	for _, f := range card["X-ABDATE"] {
 		label := f.Params.Get(vcard.ParamType)

@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -339,5 +341,99 @@ func TestResolveMailAuthContext_LockoutIs429(t *testing.T) {
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Fatal("expected a Retry-After header on the 429 response")
+	}
+}
+
+// TestUnknownDeviceIdsNeverEnterTheLockoutTable is run-8 finding F2 (HIGH).
+//
+// deviceAuthFromRequest used to spend a lockout strike on the caller-supplied
+// X-Kypost-Device-Id BEFORE resolving whether any such device exists.
+// tryAttempt inserts unknown keys, and at loginLockoutHardCap it sheds the NEW
+// key rather than evicting an old one — deliberately, because for the login
+// table a genuine caller already holds a resident entry. On the device path
+// that premise does not hold: recordSuccess DELETES the entry on every
+// success, so a healthy paired device is always a new key. 50,000 anonymous
+// requests with invented device ids (245 ms, no credential of any kind) filled
+// the table, and every real device then got 429 on mail sync, contacts sync
+// and push-MFA approval — presenting the correct secret, from an unrelated
+// address.
+//
+// Resolving the device first means only a real, currently-paired id can
+// occupy a slot.
+func TestUnknownDeviceIdsNeverEnterTheLockoutTable(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
+	deviceID, deviceSecret := pairNativeDevice(t, srv, userID, "device-flood-victim")
+
+	for i := 0; i < 200; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull", nil)
+		setDeviceHeaders(req, "flood-"+strconv.Itoa(i), "x")
+		if _, _, ok, _ := srv.deviceAuthFromRequest(req); ok {
+			t.Fatalf("flood request %d authenticated", i)
+		}
+	}
+
+	srv.deviceLockout.mu.Lock()
+	resident := len(srv.deviceLockout.entries)
+	srv.deviceLockout.mu.Unlock()
+	if resident != 0 {
+		t.Fatalf("%d lockout entries after 200 invented device ids; an unauthenticated "+
+			"caller can size this table, and at loginLockoutHardCap it sheds every real device", resident)
+	}
+
+	// And the genuine device is unaffected, which is the harm the flood caused.
+	req := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull", nil)
+	setDeviceHeaders(req, deviceID, deviceSecret)
+	if _, _, ok, retryAfter := srv.deviceAuthFromRequest(req); !ok || retryAfter > 0 {
+		t.Fatalf("genuine device: ok=%v retryAfter=%v, want ok=true retryAfter=0", ok, retryAfter)
+	}
+}
+
+// TestOverlongDeviceCredentialsAreRejected is F2's memory variant. The entry
+// COUNT was capped; the key BYTES were not, and sweepIfCrowdedLocked returns
+// immediately below loginLockoutSweepThreshold so sub-threshold entries are
+// never reclaimed. Go's 1 MiB DefaultMaxHeaderBytes is a total per-connection
+// budget with no per-header limit, so a 1,024,000-byte device id is accepted
+// and ~9,999 of them hold 9.76 GiB against the compose file's mem_limit of 8g.
+//
+// maxDeviceTextLen is the same cap handleNativeRegister applies when a device
+// id is stored, so anything longer could never have been registered.
+func TestOverlongDeviceCredentialsAreRejected(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull", nil)
+	setDeviceHeaders(req, strings.Repeat("a", maxDeviceTextLen+1), "secret")
+	if id, secret := deviceCredentialsFromRequest(req); id != "" || secret != "" {
+		t.Fatalf("an over-length device id was accepted: len(id)=%d", len(id))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull", nil)
+	setDeviceHeaders(req, "device-1", strings.Repeat("b", maxDeviceSecretLen+1))
+	if id, secret := deviceCredentialsFromRequest(req); id != "" || secret != "" {
+		t.Fatalf("an over-length device secret was accepted: len(secret)=%d", len(secret))
+	}
+
+	// A device id at the registration cap still works.
+	req = httptest.NewRequest(http.MethodGet, "/api/notifications/native/pull", nil)
+	setDeviceHeaders(req, strings.Repeat("a", maxDeviceTextLen), "secret")
+	if id, _ := deviceCredentialsFromRequest(req); len(id) != maxDeviceTextLen {
+		t.Fatalf("a device id at the registration cap was rejected (len=%d)", len(id))
+	}
+}
+
+// TestServerCapsHeaderBytes pins the MaxHeaderBytes that closes F2's OOM at
+// the transport rather than at one handler. net/http's zero value means the
+// 1 MiB default, so this must be set explicitly.
+func TestServerCapsHeaderBytes(t *testing.T) {
+	srv := newTestServer(t)
+	srv.Prepare()
+	if srv.httpServer.MaxHeaderBytes == 0 {
+		t.Fatal("MaxHeaderBytes is unset, so net/http applies its 1 MiB default — a single " +
+			"request may carry a 1,024,000-byte header value")
+	}
+	if srv.httpServer.MaxHeaderBytes > 128<<10 {
+		t.Fatalf("MaxHeaderBytes = %d, larger than any legitimate request here", srv.httpServer.MaxHeaderBytes)
 	}
 }

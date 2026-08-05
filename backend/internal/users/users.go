@@ -153,6 +153,13 @@ type WrappedEnvelope struct {
 	Slot     string `json:"slot"`
 	Envelope string `json:"envelope"`
 	AddedAt  string `json:"addedAt,omitempty"`
+	// ExpiresAt is set only on device: slots, which carry a payload in flight
+	// rather than a durable sealing. The device that the envelope is for cannot
+	// delete it — deletion needs a session and the ceremony's last step runs on
+	// the device — so an expiry is how the server stops holding a copy whose
+	// journey is over. Empty means "never", which is right for password and
+	// recovery slots.
+	ExpiresAt string `json:"expiresAt,omitempty"`
 }
 
 // Envelope slot names. "password" is not writable through the slot API: it
@@ -184,6 +191,14 @@ const maxDeviceSlotIDLen = 128
 // one must keep working at the cap, or a user who reaches it can never
 // rotate a sealing again.
 const maxWrappedEnvelopeSlots = 32
+
+// DeviceEnvelopeTTL bounds how long the server keeps a device: transport copy.
+// Seven days matches the pickup-link retention window rather than introducing a
+// third number; if one moves, both should. It is generous on purpose — enrolling
+// at pairing completes in seconds, and this window only matters when the device
+// is offline during a deferred enrollment. A device that misses it re-runs the
+// ceremony; nothing is lost but the ceremony.
+const DeviceEnvelopeTTL = 7 * 24 * time.Hour
 
 // MaxWrappedEnvelopeBytes bounds a single client-wrapped envelope, whichever
 // field it lands in.
@@ -238,12 +253,27 @@ func (u User) WrappedEnvelopes() []WrappedEnvelope {
 		})
 	}
 	for _, e := range u.PGPWrappedEnvelopes {
-		if e.Slot == EnvelopeSlotPassword {
+		if e.Slot == EnvelopeSlotPassword || e.expired() {
 			continue
 		}
 		out = append(out, e)
 	}
 	return out
+}
+
+// expired reports whether this envelope's TTL has passed. An unparseable
+// ExpiresAt counts as expired: a timestamp the server cannot read is not
+// evidence that a payload is still wanted, and failing closed here costs a
+// re-run of the ceremony rather than leaving a blob around indefinitely.
+func (e WrappedEnvelope) expired() bool {
+	if e.ExpiresAt == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, e.ExpiresAt)
+	if err != nil {
+		return true
+	}
+	return time.Now().UTC().After(t)
 }
 
 // HasServerReadableKey reports whether the server can still decrypt this user's
@@ -684,8 +714,12 @@ func (s *Store) createInitial(f usersFile) (won bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	// 0o700, matching fsutil.AtomicWriteFile's 0o700 for this same class of
+	// data. This directory holds users.json — every account record, the sealed
+	// TOTP secrets, the scrypt password hashes and the wrapped PGP envelopes —
+	// and was created world-readable while the file written into it was not.
 	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return false, err
 	}
 	tmp, err := os.CreateTemp(dir, ".users.json.tmp.*")
@@ -985,6 +1019,73 @@ func (s *Store) Create(ctx context.Context, username, password string, role Role
 // the same reason.
 var errNoChangeNeeded = errors.New("users: no change needed")
 
+// compactExpiredEnvelopes drops the wrapped-envelope slots whose transport TTL
+// has passed, reporting whether it removed any.
+//
+// Called from mutateGuarded so every write path compacts, rather than from the
+// two envelope endpoints — the leak's whole character was that the expired rows
+// were invisible to every reader, so the fix must not depend on someone
+// remembering to look.
+func compactExpiredEnvelopes(u *User) bool {
+	kept := u.PGPWrappedEnvelopes[:0]
+	for _, e := range u.PGPWrappedEnvelopes {
+		if !e.expired() {
+			kept = append(kept, e)
+		}
+	}
+	if len(kept) == len(u.PGPWrappedEnvelopes) {
+		return false
+	}
+	u.PGPWrappedEnvelopes = kept
+	return true
+}
+
+// SweepExpiredEnvelopes drops every user's expired wrapped-envelope rows in a
+// single pass, returning how many it removed.
+//
+// mutateGuarded already compacts on any write, which handles every account that
+// is being used. This is for the account that is not: a device envelope expires,
+// nothing else about that account ever changes, and the row sits in users.json
+// forever — invisible to WrappedEnvelopes(), invisible to the slot cap, and
+// inside the file every authenticated request on the instance reads through.
+// Compaction-on-write is opportunistic; this is the guarantee.
+//
+// ONE read-modify-write for every user, not one per user. The whole cost being
+// reclaimed here is whole-file rewrites under a global cross-process lock, so a
+// sweep that took that lock once per account would be a smaller version of the
+// problem it exists to fix.
+//
+// It deliberately does NOT stamp UpdatedAt. The rows removed were already
+// invisible to every reader and to the cap, so from any observer's point of
+// view the account did not change; bumping the timestamp would report a
+// modification that no one made and nothing can see.
+func (s *Store) SweepExpiredEnvelopes() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	removed := 0
+	err := fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readFileUnlocked()
+		if err != nil {
+			return err
+		}
+		for i := range f.Users {
+			before := len(f.Users[i].PGPWrappedEnvelopes)
+			if compactExpiredEnvelopes(&f.Users[i]) {
+				removed += before - len(f.Users[i].PGPWrappedEnvelopes)
+			}
+		}
+		if removed == 0 {
+			return nil
+		}
+		return s.writeFileUnlocked(f)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
 // mutate re-reads the store, applies fn to the matching user, and persists
 // the result. fn returns an error to abort without writing.
 func (s *Store) mutate(id string, fn func(*User) error) (User, error) {
@@ -1017,6 +1118,17 @@ func (s *Store) mutateGuarded(id string, guard func(all []User, target User) err
 					return err
 				}
 			}
+			// Drop envelope slots whose transport TTL has passed, on whatever
+			// write happens to come next.
+			//
+			// WrappedEnvelopes() filters them on READ and the slot cap counts
+			// only live ones, so an expired row was invisible to every reader
+			// and to the bound that exists to cap an account's share of this
+			// file — but nothing removed it. Measured: 4 MiB per account per
+			// week, permanently, with the visible slot count pinned at 33 and
+			// no operator surface that could even see it. This is the one place
+			// every write passes.
+			compacted := compactExpiredEnvelopes(&f.Users[i])
 			if err := fn(&f.Users[i]); err != nil {
 				// A mutation that changes nothing must not cost a write. Every
 				// write here is a whole-file marshal + fsync under this lock,
@@ -1024,11 +1136,17 @@ func (s *Store) mutateGuarded(id string, guard func(all []User, target User) err
 				// unthrottled endpoint that re-sets a field to the value it
 				// already holds is a free instance-wide stall. See
 				// ErrNoChangeNeeded.
-				if errors.Is(err, errNoChangeNeeded) {
+				//
+				// ...unless the compaction above actually removed something, in
+				// which case there IS a change to persist and eliding the write
+				// would leave the expired rows on disk forever.
+				if errors.Is(err, errNoChangeNeeded) && !compacted {
 					updated = f.Users[i]
 					return nil
 				}
-				return err
+				if !errors.Is(err, errNoChangeNeeded) {
+					return err
+				}
 			}
 			f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 			if err := s.writeFileUnlocked(f); err != nil {
@@ -1360,6 +1478,10 @@ func (s *Store) SetPGPWrappedEnvelope(id, slot, envelope, addedAt string) (User,
 	if strings.TrimSpace(envelope) == "" {
 		return User{}, errors.New("wrapped envelope is required")
 	}
+	expiresAt := ""
+	if strings.HasPrefix(slot, EnvelopeSlotDevicePrefix) {
+		expiresAt = time.Now().UTC().Add(DeviceEnvelopeTTL).Format(time.RFC3339)
+	}
 	return s.mutate(id, func(u *User) error {
 		if u.PGPFingerprint == "" {
 			return ErrNoPGPIdentity
@@ -1375,15 +1497,24 @@ func (s *Store) SetPGPWrappedEnvelope(id, slot, envelope, addedAt string) (User,
 			if u.PGPWrappedEnvelopes[i].Slot == slot {
 				u.PGPWrappedEnvelopes[i].Envelope = envelope
 				u.PGPWrappedEnvelopes[i].AddedAt = addedAt
+				u.PGPWrappedEnvelopes[i].ExpiresAt = expiresAt
 				return nil
 			}
 		}
 		// Past this point the slot is new, not a replace — the cap applies.
-		if len(u.PGPWrappedEnvelopes) >= maxWrappedEnvelopeSlots {
+		// Only live entries count, so an expired slot frees headroom: a device
+		// that enrolled once and went quiet must not cost the user a slot forever.
+		live := 0
+		for _, e := range u.PGPWrappedEnvelopes {
+			if !e.expired() {
+				live++
+			}
+		}
+		if live >= maxWrappedEnvelopeSlots {
 			return ErrTooManyEnvelopeSlots
 		}
 		u.PGPWrappedEnvelopes = append(u.PGPWrappedEnvelopes, WrappedEnvelope{
-			Slot: slot, Envelope: envelope, AddedAt: addedAt,
+			Slot: slot, Envelope: envelope, AddedAt: addedAt, ExpiresAt: expiresAt,
 		})
 		return nil
 	})
@@ -1405,6 +1536,13 @@ func (s *Store) DeletePGPWrappedEnvelope(id, slot string) (User, error) {
 			if e.Slot != slot {
 				kept = append(kept, e)
 			}
+		}
+		// Deleting a slot that is not there is a no-op, so it must not cost a
+		// whole-file marshal + fsync under the global lock every authenticated
+		// request contends with. It did: this returned nil unconditionally and
+		// so always wrote, measured at 393 rewrites/s from one looping caller.
+		if len(kept) == len(u.PGPWrappedEnvelopes) {
+			return errNoChangeNeeded
 		}
 		u.PGPWrappedEnvelopes = kept
 		return nil

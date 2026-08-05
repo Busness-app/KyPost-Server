@@ -27,6 +27,17 @@ async function generateTestKey(name: string, email: string): Promise<TestKey> {
   return { publicKey, privateKey };
 }
 
+/**
+ * A key as the server hands it over: labelled with the addresses the ADDRESS
+ * BOOK binds it to, which is the contact's own email list — not anything the
+ * key says about itself. `bound(mallory, "mallory@evil.example")` is what the
+ * Autocrypt harvest produces for a key pinned under Mallory's contact,
+ * whatever User IDs that key happens to carry.
+ */
+function bound(key: TestKey, ...addresses: string[]) {
+  return { addresses, publicKey: key.publicKey };
+}
+
 /** Encrypts to recipientPublicKey, signed by signerPrivateKey. */
 async function encryptSignedFor(
   recipientPublicKey: string,
@@ -56,7 +67,7 @@ describe("signature verification is bound to the sender", () => {
     try {
       const result = await decryptMessage(
         ciphertext,
-        [mallory.publicKey, bob.publicKey],
+        [bound(mallory, "mallory@evil.example"), bound(bob, "bob@example.com")],
         "bob@example.com"
       );
 
@@ -77,7 +88,11 @@ describe("signature verification is bound to the sender", () => {
 
     unlockWithArmoredKey(victim.privateKey);
     try {
-      const result = await decryptMessage(ciphertext, [bob.publicKey], "bob@example.com");
+      const result = await decryptMessage(
+        ciphertext,
+        [bound(bob, "bob@example.com")],
+        "bob@example.com"
+      );
 
       expect(result.signed).toBe(true);
       expect(result.verified).toBe(true);
@@ -154,47 +169,52 @@ describe("the Sent copy is encrypted to the sender's own key (run-4 M5)", () => 
   }, 30000);
 });
 
-// run-7 finding F1: the H7 fix above was implemented as a raw-substring test,
-// `uid.toLowerCase().includes("<" + sender + ">")`, over the UNPARSED User-ID
-// string. A User ID is free-form and self-certified, and the Go backend parses it
-// differently: go-crypto's parseUserId stops after the FIRST bracketed address,
-// while a substring test is order-independent. So a single crafted UID
+// run-7 F1, then run-8 F1: the H7 fix above was reimplemented twice against the
+// key's own User IDs — first as a raw-substring test, then as a parsed-email
+// comparison — and both are forgeable, because a User ID is self-asserted and
+// one key may carry as many as its owner likes.
 //
-//     Mallory <mallory@evil.example> aka Bob <bob@example.com>
+// The run-8 payload needs no crafted string at all: ONE key with the two
+// ordinary User IDs `Mallory <mallory@evil.example>` and `Bob <bob@example.com>`.
+// The Autocrypt harvest validates it against Mallory's From, matches on the
+// first, and pins it under HER contact with no prompt. The second then satisfied
+// any "does this key certify the sender" test and the badge went green under a
+// spoofed From — with the real signer's fingerprint suppressed, since ReadPage
+// shows it only when !verified.
 //
-// parsed server-side as mallory@evil.example — the Autocrypt harvest pinned it
-// under the ATTACKER's own contact with no prompt — while the browser found
-// <bob@example.com> inside the raw string and rendered "signature verified" under
-// a spoofed From, with the real signer's fingerprint suppressed (ReadPage only
-// shows it when !verified).
-//
-// The fix compares the PARSED User-ID email. openpgp.js declines to parse a
-// multi-address User ID at all (name/email/comment all come back ""), so a UID the
-// two parsers could disagree about now certifies no address whatsoever.
-describe("signature binding uses the parsed User ID, not a substring of it", () => {
-  async function generateFreeformKey(rawName: string, email: string): Promise<TestKey> {
+// The anchor is now the address book: a key verifies for the addresses the
+// CONTACT it is filed under carries, and nothing the key asserts can add to
+// that. Removing the browser's own User-ID parse also ends the openpgp.js /
+// go-crypto disagreement, which was independently forgery-capable in the
+// direction the server rejected and the browser accepted.
+describe("signature binding is anchored in the address book, not the key's User IDs", () => {
+  it("refuses a key carrying the sender as a second, self-asserted User ID", async () => {
+    // One key, two ordinary User IDs. Pinned under Mallory's contact, because
+    // that is the From the Autocrypt header arrived with.
     const { publicKey, privateKey } = await openpgp.generateKey({
       type: "ecc",
       curve: "curve25519Legacy",
-      userIDs: [{ name: rawName, email }],
+      userIDs: [
+        { name: "Mallory", email: "mallory@evil.example" },
+        { name: "Bob", email: "bob@example.com" }
+      ],
       format: "armored"
     });
-    return { publicKey, privateKey };
-  }
-
-  it("refuses a key whose User ID merely CONTAINS the sender address", async () => {
-    // Parses server-side as mallory@evil.example; contains "<bob@example.com>".
-    const attacker = await generateFreeformKey(
-      "Mallory <mallory@evil.example> aka Bob",
-      "bob@example.com"
-    );
+    const attacker: TestKey = { publicKey, privateKey };
+    const bob = await generateTestKey("Bob", "bob@example.com");
     const victim = await generateTestKey("Victim", "victim@example.com");
 
     const ciphertext = await encryptSignedFor(victim.publicKey, attacker.privateKey, "hello");
 
     unlockWithArmoredKey(victim.privateKey);
     try {
-      const result = await decryptMessage(ciphertext, [attacker.publicKey], "bob@example.com");
+      // Bob's genuine key is in the book too, exactly as it would be for a
+      // reader who had verified him: the attacker's signature must still lose.
+      const result = await decryptMessage(
+        ciphertext,
+        [bound(attacker, "mallory@evil.example"), bound(bob, "bob@example.com")],
+        "bob@example.com"
+      );
 
       expect(result.signed).toBe(true);
       expect(result.verified).toBe(false);
@@ -210,7 +230,32 @@ describe("signature binding uses the parsed User ID, not a substring of it", () 
 
     unlockWithArmoredKey(victim.privateKey);
     try {
-      const result = await decryptMessage(ciphertext, [bob.publicKey], "bob@example.com");
+      const result = await decryptMessage(
+        ciphertext,
+        [bound(bob, "bob@example.com")],
+        "bob@example.com"
+      );
+      expect(result.verified).toBe(true);
+    } finally {
+      lock();
+    }
+  }, 30000);
+
+  it("verifies a contact's second address without the key carrying it", async () => {
+    // The address book says this contact is both addresses. The key carries
+    // only one as a User ID — which under the old anchor silently cost the
+    // reader their signature indicator.
+    const bob = await generateTestKey("Bob", "bob@example.com");
+    const victim = await generateTestKey("Victim", "victim@example.com");
+    const ciphertext = await encryptSignedFor(victim.publicKey, bob.privateKey, "hello");
+
+    unlockWithArmoredKey(victim.privateKey);
+    try {
+      const result = await decryptMessage(
+        ciphertext,
+        [bound(bob, "bob@example.com", "bob@work.example")],
+        "bob@work.example"
+      );
       expect(result.verified).toBe(true);
     } finally {
       lock();

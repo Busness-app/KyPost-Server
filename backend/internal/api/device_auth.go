@@ -20,8 +20,28 @@ const (
 	headerDeviceSecret = "X-Kypost-Device-Secret"
 )
 
+// maxDeviceSecretLen bounds the secret header. Minted secrets are a fixed
+// 192-bit random value in hex/base64; nothing legitimate approaches this.
+const maxDeviceSecretLen = 512
+
+// deviceCredentialsFromRequest reads the two device headers, rejecting any
+// value too long to have been registered.
+//
+// The length bound is load-bearing, not tidiness. deviceID reaches
+// deviceLockoutKey, which is a map key held for deviceLockoutFor — so an
+// unbounded header is an unbounded allocation an unauthenticated caller
+// chooses the size of. Go's DefaultMaxHeaderBytes is a 1 MiB TOTAL per
+// connection with no per-header limit, so a single request could park a
+// megabyte in the lockout table. maxDeviceTextLen is the same cap
+// handleNativeRegister applies when a device id is stored, so a longer one
+// could never have been registered and there is nothing to authenticate.
 func deviceCredentialsFromRequest(r *http.Request) (deviceID, deviceSecret string) {
-	return strings.TrimSpace(r.Header.Get(headerDeviceID)), r.Header.Get(headerDeviceSecret)
+	deviceID = strings.TrimSpace(r.Header.Get(headerDeviceID))
+	deviceSecret = r.Header.Get(headerDeviceSecret)
+	if len(deviceID) > maxDeviceTextLen || len(deviceSecret) > maxDeviceSecretLen {
+		return "", ""
+	}
+	return deviceID, deviceSecret
 }
 
 // deviceLockoutKey scopes the device brute-force lockout to (deviceID,
@@ -53,18 +73,27 @@ func (s *Server) deviceLockoutKey(deviceID string, r *http.Request) string {
 // deviceMaxFailures failed attempts (see s.deviceLockout); callers must
 // distinguish this ("come back later") from an ordinary ok=false ("bad
 // credentials") and answer 429 rather than 401 — see writeDeviceAuthFailure.
-// Every failure branch below that follows a lockout check pays (or would pay,
-// for an unregistered deviceID) toward that deviceID's strike count; a
-// correct secret against a deactivated account does not, since the secret
-// itself was valid and brute-forcing it is not what happened.
+// Every failure branch below that follows the lockout check pays toward that
+// deviceID's strike count; a correct secret against a deactivated account
+// does not, since the secret itself was valid and brute-forcing it is not
+// what happened.
+//
+// The lockout is spent only once the deviceID has been resolved to a device
+// that actually exists. Reserving a strike first — which is what this did —
+// let an unauthenticated caller mint a lockout entry per invented device id.
+// tryAttempt sheds NEW keys at loginLockoutHardCap and recordSuccess DELETES
+// an entry on every success, so a healthy paired device is always a new key:
+// 50,000 anonymous requests filled the table and every genuine device, with
+// the correct secret from an unrelated address, got 429 until the cooldown
+// expired. Resolving first means only a real, currently-paired device id can
+// occupy a slot, and an unknown id costs one throttled map lookup.
+//
+// The reservation still precedes the credential comparison, which is what
+// tryAttempt's doc requires — the concurrent-burst property is unchanged.
 func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device state.NativeDevice, ok bool, retryAfter time.Duration) {
 	deviceID, deviceSecret := deviceCredentialsFromRequest(r)
 	if deviceID == "" || deviceSecret == "" {
 		return "", state.NativeDevice{}, false, 0
-	}
-	lockoutKey := s.deviceLockoutKey(deviceID, r)
-	if allowed, wait := s.deviceLockout.tryAttempt(lockoutKey); !allowed {
-		return "", state.NativeDevice{}, false, wait
 	}
 	ownerID, okOwner := s.lookupUserByDevice(deviceID)
 	if !okOwner {
@@ -77,6 +106,10 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 	dev, okDev := store.GetNativeDevice(deviceID)
 	if !okDev {
 		return "", state.NativeDevice{}, false, 0
+	}
+	lockoutKey := s.deviceLockoutKey(deviceID, r)
+	if allowed, wait := s.deviceLockout.tryAttempt(lockoutKey); !allowed {
+		return "", state.NativeDevice{}, false, wait
 	}
 	// A legacy (pre-HashDeviceSecret) device secret still verifies through
 	// scrypt, so this can shed. Both outcomes deny the request here; the

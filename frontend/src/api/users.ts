@@ -30,8 +30,23 @@ export function setUserRole(id: string, role: Role): Promise<ManagedUser> {
   return putJSON<ManagedUser>(`/api/users/${encodeURIComponent(id)}`, { role });
 }
 
-export function resetUserPassword(id: string, password: string): Promise<ManagedUser> {
-  return postJSON<ManagedUser>(`/api/users/${encodeURIComponent(id)}/reset-password`, { password });
+/**
+ * Resets an account's password to a temporary one.
+ *
+ * `pgpKeyDestroyed` reports whether this reset made a client-protected PGP key
+ * permanently unrecoverable. The key is wrapped under the account password and
+ * the server cannot open it, so an admin cannot rewrap what they cannot read —
+ * documented behaviour the USER is warned about, and which the admin doing it
+ * previously had no way to know about, before or after.
+ */
+export function resetUserPassword(
+  id: string,
+  password: string
+): Promise<{ user: ManagedUser; pgpKeyDestroyed: boolean }> {
+  return postJSON<{ user: ManagedUser; pgpKeyDestroyed: boolean }>(
+    `/api/users/${encodeURIComponent(id)}/reset-password`,
+    { password }
+  );
 }
 
 export function deactivateUser(id: string): Promise<ManagedUser> {

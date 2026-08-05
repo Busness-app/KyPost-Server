@@ -760,6 +760,25 @@ export function App() {
     const keyFor = new Map(results.filter((r) => r.usable && r.publicKey).map((r) => [r.address.toLowerCase(), r.publicKey!]));
     const missing = [...toList, ...ccList, ...bccList].filter((addr) => !keyFor.has(addr.toLowerCase()));
 
+    // A BROKEN PIN IS NOT A MISSING KEY, and it must not be reported as one.
+    //
+    // tier "key_changed" means discovery found a key for this address whose
+    // fingerprint does not match the one already pinned to their contact —
+    // which is what a key rotation looks like, and also what an interception
+    // attempt looks like. It was folded into `missing` and shown with the
+    // wording for "never had a key", so the user was told nothing had changed
+    // when the one thing worth telling them had. With "send a secure link if no
+    // key" ticked they silently got a pickup link instead, and the broken pin
+    // was never mentioned at all.
+    const changed = results.filter((r) => r.tier === "key_changed").map((r) => r.address);
+    if (changed.length > 0) {
+      throw new Error(
+        `The PGP key for ${changed.join(", ")} has CHANGED since you last saved it. That is what a ` +
+          "key rotation looks like, and also what an interception attempt looks like. Verify the new " +
+          "fingerprint with them out of band, then update their contact in Contacts. Nothing was sent."
+      );
+    }
+
     // Recipients with no key get a secure link instead: the message is
     // sealed here under a random key that travels in the link's fragment,
     // so the server stores ciphertext it cannot read. This is weaker than

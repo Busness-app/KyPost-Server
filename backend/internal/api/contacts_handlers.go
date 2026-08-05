@@ -57,6 +57,23 @@ type contactPayload struct {
 	Pronouns           string                        `json:"pronouns,omitempty"`
 }
 
+// capValues bounds one repeatable field to maxValuesPerField entries.
+//
+// The JSON contact path accepted unbounded arrays — 20,000 emails on one
+// contact went in — while the vCard path that writes the SAME records has
+// capped every repeatable family at 64 since it was written. The asymmetry is
+// the whole point: two write paths, one shared file, one bound. It is not a
+// cross-user issue (contacts.json is per-user, so this is self-DoS), which is
+// why it is a consistency fix rather than a finding, but a client that can
+// write a record the other writer refuses to produce is a bug waiting to be
+// found through the reader they share.
+func capValues[T any](in []T) []T {
+	if len(in) <= maxValuesPerField {
+		return in
+	}
+	return in[:maxValuesPerField]
+}
+
 func (p contactPayload) toContact(uid string) contacts.Contact {
 	return contacts.Contact{
 		UID:           uid,
@@ -69,25 +86,25 @@ func (p contactPayload) toContact(uid string) contacts.Contact {
 		Nickname:      p.Nickname,
 		Org:           p.Org,
 		Title:         p.Title,
-		Emails:        p.Emails,
-		Phones:        p.Phones,
-		Addresses:     p.Addresses,
+		Emails:        capValues(p.Emails),
+		Phones:        capValues(p.Phones),
+		Addresses:     capValues(p.Addresses),
 		Notes:         p.Notes,
 		Birthday:      p.Birthday,
 		// PhotoRef is intentionally NOT copied from the payload. It names a
 		// file the server writes and later serves; callers do not get to
 		// choose it. Callers that need to preserve an existing photo across an
 		// update get it carried forward by the store, not echoed by the client.
-		GroupIDs:           p.GroupIDs,
+		GroupIDs:           capValues(p.GroupIDs),
 		PGPKey:             p.PGPKey,
-		IMs:                p.IMs,
-		Websites:           p.Websites,
-		Relations:          p.Relations,
-		Events:             p.Events,
+		IMs:                capValues(p.IMs),
+		Websites:           capValues(p.Websites),
+		Relations:          capValues(p.Relations),
+		Events:             capValues(p.Events),
 		PhoneticGivenName:  p.PhoneticGivenName,
 		PhoneticFamilyName: p.PhoneticFamilyName,
 		Department:         p.Department,
-		CustomFields:       p.CustomFields,
+		CustomFields:       capValues(p.CustomFields),
 		Pronouns:           p.Pronouns,
 	}
 }
@@ -174,6 +191,7 @@ func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to create contact", http.StatusInternalServerError)
 			return
 		}
+		s.invalidatePGPVerdictsOnKeyChange(r, contacts.Contact{}, created)
 		writeJSON(w, http.StatusOK, created)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -241,8 +259,10 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to update contact", http.StatusInternalServerError)
 			return
 		}
+		s.invalidatePGPVerdictsOnKeyChange(r, existing, updated)
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
+		deleted, _ := store.Get(uid)
 		emails := discoveryCreatedEmails(store, uid)
 		removed, err := store.Delete(uid)
 		if err != nil {
@@ -253,6 +273,9 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 			if ac, ok := authFromContext(r); ok {
 				s.suppressDiscoveryOnDelete(ac.UserID, emails)
 			}
+		}
+		if removed {
+			s.invalidatePGPVerdictsOnKeyChange(r, deleted, contacts.Contact{})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 	default:
@@ -529,4 +552,33 @@ func parseNonNegativeInt64Query(r *http.Request, key string) int64 {
 		return 0
 	}
 	return v
+}
+
+// invalidatePGPVerdictsOnKeyChange clears the caller's cached signature
+// verdicts when a write changed a contact's PGP key.
+//
+// The verdict is anchored in the address book (see signerKeysForSender), so
+// removing or replacing a contact's key — the obvious remediation after
+// discovering a forged badge — has to reach the verdicts that key produced.
+// Without this the old verdict stood for every message already in the
+// 5,000-entry window, and remediating the contact did not remediate the mail.
+//
+// Best-effort: a stale verdict is worth logging about, not worth failing the
+// contact write the user asked for.
+func (s *Server) invalidatePGPVerdictsOnKeyChange(r *http.Request, before, after contacts.Contact) {
+	if before.PGPKey == after.PGPKey {
+		return
+	}
+	ac, ok := authFromContext(r)
+	if !ok {
+		return
+	}
+	cache, err := s.userMailCacheStore(ac.UserID)
+	if err != nil {
+		s.logger.Error("could not open the mail cache to invalidate pgp verdicts", "error", err.Error())
+		return
+	}
+	if err := cache.InvalidatePGPVerdicts(); err != nil {
+		s.logger.Error("failed to invalidate cached pgp verdicts after a contact key change", "error", err.Error())
+	}
 }

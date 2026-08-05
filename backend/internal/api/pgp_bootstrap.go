@@ -97,14 +97,14 @@ func (s *Server) handlePGPBootstrap(w http.ResponseWriter, r *http.Request) {
 
 	// Contact public keys, so a freshly-started client can verify inbound
 	// signatures immediately instead of waiting on a contacts sync. Public
-	// key material only.
-	signerKeys := []string{}
+	// key material only, each labelled with the addresses the address book
+	// binds it to — the client must not re-derive that binding from the keys
+	// themselves. See boundSignerKeys.
+	signerKeys := []boundSignerKey{}
 	if contactsStore, cerr := s.userContactsStore(ac.UserID); cerr == nil {
-		if keys := allKnownPGPKeys(contactsStore); len(keys) > 0 {
-			signerKeys = keys
-		}
+		signerKeys = boundSignerKeys(contactsStore)
 	}
-	resp["signerPublicKeys"] = signerKeys
+	resp["signerKeys"] = signerKeys
 
 	// The addresses a newly generated key must carry as User IDs: the IMAP
 	// account address plus every verified send-as alias. Both WKD serving

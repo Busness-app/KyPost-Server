@@ -95,9 +95,16 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 	// signerKeys lets the client verify an embedded signature without a
 	// second round trip for the whole address book. Public keys only —
 	// nothing here is secret.
-	var signerKeys []string
+	//
+	// Each key carries the addresses the address book binds it to, so the
+	// client accepts a signature only from a key bound to the sender it is
+	// displaying. It used to receive every key it held with no binding at all
+	// and re-derive one from the keys' User IDs, which is both forgeable (one
+	// key, two self-asserted User IDs) and parser-dependent. See
+	// boundSignerKeys.
+	signerKeys := []boundSignerKey{}
 	if contactsStore, cerr := s.userContactsStore(ac.UserID); cerr == nil {
-		signerKeys = allKnownPGPKeys(contactsStore)
+		signerKeys = boundSignerKeys(contactsStore)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -106,7 +113,7 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 		"encryptedPayload": encrypted,
 		"signaturePayload": signature,
 		"body":             signedOnlyBody(content, encrypted),
-		"signerPublicKeys": signerKeys,
+		"signerKeys":       signerKeys,
 	})
 }
 
