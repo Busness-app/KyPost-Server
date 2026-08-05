@@ -84,6 +84,21 @@ type NativeDevice struct {
 	// Transport specifies the push delivery transport: "fcm", "apns", or "unifiedpush".
 	// Empty/absent means derive from Platform: "ios"/"macos" -> "apns", else "fcm".
 	Transport string `json:"transport,omitempty"`
+	// EnrollmentPublicKey is this device's EC P-256 public key for encrypted-mail
+	// enrollment, published by the device under its own pairing credential. A
+	// public key is not a capability: it lets a browser seal TO this device and
+	// confers nothing by itself, which is why a device may publish its own while
+	// only a session may mint the sealing. Devices paired before this existed
+	// decode as empty, meaning "not enrolled and cannot be" until they publish.
+	EnrollmentPublicKey string `json:"enrollmentPublicKey,omitempty"`
+	EnrollmentKeyAt     string `json:"enrollmentKeyAt,omitempty"`
+	// EncryptionEnrolled is DEVICE-REPORTED: whether the device can still open
+	// its local envelope. It is not a record of what the browser did, because
+	// those diverge — reinstalling the app destroys the keystore key, as does a
+	// biometric-enrollment change on some configurations. A marker that only ever
+	// turned on would tell the user a device is protected when it can read
+	// nothing, so the device restates it on every registration call.
+	EncryptionEnrolled bool `json:"encryptionEnrolled"`
 	// SecretHash is the hash of this device's own pairing secret, minted once
 	// at registration — users.HashDeviceSecret format, or the older
 	// users.HashPassword scrypt format for devices paired before that existed.
@@ -849,30 +864,37 @@ func (s *Store) RemoveNotificationSubscription(endpoint string) (bool, error) {
 // ---- native devices --------------------------------------------------------
 
 const deviceColumns = `device_id, platform, push_token, device_name, app_version,
-	user_agent, registered_at, updated_at, user_id, mfa_approver, transport, secret_hash`
+	user_agent, registered_at, updated_at, user_id, mfa_approver, transport, secret_hash,
+	enrollment_public_key, enrollment_key_at, encryption_enrolled`
 
 func scanDevice(rows *sql.Rows) (NativeDevice, error) {
 	var d NativeDevice
-	var approver int
+	var approver, enrolled int
 	err := rows.Scan(&d.DeviceID, &d.Platform, &d.PushToken, &d.DeviceName, &d.AppVersion,
-		&d.UserAgent, &d.RegisteredAt, &d.UpdatedAt, &d.UserID, &approver, &d.Transport, &d.SecretHash)
+		&d.UserAgent, &d.RegisteredAt, &d.UpdatedAt, &d.UserID, &approver, &d.Transport, &d.SecretHash,
+		&d.EnrollmentPublicKey, &d.EnrollmentKeyAt, &enrolled)
 	d.MFAApprover = approver == 1
+	d.EncryptionEnrolled = enrolled == 1
 	return d, err
 }
 
 func insertDevice(e execer, d NativeDevice, seq int) error {
 	_, err := e.Exec(
 		`INSERT INTO native_devices(`+deviceColumns+`, seq)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(device_id) DO UPDATE SET
 		   platform = excluded.platform, push_token = excluded.push_token,
 		   device_name = excluded.device_name, app_version = excluded.app_version,
 		   user_agent = excluded.user_agent, registered_at = excluded.registered_at,
 		   updated_at = excluded.updated_at, user_id = excluded.user_id,
 		   mfa_approver = excluded.mfa_approver, transport = excluded.transport,
-		   secret_hash = excluded.secret_hash`,
+		   secret_hash = excluded.secret_hash,
+		   enrollment_public_key = excluded.enrollment_public_key,
+		   enrollment_key_at = excluded.enrollment_key_at,
+		   encryption_enrolled = excluded.encryption_enrolled`,
 		d.DeviceID, d.Platform, d.PushToken, d.DeviceName, d.AppVersion, d.UserAgent,
-		d.RegisteredAt, d.UpdatedAt, d.UserID, boolToInt(d.MFAApprover), d.Transport, d.SecretHash, seq)
+		d.RegisteredAt, d.UpdatedAt, d.UserID, boolToInt(d.MFAApprover), d.Transport, d.SecretHash,
+		d.EnrollmentPublicKey, d.EnrollmentKeyAt, boolToInt(d.EncryptionEnrolled), seq)
 	return err
 }
 
@@ -932,6 +954,11 @@ func (s *Store) GetNativeDevice(deviceID string) (NativeDevice, bool) {
 //     over whatever the caller passed.
 //   - by push token + platform: the same physical device re-pairing without its
 //     device id is one device, not two, so that row is updated in place.
+//
+// Both matching branches rebuild the whole row from the caller's struct, so
+// anything the device does not resend has to be carried forward explicitly —
+// see enrollmentState, which does that for the enrollment columns exactly as
+// the lines above do for MFAApprover.
 func (s *Store) UpsertNativeDevice(device NativeDevice) error {
 	return s.tx(func(tx *sql.Tx) error { return s.upsertNativeDeviceTx(tx, device) })
 }
@@ -956,14 +983,19 @@ func (s *Store) upsertNativeDeviceTx(tx *sql.Tx, device NativeDevice) error {
 	var existingSeq sql.NullInt64
 	var existingRegistered string
 	var existingApprover int
+	var existing enrollmentState
 	err := tx.QueryRow(
-		`SELECT seq, registered_at, mfa_approver FROM native_devices WHERE device_id = ?`,
-		device.DeviceID).Scan(&existingSeq, &existingRegistered, &existingApprover)
+		`SELECT seq, registered_at, mfa_approver,
+		        enrollment_public_key, enrollment_key_at, encryption_enrolled
+		 FROM native_devices WHERE device_id = ?`,
+		device.DeviceID).Scan(&existingSeq, &existingRegistered, &existingApprover,
+		&existing.publicKey, &existing.keyAt, &existing.enrolled)
 	if err == nil {
 		if existingRegistered != "" {
 			device.RegisteredAt = existingRegistered
 		}
 		device.MFAApprover = existingApprover == 1
+		existing.applyTo(&device)
 		return insertDevice(tx, device, int(existingSeq.Int64))
 	}
 	if err != sql.ErrNoRows {
@@ -974,10 +1006,14 @@ func (s *Store) upsertNativeDeviceTx(tx *sql.Tx, device NativeDevice) error {
 		var matchID, matchRegistered string
 		var matchSeq sql.NullInt64
 		var matchApprover int
+		var match enrollmentState
 		err := tx.QueryRow(
-			`SELECT device_id, registered_at, seq, mfa_approver FROM native_devices
+			`SELECT device_id, registered_at, seq, mfa_approver,
+			        enrollment_public_key, enrollment_key_at, encryption_enrolled
+			 FROM native_devices
 			 WHERE push_token = ? AND platform = ? ORDER BY seq LIMIT 1`,
-			device.PushToken, device.Platform).Scan(&matchID, &matchRegistered, &matchSeq, &matchApprover)
+			device.PushToken, device.Platform).Scan(&matchID, &matchRegistered, &matchSeq, &matchApprover,
+			&match.publicKey, &match.keyAt, &match.enrolled)
 		if err == nil {
 			if _, err := tx.Exec(`DELETE FROM native_devices WHERE device_id = ?`, matchID); err != nil {
 				return err
@@ -985,6 +1021,7 @@ func (s *Store) upsertNativeDeviceTx(tx *sql.Tx, device NativeDevice) error {
 			device.DeviceID = matchID
 			device.RegisteredAt = matchRegistered
 			device.MFAApprover = matchApprover == 1
+			match.applyTo(&device)
 			return insertDevice(tx, device, int(matchSeq.Int64))
 		}
 		if err != sql.ErrNoRows {
@@ -1022,6 +1059,88 @@ func (s *Store) RemoveNativeDevice(deviceID string) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// enrollmentState is the enrollment half of an existing device row, read before
+// a re-registration overwrites it.
+//
+// A device re-registers on every app start and whenever its push token rotates,
+// and it does not resend its enrollment key when it does — that key is published
+// once, through a different route. Without this carry-forward an ordinary token
+// refresh would silently erase the key mid-ceremony, and the browser would then
+// seal to a key that no longer exists.
+type enrollmentState struct {
+	publicKey string
+	keyAt     string
+	enrolled  int
+}
+
+func (e enrollmentState) applyTo(d *NativeDevice) {
+	d.EnrollmentPublicKey = e.publicKey
+	d.EnrollmentKeyAt = e.keyAt
+	d.EncryptionEnrolled = e.enrolled == 1
+}
+
+// SetNativeDeviceEnrollmentKey records a device's enrollment public key and
+// returns the updated record.
+//
+// Unlike SetNativeDeviceMFAApprover, an absent device is an error rather than a
+// quiet updated=false. The two are called from different places for different
+// reasons: the approver flag is flipped by a session acting on a device it just
+// listed, where a race with removal is ordinary. This is called by the device
+// itself, under its own pairing credential, so the row is guaranteed to exist —
+// its absence means the credential outlived the record it names, and silently
+// doing nothing there would report a successful publish for a key the server
+// did not keep.
+func (s *Store) SetNativeDeviceEnrollmentKey(deviceID, publicKey, at string) (NativeDevice, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return NativeDevice{}, fmt.Errorf("enrollment key: empty device id")
+	}
+	res, err := s.db.Exec(
+		`UPDATE native_devices
+		 SET enrollment_public_key = ?, enrollment_key_at = ?, updated_at = ?
+		 WHERE device_id = ?`,
+		publicKey, at, time.Now().UTC().Format(time.RFC3339), deviceID)
+	if err != nil {
+		return NativeDevice{}, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return NativeDevice{}, err
+	}
+	if n == 0 {
+		return NativeDevice{}, fmt.Errorf("enrollment key: no such device %q", deviceID)
+	}
+	d, ok := s.GetNativeDevice(deviceID)
+	if !ok {
+		return NativeDevice{}, fmt.Errorf("enrollment key: device %q vanished after update", deviceID)
+	}
+	return d, nil
+}
+
+// SetNativeDeviceEncryptionEnrolled records the device's own answer to "can I
+// still decrypt". Both directions must work — see EncryptionEnrolled. An absent
+// device is an error, for the same reason as SetNativeDeviceEnrollmentKey.
+func (s *Store) SetNativeDeviceEncryptionEnrolled(deviceID string, enrolled bool) error {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return fmt.Errorf("encryption enrolled: empty device id")
+	}
+	res, err := s.db.Exec(
+		`UPDATE native_devices SET encryption_enrolled = ?, updated_at = ? WHERE device_id = ?`,
+		boolToInt(enrolled), time.Now().UTC().Format(time.RFC3339), deviceID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("encryption enrolled: no such device %q", deviceID)
+	}
+	return nil
 }
 
 // SetNativeDeviceMFAApprover flips a device's MFAApprover flag. It returns
