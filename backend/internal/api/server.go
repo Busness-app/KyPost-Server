@@ -1196,6 +1196,13 @@ type pgpRecipientPlan struct {
 	bccEmails        []string
 	bccKeys          []string
 	withoutKeyEmails []string
+	// keyChangedEmails are recipients whose PINNED key no longer matches what
+	// discovery returns. Kept apart from withoutKeyEmails because the two mean
+	// opposite things: "no key on file" is an absence the pickup fallback exists
+	// to cover, while a broken pin is the TOFU control firing — the one signal
+	// that a key substitution may be in progress. Folding them together made the
+	// fallback mail the plaintext of exactly the messages the pin was protecting.
+	keyChangedEmails []string
 }
 
 // pgpDelivery is one PGP/MIME ciphertext and the SMTP recipient(s) it

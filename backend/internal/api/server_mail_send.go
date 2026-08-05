@@ -195,9 +195,12 @@ func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string
 	var plan pgpRecipientPlan
 	seen := map[string]bool{}
 
-	resolve := func(recipient string) (armoredKey string, usable bool) {
+	// The TIER is load-bearing and must not be collapsed away here: tierKeyChanged
+	// carries Usable:false, so returning only (Armored, Usable) made a broken pin
+	// indistinguishable from a recipient who never had a key.
+	resolve := func(recipient string) (armoredKey string, usable bool, changed bool) {
 		rk := resolver.resolve(ctx, recipient)
-		return rk.Armored, rk.Usable
+		return rk.Armored, rk.Usable, rk.Tier == tierKeyChanged
 	}
 
 	toCC := append(append([]string{}, toList...), ccList...)
@@ -207,10 +210,14 @@ func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string
 			continue
 		}
 		seen[lower] = true
-		if key, ok := resolve(recipient); ok {
+		key, ok, changed := resolve(recipient)
+		switch {
+		case ok:
 			plan.toCCEmails = append(plan.toCCEmails, recipient)
 			plan.toCCKeys = append(plan.toCCKeys, key)
-		} else {
+		case changed:
+			plan.keyChangedEmails = append(plan.keyChangedEmails, recipient)
+		default:
 			plan.withoutKeyEmails = append(plan.withoutKeyEmails, recipient)
 		}
 	}
@@ -220,10 +227,14 @@ func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string
 			continue
 		}
 		seen[lower] = true
-		if key, ok := resolve(recipient); ok {
+		key, ok, changed := resolve(recipient)
+		switch {
+		case ok:
 			plan.bccEmails = append(plan.bccEmails, recipient)
 			plan.bccKeys = append(plan.bccKeys, key)
-		} else {
+		case changed:
+			plan.keyChangedEmails = append(plan.keyChangedEmails, recipient)
+		default:
 			plan.withoutKeyEmails = append(plan.withoutKeyEmails, recipient)
 		}
 	}
@@ -605,6 +616,25 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	// Ordering matters: nothing has been sent at this point, so a client may
 	// re-send with allowPickupFallback set once the user confirms, with no
 	// risk of a duplicate or half-delivered message.
+	// A broken pin is refused outright, and AllowPickupFallback cannot override
+	// it. The pickup fallback exists for recipients who have no key; a recipient
+	// whose PINNED key stopped matching is the TOFU control reporting that the
+	// key served for this address changed, which is the one case where mailing
+	// the plaintext in the clear is worst. Telling the sender "no usable PGP key"
+	// and offering the fallback — as this endpoint did — actively invites them to
+	// downgrade in exactly that situation.
+	//
+	// The sender's remedy is to verify the new fingerprint out of band and update
+	// the contact, not to send anyway.
+	if len(plan.keyChangedEmails) > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "the PGP key on file for some recipients no longer matches the key now " +
+				"published for their address; verify the new fingerprint with them before sending",
+			"keyChangedRecipients":    plan.keyChangedEmails,
+			"pickupFallbackAvailable": false,
+		})
+		return
+	}
 	if len(plan.withoutKeyEmails) > 0 && !req.AllowPickupFallback {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":                   "some recipients have no usable PGP key; sending them a one-time link stores this message's plaintext on the server for 7 days",
@@ -689,7 +719,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		bccFailed := 0
 		for _, delivery := range bccDeliveries {
 			if err := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, delivery.Recipients, delivery.Ciphertext); err != nil {
-				s.logger.Error("bcc pgp send failed", "recipient", delivery.Recipients[0], "error", err.Error())
+				s.logger.Error("bcc pgp send failed", "recipient_count", strconv.Itoa(len(delivery.Recipients)), "error", err.Error())
 				bccFailed++
 			}
 		}
@@ -727,9 +757,12 @@ func partialDeliveryWarning(bccFailed, bccTotal, pickupFailed, pickupTotal int) 
 // delivered to the keyed recipients and treats this as best-effort logging.
 func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients []string, subject, body, mode, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword string) int {
 	failed := 0
-	for _, recipient := range recipients {
+	for i, recipient := range recipients {
 		if err := s.sendPickupNotification(userID, envelopeFrom, recipient, subject, body, mode, smtpHost, smtpPort, addr, smtpUsername, smtpPassword); err != nil {
-			s.logger.Error("pickup notification send failed", "recipient", recipient, "error", err.Error())
+			// Index, not address: this file is the instance-wide log, which
+			// GET /api/logs serves to any admin, and an admin has no mailbox
+			// access to other users. See log_privacy_test.go.
+			s.logger.Error("pickup notification send failed", "recipient_index", strconv.Itoa(i), "error", err.Error())
 			failed++
 		}
 	}
