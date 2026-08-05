@@ -446,4 +446,26 @@ describe("revocation", () => {
 
     await vi.waitFor(() => expect(deleteDeviceEnvelope).toHaveBeenCalledWith("d1", "hunter2"));
   });
+
+  // Pins the review finding: a wrong step-up credential is a routine failure
+  // for this control, and it must read as "this removal failed" — not as
+  // "we can't see your paired devices," which is what happened when the
+  // handler borrowed the fetch-level `error` state that gates the whole list.
+  it("keeps the device list on screen when a removal fails, and scopes the error to the confirmation", async () => {
+    deleteDeviceEnvelope.mockRejectedValue(new Error("wrong password"));
+    listNativeDevices.mockResolvedValue({
+      devices: [device({ enrollmentPublicKey: HONEST_KEY, encryptionEnrolled: true })]
+    });
+    renderCard();
+    await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
+
+    await userEvent.type(screen.getByLabelText("Account password"), "wrong");
+    await userEvent.click(screen.getByRole("button", { name: "Remove it" }));
+
+    expect(await screen.findByText("wrong password")).toBeTruthy();
+    // The list-level failure message must not have fired, and the device
+    // itself must still be visible underneath the still-open confirmation.
+    expect(screen.getByText("Pixel")).toBeTruthy();
+    expect(screen.queryByText(/could not read your paired devices/i)).toBeNull();
+  });
 });

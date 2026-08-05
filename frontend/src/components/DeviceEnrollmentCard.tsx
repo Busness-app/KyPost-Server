@@ -85,6 +85,7 @@ export function DeviceEnrollmentCard({
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<NativeDevice | null>(null);
   const [removePassword, setRemovePassword] = useState("");
+  const [removeError, setRemoveError] = useState("");
 
   function openCeremony(device: NativeDevice) {
     setCeremony({ device, publicKey: device.enrollmentPublicKey ?? "" });
@@ -142,9 +143,15 @@ export function DeviceEnrollmentCard({
       await deleteDeviceEnvelope(removing.deviceId, removePassword);
       setRemoving(null);
       setRemovePassword("");
+      setRemoveError("");
       await refresh();
     } catch (e) {
-      setError(toErrorMessage(e, "Could not remove the sealing."));
+      // Scoped to the confirmation panel, not the list-level `error` state:
+      // that state gates whether the whole device list renders at all, so
+      // reusing it here would make a wrong password on ONE device's removal
+      // hide every OTHER device from the list underneath the still-open
+      // confirmation — the wrong impression for a security-sensitive control.
+      setRemoveError(toErrorMessage(e, "Could not remove the sealing."));
     } finally {
       setBusy(false);
     }
@@ -205,7 +212,13 @@ export function DeviceEnrollmentCard({
                 {state === "enrolled" ? (
                   <>
                     <p className="sec-muted">This device can read your encrypted mail.</p>
-                    <button type="button" onClick={() => setRemoving(device)}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRemoving(device);
+                        setRemoveError("");
+                      }}
+                    >
                       Remove sealing
                     </button>
                   </>
@@ -335,11 +348,19 @@ export function DeviceEnrollmentCard({
               onChange={(e) => setRemovePassword(e.target.value)}
             />
           </label>
+          {removeError ? <p className="sec-verdict sec-verdict-risk">{removeError}</p> : null}
           <div className="sec-actions">
             <button type="button" disabled={busy} onClick={() => void removeSealing()}>
               Remove it
             </button>
-            <button type="button" disabled={busy} onClick={() => setRemoving(null)}>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setRemoving(null);
+                setRemoveError("");
+              }}
+            >
               Cancel
             </button>
           </div>
