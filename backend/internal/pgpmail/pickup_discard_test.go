@@ -26,14 +26,14 @@ func TestDiscardFreesTheQuotaSlot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if got := store.outstandingForLocked("user-1"); got != 1 {
+	if got, _ := store.outstandingForLocked("user-1"); got != 1 {
 		t.Fatalf("outstanding after Create = %d, want 1", got)
 	}
 
 	if err := store.Discard("user-1", id); err != nil {
 		t.Fatalf("Discard: %v", err)
 	}
-	if got := store.outstandingForLocked("user-1"); got != 0 {
+	if got, _ := store.outstandingForLocked("user-1"); got != 0 {
 		t.Fatalf("outstanding after Discard = %d, want 0; the slot is still held", got)
 	}
 }
@@ -70,7 +70,7 @@ func TestDiscardRefusesAnotherSendersRecord(t *testing.T) {
 	if err := store.Discard("user-2", id); err == nil {
 		t.Fatal("Discard removed a record belonging to another sender")
 	}
-	if got := store.outstandingForLocked("user-1"); got != 1 {
+	if got, _ := store.outstandingForLocked("user-1"); got != 1 {
 		t.Fatalf("outstanding = %d, want 1; the owner's record was removed anyway", got)
 	}
 }
