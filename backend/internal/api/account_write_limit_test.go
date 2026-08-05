@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"kypost-server/backend/internal/users"
 )
@@ -27,6 +28,15 @@ func TestMutatingRoutesAreMeteredPerAccount(t *testing.T) {
 	handler := srv.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+
+	// Freeze the bucket's clock. The burst is 90 and it refills at 10/s, so
+	// spending it takes ~100 ms of headroom — which a -race build on a loaded
+	// CI runner does not have. Without this the 91st request sometimes finds a
+	// token that refilled while the loop was still running, and the test fails
+	// on the machine rather than on the code. Same idiom as
+	// TestBucketDebtIsFloored.
+	frozen := time.Now()
+	srv.accountWriteLimiter.now = func() time.Time { return frozen }
 
 	post := func() int {
 		req := httptest.NewRequest(http.MethodPost, "/api/mfa/totp/setup", nil)
