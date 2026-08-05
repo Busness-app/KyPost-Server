@@ -98,4 +98,40 @@ describe("DeviceEnrollmentCard", () => {
     await vi.waitFor(() => expect(listNativeDevices).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/not enrolled/i)).toBeTruthy();
   });
+
+  // A failed fetch must not present as "no devices are enrolled" — that is the
+  // reassuring answer and may be the wrong one.
+  it("shows the error instead of the reassuring empty-state on a failed first load", async () => {
+    listNativeDevices.mockRejectedValue(new Error("network down"));
+    renderCard();
+
+    expect(await screen.findByText("network down")).toBeTruthy();
+    expect(screen.queryByText(/no paired devices yet/i)).toBeNull();
+  });
+
+  // Pins the security property the `fingerprint` dependency exists for: if the
+  // identity-change refetch fails, the previous identity's device list must not
+  // linger on screen claiming devices can still read mail they can no longer
+  // open under the new identity.
+  it("clears the device list on a failed refetch, rather than showing stale enrollment", async () => {
+    listNativeDevices.mockResolvedValue({
+      devices: [device({ enrollmentPublicKey: "KEY", encryptionEnrolled: true })]
+    });
+    const { rerender } = renderCard();
+    await screen.findByText(/can read your encrypted mail/i);
+
+    listNativeDevices.mockRejectedValue(new Error("network down"));
+    rerender(
+      <DeviceEnrollmentCard
+        fingerprint="CCCC3333DDDD4444"
+        clientProtected
+        unlocked
+        onRequestUnlock={() => {}}
+      />
+    );
+
+    await screen.findByText("network down");
+    expect(screen.queryByText(/can read your encrypted mail/i)).toBeNull();
+    expect(screen.queryByText("Pixel")).toBeNull();
+  });
 });

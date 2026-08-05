@@ -63,9 +63,13 @@ export function DeviceEnrollmentCard({
       setDevices(Array.isArray(next.devices) ? next.devices : []);
       setError("");
     } catch (e) {
-      // An empty list must not be how a failed fetch presents: that reads as
-      // "no devices are enrolled", which is the reassuring answer and may be
-      // the wrong one.
+      // Clear the list rather than leave a stale one on screen. This matters
+      // most on the identity-change refetch this component exists to
+      // guarantee: a list held over from the old identity would keep
+      // asserting "this device can read your encrypted mail" about sealings
+      // that no longer exist server-side. An empty list here is not the
+      // reassuring "no devices" story — the error message below says so.
+      setDevices([]);
       setError(toErrorMessage(e, "Could not read your paired devices."));
     }
   }, []);
@@ -92,8 +96,9 @@ export function DeviceEnrollmentCard({
         A paired device cannot read your encrypted mail until you enroll it. Enrolling gives that
         device its own copy of your key, opened by its secure hardware rather than your password.
       </p>
-      {error ? <p className="sec-muted">{error}</p> : null}
-      {devices.length === 0 ? (
+      {error ? (
+        <p className="sec-muted">{error}</p>
+      ) : devices.length === 0 ? (
         <p className="sec-muted">
           No paired devices yet. Pair a device on the Notifications page first.
         </p>
