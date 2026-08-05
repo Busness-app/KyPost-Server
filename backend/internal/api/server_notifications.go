@@ -209,10 +209,12 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		body = "Push delivery is working across all subscribed devices."
 	}
 
+	// A test notification's only job is to prove delivery, so it lands the user
+	// back on the settings that configure it — a tab on Configuration.
 	message := map[string]any{
 		"title": title,
 		"body":  body,
-		"url":   "/notifications",
+		"url":   "/config?tab=notifications",
 		"tag":   "kypost-test",
 	}
 	payloadBytes, err := json.Marshal(message)
@@ -261,7 +263,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		nativeMessage := processor.NativePushMessage{
 			Title: title,
 			Body:  body,
-			Data:  map[string]string{"url": "/notifications"},
+			Data:  map[string]string{"url": "/config?tab=notifications"},
 		}
 		outcome, err := processor.SendNativePush(r.Context(), s.nativePushDispatcher, s.health, store, nativeMessage, func(device state.NativeDevice, platform string, sendErr error) {
 			// "sent_via", not "sender" — this names the delivery path, not an

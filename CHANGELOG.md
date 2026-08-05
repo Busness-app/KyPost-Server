@@ -113,6 +113,20 @@ non-prerelease version.
 
 ### Changed
 
+- **Notification settings moved to Configuration → Notifications.** They were
+  sharing a page with device pairing under a nav entry labelled "Pairing" that
+  routed to `/notifications` and rendered a heading reading "Notifications and
+  Pairing" — three names for two unrelated things. Delivery mode, IMAP keywords,
+  content previews, the test notification and this-device unsubscribe are now a
+  tab on Configuration, visible to every user because they are per-account
+  preferences rather than system config. `/notifications` keeps only pairing for
+  now. Configuration's active tab also moved into the URL (`?tab=`), so a link
+  can open one and a reload no longer drops you back on the first tab; an
+  unrecognised value, or an admin-only tab requested by a non-admin, falls back
+  to that user's default rather than rendering a tab strip with no panel. The
+  test notification and any push carrying no explicit url now land on the new
+  tab.
+
 - **Encrypted mail no longer goes to the classifier.** A PGP-encrypted message
   has no readable body — the poller never decrypts, and the payload is detected
   precisely *because* no MIME part rendered — so every one of them spent an

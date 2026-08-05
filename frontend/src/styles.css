@@ -946,7 +946,7 @@ pre {
 .notifications-layout {
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(240px, 330px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .notifications-card {
@@ -1523,6 +1523,138 @@ pre {
   border-radius: 10px;
   padding: 10px;
   background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+}
+
+/* Notifications tab. `.config-card label` gives every label a border, padding
+   and panel background, which is right for a field but wrong for these — the
+   mode options and keyword chips are their own selectable surfaces and set all
+   three themselves. */
+.config-card h4 {
+  margin: 16px 0 0;
+  color: var(--ink-strong);
+  font-size: 0.95rem;
+}
+
+.config-notify-mode-grid {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.config-card .config-notify-mode-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--panel) 85%, var(--bg));
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+  cursor: pointer;
+}
+
+.config-card .config-notify-mode-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+  transform: translateY(-1px);
+}
+
+.config-card .config-notify-mode-option.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--panel));
+}
+
+.config-notify-mode-input {
+  margin-top: 2px;
+}
+
+.config-notify-mode-title {
+  grid-column: 2;
+  color: var(--ink-strong);
+  font-weight: 650;
+}
+
+.config-notify-mode-copy {
+  grid-column: 2;
+  display: block;
+  color: color-mix(in srgb, var(--ink) 82%, var(--ink-strong));
+  font-size: 0.85rem;
+}
+
+.config-card .config-notify-preview-toggle {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.config-card .config-notify-preview-toggle input {
+  margin-top: 4px;
+}
+
+.config-notify-keywords-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.config-notify-count {
+  align-self: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--line));
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.8rem;
+  color: var(--ink-strong);
+  background: color-mix(in srgb, var(--accent-soft) 32%, transparent);
+  white-space: nowrap;
+}
+
+.config-notify-keywords-tools {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.config-notify-keywords-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px;
+  max-height: 310px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.config-card .config-notify-keyword-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 9px;
+  background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.config-card .config-notify-keyword-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+}
+
+.config-card .config-notify-keyword-option.selected {
+  border-color: color-mix(in srgb, var(--accent) 90%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 42%, var(--panel));
+}
+
+.config-notify-keyword-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-notify-keyword-option input {
+  margin: 0;
 }
 
 @keyframes notifications-fade-up {
