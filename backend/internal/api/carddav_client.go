@@ -360,6 +360,14 @@ func fetchAddressBookCards(ctx context.Context, httpClient webdav.HTTPClient, ho
 		if raw == "" {
 			continue
 		}
+		// Same quadratic-unfolding guard the import route applies. The body is
+		// fully buffered above before parsing, so the 45s context deadline set
+		// by the caller is never consulted during the decode — a heavily folded
+		// card from a user-configured server would run to completion whatever
+		// the deadline says.
+		if err := checkVCardFolding([]byte(raw)); err != nil {
+			continue
+		}
 		card, err := vcard.NewDecoder(strings.NewReader(raw)).Decode()
 		if err != nil {
 			continue

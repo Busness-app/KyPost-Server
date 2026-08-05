@@ -48,8 +48,26 @@ func (s *Server) confirmAccountCredential(w http.ResponseWriter, r *http.Request
 	if !s.confirmAccountCredentialNoRecord(w, r, userID, password, authSecret) {
 		return false
 	}
-	s.mfaLockout.recordSuccess(userID)
+	s.passwordChangeLockout.recordSuccess(stepUpLockoutKey(userID, r))
 	return true
+}
+
+// stepUpLockoutKey keys credential-confirmation attempts on the acting account
+// AND the client address.
+//
+// This is deliberately NOT mfaLockout's key space. mfaLockout is account-wide on
+// purpose — a password holder can mint unlimited fresh sign-in challenges, so
+// only a cross-challenge account counter keeps a six-digit TOTP code out of
+// reach of online guessing. Spending that same counter on a PASSWORD check let
+// anyone holding a stolen session exhaust the owner's second-factor and
+// recovery-code budget from their own machine, turning the control into the
+// attack.
+//
+// A password is a high-entropy secret, so it can be throttled the way
+// handleChangePassword throttles the same secret: per (account, address). The
+// two counters guard different things and must not be shared.
+func stepUpLockoutKey(userID string, r *http.Request) string {
+	return clampLockoutKeyComponent(userID) + "\x00" + lockoutKeyForIP(clientIP(r))
 }
 
 // confirmAccountCredentialNoRecord is confirmAccountCredential without clearing
@@ -67,14 +85,15 @@ func (s *Server) confirmAccountCredentialNoRecord(w http.ResponseWriter, r *http
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return false
 	}
-	if allowed, _ := s.mfaLockout.tryAttempt(userID); !allowed {
+	lockKey := stepUpLockoutKey(userID, r)
+	if allowed, _ := s.passwordChangeLockout.tryAttempt(lockKey); !allowed {
 		http.Error(w, "too many attempts, try again later", http.StatusTooManyRequests)
 		return false
 	}
 	confirmed, err := verifyAccountCredential(r.Context(), u, password, authSecret)
 	if err != nil {
 		// Nothing was checked, so the throttle strike goes back with it.
-		s.mfaLockout.cancelAttempt(userID)
+		s.passwordChangeLockout.cancelAttempt(lockKey)
 		writeKDFBusy(w)
 		return false
 	}

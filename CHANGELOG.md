@@ -51,6 +51,31 @@ non-prerelease version.
 
 ### Security
 
+- **A recipient whose PGP key changed no longer gets a plaintext pickup link.**
+  The resolver already refused to switch keys when a contact's pinned
+  fingerprint stopped matching what discovery served, but the send path threw
+  that verdict away and treated the recipient as having no key at all — which is
+  precisely the case the "Secure link if no key" fallback covers, by storing the
+  message in the clear on this server for seven days. A broken pin is the one
+  signal that the key published for an address may have been substituted, so it
+  is now refused outright and the checkbox cannot override it. The compose error
+  says so, and no longer offers the fallback.
+
+- **Filter rules with an unusable regular expression are rejected when saved.**
+  An invalid pattern used to be accepted and only fail while running, where
+  "did not match" combined with *Not* inverted into "matched every message" — so
+  one mistyped character could quietly sweep an inbox into Trash. A pattern that
+  expands to an unreasonable size is refused for the same reason. Existing rules
+  are unaffected unless they were already broken.
+
+- **Address books have a size limit, and deleted contacts are now reclaimed.**
+  Tombstones from deleted contacts were kept forever because nothing ever ran
+  the collector, so a sync client that repeatedly added and removed entries grew
+  the file without bound. Deletions past the retention window are now swept
+  hourly, and an account is capped at 50,000 live contacts — far above any real
+  address book, and a backstop rather than a limit anyone will meet.
+
+
 - **The poll daemon refuses plaintext mailbox credentials.** The API's reader
   already rejected an unencrypted IMAP config and named the remedy, but the
   daemon's kept a copy of the fallback that had been removed from the shared

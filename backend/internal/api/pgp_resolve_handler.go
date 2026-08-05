@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -53,6 +54,15 @@ func (s *Server) handlePGPRecipientsResolve(w http.ResponseWriter, r *http.Reque
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	// The sibling bound to /api/pgp/recipients/check and to the send path: this
+	// loop carries the same per-address contacts-file re-read, plus outbound WKD
+	// and keyserver lookups on top of it.
+	if len(req.Addresses) > maxRecipientsPerSend {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+			"error": fmt.Sprintf("too many addresses (maximum %d)", maxRecipientsPerSend),
+		})
 		return
 	}
 	if len(req.Addresses) == 0 {

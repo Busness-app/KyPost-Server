@@ -58,7 +58,7 @@ func (s *Server) handleLoginParams(w http.ResponseWriter, r *http.Request) {
 	// bucket and denied sign-in to every user, from any single address, with no
 	// per-IP proxy rule able to restore it.
 	if s.loginParamsLimiter != nil {
-		if ok, _ := s.loginParamsLimiter.allow(clientIP(r)); !ok {
+		if ok, _ := s.loginParamsLimiter.allow(lockoutKeyForIP(clientIP(r))); !ok {
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{
 				"error": "too many sign-in attempts right now, try again shortly",
 			})

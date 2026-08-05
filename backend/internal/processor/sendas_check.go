@@ -103,6 +103,10 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 			continue
 		}
 
+		// Zero on a parse failure, which makes the Date check below inert rather
+		// than rejecting everything — the Subject check is the load-bearing one.
+		createdAt, _ := time.Parse(time.RFC3339, alias.CreatedAt)
+
 		domain := domainOf(alias.Email)
 		verified := false
 		for _, m := range matches {
@@ -140,6 +144,35 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 			// their key over WKD under it. autocrypt_harvest.go binds the exact
 			// address for the same reason.
 			if !strings.EqualFold(strings.TrimSpace(rawFromAddress(raw)), strings.TrimSpace(alias.Email)) {
+				continue
+			}
+			// And the signed Subject must actually CARRY this challenge's code.
+			//
+			// Everything above proves the message came from the alias's domain
+			// with a signed From equal to the alias. None of it proves the
+			// message is a response to THIS challenge. Until this check the code
+			// was used only as the IMAP SEARCH term — and that search is
+			// answered by a server the account holder chose, since
+			// POST /api/imap/config stores any host with no connection attempt
+			// and no ownership check. So one genuine, unmodified, correctly
+			// signed message the target once sent the attacker (any
+			// mailing-list post) satisfied the alias.
+			//
+			// The Subject is already proven DKIM-covered and proven to occur
+			// exactly once by the check above, so reading it back here is
+			// reading signed data.
+			if !strings.Contains(rawSubject(raw), alias.VerificationCode) {
+				continue
+			}
+			// A message that predates the challenge cannot be a response to it.
+			// Without this, an attacker's server may serve an old message that
+			// happens to quote a code — and codes are not secret from the
+			// account holder, who is the one being challenged.
+			if sentAt, ok := rawSentAt(raw); ok && sentAt.Before(createdAt) {
+				continue
+			}
+			// An unattended responder is not a person proving control.
+			if rawIsAutoReply(raw) {
 				continue
 			}
 			verified = true
@@ -319,4 +352,57 @@ func rawFromAddress(raw []byte) string {
 		return ""
 	}
 	return parseFromAddress(msg.Header.Get("From"))
+}
+
+// rawSubject returns the message's Subject header, or "" if the message does
+// not parse.
+//
+// Package-level rather than inline in checkPendingSendAsAliases because that
+// function's `mail imapadapter.Client` parameter shadows the net/mail import.
+func rawSubject(raw []byte) string {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return ""
+	}
+	return msg.Header.Get("Subject")
+}
+
+// rawSentAt returns the message's Date, and whether it parsed. Same shadowing
+// reason as rawSubject.
+func rawSentAt(raw []byte) (time.Time, bool) {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return time.Time{}, false
+	}
+	t, err := mail.ParseDate(msg.Header.Get("Date"))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// rawIsAutoReply reports whether the message announces itself as machine
+// generated.
+//
+// The probe is sent FROM the requesting account's own address, so an
+// out-of-office or helpdesk auto-acknowledgement at the target address returns
+// a domain-signed reply that quotes the code in its Subject and carries the
+// target's From — satisfying every other check without anyone at that address
+// ever reading it. RFC 3834 exists precisely so a responder can be recognised;
+// honouring it is what stops an unattended bounce from constituting proof of
+// control.
+func rawIsAutoReply(raw []byte) bool {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return false
+	}
+	if v := strings.ToLower(strings.TrimSpace(msg.Header.Get("Auto-Submitted"))); v != "" && v != "no" {
+		return true
+	}
+	for _, h := range []string{"X-Autoreply", "X-Autorespond", "X-Auto-Response-Suppress"} {
+		if strings.TrimSpace(msg.Header.Get(h)) != "" {
+			return true
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(msg.Header.Get("Precedence")), "auto_reply")
 }

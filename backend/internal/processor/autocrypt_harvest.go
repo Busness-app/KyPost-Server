@@ -42,6 +42,34 @@ func findContactByEmail(store *contacts.Store, email string) (contacts.Contact, 
 	return contacts.Contact{}, false
 }
 
+// authenticatedForContact reports whether storing a key proven for addr on
+// contact c stays within what that proof covers.
+//
+// True when the contact carries only addr (nothing else can inherit the key),
+// or when addr is the contact's primary address — the one a record-wide key is
+// legitimately about. False for a secondary address on a multi-address card,
+// where a record-wide write would silently authorize the key for the other
+// addresses too.
+func authenticatedForContact(c contacts.Contact, addr string) bool {
+	target := strings.ToLower(strings.TrimSpace(addr))
+	seen := map[string]bool{}
+	for _, e := range c.Emails {
+		v := strings.ToLower(strings.TrimSpace(e.Value))
+		if v != "" {
+			seen[v] = true
+		}
+	}
+	if len(seen) <= 1 {
+		return true
+	}
+	for _, e := range c.Emails {
+		if v := strings.ToLower(strings.TrimSpace(e.Value)); v != "" {
+			return v == target
+		}
+	}
+	return false
+}
+
 // harvestPinAutocryptKey applies the source-based precedence rule for a
 // validated, DKIM-authenticated Autocrypt key. Harvest is the weakest rung: it
 // never overrides a non-autocrypt key (manual/qr/wkd/keyserver), fills a gap
@@ -49,6 +77,28 @@ func findContactByEmail(store *contacts.Store, email string) (contacts.Contact, 
 // exists, and for an existing autocrypt key lets the newest fingerprint win.
 func harvestPinAutocryptKey(store *contacts.Store, addr, armored, fingerprint string) (harvestAction, error) {
 	c, ok := findContactByEmail(store, addr)
+	if ok && !authenticatedForContact(c, addr) {
+		// DKIM proved control of `addr` and of nothing else. The key, however,
+		// is stored on the contact RECORD, and findContact,
+		// findContactByEmail and contactBindsAddress all match ANY address on
+		// a contact — so writing it here would authorize this key for
+		// addresses whose domains never signed anything.
+		//
+		// Concretely: a contact card carrying bob@example.com plus a lapsed
+		// bob@old-domain.example lets whoever acquires the lapsed domain
+		// become the encryption target for bob@example.com. That is a
+		// confidentiality break, not just a forged signature badge, and the
+		// newest-fingerprint-wins branch below means it REPLACES a
+		// legitimately harvested key rather than only filling a gap.
+		//
+		// The principled fix is to bind a harvested key to the address it was
+		// authenticated for rather than to the record; the data model has no
+		// per-address key slot yet (ContactValue is {Label, Value}), so until
+		// it does, refuse the cases where record-wide storage would overreach.
+		// A single-address contact cannot overreach, and neither can the
+		// contact's own primary address.
+		return harvestSkipped, nil
+	}
 	if !ok {
 		_, err := store.Upsert(contacts.Contact{
 			FormattedName:     addr,

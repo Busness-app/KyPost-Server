@@ -273,8 +273,10 @@ func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainB
 		// A leaked quota slot is recoverable; that is not. Keep the record and
 		// let the sweeper collect it if the link really is never used.
 		if errors.Is(sendErr, mailmsg.ErrSMTPAcceptedThenFailed) {
+			// No recipient address: this is the instance-wide log, which
+			// GET /api/logs serves to any admin. See log_privacy_test.go.
 			s.logger.Error("pickup link accepted by the smtp server but the session failed; keeping the record",
-				"recipient", recipient, "error", sendErr.Error())
+				"error", sendErr.Error())
 			return sendErr
 		}
 		return discard(sendErr)

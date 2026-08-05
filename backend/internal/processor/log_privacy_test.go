@@ -25,11 +25,12 @@ import (
 // error paths no test happens to drive. A behavioural test proves one line is
 // clean; this proves the package is.
 var forbiddenLogKeys = map[string]string{
-	"sender":  "the sending address is correspondence metadata",
-	"subject": "a subject line is message content",
-	"body":    "a body is message content",
-	"to":      "recipient addresses are correspondence metadata",
-	"snippet": "a snippet is message content",
+	"recipient": "a recipient address is correspondence metadata: the instance log is admin-readable, and admins have no mailbox access to other users",
+	"sender":    "the sending address is correspondence metadata",
+	"subject":   "a subject line is message content",
+	"body":      "a body is message content",
+	"to":        "recipient addresses are correspondence metadata",
+	"snippet":   "a snippet is message content",
 }
 
 func TestNoMessageContentInInstanceWideLog(t *testing.T) {

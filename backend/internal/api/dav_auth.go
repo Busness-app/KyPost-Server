@@ -153,6 +153,9 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// it into the session: an admin demoted mid-sync must not keep the
 			// old role for the rest of the cache TTL.
 			ac.Role = u.Role
+			if !s.meterAccountWrite(w, r, ac.UserID) {
+				return
+			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 			return
 		}
@@ -210,6 +213,9 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		s.davLockout.recordSuccess(lockKey)
 		ac := AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}
 		s.davCredentials.put(gen, username, password, ac)
+		if !s.meterAccountWrite(w, r, ac.UserID) {
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	})
 }

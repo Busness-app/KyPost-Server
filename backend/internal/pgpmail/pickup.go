@@ -114,6 +114,22 @@ const maxOutstandingPickupsPerUser = 100
 // since that scan can only ever walk what fits under this.
 const maxPickupBytesTotal = 2 << 30
 
+// maxPickupBytesPerUser apportions the shared ceiling above.
+//
+// maxOutstandingPickupsPerUser is denominated in RECORDS, and the shared
+// ceiling in BYTES, so the per-user cap never bound the shared resource: 100
+// records of ~34 MiB is ~3.4 GiB against a 2 GiB total, letting one account
+// exhaust the whole directory from entirely inside its own quota and deny
+// pickup sending to every other user for the full retention window.
+//
+// A cap must be in the same unit as the thing it apportions. 128 MiB leaves
+// room for sixteen accounts at their maximum before the shared ceiling is
+// reachable at all, while still allowing several full-size messages outstanding.
+//
+// A var, not a const, solely so in-package tests can lower it and exercise the
+// refusal without writing gigabytes; production never reassigns it.
+var maxPickupBytesPerUser int64 = 128 << 20
+
 // ErrPickupStorageFull reports that the pickup directory is at its byte
 // ceiling. Distinct from the per-account quota: the sender may be well under
 // their own limit and still be refused because the shared volume is not.
@@ -152,16 +168,20 @@ var ErrPickupQuotaExceeded = errors.New("pgpmail: too many unread pickup message
 // collects them on its own schedule, and letting them hold a slot would mean
 // someone who legitimately sent a week's worth of pickup links gets refused
 // over messages that have already been read.
-func (s *PickupStore) outstandingForLocked(senderUserID string) int {
+// It also returns the BYTES those records occupy, because the per-user cap has
+// to be denominated in the same unit as the shared ceiling it apportions — and
+// this scan already reads every record, so the byte total is free.
+func (s *PickupStore) outstandingForLocked(senderUserID string) (int, int64) {
 	entries, err := os.ReadDir(s.baseDir)
 	if err != nil {
 		// No directory yet means no records yet. A read failure is reported as
 		// zero rather than as "full": refusing to send because the quota could
 		// not be counted would turn an unrelated disk problem into an outage.
-		return 0
+		return 0, 0
 	}
 	now := time.Now().UTC()
 	count := 0
+	var bytes int64
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -181,8 +201,9 @@ func (s *PickupStore) outstandingForLocked(senderUserID string) int {
 			continue
 		}
 		count++
+		bytes += int64(len(b))
 	}
-	return count
+	return count, bytes
 }
 
 // Create seals body and persists a new pickup record, expiring after ttl.
@@ -198,7 +219,8 @@ func (s *PickupStore) Create(senderUserID, recipientEmail, subject, body, mode s
 	if s.pickupBytesTotalLocked() >= maxPickupBytesTotal {
 		return "", ErrPickupStorageFull
 	}
-	if s.outstandingForLocked(senderUserID) >= maxOutstandingPickupsPerUser {
+	outstanding, senderBytes := s.outstandingForLocked(senderUserID)
+	if outstanding >= maxOutstandingPickupsPerUser || senderBytes >= maxPickupBytesPerUser {
 		return "", ErrPickupQuotaExceeded
 	}
 
@@ -256,7 +278,8 @@ func (s *PickupStore) CreateClientSealed(senderUserID, recipientEmail, sealed st
 	if s.pickupBytesTotalLocked() >= maxPickupBytesTotal {
 		return "", ErrPickupStorageFull
 	}
-	if s.outstandingForLocked(senderUserID) >= maxOutstandingPickupsPerUser {
+	outstanding, senderBytes := s.outstandingForLocked(senderUserID)
+	if outstanding >= maxOutstandingPickupsPerUser || senderBytes >= maxPickupBytesPerUser {
 		return "", ErrPickupQuotaExceeded
 	}
 

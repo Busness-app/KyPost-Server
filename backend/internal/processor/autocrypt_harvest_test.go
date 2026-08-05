@@ -350,3 +350,121 @@ func TestHarvestAutocryptSkipsSuppressedAddress(t *testing.T) {
 		t.Fatalf("suppressed address must harvest nothing")
 	}
 }
+
+// TestHarvestPinSkipsSecondaryAddressOnMultiAddressContact pins the scope of
+// what the DKIM gate actually proves.
+//
+// verifyAutocryptDKIM authenticates the Autocrypt header against the domain of
+// the FROM address — the sender's own domain. That proves control of that one
+// address and nothing else. But the key is written onto the contact RECORD, and
+// findContact/findContactByEmail/contactBindsAddress all match ANY address on a
+// contact, so the key becomes the encryption target and signature anchor for
+// every other address on the card.
+//
+// An attacker who acquires a lapsed secondary domain sitting on a contact card
+// therefore takes over the PRIMARY address: their key is what the victim's next
+// encrypted message to bob@example.com is encrypted to.
+func TestHarvestPinSkipsSecondaryAddressOnMultiAddressContact(t *testing.T) {
+	store, err := contacts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+	existing, err := store.Upsert(contacts.Contact{
+		FormattedName: "Bob",
+		Emails: []contacts.ContactValue{
+			{Value: "bob@example.com"},
+			{Value: "bob@lapsed-domain.example"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// Mallory owns lapsed-domain.example, so her key legitimately carries that
+	// address as its only User ID and she can legitimately DKIM-sign for it.
+	armored, fp := autocryptTestKey(t, "Mallory", "bob@lapsed-domain.example")
+
+	action, err := harvestPinAutocryptKey(store, "bob@lapsed-domain.example", armored, fp)
+	if err != nil {
+		t.Fatalf("harvestPinAutocryptKey: %v", err)
+	}
+	if action != harvestSkipped {
+		t.Fatalf("action = %q, want skipped", action)
+	}
+	c, _ := store.Get(existing.UID)
+	if c.PGPKey != "" || c.PGPKeyFingerprint != "" {
+		t.Fatalf("a key proven only for a secondary address must not become the "+
+			"contact-wide anchor for bob@example.com, got fp=%q", c.PGPKeyFingerprint)
+	}
+}
+
+// TestHarvestPinSecondaryAddressCannotReplaceAnExistingKey is the sharper half:
+// the newest-fingerprint-wins branch means this is not merely gap-filling. A
+// contact that already holds a legitimately harvested key for its primary
+// address has that key REPLACED by one proven only for a secondary address.
+func TestHarvestPinSecondaryAddressCannotReplaceAnExistingKey(t *testing.T) {
+	store, err := contacts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+	realArmored, realFP := autocryptTestKey(t, "Bob", "bob@example.com")
+	existing, err := store.Upsert(contacts.Contact{
+		FormattedName: "Bob",
+		Emails: []contacts.ContactValue{
+			{Value: "bob@example.com"},
+			{Value: "bob@lapsed-domain.example"},
+		},
+		PGPKey:            realArmored,
+		PGPKeyFingerprint: realFP,
+		PGPKeySource:      contacts.PGPSourceAutocrypt,
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	mallory, malloryFP := autocryptTestKey(t, "Mallory", "bob@lapsed-domain.example")
+
+	action, err := harvestPinAutocryptKey(store, "bob@lapsed-domain.example", mallory, malloryFP)
+	if err != nil {
+		t.Fatalf("harvestPinAutocryptKey: %v", err)
+	}
+	if action != harvestSkipped {
+		t.Fatalf("action = %q, want skipped", action)
+	}
+	c, _ := store.Get(existing.UID)
+	if c.PGPKeyFingerprint != realFP {
+		t.Fatalf("Bob's real key was replaced by one proven only for a secondary "+
+			"address: fp = %q, want %q", c.PGPKeyFingerprint, realFP)
+	}
+}
+
+// TestHarvestPinStillWorksForThePrimaryAddress guards against over-correcting:
+// the ordinary case — a key proven for the contact's own primary address — must
+// keep working on a multi-address card.
+func TestHarvestPinStillWorksForThePrimaryAddress(t *testing.T) {
+	store, err := contacts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("contacts.New: %v", err)
+	}
+	existing, err := store.Upsert(contacts.Contact{
+		FormattedName: "Bob",
+		Emails: []contacts.ContactValue{
+			{Value: "bob@example.com"},
+			{Value: "bob@lapsed-domain.example"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	armored, fp := autocryptTestKey(t, "Bob", "bob@example.com")
+
+	action, err := harvestPinAutocryptKey(store, "bob@example.com", armored, fp)
+	if err != nil {
+		t.Fatalf("harvestPinAutocryptKey: %v", err)
+	}
+	if action != harvestPinned {
+		t.Fatalf("action = %q, want pinned", action)
+	}
+	c, _ := store.Get(existing.UID)
+	if c.PGPKeyFingerprint != fp {
+		t.Fatalf("primary-address harvest must still pin, got fp=%q", c.PGPKeyFingerprint)
+	}
+}

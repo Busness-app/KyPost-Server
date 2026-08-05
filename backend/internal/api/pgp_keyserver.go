@@ -119,6 +119,17 @@ func (s *Server) handlePGPRecipientsCheck(w http.ResponseWriter, r *http.Request
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	// Same bound, same reason, as maxRecipientsPerSend on the send path: the
+	// per-address lookup below re-reads and re-unmarshals the whole contacts
+	// file, so cost is O(addresses x contacts). Unlike the send path this loop
+	// makes no network call, so there is nothing that would notice a client
+	// disconnect — an uncapped list is uninterruptible work.
+	if len(req.Addresses) > maxRecipientsPerSend {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+			"error": fmt.Sprintf("too many addresses (maximum %d)", maxRecipientsPerSend),
+		})
+		return
+	}
 
 	contactsStore, err := s.userContactsStore(ac.UserID)
 	if err != nil {

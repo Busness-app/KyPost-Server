@@ -166,3 +166,57 @@ func TestGroupNodesCountTowardTheConditionCap(t *testing.T) {
 		t.Fatalf("a match at exactly the cap was rejected: %v", err)
 	}
 }
+
+// TestValidateRuleRejectsAPatternWhoseCompiledFormIsHuge pins the bound that
+// maxCompiledPatterns does not provide.
+//
+// The cache is capped at 4096 ENTRIES with no byte accounting, and a pattern is
+// admitted on its SOURCE length alone (512 bytes). A bounded repeat over a long
+// literal — (?:<494 chars>){1000}, 504 bytes — compiles to a program tens of
+// megabytes wide. 300 of them, one rule at the condition cap, is gigabytes
+// pinned in a process-global map after a single message evaluation, and 300 is
+// far below 4096 so the wholesale flush never fires.
+//
+// It must be rejected at validation, not merely left uncached: returning nil at
+// evaluation time would trade a memory exhaustion for a recompile-per-message
+// CPU exhaustion.
+func TestValidateRuleRejectsAPatternWhoseCompiledFormIsHuge(t *testing.T) {
+	huge := "(?:" + strings.Repeat("a", 494) + "){1000}"
+	if len(huge) > maxConditionValueBytes {
+		t.Fatalf("test pattern must fit the source-length cap: %d > %d", len(huge), maxConditionValueBytes)
+	}
+	r := Rule{
+		Name:    "blowup",
+		Match:   MatchGroup{Op: "anyof", Conditions: []Condition{{Field: "subject", Comparator: "regex", Value: huge}}},
+		Actions: []Action{{Type: "delete"}},
+	}
+	if err := ValidateRule(r); err == nil {
+		t.Fatalf("ValidateRule accepted a %d-byte pattern that compiles to a huge program", len(huge))
+	}
+}
+
+// TestValidateRuleRejectsAnUncompilablePattern is the other half: an invalid
+// regex is currently stored with a 200 OK and only fails at evaluation time,
+// where compilePattern returns nil.
+func TestValidateRuleRejectsAnUncompilablePattern(t *testing.T) {
+	r := Rule{
+		Name:    "typo",
+		Match:   MatchGroup{Op: "anyof", Conditions: []Condition{{Field: "subject", Comparator: "regex", Value: "("}}},
+		Actions: []Action{{Type: "delete"}},
+	}
+	if err := ValidateRule(r); err == nil {
+		t.Fatal("ValidateRule accepted an uncompilable regex")
+	}
+}
+
+// TestValidateRuleAcceptsAnOrdinaryPattern guards against over-correcting.
+func TestValidateRuleAcceptsAnOrdinaryPattern(t *testing.T) {
+	r := Rule{
+		Name:    "ordinary",
+		Match:   MatchGroup{Op: "anyof", Conditions: []Condition{{Field: "subject", Comparator: "regex", Value: "^(invoice|receipt)-[0-9]{4,8}$"}}},
+		Actions: []Action{{Type: "delete"}},
+	}
+	if err := ValidateRule(r); err != nil {
+		t.Fatalf("ValidateRule rejected an ordinary pattern: %v", err)
+	}
+}

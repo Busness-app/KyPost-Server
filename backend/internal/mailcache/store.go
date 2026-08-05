@@ -473,6 +473,13 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 			updated.PGPSignerFingerprint = in.PGPSignerFingerprint
 			updated.PGPProtectedSubject = in.PGPProtectedSubject
 			updated.BodyMode = in.BodyMode
+			// The stamp travels with the verdict it describes. Without this the
+			// existing-UID branch kept a zero version alongside a fresh verdict,
+			// and dropStaleVerdicts then discarded both on the very next load —
+			// which is the production ordering, since the poller creates the
+			// entry before the API warms the verdict into it.
+			updated.PGPVerdictSchemaVersion = in.PGPVerdictSchemaVersion
+			updated.ContactKeyGen = in.ContactKeyGen
 		}
 		// Only the warm path (poller) calls Upsert, and it always carries an
 		// authoritative attachment flag from the same GetEmails parse — so

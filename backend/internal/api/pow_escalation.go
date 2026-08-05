@@ -28,6 +28,16 @@ const (
 	// or an influenced X-Forwarded-For chain under TRUST_PROXY_HEADERS=true)
 	// accumulates freely between ticks. Crossing this triggers an inline sweep.
 	powEscalationSweepThreshold = 10_000
+	// maxPowEscalationAccountsPerIP bounds the per-address account map.
+	//
+	// powEscalationSweepThreshold guards only the OUTER map, and its check lives
+	// inside the !exists branch, so it runs only when a new address arrives. A
+	// single address rotating usernames therefore grew one entry's byAccount map
+	// without any bound, on a key the caller chooses.
+	//
+	// An address that has failed against this many distinct accounts is already
+	// at maximum escalation; tracking more of them changes no decision.
+	maxPowEscalationAccountsPerIP = 256
 )
 
 // powEscalationEntry counts an address's recent failures per targeted account
@@ -103,8 +113,24 @@ func (p *powEscalation) recordFailure(ip, account string, now time.Time) {
 		e = &powEscalationEntry{byAccount: map[string]int{}}
 		p.entries[ip] = e
 	}
-	e.byAccount[account]++
-	e.expiresAt = now.Add(powEscalationDecay)
+	// The outer map is bounded by sweepThreshold above; the inner one needs its
+	// own cap. One address rotating usernames only ever takes the `exists`
+	// branch, which never consults that threshold, so byAccount grew without
+	// limit on a caller-supplied key.
+	//
+	// Past the cap, stop admitting NEW accounts and keep counting the ones
+	// already tracked: escalation for an address that is spraying usernames is
+	// already at its ceiling, so the extra keys buy accuracy nobody can use.
+	if _, tracked := e.byAccount[account]; tracked || len(e.byAccount) < maxPowEscalationAccountsPerIP {
+		e.byAccount[account]++
+	}
+	// Extend the decay window from FIRST failure, not from the latest one.
+	// Refreshing it on every failure meant an entry never expired while its
+	// attacker kept working — so the sweep could not reclaim exactly the
+	// entries that were growing.
+	if e.expiresAt.IsZero() {
+		e.expiresAt = now.Add(powEscalationDecay)
+	}
 }
 
 // clearAccount forgives ip's failures against one account, called when a login

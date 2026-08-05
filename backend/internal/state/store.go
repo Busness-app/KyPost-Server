@@ -974,6 +974,18 @@ func (s *Store) upsertNativeDeviceTx(tx *sql.Tx, device NativeDevice) error {
 		}
 		device.DeviceID = id
 	}
+	// Enrollment fields are never settable through this function, on ANY branch.
+	//
+	// applyTo carries them forward on the two branches that match an existing
+	// row, but the new-device branch wrote whatever the caller passed — so the
+	// constraint held by convention rather than by construction. No caller
+	// currently sets them (the register request has no such field and the struct
+	// literal omits them), but zeroing here makes the rule true rather than
+	// merely observed, which is what the comment on enrollmentState claims.
+	device.EnrollmentPublicKey = ""
+	device.EnrollmentKeyAt = ""
+	device.EncryptionEnrolled = false
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	if strings.TrimSpace(device.RegisteredAt) == "" {
 		device.RegisteredAt = now
@@ -1003,16 +1015,16 @@ func (s *Store) upsertNativeDeviceTx(tx *sql.Tx, device NativeDevice) error {
 	}
 
 	if device.PushToken != "" {
-		var matchID, matchRegistered string
+		var matchID, matchRegistered, matchUserID string
 		var matchSeq sql.NullInt64
 		var matchApprover int
 		var match enrollmentState
 		err := tx.QueryRow(
-			`SELECT device_id, registered_at, seq, mfa_approver,
+			`SELECT device_id, registered_at, seq, mfa_approver, user_id,
 			        enrollment_public_key, enrollment_key_at, encryption_enrolled
 			 FROM native_devices
 			 WHERE push_token = ? AND platform = ? ORDER BY seq LIMIT 1`,
-			device.PushToken, device.Platform).Scan(&matchID, &matchRegistered, &matchSeq, &matchApprover,
+			device.PushToken, device.Platform).Scan(&matchID, &matchRegistered, &matchSeq, &matchApprover, &matchUserID,
 			&match.publicKey, &match.keyAt, &match.enrolled)
 		if err == nil {
 			if _, err := tx.Exec(`DELETE FROM native_devices WHERE device_id = ?`, matchID); err != nil {
@@ -1021,6 +1033,14 @@ func (s *Store) upsertNativeDeviceTx(tx *sql.Tx, device NativeDevice) error {
 			device.DeviceID = matchID
 			device.RegisteredAt = matchRegistered
 			device.MFAApprover = matchApprover == 1
+			// Carry the owner forward too. Every other field the merge preserves
+			// is listed above; user_id was not, so a caller that omitted it
+			// blanked the row's owner. Harmless today because the single caller
+			// always sets it — the same unenforced-constraint shape as the
+			// enrollment fields.
+			if strings.TrimSpace(device.UserID) == "" {
+				device.UserID = matchUserID
+			}
 			match.applyTo(&device)
 			return insertDevice(tx, device, int(matchSeq.Int64))
 		}

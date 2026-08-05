@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -266,5 +267,55 @@ func TestPoWEscalationSumsAcrossAccounts(t *testing.T) {
 
 	if got, want := e.maxNumberFor("1.2.3.4", 5_000, now), flat.maxNumberFor("5.6.7.8", 5_000, now); got != want {
 		t.Fatalf("three failures across three accounts priced at %d, three against one at %d — they must match", got, want)
+	}
+}
+
+// TestPowEscalationBoundsAccountsPerAddress pins the bound the outer map has
+// and the inner one does not.
+//
+// sweepThreshold guards p.entries, and the check sits inside the !exists branch
+// so it only ever runs when a NEW ip arrives. e.byAccount is keyed on a
+// caller-supplied username with no cap of its own, so one address rotating
+// usernames grows a single entry without limit.
+func TestPowEscalationBoundsAccountsPerAddress(t *testing.T) {
+	p := newPowEscalation()
+	now := time.Now()
+
+	for i := 0; i < maxPowEscalationAccountsPerIP*3; i++ {
+		p.recordFailure("198.51.100.7", fmt.Sprintf("victim-%d", i), now)
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.entries["198.51.100.7"]
+	if e == nil {
+		t.Fatal("no entry recorded")
+	}
+	if len(e.byAccount) > maxPowEscalationAccountsPerIP {
+		t.Fatalf("byAccount holds %d accounts for one address, cap is %d",
+			len(e.byAccount), maxPowEscalationAccountsPerIP)
+	}
+}
+
+// TestPowEscalationEntryExpiresDespiteContinuedFailures pins the other half: an
+// entry whose expiry is pushed forward on every failure never ages out while an
+// attacker keeps working, so the sweep can never reclaim it.
+func TestPowEscalationEntryExpiresDespiteContinuedFailures(t *testing.T) {
+	p := newPowEscalation()
+	start := time.Now()
+
+	p.recordFailure("198.51.100.8", "victim", start)
+	// Keep failing, well past the decay window.
+	for i := 1; i <= 20; i++ {
+		p.recordFailure("198.51.100.8", "victim", start.Add(time.Duration(i)*powEscalationDecay))
+	}
+
+	p.sweepExpired(start.Add(25 * powEscalationDecay))
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.entries["198.51.100.8"]; ok {
+		t.Fatal("entry survived a sweep 25 decay windows after it was created, " +
+			"because every failure pushed its expiry forward")
 	}
 }

@@ -54,6 +54,24 @@ export function keylessRecipientsFrom409(error: unknown): string[] | null {
 }
 
 
+// Pulls the changed-key recipient list out of /api/mail/send's 409 body.
+//
+// Deliberately separate from keylessRecipientsFrom409: the two 409s mean
+// opposite things. "No key on file" is an absence the pickup fallback exists to
+// cover. A CHANGED key is the TOFU pin firing — the one signal that the key
+// published for an address may have been substituted — and offering the pickup
+// fallback there would mail the plaintext in the clear to whoever is in a
+// position to have made the substitution. The server refuses those sends and
+// this list is why; the message must not mention the fallback.
+export function keyChangedRecipientsFrom409(error: unknown): string[] | null {
+  if (!(error instanceof HttpError) || error.status !== 409) return null;
+  const body = error.body as { keyChangedRecipients?: unknown } | undefined;
+  const list = body?.keyChangedRecipients;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  return list.filter((item): item is string => typeof item === "string");
+}
+
+
 // --- partial delivery of a client-side encrypted send -----------------------
 
 /**

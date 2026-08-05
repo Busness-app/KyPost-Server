@@ -102,6 +102,15 @@ type Entry struct {
 	// recomputes rather than showing nothing — dropped when the file is
 	// loaded. See PGPVerdictSchema (the constant).
 	PGPVerdictSchemaVersion int `json:"pgpVerdictSchema,omitempty"`
+	// ContactKeyGen is the contacts store's PGP key generation at the moment
+	// this verdict was computed.
+	//
+	// A signature verdict is derived from the address book, so it is only valid
+	// while the address book's key bindings are unchanged. Recording the
+	// generation lets a reader discard a verdict whose basis has moved, whichever
+	// of the eleven contact write paths moved it — including the three in the
+	// daemon process, which cannot reach the API's invalidation helper at all.
+	ContactKeyGen int64 `json:"contactKeyGen,omitempty"`
 
 	// PGPProtectedSubject is the real subject recovered from a decrypted
 	// message's protected headers, warm-path-only like the other PGP fields.

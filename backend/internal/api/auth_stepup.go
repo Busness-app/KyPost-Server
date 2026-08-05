@@ -86,6 +86,11 @@ func (s *Server) handleAuthStepUp(w http.ResponseWriter, r *http.Request) {
 	if u.TOTPEnabled && !s.confirmSecondFactor(w, r, u, strings.TrimSpace(req.Code)) {
 		return
 	}
+	// One success per counter: the credential half runs on the (account,
+	// address)-keyed step-up throttle, the second-factor half on the
+	// account-wide mfaLockout. They were a single counter, which is what let a
+	// wrong password here deny the owner their own TOTP.
+	s.passwordChangeLockout.recordSuccess(stepUpLockoutKey(ac.UserID, r))
 	s.mfaLockout.recordSuccess(ac.UserID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
