@@ -511,3 +511,77 @@ func TestDeviceAuthReadRouteIsNotMetered(t *testing.T) {
 		}
 	}
 }
+
+// deviceId becomes part of the enrollment code's hash preimage, and three
+// independent implementations must produce identical bytes from it. The spec
+// mandates UTF-8 and a length prefix but says nothing about normalisation, so a
+// non-ASCII id that one implementation normalises differently makes the codes
+// never match — surfacing to the user as "the key this server gave the browser
+// is not the key on that device", which is indistinguishable from an attack.
+func TestRegisterRejectsADeviceIDThatCannotBeHashedPortably(t *testing.T) {
+	for _, id := range []string{
+		"café-phone",             // non-ASCII: NFC and NFD differ
+		"pixeĺ",                 // combining acute, normalises
+		"my phone",               // space: breaks the device: slot name
+		"emoji-\U0001F4F1",       // outside the BMP
+		strings.Repeat("a", 129), // over the slot-id bound
+	} {
+		if validDeviceID(id) {
+			t.Errorf("validDeviceID(%q) = true; that id cannot be hashed portably", id)
+		}
+	}
+	for _, id := range []string{"pixel-7", "device_a", "A.B:C-1", "0123456789abcdef"} {
+		if !validDeviceID(id) {
+			t.Errorf("validDeviceID(%q) = false; that is an ordinary id", id)
+		}
+	}
+}
+
+// The bound applies to NEW ids only. A device registered before it exists must
+// keep working on its next token refresh rather than being stranded, and it
+// re-registers through the branch that proves possession of its secret.
+func TestAnAlreadyRegisteredDeviceIDIsNotStrandedByTheCharsetBound(t *testing.T) {
+	srv, userID, _, _ := newPairedDeviceForTest(t)
+	legacyID := "café-phone" // would be refused as a new id
+
+	store, err := srv.userStore(userID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	raw, err := randomToken(24)
+	if err != nil {
+		t.Fatalf("randomToken: %v", err)
+	}
+	hash, err := users.HashPassword(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := store.UpsertNativeDevice(state.NativeDevice{
+		DeviceID: legacyID, Platform: "android", PushToken: "old", UserID: userID, SecretHash: hash,
+	}); err != nil {
+		t.Fatalf("seed legacy device: %v", err)
+	}
+	srv.userMu.Lock()
+	srv.deviceIndex[legacyID] = userID
+	srv.userMu.Unlock()
+
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+	body := fmt.Sprintf(
+		`{"subscriberId":%q,"pairingToken":%q,"deviceToken":"refreshed","deviceId":%q,"platform":"android"}`,
+		subscriberID, token, legacyID)
+	req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", strings.NewReader(body))
+	req.Header.Set(headerDeviceSecret, raw)
+	rec := httptest.NewRecorder()
+	srv.handleNotificationNativeRegister(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a pre-existing device was stranded by the charset bound: status %d, body=%s", rec.Code, rec.Body.String())
+	}
+}

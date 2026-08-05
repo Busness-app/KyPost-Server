@@ -141,6 +141,23 @@ H        = SHA-256(preimage)                 // 32 bytes
 `deviceId` is length-prefixed because it is the only variable-width field; without the
 prefix a device id ending in digits could collide with a different id and bucket.
 
+**deviceId charset — NORMATIVE, added 2026-08-05.** A device id is **1–128 characters from
+`A-Z a-z 0-9 . _ : -`** and nothing else. `POST /api/notifications/native/register` refuses
+any other id for a NEW device (`validDeviceID`); ids registered before this bound keep
+working, since re-registration proves possession of the existing secret.
+
+This is not tidiness. The paragraph above says UTF-8 and gives a length prefix, but said
+nothing about normalisation — and `deviceId` is **client-chosen**. If any of the three
+implementations normalises differently (NFC versus NFD), or a JSON round-trip alters the
+string, the preimages differ, the codes never match, and the browser reports that as *"the
+key this server gave the browser is not the key on that device"*. An encoding bug would
+present to the user as an active attack, which is the one failure this feature must never
+manufacture. Every character in the permitted set is byte-identical under UTF-8, NFC and
+NFD, and none needs escaping in the `device:<id>` slot name.
+
+Implementations MUST NOT normalise `deviceId` before hashing. With the charset above there
+is nothing to normalise, which is the point.
+
 **Code extraction.** Take the **first 50 bits of `H`, most-significant bit first**, and
 emit ten Crockford base32 characters, character *i* encoding bits `[5i, 5i+5)`. Fifty bits
 is exactly ten characters with no padding. Alphabet:

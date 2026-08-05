@@ -16,6 +16,10 @@ import (
 // Each device has its own secret minted at registration time — there is no
 // account-wide shared secret and no legacy query-param fallback.
 const (
+	// maxDeviceIDLen matches users.maxDeviceSlotIDLen: a device id becomes the
+	// `device:<id>` envelope slot name, so the two bounds must not disagree.
+	maxDeviceIDLen = 128
+
 	headerDeviceID     = "X-Kypost-Device-Id"
 	headerDeviceSecret = "X-Kypost-Device-Secret"
 )
@@ -198,4 +202,38 @@ func writeDeviceAuthFailure(w http.ResponseWriter, retryAfter time.Duration) {
 		return
 	}
 	http.Error(w, "invalid device credentials", http.StatusUnauthorized)
+}
+
+// validDeviceID reports whether a NEW device id is safe to hash.
+//
+// deviceId is client-chosen and becomes part of the enrollment code's hash
+// preimage: SHA-256(rawKey ‖ uint16BE(len(idUtf8)) ‖ idUtf8 ‖ uint64BE(bucket)).
+// Three independent implementations — browser, Android, Qt — must produce the
+// same bytes from the same id, and the spec mandates UTF-8 and a length prefix
+// but says nothing about normalisation or character set.
+//
+// That gap is dangerous out of proportion to its size. If any implementation
+// normalises differently (NFC vs NFD), or a JSON round-trip alters the string,
+// the derived codes never match — and the browser reports a mismatch as "the
+// key this server gave the browser is not the key on that device", the most
+// alarming message in the product. A user cannot tell that apart from a hostile
+// server. An encoding bug would present as an attack.
+//
+// Restricting new ids to an unambiguous ASCII subset removes the class rather
+// than documenting a rule nothing enforces. The set is deliberately narrow:
+// every character survives UTF-8, NFC and NFD identically, and none of them
+// needs escaping in the `device:<id>` envelope slot name.
+func validDeviceID(id string) bool {
+	if id == "" || len(id) > maxDeviceIDLen {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == ':', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }

@@ -492,6 +492,15 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 				})
 				return
 			}
+		} else if !validDeviceID(requested) {
+			// A NEW id must be portable across the three implementations that
+			// hash it. Checked only for new ids so that a device registered
+			// before this bound is not stranded on its next token refresh —
+			// it re-registers through the branch above, which proves possession.
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": "deviceId must be 1-128 characters of A-Z a-z 0-9 . _ : or -",
+			})
+			return
 		}
 	}
 
