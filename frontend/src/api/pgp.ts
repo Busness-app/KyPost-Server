@@ -1,5 +1,6 @@
 import { getJSON, postJSON, putJSON, deleteJSON } from "./client";
 import { credentialFields, deriveCredential } from "./auth";
+import type { DeviceEnvelope } from "../lib/deviceEnrollment";
 
 export type PGPIdentity = {
   fingerprint: string;
@@ -330,4 +331,45 @@ export function createSealedPickup(
   sealed: unknown
 ): Promise<{ id: string; url: string; expiresAt: string }> {
   return postJSON("/api/pgp/pickup", { recipient, sealed: JSON.stringify(sealed) });
+}
+
+// ---- device enrollment slots -----------------------------------------------
+
+/**
+ * Installs a device's ECDH-sealed envelope in its `device:<id>` slot.
+ *
+ * CALLERS MUST HAVE VERIFIED THE ENROLLMENT CODE FIRST. This request is what
+ * the comparison in DeviceEnrollmentCard gates: by the time it is issued the
+ * private key is ALREADY sealed to whatever public key the server served, so
+ * nothing here or downstream can undo a decision made upstream of it. The
+ * function cannot check that for itself, which is exactly why the gate belongs
+ * at the call site.
+ *
+ * `password` is the ACCOUNT credential the route's step-up requires — not the
+ * vault passphrase, which the stale-envelope recovery path proves may differ.
+ */
+export async function putDeviceEnvelope(
+  deviceId: string,
+  envelope: DeviceEnvelope,
+  password: string
+): Promise<{ ok: boolean }> {
+  return putJSON<{ ok: boolean }>(`/api/pgp/identity/envelope/device:${encodeURIComponent(deviceId)}`, {
+    envelope: JSON.stringify(envelope),
+    ...(await stepUp(password))
+  });
+}
+
+/**
+ * Removes the server's transport copy of a device's sealing.
+ *
+ * This is weaker than it sounds and the UI must not imply otherwise: it removes
+ * the server's copy only. Once the device has fetched that envelope and
+ * re-sealed it under its own keystore key, the server has no reach into it at
+ * all, and revoking that device means rotating the identity.
+ */
+export async function deleteDeviceEnvelope(deviceId: string, password: string): Promise<{ ok: boolean }> {
+  return deleteJSON<{ ok: boolean }>(
+    `/api/pgp/identity/envelope/device:${encodeURIComponent(deviceId)}`,
+    await stepUp(password)
+  );
 }
