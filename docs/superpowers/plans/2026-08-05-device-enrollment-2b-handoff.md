@@ -144,56 +144,53 @@ stops future sealings and does not erase what that device already has.
 
 ---
 
-## Unresolved gaps — settle these BEFORE writing code
+## The wire format — SETTLED
 
-Gaps 1–3 are shared with 2c and are described in full in the Android handoff. Summarised
-here because 2b cannot proceed without them either:
+All four gaps that blocked this handoff are closed. The contract is normative in
+`docs/superpowers/specs/2026-08-04-device-enrollment-design.md` under the three
+`NORMATIVE:` headings, and implemented in `src/lib/deviceEnrollment.ts`.
 
-1. **The public key's wire encoding is unspecified.** Raw uncompressed point? DER
-   `SubjectPublicKeyInfo`? Base64 of which? The server stores it opaquely with only a
-   4 KiB cap. The code derivation hashes this value, so 2b and 2c hashing different
-   encodings of the same key produces a mismatch on **every honest enrollment** — and the
-   user is told the codes do not match, which reads as "your server is hostile."
+- **Public key encoding:** base64 of the uncompressed SEC1 point, `0x04 || X || Y`, 65
+  bytes. Exactly what `crypto.subtle.exportKey("raw", …)` produces.
+- **Code derivation:** hashes the raw 65 bytes, never the base64. Preimage is
+  `rawKey || uint16BE(len(deviceId)) || deviceId || uint64BE(bucket)`; first 50 bits,
+  MSB-first, as ten Crockford characters.
+- **Envelope + AAD:** `ECDH-P256+HKDF-SHA256+A256GCM`, AAD binds device id and PGP
+  fingerprint. The fingerprint binding is what stops an envelope outliving a rotation.
+- **Identity rotation** now clears every device's enrollment state server-side
+  (`5bf8986`). The enrolled indicator is unblocked.
 
-2. **The code derivation is under-specified.** The spec gives
-   `truncate(SHA-256(devicePublicKey ‖ deviceId ‖ timeBucket), 50 bits)` → ten Crockford
-   base32 characters as `XXXXX-XXXXX`, two minutes' validity. Undefined: what `‖` is in
-   bytes; how `timeBucket` is encoded and at what width and endianness; *which* 50 bits
-   and how they pack into base32. Also unstated: whether the browser accepts the adjacent
-   time bucket when the two ends straddle a boundary — that doubles the attacker's window
-   and must be a decision, not an accident.
+**Test vector:** `5R9K6FWA18`, held as an inline snapshot in
+`src/lib/deviceEnrollment.test.ts`, which is authoritative if it and the design doc
+disagree. Android and Qt assert the same string.
 
-   This one is a trap because it *looks* specified and passes review as such.
-
-3. **GCM AAD binding is absent from every document.** The device id and the PGP key
-   fingerprint must be bound into the envelope's AAD so a substituted or replayed
-   envelope fails authentication rather than decrypting into the wrong account's key.
-   This is a **shipping condition** carried over from the Android side's rejection of an
-   unbound design, not an optimisation.
-
-4. **Identity rotation does not clear device enrollment state — server bug, found
-   2026-08-05, not yet fixed.** `SetPGPIdentity`, `SetPGPIdentityClientProtected` and
-   `ClearPGPIdentity` all clear `PGPWrappedEnvelopes`, because every non-password slot
-   seals the old key. None of them touch `native_devices`, and they structurally cannot —
-   `users.Store` has no coupling to `state.Store`.
-
-   So after rotating the identity, every device still reports `encryptionEnrolled: true`
-   with a populated `enrollmentPublicKey`, while its envelope has been destroyed. **This
-   lands in the revocation flow specifically:** rotation is the documented way to
-   un-enroll a lost phone, and afterwards the Security page still lists that phone as
-   enrolled.
-
-   There is a subtlety 2b's copy has to survive: the device genuinely *can* still open its
-   local copy of the superseded key, so `true` is not a lie about capability — it is a lie
-   about *which identity*. The indicator needs to distinguish "enrolled for your current
-   key" from "holds a copy of a retired key". **Do not build the indicator until this is
-   fixed**, or it will be built against state the server does not maintain.
-
-Gaps 1 and 2 belong in the server design doc as normative wire format **with test
-vectors**, since three implementations (browser, Android, Qt) must agree bit-for-bit.
-Gap 3 belongs in a joint 2b/2c section. Gap 4 is server work.
+Changing any of it is a wire-format break: it moves the `v1` tag, the HKDF `info` and the
+AAD prefix together, and strands every enrolled device until it re-enrolls.
 
 ---
+
+## What is already built
+
+`src/lib/deviceEnrollment.ts` — the verification core, 20 tests, three mutation checks.
+
+- `bucketFor`, `deriveEnrollmentCode`, `normalizeEnrollmentCode`, `formatEnrollmentCode`
+- `verifyEnrollmentCode(publicKeyB64, deviceId, typed, nowUnixSeconds?)` — accepts the
+  current bucket and the previous one, never a future one. Returns `false` on malformed
+  input rather than throwing: a typo and an attack are the same answer, "do not seal".
+- `importDevicePublicKey` — WebCrypto validates curve membership here.
+- `sealEnvelopeForDevice(publicKeyB64, deviceId, pgpFingerprint, armoredPrivateKey)`
+
+**`sealEnvelopeForDevice` cannot verify the code for itself** — it is handed a key and told
+to seal. That is exactly why the comparison has to gate reaching it, at the call site.
+
+## What is left
+
+1. **The envelope API client.** `PUT`/`DELETE /api/pgp/identity/envelope/device:<id>` in
+   `src/api/pgp.ts`. Nothing exists — Change 1 shipped those routes with no browser
+   consumer, so there is no call to copy the shape from. Both need the step-up credential.
+2. **The Security page UI** — device list with the enrolled indicator, code entry, and the
+   refusal path.
+3. **Revocation copy**, per the section above.
 
 ## Test expectations
 
@@ -217,7 +214,9 @@ Existing patterns to follow: `src/lib/keyVault.test.ts`, `src/lib/pgpClient.test
 
 ## Status of the server work
 
-Complete: `cd28b8f`, `bfd2c10`, `54b7daf`, `3b038fe` on `fix/security-audit-run-9`.
+Complete on `fix/security-audit-run-9`: `cd28b8f`, `bfd2c10`, `54b7daf`, `3b038fe`, plus
+`5bf8986` (identity rotation clears device enrollment) and `5c02bd3` (the browser
+verification core).
 Build/vet/gofmt clean, full non-race suite exit 0 across 30 packages, `-race` at CI flags
 green on `internal/api`, `internal/state`, `internal/users`. 17 new tests with four
 mutation checks.
