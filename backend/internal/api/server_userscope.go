@@ -750,6 +750,32 @@ func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken s
 		s.logger.Error("failed to revoke carddav credential", "user_id", u.ID, "error", err.Error())
 		errs = append(errs, fmt.Errorf("remove CardDAV credential: %w", err))
 	}
+	// Rotate the subscriber ID last, once the devices are gone.
+	//
+	// Everything above revokes something that EXISTS: a session, a device row, a
+	// stored credential. An outstanding native pairing token is none of those —
+	// it is a stateless HMAC over {sub, exp, nonce, purpose}, signed with the
+	// server-wide pairing secret and bound to nothing this function touches. So
+	// a token minted before an admin password reset still redeemed after one and
+	// minted a fresh device credential, with MFAApprover set, on an account the
+	// admin believed was secured. The single-use nonce guard does not help: the
+	// token is redeemed exactly once, just later than intended.
+	//
+	// Rotating the subscriber ID kills every outstanding token at once, because
+	// their Sub stops resolving to any account. The stale index entry has to go
+	// with it — subIndex is a lazily-rebuilt cache, so leaving the old ID mapped
+	// would keep answering for exactly the tokens this is meant to invalidate.
+	if store, err := s.userStore(u.ID); err != nil {
+		errs = append(errs, fmt.Errorf("open state store to rotate subscriber id: %w", err))
+	} else if previous, err := store.RotateSubscriberID(); err != nil {
+		s.logger.Error("failed to rotate subscriber id", "user_id", u.ID, "error", err.Error())
+		errs = append(errs, fmt.Errorf("rotate subscriber id: %w", err))
+	} else if previous != "" {
+		s.userMu.Lock()
+		delete(s.subIndex, previous)
+		s.userMu.Unlock()
+	}
+
 	s.davCredentials.invalidateUser(u.Username)
 	return errors.Join(errs...)
 }

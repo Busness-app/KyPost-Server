@@ -656,6 +656,39 @@ func (s *Store) GetOrCreateSubscriberID() (string, error) {
 	return id, nil
 }
 
+// RotateSubscriberID replaces this account's subscriber ID and returns the
+// previous one, so the caller can evict it from any index that cached it.
+//
+// This is credential revocation, not housekeeping. A native pairing token is a
+// stateless HMAC over {sub, exp, nonce, purpose} — nothing in it is tied to a
+// session, a password or a device — so purging sessions, devices and the
+// CardDAV credential did not reach a token that had already been minted. One
+// held across an admin password reset still redeemed afterwards and minted a
+// working device credential on an account the admin believed was secured.
+//
+// Rotating the subscriber ID invalidates every outstanding token at once: their
+// Sub no longer resolves to any account. It is safe to do here precisely
+// because revocation also deletes every paired device — the subscriber ID is a
+// pairing-time value, and nothing that survives revocation refers to it.
+func (s *Store) RotateSubscriberID() (previous string, err error) {
+	err = s.tx(func(tx *sql.Tx) error {
+		existing, err := metaString(tx, metaSubscriberID)
+		if err != nil {
+			return err
+		}
+		fresh, err := fsutil.NewUUIDv4()
+		if err != nil {
+			return err
+		}
+		previous = existing
+		return setMeta(tx, metaSubscriberID, fresh)
+	})
+	if err != nil {
+		return "", err
+	}
+	return previous, nil
+}
+
 // normalizeDeliveryMode coerces any stored/requested value to a known mode,
 // defaulting to push so an absent or unrecognized value never disables
 // notifications.
@@ -1161,6 +1194,44 @@ func (s *Store) SetNativeDeviceEncryptionEnrolled(deviceID string, enrolled bool
 		return fmt.Errorf("encryption enrolled: no such device %q", deviceID)
 	}
 	return nil
+}
+
+// ClearDeviceEnrollments resets the enrollment columns on every device in this
+// user's store, returning how many rows changed.
+//
+// Called when the account's PGP identity is written or cleared. Every non-password
+// envelope slot seals the OLD key, so users.Store clears PGPWrappedEnvelopes on
+// each identity write — but the enrollment record lives here, in a different
+// store that users.Store cannot reach, and was left behind. The result was a
+// device reporting itself enrolled, with a stale published key, naming an
+// envelope that no longer existed.
+//
+// That matters most in the flow it breaks: rotating the identity is the
+// documented way to un-enroll a lost phone, because the server cannot reach the
+// copy that phone re-sealed locally. Leaving the marker set meant the Security
+// page went on showing that phone as protected right after the user acted to
+// revoke it.
+//
+// The published key is cleared alongside the marker, not just the marker. It
+// was published for a superseded identity, and forcing the device to re-publish
+// makes re-enrollment start from device ground truth rather than from a server
+// record nobody has re-verified.
+//
+// The pairing itself is untouched — push, sync and the approver flag all keep
+// working. Rotation invalidates a sealing, not a device.
+func (s *Store) ClearDeviceEnrollments() (int, error) {
+	res, err := s.db.Exec(
+		`UPDATE native_devices
+		 SET enrollment_public_key = '', enrollment_key_at = '',
+		     encryption_enrolled = 0, updated_at = ?
+		 WHERE enrollment_public_key != '' OR enrollment_key_at != ''
+		    OR encryption_enrolled != 0`,
+		time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }
 
 // SetNativeDeviceMFAApprover flips a device's MFAApprover flag. It returns

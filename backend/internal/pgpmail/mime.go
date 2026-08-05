@@ -499,6 +499,30 @@ func ParseContent(content []byte) (body, mode string, attachments []mailmsg.Atta
 	return body, mode, attachments, err
 }
 
+// partFileName reports a part's filename from BOTH Content-Disposition and
+// Content-Type, which is what decides whether the part is a body candidate.
+//
+// Go's part.FileName() consults only Content-Disposition. The browser mirror
+// (walkMultipart in frontend/src/lib/mimeContent.ts) also honours Content-Type
+// name=, so a part named solely by name= read as UNNAMED here and as NAMED
+// there — and the two parsers then chose DIFFERENT display bodies for the same
+// bytes. Because buildPGPDeliveries encrypts one plaintext to every To/CC key
+// in a single call, recipients on different custody modes received identical
+// ciphertext under one signature and were shown different messages. That is the
+// exact property the "signature verified" badge exists to deny, so the two
+// implementations must agree here. See testdata/mime-corpus.json, which both
+// test suites execute.
+func partFileName(part *multipart.Part) string {
+	if name := part.FileName(); name != "" {
+		return name
+	}
+	_, params, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+	if err != nil {
+		return ""
+	}
+	return params["name"]
+}
+
 // parseMultipart walks the parts of a multipart body, recursing into nested
 // multipart parts up to maxContentDepth. The first text/plain, text/html or
 // untyped part found (in document order, across nesting) wins as the display
@@ -551,7 +575,7 @@ func parseMultipart(r io.Reader, boundary string, depth int, body, mode *string,
 		// wins as the display body and the rest are dropped rather than
 		// misfiled as attachments. A text part *with* a filename is a genuine
 		// text attachment (e.g. note.txt) and falls through below.
-		filename := part.FileName()
+		filename := partFileName(part)
 		if filename == "" && (strings.HasPrefix(partType, "text/plain") || strings.HasPrefix(partType, "text/html") || partType == "") {
 			if *body == "" {
 				*body = string(partBody)

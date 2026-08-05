@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -209,6 +211,13 @@ func newNativeRegisterForTest(t *testing.T) (srv *Server, userID, deviceID strin
 	}
 	deviceID = "enrollment-device"
 
+	// Re-registration under an existing deviceID now requires proof of
+	// possession of that device's current secret, so a stolen session cannot
+	// rebind a victim's device id (see handleNotificationNativeRegister). A real
+	// device always has that secret: it is issued at pairing and used on every
+	// subsequent API call. Modelling that here keeps these tests about the
+	// merge behaviour rather than about auth.
+	secret := ""
 	register = func(t *testing.T, extra string) int {
 		t.Helper()
 		token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
@@ -222,8 +231,19 @@ func newNativeRegisterForTest(t *testing.T) (srv *Server, userID, deviceID strin
 			`{"subscriberId":%q,"pairingToken":%q,"deviceToken":"enrollment-token","deviceId":%q,"platform":"android"%s}`,
 			subscriberID, token, deviceID, extra)
 		req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", strings.NewReader(body))
+		if secret != "" {
+			req.Header.Set(headerDeviceSecret, secret)
+		}
 		rec := httptest.NewRecorder()
 		srv.handleNotificationNativeRegister(rec, req)
+		if rec.Code == http.StatusOK {
+			var resp struct {
+				DeviceSecret string `json:"deviceSecret"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err == nil && resp.DeviceSecret != "" {
+				secret = resp.DeviceSecret
+			}
+		}
 		return rec.Code
 	}
 	return srv, userID, deviceID, register
@@ -285,5 +305,304 @@ func TestNativeRegisterPreservesAPublishedEnrollmentKey(t *testing.T) {
 	}
 	if got := deviceByID(t, srv, userID, deviceID).EnrollmentPublicKey; got != "PUBKEY" {
 		t.Fatalf("re-registration erased the published enrollment key: %q", got)
+	}
+}
+
+// A pairing token proves someone held a live session. It does not prove
+// possession of the device being rebound — so a stolen session must not be able
+// to point register at a victim's existing deviceId and take it over.
+//
+// The merge in upsertNativeDeviceTx is what makes this dangerous rather than
+// merely rude: it overwrites SecretHash and PushToken while PRESERVING
+// MFAApprover and the enrollment columns. The real phone stops authenticating,
+// its push is redirected, the attacker inherits its right to approve sign-ins,
+// and no new row appears for the user to notice.
+func TestNativeRegisterRefusesToRebindADeviceWithoutItsSecret(t *testing.T) {
+	srv, userID, deviceID, register := newNativeRegisterForTest(t)
+	if code := register(t, ""); code != http.StatusOK {
+		t.Fatalf("first register: status %d", code)
+	}
+	original := deviceByID(t, srv, userID, deviceID)
+
+	store, err := srv.userStore(userID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+
+	// The attacker holds only a session (enough to mint this token) and the
+	// victim's deviceId, which the device list discloses. No device secret.
+	body := fmt.Sprintf(
+		`{"subscriberId":%q,"pairingToken":%q,"deviceToken":"attacker-endpoint","deviceId":%q,"platform":"android"}`,
+		subscriberID, token, deviceID)
+	req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleNotificationNativeRegister(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("rebind without the device secret was allowed: status %d", rec.Code)
+	}
+	after := deviceByID(t, srv, userID, deviceID)
+	if after.SecretHash != original.SecretHash {
+		t.Error("the real device's secret was replaced")
+	}
+	if after.PushToken != original.PushToken {
+		t.Errorf("push was redirected to %q", after.PushToken)
+	}
+}
+
+// Refusing a rebind must not burn the single-use pairing token: a legitimate
+// device that omits its secret would otherwise send the user back to the QR
+// screen. The nonce is consumed only after the re-pair check passes.
+func TestARefusedRebindLeavesThePairingTokenUsable(t *testing.T) {
+	srv, userID, deviceID, register := newNativeRegisterForTest(t)
+	if code := register(t, ""); code != http.StatusOK {
+		t.Fatalf("first register: status %d", code)
+	}
+	store, err := srv.userStore(userID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+
+	post := func(devID string) int {
+		body := fmt.Sprintf(
+			`{"subscriberId":%q,"pairingToken":%q,"deviceToken":"tok","deviceId":%q,"platform":"android"}`,
+			subscriberID, token, devID)
+		req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		srv.handleNotificationNativeRegister(rec, req)
+		return rec.Code
+	}
+
+	if code := post(deviceID); code != http.StatusConflict {
+		t.Fatalf("expected the rebind to be refused, got %d", code)
+	}
+	// The same token must still pair a genuinely new device.
+	if code := post("a-brand-new-device"); code != http.StatusOK {
+		t.Fatalf("the refused rebind burned the pairing token: status %d", code)
+	}
+}
+
+// An admin password reset is the standard response to a compromised account,
+// and revokeAllUserCredentials purges sessions, devices and the CardDAV
+// credential. A native pairing token is none of those — it is a stateless HMAC
+// bound to nothing that revocation touches — so one minted BEFORE the reset
+// still redeemed after it and minted a working device credential on an account
+// the admin believed was secured. The single-use nonce does not help: the token
+// is redeemed exactly once, just later than intended.
+func TestRevocationInvalidatesAnAlreadyMintedPairingToken(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user: %v", err)
+	}
+	u := all[0]
+	store, err := srv.userStore(u.ID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	// Warm the index the way a real lookup would, so the test proves the stale
+	// entry is evicted rather than that it was never cached.
+	if _, ok := srv.lookupUserBySubscriber(subscriberID); !ok {
+		t.Fatal("subscriber index did not resolve before revocation")
+	}
+
+	token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+
+	if err := srv.revokeAllUserCredentials(u); err != nil {
+		t.Fatalf("revokeAllUserCredentials: %v", err)
+	}
+
+	body := fmt.Sprintf(
+		`{"subscriberId":%q,"pairingToken":%q,"deviceToken":"attacker-endpoint","deviceId":"post-reset","platform":"android"}`,
+		subscriberID, token)
+	req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleNotificationNativeRegister(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("a pairing token minted before revocation still registered a device: %s", rec.Body.String())
+	}
+}
+
+// MustChangePassword confines a SESSION to the password-change and logout
+// routes. A device credential was exempt entirely, so one minted around an
+// admin reset kept full mail and contacts access on an account the admin had
+// just confined.
+func TestDeviceAuthRefusedWhileAPasswordChangeIsOwed(t *testing.T) {
+	srv, userID, deviceID, authDevice := newPairedDeviceForTest(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/device/envelope", nil)
+	authDevice(req)
+	if _, _, ok, _ := srv.deviceAuthFromRequest(req); !ok {
+		t.Fatal("device credential did not work before the flag was set")
+	}
+
+	if _, err := srv.users.SetPassword(context.Background(), userID, "reset-by-admin-password", true); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/api/pgp/device/envelope", nil)
+	authDevice(req2)
+	if _, _, ok, _ := srv.deviceAuthFromRequest(req2); ok {
+		t.Fatalf("device %q authenticated on an account owing a password change", deviceID)
+	}
+}
+
+// meterAccountWrite runs in withAuth, withMailAuth and withDAVBasicAuth, but
+// withDeviceAuth is an inert marker with no shared middleware to hang it on, so
+// commit a8904dd ("meter every auth wrapper") closed three legs and left the
+// fourth. A device credential was consequently STRONGER than a session on this
+// one axis, while the trust model ranks it weaker.
+func TestDeviceAuthMutatingRouteIsMetered(t *testing.T) {
+	srv, _, _, authDevice := newPairedDeviceForTest(t)
+
+	// Freeze the bucket's clock, same idiom and same reason as
+	// TestMutatingRoutesAreMeteredPerAccount. The burst is 90 refilling at 10/s,
+	// so a loop that races the refill has to spend the whole burst within ~5s to
+	// observe a throttle at all. Every request here costs a scrypt verify of the
+	// device secret — the one metered path with a KDF per request — which is
+	// ~30ms cheap and ~230ms under -race, so the loop took 32-51s and the bucket
+	// refilled faster than it drained. The test then reported the runner's speed
+	// rather than whether the meter is wired in, and failed in CI while passing
+	// locally with under a second to spare. withProductionHashCost's comment
+	// records the general form of this lesson: stub the stopwatch, because -race
+	// moves measured time by a machine-dependent factor.
+	frozen := time.Now()
+	srv.accountWriteLimiter.now = func() time.Time { return frozen }
+
+	post := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/api/pgp/device/enrollment-key",
+			strings.NewReader(`{"publicKey":"BASE64PUBKEY"}`))
+		authDevice(req)
+		rec := httptest.NewRecorder()
+		srv.handlePGPPublishEnrollmentKey(rec, req)
+		return rec.Code
+	}
+
+	// With no refill to outrun, the burst is exactly what it says: 90 writes
+	// pass and the 91st does not. That also drops 50 scrypt verifies the old
+	// loop only performed to buy wall-clock slack.
+	for i := 0; i < accountWriteBurst; i++ {
+		if code := post(); code == http.StatusTooManyRequests {
+			t.Fatalf("write %d of the burst was throttled (%d); the burst must pass", i+1, code)
+		}
+	}
+	if code := post(); code != http.StatusTooManyRequests {
+		t.Fatalf("write %d on a device credential got %d, want 429 — a device credential "+
+			"drives unbounded writes while the trust model ranks it weaker than a session",
+			accountWriteBurst+1, code)
+	}
+}
+
+// ...but the meter must not touch device READS. meterAccountWrite returns true
+// immediately for GET, and the device envelope read is on the same credential.
+func TestDeviceAuthReadRouteIsNotMetered(t *testing.T) {
+	srv, _, _, authDevice := newPairedDeviceForTest(t)
+
+	for i := 0; i < accountWriteBurst+50; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/pgp/device/envelope", nil)
+		authDevice(req)
+		rec := httptest.NewRecorder()
+		srv.handlePGPDeviceEnvelope(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("device read throttled on request %d; reads must not be metered", i+1)
+		}
+	}
+}
+
+// deviceId becomes part of the enrollment code's hash preimage, and three
+// independent implementations must produce identical bytes from it. The spec
+// mandates UTF-8 and a length prefix but says nothing about normalisation, so a
+// non-ASCII id that one implementation normalises differently makes the codes
+// never match — surfacing to the user as "the key this server gave the browser
+// is not the key on that device", which is indistinguishable from an attack.
+func TestRegisterRejectsADeviceIDThatCannotBeHashedPortably(t *testing.T) {
+	for _, id := range []string{
+		"café-phone",             // non-ASCII: NFC and NFD differ
+		"pixeĺ",                 // combining acute, normalises
+		"my phone",               // space: breaks the device: slot name
+		"emoji-\U0001F4F1",       // outside the BMP
+		strings.Repeat("a", 129), // over the slot-id bound
+	} {
+		if validDeviceID(id) {
+			t.Errorf("validDeviceID(%q) = true; that id cannot be hashed portably", id)
+		}
+	}
+	for _, id := range []string{"pixel-7", "device_a", "A.B:C-1", "0123456789abcdef"} {
+		if !validDeviceID(id) {
+			t.Errorf("validDeviceID(%q) = false; that is an ordinary id", id)
+		}
+	}
+}
+
+// The bound applies to NEW ids only. A device registered before it exists must
+// keep working on its next token refresh rather than being stranded, and it
+// re-registers through the branch that proves possession of its secret.
+func TestAnAlreadyRegisteredDeviceIDIsNotStrandedByTheCharsetBound(t *testing.T) {
+	srv, userID, _, _ := newPairedDeviceForTest(t)
+	legacyID := "café-phone" // would be refused as a new id
+
+	store, err := srv.userStore(userID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	raw, err := randomToken(24)
+	if err != nil {
+		t.Fatalf("randomToken: %v", err)
+	}
+	hash, err := users.HashPassword(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := store.UpsertNativeDevice(state.NativeDevice{
+		DeviceID: legacyID, Platform: "android", PushToken: "old", UserID: userID, SecretHash: hash,
+	}); err != nil {
+		t.Fatalf("seed legacy device: %v", err)
+	}
+	srv.userMu.Lock()
+	srv.deviceIndex[legacyID] = userID
+	srv.userMu.Unlock()
+
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+	body := fmt.Sprintf(
+		`{"subscriberId":%q,"pairingToken":%q,"deviceToken":"refreshed","deviceId":%q,"platform":"android"}`,
+		subscriberID, token, legacyID)
+	req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", strings.NewReader(body))
+	req.Header.Set(headerDeviceSecret, raw)
+	rec := httptest.NewRecorder()
+	srv.handleNotificationNativeRegister(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a pre-existing device was stranded by the charset bound: status %d, body=%s", rec.Code, rec.Body.String())
 	}
 }

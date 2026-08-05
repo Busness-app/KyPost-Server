@@ -893,7 +893,7 @@ func (s *Server) logSaturatedLockouts() {
 		if lockout != nil && lockout.Saturated() {
 			s.logger.Error("lockout table saturated; new keys are being shed",
 				"table", name,
-				"hard_cap", strconv.Itoa(loginLockoutHardCap),
+				"hard_cap", strconv.Itoa(lockout.HardCap()),
 				"effect", "callers not already tracked receive 429; lockouts already in force are preserved")
 		}
 	}
