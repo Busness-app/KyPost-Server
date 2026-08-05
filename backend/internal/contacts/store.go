@@ -33,12 +33,16 @@ type Store struct {
 	contacts       []Contact
 	seq            int64
 	gcHighWaterRev int64
+	// pgpKeyGen changes whenever any contact's PGP key material or address set
+	// changes. See PGPKeyGeneration.
+	pgpKeyGen int64
 }
 
 type contactsFile struct {
 	Contacts       []Contact `json:"contacts"`
 	Seq            int64     `json:"seq"`
 	GCHighWaterRev int64     `json:"gcHighWaterRev,omitempty"`
+	PGPKeyGen      int64     `json:"pgpKeyGen,omitempty"`
 }
 
 func New(baseDir string) (*Store, error) {
@@ -64,6 +68,7 @@ func (s *Store) applyFile(cf contactsFile) {
 	s.contacts = append([]Contact{}, cf.Contacts...)
 	s.seq = cf.Seq
 	s.gcHighWaterRev = cf.GCHighWaterRev
+	s.pgpKeyGen = cf.PGPKeyGen
 }
 
 func (s *Store) refreshFromDiskLocked() error {
@@ -75,6 +80,7 @@ func (s *Store) persistLocked() error {
 		Contacts:       s.contacts,
 		Seq:            s.seq,
 		GCHighWaterRev: s.gcHighWaterRev,
+		PGPKeyGen:      s.pgpKeyGen,
 	}
 	if err := fsutil.PersistJSONFile(s.path(), cf); err != nil {
 		return fmt.Errorf("write contacts: %w", err)
@@ -262,7 +268,29 @@ func (s *Store) upsertLocked(c Contact) (Contact, error) {
 //
 // Split out so ApplyBatch can apply many changes and persist once. The single-
 // change path is unchanged: upsertLocked above is this plus a persist.
+// MaxContactsPerUser bounds how many live contacts one account may hold.
+//
+// Every sibling per-user store has a total cap — groups 1000, rules 100,
+// send-as 20, native devices 20, pickups 100, contact photos 200 MiB — and this
+// one had none. maxContactsSyncChanges bounds a single REQUEST, not the store,
+// so a device-credential sync loop (a wrapper with no write meter) grew
+// contacts.json without limit, on the volume that also holds every other user's
+// mail cache and sealed key material.
+//
+// Set well above any plausible address book so it is a backstop rather than a
+// product limit.
+const MaxContactsPerUser = 10_000
+
 func (s *Store) applyUpsertLocked(c Contact) (Contact, error) {
+	// Bound growth, not editing: an existing contact (and a tombstone being
+	// revived) must stay writable at the cap, or a full address book becomes
+	// read-only and the user cannot even delete their way out of it.
+	if existing, exists := s.getLocked(c.UID); c.UID == "" || !exists || existing.Deleted {
+		if s.liveContactCountLocked() >= MaxContactsPerUser {
+			return Contact{}, fmt.Errorf("contact limit reached (maximum %d)", MaxContactsPerUser)
+		}
+	}
+
 	// Pin the TOFU fingerprint here, where EVERY write path passes, rather than
 	// at the two handlers that remembered to.
 	//
@@ -276,6 +304,16 @@ func (s *Store) applyUpsertLocked(c Contact) (Contact, error) {
 	// contact populated by import or sync — i.e. most of them — therefore had no
 	// protection against silent WKD key substitution once its stored key expired.
 	c = pinPGPKeyFingerprint(c)
+
+	// Advance the key generation here, where EVERY write path passes, for the
+	// same reason the TOFU pin is set here rather than at the handlers that
+	// remembered to: three of the eleven writers live in the daemon process and
+	// can never call a handler-level helper.
+	if before, ok := s.getLocked(c.UID); ok {
+		s.bumpPGPKeyGenIfBindingChanged(before, c)
+	} else if c.PGPKey != "" {
+		s.pgpKeyGen++
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	s.seq++
@@ -327,7 +365,11 @@ func (s *Store) applyDeleteLocked(uid string) bool {
 			continue
 		}
 		s.seq++
+		before := c
 		c.tombstone()
+		// tombstone() clears the key, so a deleted contact stops being an anchor
+		// for its addresses — the same class of change as replacing the key.
+		s.bumpPGPKeyGenIfBindingChanged(before, c)
 		c.Rev = s.seq
 		c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		s.contacts[i] = c
@@ -776,4 +818,67 @@ func pinPGPKeyFingerprint(c Contact) Contact {
 	}
 	c.PGPKeyFingerprint = key.GetFingerprint()
 	return c
+}
+
+// liveContactCountLocked counts contacts that are not tombstoned. Tombstones
+// are excluded so a user who deletes contacts regains headroom immediately
+// rather than having to wait for the tombstone sweeper.
+func (s *Store) liveContactCountLocked() int {
+	n := 0
+	for _, c := range s.contacts {
+		if !c.Deleted {
+			n++
+		}
+	}
+	return n
+}
+
+// PGPKeyGeneration is a counter that changes whenever any contact's PGP key
+// material or address set changes.
+//
+// It exists so cached signature verdicts can be invalidated by EVERY writer
+// rather than by the three handlers that remembered to call an invalidation
+// helper. The other eight write paths — suppress-contact, mobile sync, CardDAV
+// PUT, CardDAV pull, vCard import, the resolver's pin, dedupe, and the daemon's
+// Autocrypt harvest — cannot all share a handler-level helper: three of them run
+// in the daemon process, which has no *http.Request and no access to the API's
+// objects.
+//
+// A number persisted alongside the contacts is what both processes can see. A
+// reader compares the generation a verdict was computed under with the current
+// one and discards the verdict when they differ, which is correct regardless of
+// which process or which code path made the change.
+//
+// It also covers the case the handler helper explicitly skipped: it returned
+// early when the key bytes were unchanged, so REMOVING AN ADDRESS — which
+// narrows exactly what the key is an anchor for — invalidated nothing.
+func (s *Store) PGPKeyGeneration() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.refreshFromDiskLocked()
+	return s.pgpKeyGen
+}
+
+// pgpBindingOf is the part of a contact that determines which addresses its key
+// is a trust anchor for. Two contacts with equal bindings produce identical
+// signature verdicts.
+func pgpBindingOf(c Contact) string {
+	addrs := make([]string, 0, len(c.Emails))
+	for _, e := range c.Emails {
+		if v := strings.ToLower(strings.TrimSpace(e.Value)); v != "" {
+			addrs = append(addrs, v)
+		}
+	}
+	sort.Strings(addrs)
+	return c.PGPKey + "\x00" + c.PGPKeyFingerprint + "\x00" + strings.Join(addrs, ",")
+}
+
+// bumpPGPKeyGenIfBindingChanged advances the generation when before and after
+// disagree about the key or the addresses it binds to. Unrelated edits (a
+// rename, a phone number) deliberately do not bump it: over-invalidating would
+// force a body re-fetch for every signed message on every contact edit.
+func (s *Store) bumpPGPKeyGenIfBindingChanged(before, after Contact) {
+	if pgpBindingOf(before) != pgpBindingOf(after) {
+		s.pgpKeyGen++
+	}
 }

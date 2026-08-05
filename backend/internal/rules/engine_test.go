@@ -358,3 +358,40 @@ func TestApplyOutcome_CancelledContextStopsExecution(t *testing.T) {
 		t.Fatalf("no action may run under a cancelled context, got %+v", fake.appliedLabels)
 	}
 }
+
+// TestUncompilableRegexUnderNegateDoesNotMatchEverything pins the fail-safe.
+//
+// compilePattern returns nil when a pattern does not compile, matchesValue
+// turns that into false, and the negate branch inverts it to TRUE for every
+// message. A single mistyped character therefore converts a filter into "match
+// everything" — and with a delete action, silently sweeps the mailbox.
+//
+// An unevaluable condition is not "did not match". It must not match either
+// way.
+func TestUncompilableRegexUnderNegateDoesNotMatchEverything(t *testing.T) {
+	group := MatchGroup{
+		Op: "anyof",
+		Conditions: []Condition{
+			{Field: "subject", Comparator: "regex", Value: "(", Negate: true},
+		},
+	}
+	in := EvalInput{Subject: "an entirely ordinary message"}
+
+	if matchGroup(context.Background(), group, in) {
+		t.Fatal("an uncompilable regex under negate matched a message it has no basis to match")
+	}
+}
+
+// TestUncompilableRegexWithoutNegateDoesNotMatch is the control: the
+// non-negated form already fails closed and must stay that way.
+func TestUncompilableRegexWithoutNegateDoesNotMatch(t *testing.T) {
+	group := MatchGroup{
+		Op: "anyof",
+		Conditions: []Condition{
+			{Field: "subject", Comparator: "regex", Value: "("},
+		},
+	}
+	if matchGroup(context.Background(), group, EvalInput{Subject: "anything"}) {
+		t.Fatal("an uncompilable regex matched")
+	}
+}

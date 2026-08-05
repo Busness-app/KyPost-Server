@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"kypost-server/backend/internal/users"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -161,4 +163,64 @@ func TestPGPRecipientsCheck(t *testing.T) {
 	if resp.Results[2].HasKey || resp.Results[2].Revoked || resp.Results[2].Expired {
 		t.Fatalf("nokey@example.com: expected no key at all, got %+v", resp.Results[2])
 	}
+}
+
+// TestRecipientsCheckRejectsAnUnboundedAddressList pins the cap that the send
+// path has and this sibling does not.
+//
+// findContactPGPKey calls store.List(), which calls refreshFromDiskLocked — a
+// full os.ReadFile plus json.Unmarshal of contacts.json — once PER ADDRESS. The
+// comment justifying maxRecipientsPerSend on the send path states the cost
+// exactly: "Key resolution re-reads and re-unmarshals the entire contacts file
+// per address, so an unbounded list made one request into hours of
+// uninterruptible O(addresses x contacts) work that a client disconnect could
+// not stop." That cap was applied to /api/mail/send and /api/mail/draft and
+// left off both recipient endpoints.
+//
+// Measured at 3.10 ms per lookup against a 1,000-contact store, one 1 MiB body
+// is ~405 s of single-core CPU that no disconnect can cancel, on a route with
+// no write meter.
+func TestRecipientsCheckRejectsAnUnboundedAddressList(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "capped", "irrelevant-password", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	addrs := make([]string, maxRecipientsPerSend+1)
+	for i := range addrs {
+		addrs[i] = fmt.Sprintf("a%d@example.com", i)
+	}
+	rec := recipientsCheckForTest(srv, u, map[string]any{"addresses": addrs})
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("accepted %d addresses; the send path caps the identical lookup at %d",
+			len(addrs), maxRecipientsPerSend)
+	}
+}
+
+// TestRecipientsCheckAcceptsAnOrdinaryList is the control: a realistic compose
+// must keep working.
+func TestRecipientsCheckAcceptsAnOrdinaryList(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "ordinary", "irrelevant-password", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	rec := recipientsCheckForTest(srv, u, map[string]any{"addresses": []string{"bob@example.com", "carol@example.com"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// recipientsCheckForTest posts to handlePGPRecipientsCheck with an AuthContext
+// already in the request context, the way withMailAuth would have put it there.
+func recipientsCheckForTest(srv *Server, u users.User, payload any) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/pgp/recipients/check", bytes.NewReader(b))
+	ac := AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}
+	req = req.WithContext(context.WithValue(req.Context(), authContextKey{}, ac))
+	rec := httptest.NewRecorder()
+	srv.handlePGPRecipientsCheck(rec, req)
+	return rec
 }

@@ -236,9 +236,8 @@ Implemented:
   and hands the file to the browser. There is no bare `.asc` download and
   should not be one.
 - `PUT|GET|DELETE /api/pgp/identity/envelope/{slot}` write, read and delete one
-  non-password sealing of the private key — a recovery code today, an
-  enrolled device later (the `device:` slot prefix exists for that, no
-  endpoint mints one yet). All three are **session-only**, unlike the
+  non-password sealing of the private key — a recovery code, or an enrolled
+  device under the `device:` slot prefix. All three are **session-only**, unlike the
   `withMailAuth` routes above: a paired device authenticating with its own
   device secret must not be able to mint a sealing of the account's private
   key, which is the enforcement point a planned passphrase-only account tier
@@ -256,6 +255,37 @@ Implemented:
   same bytes under this same weaker auth. `GET` 404s only when no envelope
   exists under the requested slot name; `DELETE` of an absent slot succeeds
   (`users.Store.DeletePGPWrappedEnvelope` is deliberately idempotent).
+- `POST /api/pgp/device/enrollment-key` and `GET /api/pgp/device/envelope` are
+  the two **device-authenticated** routes of the enrollment ceremony
+  (`pgp_device_enrollment.go`). They are neither `withAuth` nor `withMailAuth`:
+  `withMailAuth` would admit a session, which has no device to scope to, and
+  `withAuth` would exclude the device entirely. Both resolve the caller through
+  `deviceAuthFromRequest`, which returns the **verified** device record, so
+  neither reads an identity out of the request.
+  - `POST .../enrollment-key` publishes the device's EC P-256 enrollment public
+    key. A device may publish its own because a public key is not a
+    capability — it only lets a browser seal **to** that device. The device id
+    is taken from the credential and never from the body: a device that could
+    name another device's id could overwrite the key a browser is about to seal
+    to, which is precisely the substitution the verification code exists to
+    catch.
+  - `GET .../envelope` serves the one envelope sealed for the calling device and
+    takes **no slot parameter** — the slot name is built from the verified
+    device record, so there is no input to abuse. This is safe where the general
+    `GET .../envelope/{slot}` would not be, because the payload is sealed to a
+    key whose private half is non-extractable from that device's secure element.
+    An expired transport copy reads as 404, since the handler iterates
+    `WrappedEnvelopes()`, which filters on the `device:` slot TTL
+    (`users.DeviceEnvelopeTTL`, 7 days).
+  - Minting and destroying a sealing stay session-only. A device may publish a
+    key and read what was sealed for it; only a session may seal.
+- `POST /api/notifications/native/register` carries an optional
+  `encryptionEnrolled` bool: the device's own answer to "can I still open my
+  enrollment envelope". It is a pointer server-side because absent and `false`
+  differ — an older client that omits it has no opinion and must not have the
+  marker cleared, while `false` reports that the keystore key is gone. The
+  marker is device-reported rather than a record of what the browser did,
+  because those diverge: reinstalling the app destroys the keystore key.
 - The server derives fingerprint and key ID from the uploaded public key
   rather than trusting the client's claim — otherwise a client could get its
   own key published under someone else's identity through WKD or Autocrypt.

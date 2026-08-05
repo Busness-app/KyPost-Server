@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -110,14 +111,58 @@ func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, e
 	return dialer.DialContext(ctx, network, net.JoinHostPort(chosen.String(), port))
 }
 
+// maxOutboundResponseBytes bounds how much of a response from a user-supplied
+// host this process will read.
+//
+// The CardDAV REPORT path applies its own 16 MiB LimitReader, but go-webdav's
+// discovery PROPFINDs decode straight from resp.Body with none — upstream even
+// carries a TODO noting the response can be quite large — and the walk-up loop
+// repeats discovery per candidate path. XML decoding into a multistatus struct
+// costs several times the wire size in resident memory, so an unbounded
+// response from a host the user configured is a memory-exhaustion primitive
+// against the shared container.
+//
+// Bounding at the transport rather than at each call site is what makes this
+// cover every current and future go-webdav call at once.
+const maxOutboundResponseBytes = 32 << 20
+
+// boundedBodyTransport caps every response body it returns.
+//
+// Note the failure mode: a truncated body surfaces to the caller as a parse
+// error rather than a clean "too large". That is acceptable here because the
+// limit is far above any legitimate CardDAV response, so reaching it already
+// means the remote server is misbehaving.
+type boundedBodyTransport struct {
+	base  http.RoundTripper
+	limit int64
+}
+
+type boundedBody struct {
+	io.Reader
+	io.Closer
+}
+
+func (t *boundedBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body = boundedBody{Reader: io.LimitReader(resp.Body, t.limit), Closer: resp.Body}
+	return resp, nil
+}
+
 // newSSRFSafeHTTPClient builds an http.Client for outbound requests whose
 // destination host is supplied by a user (e.g. a CardDAV server URL): every
-// dial, including ones made for redirects, is re-resolved and checked
-// against isPrivateOrReservedIP immediately before connecting.
+// dial, including ones made for redirects, is re-resolved and checked against
+// isPrivateOrReservedIP immediately before connecting, and every response body
+// is bounded at maxOutboundResponseBytes.
 func newSSRFSafeHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
-		Timeout:   timeout,
-		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
+		Timeout: timeout,
+		Transport: &boundedBodyTransport{
+			base:  &http.Transport{DialContext: ssrfSafeDialContext},
+			limit: maxOutboundResponseBytes,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return errors.New("too many redirects")

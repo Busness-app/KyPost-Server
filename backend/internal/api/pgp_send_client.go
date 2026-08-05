@@ -179,7 +179,7 @@ func (s *Server) handleMailSendPGP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		failed++
-		s.logger.Error("client-encrypted bcc send failed", "recipient", recipients[0], "error", sendErr.Error())
+		s.logger.Error("client-encrypted bcc send failed", "recipient_count", strconv.Itoa(len(recipients)), "error", sendErr.Error())
 	}
 
 	// Best-effort Sent copy. Only an encrypted one is stored; see sentCopyDraft.

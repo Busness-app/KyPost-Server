@@ -168,7 +168,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// GetByUsername resolves the account with. On the raw string, "victim",
 	// "Victim" and " victim " are one account to the lookup but three strike
 	// budgets here, and padding makes that key space unbounded.
-	lockoutKey := users.NormalizeUsername(req.Username) + "\x00" + lockoutKeyForIP(clientIP(r))
+	// Clamped: NormalizeUsername folds case and trims but does not truncate, and
+	// the body allows 64 KiB, so without this the caller sizes the lockout
+	// table's memory as well as populating it.
+	lockoutKey := clampLockoutKeyComponent(users.NormalizeUsername(req.Username)) + "\x00" + lockoutKeyForIP(clientIP(r))
 	if allowed, retryAfter := s.loginLockout.tryAttempt(lockoutKey); !allowed {
 		retrySeconds := int(retryAfter.Seconds()) + 1
 		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
@@ -223,7 +226,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// The account this attempt targeted, folded the same way GetByUsername
 	// resolves it and the lockout key above is built — so escalation, lockout
 	// and lookup all agree on what "the same account" means.
-	powAccount := users.NormalizeUsername(req.Username)
+	powAccount := clampLockoutKeyComponent(users.NormalizeUsername(req.Username))
 
 	u, err := s.users.GetByUsername(req.Username)
 	if err != nil || !u.Active {
@@ -944,18 +947,8 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		// cross-process lock that every authenticated request also reads
 		// through, so one looping session stalls the instance. Reads are
 		// untouched. See accountWriteBurst.
-		switch r.Method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions:
-		default:
-			if ok, retryAfter := s.accountWriteLimiter.allow(ac.UserID); !ok {
-				seconds := int(retryAfter.Seconds()) + 1
-				w.Header().Set("Retry-After", strconv.Itoa(seconds))
-				writeJSON(w, http.StatusTooManyRequests, map[string]any{
-					"error":             "too many requests, slow down",
-					"retryAfterSeconds": seconds,
-				})
-				return
-			}
+		if !s.meterAccountWrite(w, r, ac.UserID) {
+			return
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	}
@@ -1017,8 +1010,42 @@ func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "password change required", "mustChangePassword": true})
 			return
 		}
+		if !s.meterAccountWrite(w, r, ac.UserID) {
+			return
+		}
 		next(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	}
+}
+
+// meterAccountWrite applies the per-account write meter to a mutating request,
+// writing the 429 and returning false when the caller is over budget.
+//
+// Extracted so every authentication wrapper can apply it. The meter was
+// deliberately placed at the wrapper rather than at the endpoints so new routes
+// would inherit the bound automatically — but only withAuth ever called it, so
+// the ~26 withMailAuth routes, every device-credential route and every CardDAV
+// route ran unmetered. Those wrappers carry rules/run, recipient resolution and
+// pickup creation, which is what left the expensive paths with no rate bound at
+// all.
+//
+// Reads are untouched, here as in withAuth: metering a mailbox listing would
+// throttle ordinary use.
+func (s *Server) meterAccountWrite(w http.ResponseWriter, r *http.Request, userID string) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	ok, retryAfter := s.accountWriteLimiter.allow(userID)
+	if ok {
+		return true
+	}
+	seconds := int(retryAfter.Seconds()) + 1
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
+		"error":             "too many requests, slow down",
+		"retryAfterSeconds": seconds,
+	})
+	return false
 }
 
 type authContextKey struct{}

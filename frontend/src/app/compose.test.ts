@@ -5,6 +5,7 @@ import {
   deliverSealedPickupLinks,
   formatBytes,
   keylessRecipientsFrom409,
+  keyChangedRecipientsFrom409,
   readFileAsAttachment,
   secureLinkWarning
 } from "./compose";
@@ -144,5 +145,31 @@ describe("secureLinkWarning", () => {
     expect(secureLinkWarning(["a@example.com"], 2)).toBe(
       "1 of 2 secure links could not be sent: a@example.com"
     );
+  });
+});
+
+describe("keyChangedRecipientsFrom409", () => {
+  // A broken TOFU pin is not a missing key, and must never be offered the
+  // pickup fallback: the fallback mails the message plaintext in the clear,
+  // which is the worst response to "the key published for this address just
+  // changed". The server now refuses these sends outright with a distinct
+  // body; the UI has to say why, or the user reads "no PGP key" and reaches
+  // for the very checkbox that downgrades them.
+  it("extracts the changed-key recipients from the 409 body", () => {
+    const err = new HttpError("conflict", 409, {
+      error: "the PGP key on file for some recipients no longer matches",
+      keyChangedRecipients: ["bob@x.test"],
+      pickupFallbackAvailable: false,
+    });
+    expect(keyChangedRecipientsFrom409(err)).toEqual(["bob@x.test"]);
+  });
+
+  it("returns null for the keyless 409, which is a different situation", () => {
+    const err = new HttpError("conflict", 409, { keylessRecipients: ["a@x.test"] });
+    expect(keyChangedRecipientsFrom409(err)).toBeNull();
+  });
+
+  it("returns null for anything that is not a 409", () => {
+    expect(keyChangedRecipientsFrom409(new Error("boom"))).toBeNull();
   });
 });

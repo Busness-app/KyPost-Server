@@ -412,7 +412,14 @@ func verifyAliasViaPoller(t *testing.T, p *Poller, userID, email string) sendas.
 		searchResults: map[string][]imapadapter.Overview{
 			alias.VerificationCode: {{UID: 1}},
 		},
-		rawResults: map[int][]byte{1: []byte("From: " + email + "\r\nSubject: probe\r\n\r\nbody\r\n")},
+		// The Subject must carry the challenge code: verification requires the
+		// proving message to be a response to THIS challenge, not merely any
+		// DKIM-signed message from the address. This helper previously used
+		// "Subject: probe" and still verified, which is exactly the defect
+		// TestCheckPendingSendAsAliasesRejectsAMessageThatDoesNotCarryTheCode
+		// now pins.
+		rawResults: map[int][]byte{1: []byte(
+			"From: " + email + "\r\nSubject: Re: Verify send-as: " + alias.VerificationCode + "\r\n\r\nbody\r\n")},
 	}
 	// Both calls, in the order poller.go's per-user tick makes them.
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
@@ -617,5 +624,86 @@ func TestReconcilePGPUserIDsWithoutPGPKeyIsANoOp(t *testing.T) {
 	}
 	if u.PGPPublicKey != "" || u.PGPPrivateKeyEnc != "" {
 		t.Fatalf("expected no PGP identity to be created, got public key %q", u.PGPPublicKey)
+	}
+}
+
+// TestCheckPendingSendAsAliasesRejectsAMessageThatDoesNotCarryTheCode pins the
+// property the DKIM checks above are supposed to be protecting: the message
+// that satisfies the challenge must actually BE a response to this challenge.
+//
+// The DKIM gate proves the message came from the alias's domain with a signed,
+// exactly-once From equal to the alias. It does not prove the message has
+// anything to do with the alias being verified — and the only thing that ever
+// consulted the code was the IMAP SEARCH term, answered by a server the account
+// holder chose with no ownership check (POST /api/imap/config stores any host).
+// So an attacker could answer the search with one genuine, unmodified,
+// DKIM-signed message the target once sent them and the alias would verify.
+func TestCheckPendingSendAsAliasesRejectsAMessageThatDoesNotCarryTheCode(t *testing.T) {
+	stubVerifiedDKIM(t)
+	p := newTestPollerForSendAs(t)
+	const userID = "user-1"
+	store, err := p.userSendAsStore(userID)
+	if err != nil {
+		t.Fatalf("userSendAsStore: %v", err)
+	}
+	alias, err := store.Create(userID, "victim@corp.example", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	mail := &stubSendAsMailClient{
+		searchResults: map[string][]imapadapter.Overview{
+			alias.VerificationCode: {{UID: 1}},
+		},
+		// Genuine, byte-for-byte unmodified, correctly signed — and utterly
+		// unrelated to the challenge.
+		rawResults: map[int][]byte{1: []byte(
+			"From: victim@corp.example\r\nSubject: Lunch tomorrow?\r\n\r\nbody\r\n")},
+	}
+	p.checkPendingSendAsAliases(context.Background(), userID, mail)
+
+	got, ok := store.Get(alias.ID)
+	if !ok {
+		t.Fatal("alias vanished")
+	}
+	if got.Status == "verified" {
+		t.Fatalf("alias verified by a message whose Subject %q never carried code %q",
+			"Lunch tomorrow?", alias.VerificationCode)
+	}
+}
+
+// TestCheckPendingSendAsAliasesRejectsAMessagePredatingTheChallenge closes the
+// replay half of the same gap: even once the Subject must carry the code, a
+// message that predates the challenge cannot be a response to it.
+func TestCheckPendingSendAsAliasesRejectsAMessagePredatingTheChallenge(t *testing.T) {
+	stubVerifiedDKIM(t)
+	p := newTestPollerForSendAs(t)
+	const userID = "user-1"
+	store, err := p.userSendAsStore(userID)
+	if err != nil {
+		t.Fatalf("userSendAsStore: %v", err)
+	}
+	alias, err := store.Create(userID, "victim@corp.example", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	old := time.Now().Add(-72 * time.Hour).Format(time.RFC1123Z)
+	mail := &stubSendAsMailClient{
+		searchResults: map[string][]imapadapter.Overview{
+			alias.VerificationCode: {{UID: 1}},
+		},
+		rawResults: map[int][]byte{1: []byte(
+			"From: victim@corp.example\r\nDate: " + old +
+				"\r\nSubject: Re: Verify send-as: " + alias.VerificationCode + "\r\n\r\nbody\r\n")},
+	}
+	p.checkPendingSendAsAliases(context.Background(), userID, mail)
+
+	got, ok := store.Get(alias.ID)
+	if !ok {
+		t.Fatal("alias vanished")
+	}
+	if got.Status == "verified" {
+		t.Fatal("alias verified by a message sent 72h before the challenge existed")
 	}
 }

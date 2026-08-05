@@ -125,7 +125,12 @@ CREATE TABLE IF NOT EXISTS native_devices (
 	mfa_approver  INTEGER NOT NULL DEFAULT 0,
 	transport     TEXT NOT NULL DEFAULT '',
 	secret_hash   TEXT NOT NULL DEFAULT '',
-	seq           INTEGER NOT NULL
+	seq           INTEGER NOT NULL,
+	-- Enrollment columns. New databases get them here; existing ones get them
+	-- from additiveColumns below, which is the path that actually matters.
+	enrollment_public_key TEXT NOT NULL DEFAULT '',
+	enrollment_key_at     TEXT NOT NULL DEFAULT '',
+	encryption_enrolled   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS native_devices_push ON native_devices(push_token, platform);
 
@@ -183,7 +188,72 @@ func openDB(path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply state schema: %w", err)
 	}
+	if err := applyAdditiveColumns(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+// additiveColumns are columns added to a table after that table shipped.
+//
+// The schema const is CREATE TABLE IF NOT EXISTS, which makes it a migration
+// path for a whole new TABLE and for nothing else: an existing install already
+// has native_devices, so the IF NOT EXISTS fires, the new columns are never
+// created, and every query naming them fails with "no such column" — which on
+// this table means mail sync, contacts sync, App Pull and push MFA all break at
+// once on upgrade. Columns therefore have to be added separately, here.
+//
+// SQLite has no ADD COLUMN IF NOT EXISTS, so each is applied only when
+// pragma_table_info shows it missing. Every column must carry a non-NULL
+// DEFAULT: SQLite rejects adding a NOT NULL column without one, and the default
+// is also what an existing row decodes as — "" and 0 mean "not enrolled", which
+// is the truth for a device paired before enrollment existed.
+var additiveColumns = []struct{ table, column, ddl string }{
+	{"native_devices", "enrollment_public_key", "TEXT NOT NULL DEFAULT ''"},
+	{"native_devices", "enrollment_key_at", "TEXT NOT NULL DEFAULT ''"},
+	{"native_devices", "encryption_enrolled", "INTEGER NOT NULL DEFAULT 0"},
+}
+
+func applyAdditiveColumns(db *sql.DB) error {
+	// One transaction around probe-and-add, because the api and daemon
+	// processes both open every state.db at startup.
+	//
+	// Probing with pragma_table_info and then ALTERing in a separate implicit
+	// transaction is a check-then-act across processes: on the first boot after
+	// an upgrade both see the column missing, one adds it, and the other fails
+	// with "duplicate column name". That is a SQL LOGIC error, not SQLITE_BUSY,
+	// so neither busy_timeout nor _txlock=immediate helps — it propagates out of
+	// state.New to log.Fatal and takes the losing process down. supervisord
+	// restarts it and the retry succeeds, so it self-heals, but a startup crash
+	// per install is avoidable for one Begin.
+	//
+	// dsn() sets _txlock=immediate, so this Begin takes the write lock up front;
+	// the second process then blocks on it and afterwards reads a pragma that
+	// already shows the column present.
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin additive column migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, c := range additiveColumns {
+		var n int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`,
+			c.table, c.column).Scan(&n); err != nil {
+			return fmt.Errorf("inspect %s.%s: %w", c.table, c.column, err)
+		}
+		if n > 0 {
+			continue
+		}
+		// Table and column names are constants in this file, never user input.
+		if _, err := tx.Exec(fmt.Sprintf(
+			`ALTER TABLE %s ADD COLUMN %s %s`, c.table, c.column, c.ddl)); err != nil {
+			return fmt.Errorf("add column %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // metaString reads a meta key, returning "" when absent.

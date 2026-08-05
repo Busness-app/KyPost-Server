@@ -62,3 +62,9 @@ docs/superpowers/
 
 # Playwright MCP verification artifacts
 .playwright-mcp/
+
+# Agent auto-approval allowlists are per-machine and must not be shared: a
+# committed settings.json grants everyone who clones this repo the same standing
+# Bash approvals, including wildcards that amount to unrestricted code execution.
+# Keep them in settings.local.json, which is gitignored.
+.claude/settings.json

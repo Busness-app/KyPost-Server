@@ -25,8 +25,11 @@ quality and truncated to `limit`, backing the compose-autocomplete
 ## Ownership
 
 All code under `backend/internal/contacts/`. Consumed by `api/` (web CRUD
-handlers, the CardDAV backend, the mobile sync endpoints); never imported by
-`processor/` or the daemon today.
+handlers, the CardDAV backend, the mobile sync endpoints) **and by `processor/`**
+(`poller.go`, and `autocrypt_harvest.go`, which writes contact key material from
+inbound mail). Both processes therefore mutate this store, which is why anything
+derived from it must be invalidated by a mechanism the daemon can reach — see
+`PGPKeyGeneration` below.
 
 ## Local Contracts
 
@@ -36,8 +39,8 @@ handlers, the CardDAV backend, the mobile sync endpoints); never imported by
 - Every read and mutation re-reads `contacts.json` from disk first
   (`refreshFromDiskLocked`), then writes atomically via
   `fsutil.AtomicWriteFile` — required because the API and daemon processes
-  share no memory (see root `backend/AGENTS.md`), even though only `api/`
-  touches contacts today.
+  share no memory (see root `backend/AGENTS.md`), and here it is not
+  hypothetical: both actually write, the daemon through the Autocrypt harvest.
 - `Contact.Rev` is bumped by `Store.Upsert`/`Store.Delete` on every mutation;
   `Contact.ETag()` derives `"rev-<Rev>"` from it — there is no separately
   stored ETag field.
@@ -47,6 +50,26 @@ handlers, the CardDAV backend, the mobile sync endpoints); never imported by
   `defaultTombstoneRetention` (30 days); `ChangedSince` returns `tooOld=true`
   when a caller's cursor predates the GC watermark, signaling "your delta may
   be missing deletions — discard the cursor and re-fetch a full snapshot".
+  **`GC` only purges because something calls it** — `api.Server.StartContactsTombstoneSweeper`,
+  wired in `app.startBackgroundSweepers` beside its ten siblings. It had no
+  caller anywhere in the repo, tests included, so every deletion left a
+  permanent residue (the tombstone keeps its client-chosen `UID`) and a sync
+  client that added and removed entries grew the file without bound.
+- **`MaxContactsPerUser` (10,000) bounds live contacts**, checked in
+  `applyUpsertLocked` so every writer inherits it. Every sibling per-user store
+  has a total cap and this one had none — `maxContactsSyncChanges` bounds one
+  REQUEST, not the store. The cap bounds GROWTH, not editing: an existing
+  contact (and a tombstone being revived) stays writable at the cap, or a full
+  address book becomes read-only and the user cannot delete their way out.
+  Tombstones do not count, so a deletion frees headroom immediately.
+- **`PGPKeyGeneration` changes whenever key material or the ADDRESS SET
+  changes**, bumped in `applyUpsertLocked`/`applyDeleteLocked` via
+  `bumpPGPKeyGenIfBindingChanged`. It exists so consumers can invalidate
+  anything derived from this store — see `mailcache`'s `ContactKeyGen`. Two
+  properties are load-bearing: it must move when addresses narrow (that changes
+  what a key is an anchor for, without changing its bytes), and it must NOT
+  move for unrelated edits like a rename, or every signed message re-fetches
+  its body on every contact edit.
 - Conflict/concurrency policy (e.g. CardDAV `If-Match`, mobile-sync
   last-write-wins) is decided by callers in `api/`, not by `Store` itself —
   `Store.Upsert`/`Store.Delete` always apply the write unconditionally. Read

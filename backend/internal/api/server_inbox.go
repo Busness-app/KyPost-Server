@@ -335,6 +335,32 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 
 	cacheKey := inboxCacheMailboxKey(mailbox)
 
+	// Discard any cached signature verdict whose address-book basis has moved.
+	//
+	// A verdict is derived from the contacts store, so it is only valid while
+	// that store's key bindings are unchanged. Comparing generations here covers
+	// EVERY contact writer — including mobile sync, CardDAV, vCard import,
+	// dedupe, the discovery-suppression button and the daemon's Autocrypt
+	// harvest, none of which could call the handler-level invalidation helper,
+	// and three of which run in a different process entirely.
+	var contactKeyGen int64
+	if contactsStore, err := s.userContactsStore(userID); err == nil {
+		contactKeyGen = contactsStore.PGPKeyGeneration()
+		if err := cache.SyncContactKeyGeneration(contactKeyGen); err != nil {
+			s.logger.Error("could not reconcile cached PGP verdicts with the address book",
+				"user_id", userID, "error", err.Error())
+		}
+	}
+	// stampKeyGen records the address-book generation a verdict was computed
+	// under, so a later change to any contact's key or addresses invalidates it
+	// via SyncContactKeyGeneration above.
+	stampKeyGen := func(entries []mailcache.Entry) []mailcache.Entry {
+		for i := range entries {
+			entries[i].ContactKeyGen = contactKeyGen
+		}
+		return entries
+	}
+
 	if !useDelta {
 		// Cache-first: if the background poller (or an earlier request)
 		// has already warmed a full window of `limit` messages with
@@ -409,7 +435,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			warmEntries = append(warmEntries, mailCacheEntryFromUnreadMessage(msg, status))
 		}
 		if len(warmEntries) > 0 {
-			if err := cache.Upsert(cacheKey, warmEntries); err != nil {
+			if err := cache.Upsert(cacheKey, stampKeyGen(warmEntries)); err != nil {
 				s.logger.Error("failed to warm mail cache", "error", err.Error())
 			}
 		}
@@ -485,7 +511,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			}
 		}
 		if len(warmEntries) > 0 {
-			if err := cache.Upsert(cacheKey, warmEntries); err != nil {
+			if err := cache.Upsert(cacheKey, stampKeyGen(warmEntries)); err != nil {
 				s.logger.Error("failed to warm mail cache from delta fetch", "error", err.Error())
 			}
 		}

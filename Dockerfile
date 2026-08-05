@@ -109,7 +109,15 @@ ENV OLLAMA_MODELS=/kypost/ollama-models
 
 RUN mkdir -p /kypost/config /kypost/private /kypost/logs /kypost/state \
 	&& mkdir -p /kypost/ollama-models \
-	&& chown -R kypost:kypost /kypost /opt/kypost
+	# Only the DATA directories. /opt/kypost holds entrypoint.sh — which Docker
+	# re-executes AS ROOT on every restart, from the container's writable layer —
+	# and the frontend assets the API serves with a one-year immutable cache.
+	# Making those writable by the runtime user turns any file-write bug in the
+	# server, the daemon or bundled Ollama into persistent stored XSS, and into
+	# root-in-container after a restart. The runtime user only needs read+execute
+	# on /opt. entrypoint.sh already chowns the four data volumes correctly at
+	# runtime; this line was the stale sibling.
+	&& chown -R kypost:kypost /kypost
 
 VOLUME ["/kypost/config", "/kypost/private", "/kypost/logs", "/kypost/state"]
 EXPOSE 5866

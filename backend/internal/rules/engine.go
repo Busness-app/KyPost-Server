@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 )
@@ -64,6 +65,24 @@ type ActionResult struct {
 // that as incomplete — see handleRulesRun, which stops the scan rather than
 // applying a partial outcome.
 func Evaluate(ctx context.Context, input EvalInput, activeRules []Rule) Outcome {
+	// Bound evaluation's own cost.
+	//
+	// ctx is threaded all the way down, but the only thing that cancels it on
+	// the request path is the client going away — and an attacker holds the
+	// connection open. The structural caps (maxRulesPerUser, maxMatchConditions,
+	// maxConditionValueBytes) bound a match tree's SHAPE and say nothing about
+	// what it costs to evaluate: the ~8.9us/condition budget they were chosen
+	// against is documented in sieve.go as being for the `contains` comparator,
+	// while a legal regex alternation is orders of magnitude dearer.
+	//
+	// A caller that already imposed a tighter deadline keeps it; this only adds
+	// a ceiling where there was none.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, maxEvaluationBudget)
+		defer cancel()
+	}
+
 	sorted := make([]Rule, len(activeRules))
 	copy(sorted, activeRules)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Order < sorted[j].Order })
@@ -204,18 +223,33 @@ func matchGroup(ctx context.Context, g MatchGroup, input EvalInput) bool {
 
 func conditionMatches(ctx context.Context, c Condition, input EvalInput) bool {
 	var result bool
+	// evaluable distinguishes "this condition was evaluated and did not match"
+	// from "this condition could not be evaluated at all". Collapsing the two
+	// into false is what let a mistyped regex become a rule that fires on every
+	// message: compilePattern returns nil, matchesValue reported false, and
+	// Negate inverted it to true. An unevaluable condition must not match in
+	// either direction.
+	evaluable := true
 	if c.Group != nil {
 		result = matchGroup(ctx, *c.Group, input)
 	} else if strings.EqualFold(strings.TrimSpace(c.Field), "keyword") {
 		result = false
 		for _, kw := range input.Keywords {
-			if matchesValue(c.Comparator, kw, c.Value) {
+			matched, ok := matchesValue(c.Comparator, kw, c.Value)
+			if !ok {
+				evaluable = false
+				break
+			}
+			if matched {
 				result = true
 				break
 			}
 		}
 	} else {
-		result = matchesValue(c.Comparator, fieldValue(input, c.Field), c.Value)
+		result, evaluable = matchesValue(c.Comparator, fieldValue(input, c.Field), c.Value)
+	}
+	if !evaluable {
+		return false
 	}
 	if c.Negate {
 		return !result
@@ -242,28 +276,34 @@ func fieldValue(input EvalInput, field string) string {
 	}
 }
 
-func matchesValue(comparator, candidate, value string) bool {
+// matchesValue reports whether candidate matches value under comparator, and
+// whether the condition could be evaluated at all.
+//
+// The second return exists because a pattern that does not compile (or that
+// expands past maxPatternProgramInsts) has no truth value. Reporting it as
+// "false" let conditionMatches's Negate branch invert it into "matches every
+// message" — see TestUncompilableRegexUnderNegateDoesNotMatchEverything.
+//
+// Rules are validated on write and on load, so an unevaluable pattern should be
+// unreachable here; this is the backstop for a rules.json that predates the
+// validation or was edited by hand.
+func matchesValue(comparator, candidate, value string) (matched bool, evaluable bool) {
 	switch strings.ToLower(strings.TrimSpace(comparator)) {
 	case "exists":
-		return strings.TrimSpace(candidate) != ""
+		return strings.TrimSpace(candidate) != "", true
 	case "is":
-		return strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(value))
-	case "matches":
-		re := compilePattern("(?is)^" + wildcardToRegexp(value) + "$")
+		return strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(value)), true
+	case "matches", "regex":
+		pattern, _ := patternFor(comparator, value)
+		re := compilePattern(pattern)
 		if re == nil {
-			return false
+			return false, false
 		}
-		return re.MatchString(candidate)
-	case "regex":
-		re := compilePattern("(?is)" + value)
-		if re == nil {
-			return false
-		}
-		return re.MatchString(candidate)
+		return re.MatchString(candidate), true
 	case "contains":
 		fallthrough
 	default:
-		return strings.Contains(strings.ToLower(candidate), strings.ToLower(value))
+		return strings.Contains(strings.ToLower(candidate), strings.ToLower(value)), true
 	}
 }
 
@@ -284,3 +324,15 @@ func wildcardToRegexp(pattern string) string {
 	}
 	return sb.String()
 }
+
+// maxEvaluationBudget is the wall-clock ceiling on one Evaluate call.
+//
+// Generous relative to any legitimate rule set — an ordinary configuration
+// finishes in single-digit milliseconds — so this is a backstop against a
+// pathological one, not a limit users will meet. A cancelled walk returns
+// whatever it matched so far, and callers already treat that as incomplete
+// (see handleRulesRun, which stops the scan rather than applying a partial
+// outcome).
+//
+// A var, not a const, so tests can lower it; production never reassigns it.
+var maxEvaluationBudget = 5 * time.Second

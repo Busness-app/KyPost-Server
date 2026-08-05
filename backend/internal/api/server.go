@@ -550,6 +550,12 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/pgp/identity/envelope/{slot}", s.withAuth(s.handlePGPPutEnvelopeSlot))
 	mux.HandleFunc("GET /api/pgp/identity/envelope/{slot}", s.withAuth(s.handlePGPGetEnvelopeSlot))
 	mux.HandleFunc("DELETE /api/pgp/identity/envelope/{slot}", s.withAuth(s.handlePGPDeleteEnvelopeSlot))
+	// Device-authenticated, not session-authenticated: neither withAuth nor
+	// withMailAuth fits a caller that IS a device. Both scope themselves to the
+	// verified device record rather than to anything in the request. See
+	// pgp_device_enrollment.go.
+	mux.HandleFunc("POST /api/pgp/device/enrollment-key", withDeviceAuth(s.handlePGPPublishEnrollmentKey))
+	mux.HandleFunc("GET /api/pgp/device/envelope", withDeviceAuth(s.handlePGPDeviceEnvelope))
 	// export-legacy stays session-only on purpose. It is the one endpoint
 	// that returns a private key in the clear, and it re-verifies the account
 	// password before doing so — a device secret is not that password, and a
@@ -1190,6 +1196,13 @@ type pgpRecipientPlan struct {
 	bccEmails        []string
 	bccKeys          []string
 	withoutKeyEmails []string
+	// keyChangedEmails are recipients whose PINNED key no longer matches what
+	// discovery returns. Kept apart from withoutKeyEmails because the two mean
+	// opposite things: "no key on file" is an absence the pickup fallback exists
+	// to cover, while a broken pin is the TOFU control firing — the one signal
+	// that a key substitution may be in progress. Folding them together made the
+	// fallback mail the plaintext of exactly the messages the pin was protecting.
+	keyChangedEmails []string
 }
 
 // pgpDelivery is one PGP/MIME ciphertext and the SMTP recipient(s) it

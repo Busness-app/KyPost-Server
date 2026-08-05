@@ -379,6 +379,12 @@ type nativeRegisterRequest struct {
 	Transport    string `json:"transport,omitempty"`
 	DeviceName   string `json:"deviceName,omitempty"`
 	AppVersion   string `json:"appVersion,omitempty"`
+	// EncryptionEnrolled is the device's own answer to "can I still open my
+	// enrollment envelope". A POINTER because absent and false mean different
+	// things: an older client that does not send it has no opinion and must not
+	// have the marker cleared out from under it, while a client that sends false
+	// is reporting that its keystore key is gone.
+	EncryptionEnrolled *bool `json:"encryptionEnrolled,omitempty"`
 }
 
 func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http.Request) {
@@ -538,6 +544,17 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	// requested ID never got a record, so Commit settles that one too. The
 	// deferred Release above becomes a no-op.
 	reservation.Commit(registeredDeviceID)
+
+	// Written against registeredDeviceID rather than the requested id, because
+	// the upsert may have merged this registration into an existing row.
+	if req.EncryptionEnrolled != nil {
+		if err := store.SetNativeDeviceEncryptionEnrolled(registeredDeviceID, *req.EncryptionEnrolled); err != nil {
+			// Not fatal to registration: push must keep working even if the
+			// enrollment marker cannot be written.
+			s.logger.Error("could not record device encryption state",
+				"device_id", registeredDeviceID, "error", err.Error())
+		}
+	}
 
 	serverBaseURL := s.serverBaseURL
 	if serverBaseURL == "" {

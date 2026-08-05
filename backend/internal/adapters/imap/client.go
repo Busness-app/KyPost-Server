@@ -941,7 +941,7 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 	// first and never overwrites Flags/Sent/Received when it later merges
 	// in body content, so overviewFromEmail(uid, e) below already has
 	// everything a second, separate GetOverviews call used to provide.
-	emails, err := d.GetEmails(uids...)
+	emails, _, err := fetchEmailsBounded(d, uids)
 	if err != nil {
 		return nil, fmt.Errorf("imap fetch emails: %w", err)
 	}
@@ -1179,7 +1179,7 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 
 	var emails map[int]*goimap.Email
 	if len(toFetch) > 0 {
-		emails, err = d.GetEmails(toFetch...)
+		emails, _, err = fetchEmailsBounded(d, toFetch)
 		if err != nil {
 			return nil, fmt.Errorf("imap fetch emails: %w", err)
 		}

@@ -21,10 +21,11 @@ import (
 // the same file; both need the guard standing on its own.
 func TestNoMessageContentInInstanceWideLog(t *testing.T) {
 	forbidden := map[string]string{
-		"sender":  "the sending address is correspondence metadata",
-		"subject": "a subject line is message content",
-		"body":    "a body is message content",
-		"snippet": "a snippet is message content",
+		"recipient": "a recipient address is correspondence metadata: the instance log is admin-readable, and admins have no mailbox access to other users",
+		"sender":    "the sending address is correspondence metadata",
+		"subject":   "a subject line is message content",
+		"body":      "a body is message content",
+		"snippet":   "a snippet is message content",
 		// Deliberately NOT "to": in this package it names an API request
 		// target often enough that the field is ambiguous rather than wrong.
 		"password":      "never log a credential",

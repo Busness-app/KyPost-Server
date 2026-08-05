@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"path"
 	"strings"
@@ -12,7 +14,9 @@ import (
 
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/groups"
+	"kypost-server/backend/internal/pgpmail"
 
+	"github.com/ProtonMail/gopenpgp/v3/crypto"
 	"github.com/emersion/go-vcard"
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/carddav"
@@ -76,6 +80,28 @@ func (s *Server) handleCardDAV(w http.ResponseWriter, r *http.Request) {
 	// URI) would be fully buffered in memory and base64-decoded with no
 	// limit at all.
 	r.Body = http.MaxBytesReader(w, r.Body, maxContactPhotoBytes)
+	// Pre-scan a card-bearing body for pathological folding before go-webdav's
+	// decoder ever sees it.
+	//
+	// go-vcard unfolds with `l += ...` in a loop, which is quadratic, and it
+	// unfolds BEFORE validating, so a malformed card does not bail out early.
+	// checkVCardFolding exists for exactly this and had one call site, on the
+	// import route. This path cannot reuse it by wrapping the decoder, because
+	// the decode happens inside go-webdav and is never called from this repo —
+	// so the body has to be scanned and replaced here.
+	if r.Method == http.MethodPut || r.Method == http.MethodPost {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "could not read request body", http.StatusBadRequest)
+			return
+		}
+		if err := checkVCardFolding(body); err != nil {
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+	}
 	handler := &carddav.Handler{Backend: &contactsDAVBackend{server: s}, Prefix: davPrefix}
 	handler.ServeHTTP(w, r)
 }
@@ -629,10 +655,27 @@ func contactFromVCard(uid string, card vcard.Card) parsedVCardContact {
 		}
 	}
 	if pgp := card.Value(vcard.FieldKey); pgp != "" {
+		armored := pgp
 		if data, _ := decodeDataURI(pgp); data != nil {
-			c.PGPKey = string(data)
+			armored = string(data)
+		}
+		// A contact's PGPKey is a trust anchor: it is what outbound mail is
+		// encrypted to and what the signature badge is checked against. The two
+		// sibling ingest paths, validateDiscoveredKey (WKD) and
+		// validateAutocryptKey, both require the key to parse, to be usable, and
+		// to carry the address as a User ID; this one stored whatever arrived.
+		//
+		// Note that pinning does NOT substitute for this: pinPGPKeyFingerprint
+		// derives the pin from the supplied key, so keyMatchesPin passes on any
+		// value, and an unparseable key yields an empty pin which is accepted by
+		// design.
+		//
+		// This function backs CardDAV pull, CardDAV PUT and vCard import, so
+		// validating here covers all three.
+		if err := validateContactVCardKey(armored, c.Emails); err != nil {
+			c.PGPKey = ""
 		} else {
-			c.PGPKey = pgp
+			c.PGPKey = armored
 		}
 	}
 
@@ -726,4 +769,48 @@ func resolveGroupIDsByName(store *groups.Store, names []string) []string {
 		return nil
 	}
 	return ids
+}
+
+// validateContactVCardKey reports why a vCard KEY value is unusable as a
+// contact's PGP trust anchor, or nil.
+//
+// Mirrors validateDiscoveredKey (WKD) and processor.validateAutocryptKey: the
+// key must parse, be neither revoked nor expired, and carry one of the
+// contact's own addresses as a User ID. Without the last check a remote CardDAV
+// server — which the code elsewhere in this package already treats as hostile
+// for size bounds — could attach any key to any contact.
+func validateContactVCardKey(armored string, emails []contacts.ContactValue) error {
+	key, err := crypto.NewKeyFromArmored(armored)
+	if err != nil {
+		return fmt.Errorf("parse contact key: %w", err)
+	}
+	status, err := pgpmail.CheckKeyStatus(armored)
+	if err != nil {
+		return err
+	}
+	if !status.Usable() {
+		return errors.New("contact key is revoked or expired")
+	}
+	entity := key.GetEntity()
+	if entity == nil {
+		return errors.New("contact key has no entity")
+	}
+	if len(emails) == 0 {
+		// Nothing to bind to. A key on an address-less contact can never be
+		// selected for encryption or signature verification anyway, so keeping
+		// it would only be a way to smuggle one in ahead of an address.
+		return errors.New("contact has no address to bind the key to")
+	}
+	for _, e := range emails {
+		target := strings.ToLower(strings.TrimSpace(e.Value))
+		if target == "" {
+			continue
+		}
+		for _, uid := range entity.Identities {
+			if strings.ToLower(strings.TrimSpace(uid.UserId.Email)) == target {
+				return nil
+			}
+		}
+	}
+	return errors.New("contact key does not carry any of the contact's addresses as a user ID")
 }
