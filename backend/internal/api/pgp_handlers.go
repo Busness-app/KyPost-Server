@@ -142,6 +142,9 @@ func (s *Server) storePGPIdentity(w http.ResponseWriter, userID string, id *pgpm
 		http.Error(w, "failed to store pgp identity", http.StatusInternalServerError)
 		return
 	}
+	// SetPGPIdentity cleared PGPWrappedEnvelopes; the device enrollment record
+	// lives in the other store and has to be cleared alongside it.
+	s.clearDeviceEnrollmentsFor(userID, "identity "+source)
 	status := id.Status()
 	writeJSON(w, http.StatusOK, pgpIdentityResponse{
 		Fingerprint: id.Fingerprint,
@@ -203,6 +206,7 @@ func (s *Server) handlePGPIdentity(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to delete pgp identity", http.StatusInternalServerError)
 			return
 		}
+		s.clearDeviceEnrollmentsFor(ac.UserID, "identity deleted")
 		s.logger.Info("pgp identity deleted", "user_id", ac.UserID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:

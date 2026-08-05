@@ -1,6 +1,9 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
+	"strconv"
+)
 
 // Step-up authentication for the operations that replace or destroy a PGP
 // identity.
@@ -109,4 +112,42 @@ func (s *Server) confirmAccountCredentialNoRecord(w http.ResponseWriter, r *http
 // one thing: they just proved the account credential.
 func (s *Server) requirePGPStepUp(w http.ResponseWriter, r *http.Request, userID, password, authSecret string) bool {
 	return s.confirmAccountCredential(w, r, userID, password, authSecret)
+}
+
+// clearDeviceEnrollmentsFor resets every paired device's enrollment state after
+// the account's PGP identity is written or cleared.
+//
+// This mirrors, in the other store, what users.Store already does for
+// PGPWrappedEnvelopes on those same writes: every non-password slot seals the
+// OLD key, so an identity change invalidates them all. The enrollment record
+// lives in state.Store, which users.Store has no coupling to, so the two halves
+// cannot be done in one place and this must be called at each identity write.
+//
+// It matters most in the flow it otherwise breaks. Rotating the identity is the
+// documented way to un-enroll a lost phone — the server cannot reach the copy
+// that phone re-sealed into its own keystore — so a user rotating their key is
+// often doing it *to revoke*. Leaving the marker set meant the Security page
+// went on reporting that phone as protected immediately afterwards.
+//
+// Failure is logged, not fatal. The identity write has already committed by the
+// time this runs, and refusing the request afterwards would report failure for
+// something that happened. A stale marker is a wrong indicator; a caller who
+// retries because they were told the write failed can do worse.
+func (s *Server) clearDeviceEnrollmentsFor(userID, reason string) {
+	store, err := s.userStore(userID)
+	if err != nil {
+		s.logger.Error("could not open state to clear device enrollment",
+			"user_id", userID, "reason", reason, "error", err.Error())
+		return
+	}
+	n, err := store.ClearDeviceEnrollments()
+	if err != nil {
+		s.logger.Error("could not clear device enrollment after an identity change",
+			"user_id", userID, "reason", reason, "error", err.Error())
+		return
+	}
+	if n > 0 {
+		s.logger.Info("cleared device enrollment after an identity change",
+			"user_id", userID, "reason", reason, "devices", strconv.Itoa(n))
+	}
 }

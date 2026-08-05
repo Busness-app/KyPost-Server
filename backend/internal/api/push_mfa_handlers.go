@@ -387,6 +387,11 @@ func (s *Server) handlePushRespond(w http.ResponseWriter, r *http.Request) {
 		writeDeviceAuthFailure(w, retryAfter)
 		return
 	}
+	// This route MUTATES on a device credential, which no shared middleware
+	// meters. See meterDeviceWrite.
+	if !s.meterDeviceWrite(w, r, userID) {
+		return
+	}
 	var req struct {
 		ChallengeID string `json:"challengeId"`
 		Approve     bool   `json:"approve"`

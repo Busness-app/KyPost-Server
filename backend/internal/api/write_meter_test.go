@@ -17,9 +17,14 @@ import (
 // endpoints, so that — in the remediation commit's own words — "the next such
 // route gets the bound without anyone remembering to ask for it". Three of the
 // four wrappers never received it, so ~26 mail routes plus every device and
-// CardDAV route accept an unbounded request rate. Those routes carry the
-// expensive work in several other findings (rules/run, recipient resolution,
-// pickup creation), so the missing meter is what removes their rate bound.
+// CardDAV route accepted an unbounded request rate.
+//
+// The withMailAuth and withDAVBasicAuth legs were closed by a8904dd. The
+// withDeviceAuth leg could not be, because that marker is inert and has no
+// shared middleware to hang the call on — so it stayed open, and audit run-10
+// found four mutating device routes still unbounded. Those now call
+// meterDeviceWrite explicitly; TestDeviceAuthMutatingRouteIsMetered and
+// TestDeviceAuthReadRouteIsNotMetered pin that leg, since this test cannot.
 func TestWithMailAuthMetersMutatingRequests(t *testing.T) {
 	srv := newTestServer(t)
 	u, err := srv.users.Create(context.Background(), "metered", "irrelevant-password", users.RoleUser)
@@ -31,6 +36,14 @@ func TestWithMailAuthMetersMutatingRequests(t *testing.T) {
 	handler := srv.withMailAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+
+	// Freeze the bucket's clock for the same reason as
+	// TestMutatingRoutesAreMeteredPerAccount. This leg has ~40x the headroom it
+	// needs today, because session auth costs no KDF per request — but it is the
+	// same shape that made TestDeviceAuthMutatingRouteIsMetered fail in CI, and
+	// the margin is a property of the runner rather than of the assertion.
+	frozen := time.Now()
+	srv.accountWriteLimiter.now = func() time.Time { return frozen }
 
 	throttled := 0
 	for i := 0; i < accountWriteBurst*3; i++ {

@@ -473,6 +473,11 @@ func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
 		writeDeviceAuthFailure(w, retryAfter)
 		return
 	}
+	// This route MUTATES on a device credential, which no shared middleware
+	// meters. See meterDeviceWrite.
+	if !s.meterDeviceWrite(w, r, userID) {
+		return
+	}
 	store, err := s.userContactsStore(userID)
 	if err != nil {
 		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)

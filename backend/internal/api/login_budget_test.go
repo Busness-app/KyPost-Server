@@ -234,7 +234,9 @@ func TestBucketDebtIsFloored(t *testing.T) {
 // SWEEP THRESHOLD; this one drives the table past the HARD CAP, which is the
 // only place stage 2 runs.
 func TestCrowdedTableEvictsLockedBeforePartialStrikes(t *testing.T) {
-	l := newFailureLockout(3, 15*time.Minute)
+	// Reduced bounds, same proof — see newFailureLockoutSized. At production
+	// scale the loop below is 165,000 race-instrumented tryAttempt calls.
+	l := newFailureLockoutSized(3, 15*time.Minute, 100, 500)
 
 	// A real user, mid-accumulation at 2 of 3 strikes.
 	const victim = "real-victim\x00198.51.100.7"
@@ -244,7 +246,7 @@ func TestCrowdedTableEvictsLockedBeforePartialStrikes(t *testing.T) {
 
 	// Now flood past the hard cap with fully-locked entries, the way an attacker
 	// manufactures them: three requests each buys one that survives stage 1.
-	for i := range loginLockoutHardCap + 5_000 {
+	for i := range l.hardCap + l.hardCap/10 {
 		key := fmt.Sprintf("filler-%d", i)
 		for range 3 {
 			l.tryAttempt(key)
@@ -256,9 +258,9 @@ func TestCrowdedTableEvictsLockedBeforePartialStrikes(t *testing.T) {
 	_, victimSurvived := l.entries[victim]
 	l.mu.Unlock()
 
-	if size > loginLockoutHardCap {
+	if size > l.hardCap {
 		t.Errorf("table holds %d entries, want at most %d: the hard cap did not engage",
-			size, loginLockoutHardCap)
+			size, l.hardCap)
 	}
 	if !victimSurvived {
 		t.Fatal("the victim's partial strike record was evicted while attacker-manufactured " +

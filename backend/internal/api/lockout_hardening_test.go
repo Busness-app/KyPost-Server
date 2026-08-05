@@ -127,7 +127,11 @@ func TestDAVAuthSuccessClearsLockoutHistory(t *testing.T) {
 // keys instead: an outage for callers the table has not seen, never an amnesty
 // for one it has.
 func TestFailureLockoutIsHardBounded(t *testing.T) {
-	l := newFailureLockout(1, 15*time.Minute) // 1 strike => instantly locked
+	// Reduced bounds, same proof: shedding is scale-invariant, and at production
+	// scale this one test was 35% of the package's entire runtime under -race.
+	// The 1:5 sweep:cap ratio is preserved because the sweep is what keeps a
+	// transient flood from reaching the cap.
+	l := newFailureLockoutSized(1, 15*time.Minute, 100, 500) // 1 strike => instantly locked
 
 	// A victim, locked out before the flood starts.
 	const victim = "victim\x00203.0.113.9"
@@ -137,7 +141,7 @@ func TestFailureLockoutIsHardBounded(t *testing.T) {
 	}
 
 	// Every key here goes straight to locked, which is the adversarial case.
-	total := loginLockoutHardCap + 25_000
+	total := l.hardCap + l.hardCap/2
 	for i := range total {
 		l.tryAttempt(fmt.Sprintf("filler-%d\x00203.0.113.%d", i, i%256))
 	}
@@ -145,9 +149,9 @@ func TestFailureLockoutIsHardBounded(t *testing.T) {
 	l.mu.Lock()
 	size := len(l.entries)
 	l.mu.Unlock()
-	if size > loginLockoutHardCap {
+	if size > l.hardCap {
 		t.Errorf("lockout table holds %d entries after %d all-locking attempts, want at most %d",
-			size, total, loginLockoutHardCap)
+			size, total, l.hardCap)
 	}
 
 	// THE POINT: the flood must not have bought the attacker their victim back.
@@ -166,12 +170,12 @@ func TestFailureLockoutIsHardBounded(t *testing.T) {
 // keys it has never seen; refusing an existing one would let a flood lock out
 // every user who was mid-accumulation.
 func TestSaturatedTableStillServesKnownKeys(t *testing.T) {
-	l := newFailureLockout(3, 15*time.Minute)
+	l := newFailureLockoutSized(3, 15*time.Minute, 100, 500)
 
 	const known = "known\x00203.0.113.1"
 	l.tryAttempt(known) // 1 of 3: known to the table, not locked
 
-	for i := range loginLockoutHardCap + 1_000 {
+	for i := range l.hardCap + l.hardCap/10 {
 		l.tryAttempt(fmt.Sprintf("filler-%d", i))
 	}
 
@@ -282,5 +286,41 @@ func TestCrowdedTableSweepIsThrottled(t *testing.T) {
 	l.mu.Unlock()
 	if !after.Equal(before) {
 		t.Error("the sweep ran again immediately; it should be throttled by sweepMinInterval")
+	}
+}
+
+// TestFailureLockoutBoundsArePerInstance pins that a lockout's sweep threshold
+// and hard cap belong to the instance rather than to the package.
+//
+// The shedding property is scale-invariant: "past the cap, refuse keys the table
+// has not seen, and never forgive one it has" is the same proof at 500 entries
+// as at 50,000. Proving it at production scale cost 75,000 instrumented map
+// inserts under -race — one test that was 35% of this package's entire runtime.
+//
+// The two bounds move together because their RATIO is load-bearing: the sweep
+// runs at loginLockoutSweepThreshold and is what keeps a transient flood from
+// reaching the cap, so a test that lowered only the cap would exercise a
+// different machine from the one that ships.
+func TestFailureLockoutBoundsArePerInstance(t *testing.T) {
+	small := newFailureLockoutSized(1, 15*time.Minute, 20, 100)
+	for i := range 250 {
+		small.tryAttempt(fmt.Sprintf("k-%d", i))
+	}
+	small.mu.Lock()
+	size := len(small.entries)
+	small.mu.Unlock()
+	if size > 100 {
+		t.Fatalf("instance with hardCap=100 holds %d entries", size)
+	}
+	if !small.Saturated() {
+		t.Fatal("instance with hardCap=100 shed keys without recording it")
+	}
+
+	// A default-constructed lockout keeps the production bounds, so lowering
+	// them for a test cannot silently become the shipped configuration.
+	prod := newFailureLockout(1, 15*time.Minute)
+	if prod.hardCap != loginLockoutHardCap || prod.sweepThreshold != loginLockoutSweepThreshold {
+		t.Fatalf("newFailureLockout must default to the package bounds, got cap=%d sweep=%d",
+			prod.hardCap, prod.sweepThreshold)
 	}
 }
