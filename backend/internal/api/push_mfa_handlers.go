@@ -114,7 +114,7 @@ func (s *Server) handleMFAPushEnabled(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(eligible) == 0 {
-			msg := "pair a device on the Notifications page before enabling push approval"
+			msg := "pair a device on Security's Devices tab before enabling push approval"
 			paired, err := approverDevices(store)
 			if err != nil {
 				http.Error(w, "failed to read paired devices", http.StatusServiceUnavailable)

@@ -1,7 +1,8 @@
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
-import { Link } from "react-router";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router";
 import QRCode from "qrcode";
-import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
+import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
+import { listNativeDevices, type NativeDeliveryMode, type NativeDevice } from "../api/devices";
 import { credentialFields, deriveCredential } from "../api/auth";
 import {
   getPGPIdentity,
@@ -38,17 +39,10 @@ import { unlockWithArmoredKey } from "../lib/keyVault";
 import { PgpUnlockDialog } from "../components/PgpUnlockDialog";
 import { DeviceEnrollmentCard } from "../components/DeviceEnrollmentCard";
 import { listContacts, type Contact } from "../api/contacts";
-
-type ApproverDevice = {
-  deviceId: string;
-  deviceName?: string;
-  platform?: string;
-  approver: boolean;
-  // Absent on older servers, which had no notion of an ineligible transport.
-  // Treat undefined as eligible so this page keeps working against one.
-  canApprove?: boolean;
-  cannotApproveReason?: string;
-};
+import { DeviceList } from "./security/DeviceList";
+import { PairingPanel } from "./security/PairingPanel";
+import { countApprovers, joinDeviceRows, type ApproverDevice } from "./security/deviceJoin";
+import { SECURITY_TABS, SECURITY_TAB_LABELS, resolveSecurityTab, type SecurityTab } from "./security/tabs";
 
 type MfaStatus = {
   totpEnabled: boolean;
@@ -71,6 +65,27 @@ export function SecurityPage() {
   const [status, setStatus] = useState<MfaStatus | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // In the URL so the prose elsewhere ("pair a device on Security's Devices
+  // tab") can be a link, and so a reload keeps you where you were.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = resolveSecurityTab(searchParams.get("tab"));
+  function setActiveTab(tab: SecurityTab) {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", tab);
+    setSearchParams(next, { replace: true });
+  }
+
+  // Paired devices. The inventory comes from its own endpoint rather than from
+  // the pairing endpoint, which mints a credential as a side effect — see
+  // api/devices.ts. Pairing itself is lazy, inside PairingPanel.
+  const [nativeDevices, setNativeDevices] = useState<NativeDevice[]>([]);
+  const [devicesError, setDevicesError] = useState("");
+  const [deviceRemoveBusyId, setDeviceRemoveBusyId] = useState("");
+  const [unpairBusy, setUnpairBusy] = useState(false);
+  const [pairingOpen, setPairingOpen] = useState(false);
+  const [deliveryMode, setDeliveryMode] = useState<NativeDeliveryMode>("push");
+  const [deliveryModeBusy, setDeliveryModeBusy] = useState(false);
 
   // Enrollment state.
   const [setup, setSetup] = useState<SetupResponse | null>(null);
@@ -588,6 +603,91 @@ export function SecurityPage() {
     void refreshStatus();
   }, []);
 
+  const refreshDevices = useCallback(async () => {
+    try {
+      const next = await listNativeDevices();
+      setNativeDevices(Array.isArray(next.devices) ? next.devices : []);
+      // Older servers omit it; leave the toggle showing what it already had
+      // rather than silently asserting "push".
+      if (next.deliveryMode) {
+        setDeliveryMode(next.deliveryMode === "pull" ? "pull" : "push");
+      }
+      setDevicesError("");
+    } catch (err) {
+      // Empty the list rather than leave a stale one claiming a device is still
+      // paired. The error below says why it is empty, so this does not read as
+      // the reassuring "nothing is paired".
+      setNativeDevices([]);
+      setDevicesError(toErrorMessage(err, "Could not read your paired devices."));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshDevices();
+  }, [refreshDevices]);
+
+  async function changeDeliveryMode(mode: NativeDeliveryMode) {
+    if (mode === deliveryMode || deliveryModeBusy) {
+      return;
+    }
+    const previous = deliveryMode;
+    setDeliveryMode(mode); // optimistic
+    setDeliveryModeBusy(true);
+    try {
+      const res = await putJSON<{ ok: boolean; deliveryMode: NativeDeliveryMode }>(
+        "/api/notifications/native/mode",
+        { mode }
+      );
+      setDeliveryMode(res.deliveryMode === "pull" ? "pull" : "push");
+      setMessage(res.deliveryMode === "pull"
+        ? "Switched to App Pull notifications (bypasses Cloudflare and Firebase)."
+        : "Switched to relay push notifications.");
+    } catch (err) {
+      setDeliveryMode(previous); // roll back
+      setMessage(`Failed to change notification delivery: ${toErrorMessage(err, "unknown error")}`);
+    } finally {
+      setDeliveryModeBusy(false);
+    }
+  }
+
+  async function removeDevice(deviceId: string) {
+    const cleaned = deviceId.trim();
+    if (!cleaned) {
+      return;
+    }
+    setDeviceRemoveBusyId(cleaned);
+    try {
+      await deleteJSON<{ ok: boolean; removed: boolean; devices: number }>(
+        "/api/notifications/native/devices",
+        { deviceId: cleaned }
+      );
+      await refreshDevices();
+      // The removed device may have been an approver, so the MFA status is now
+      // stale too — refreshing only the inventory would leave its approver row
+      // behind, flagged as missing from a list it was just removed from.
+      await refreshStatus();
+      setMessage("Removed paired device.");
+    } catch (err) {
+      setMessage(`Failed to remove paired device: ${toErrorMessage(err, "unknown error")}`);
+    } finally {
+      setDeviceRemoveBusyId("");
+    }
+  }
+
+  async function revokePairedDevices() {
+    setUnpairBusy(true);
+    try {
+      await postJSON<{ ok: boolean }>("/api/notifications/native/unpair", {});
+      await refreshDevices();
+      await refreshStatus();
+      setMessage("Revoked every paired device.");
+    } catch (err) {
+      setMessage(`Failed to revoke paired devices: ${toErrorMessage(err, "unknown error")}`);
+    } finally {
+      setUnpairBusy(false);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     if (!setup?.otpauthUri) {
@@ -742,9 +842,12 @@ export function SecurityPage() {
   const showRecoveryPanel = recoveryCodes.length > 0;
   const totpOn = showRecoveryPanel || Boolean(status?.totpEnabled);
   const pushOn = Boolean(status?.pushMfaEnabled);
-  const approverCount =
-    status?.approverDevices.filter((d) => d.approver && d.canApprove !== false).length ?? 0;
+  // One list from two sources — see pages/security/deviceJoin.ts for what
+  // happens when they disagree.
+  const deviceRows = joinDeviceRows(nativeDevices, status?.approverDevices ?? []);
+  const approverCount = countApprovers(deviceRows);
   const approvalsOn = pushOn && approverCount > 0;
+  const pairedCount = nativeDevices.length;
 
   // Four states, not two: an identity whose custody is still loading must not be
   // reported as server-held, because that is the alarming answer.
@@ -785,10 +888,12 @@ export function SecurityPage() {
           </p>
         </li>
         <li>
-          <p className="sec-eyebrow">Approvals</p>
+          <p className="sec-eyebrow">Devices</p>
           <span className="sec-custody-state">
             <span className={`sec-pip ${approvalsOn ? "sec-pip-on" : ""}`} aria-hidden="true" />
-            {approvalsOn ? `${approverCount} paired ${approverCount === 1 ? "device" : "devices"}` : "Codes only"}
+            {pairedCount === 0
+              ? "None paired"
+              : `${pairedCount} paired, ${approverCount} can approve`}
           </span>
           <p>
             {approvalsOn
@@ -827,7 +932,23 @@ export function SecurityPage() {
         </li>
       </ul>
 
+      <div className="sec-tabs" role="tablist" aria-label="Security sections">
+        {SECURITY_TABS.map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab}
+            className={`sec-tab${activeTab === tab ? " active" : ""}`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {SECURITY_TAB_LABELS[tab]}
+          </button>
+        ))}
+      </div>
+
       <div className="sec-layout">
+        {activeTab === "signin" ? (
         <div className={`sec-card ${totpOn ? "sec-card-on" : ""}`}>
           <div className="sec-card-head">
             <p className="sec-eyebrow">Sign-in</p>
@@ -984,24 +1105,59 @@ export function SecurityPage() {
             </div>
           )}
         </div>
+        ) : null}
 
-        <div className={`sec-card ${approvalsOn ? "sec-card-on" : ""}`}>
+        {activeTab === "devices" ? (
+        <>
+        <div className="sec-card">
           <div className="sec-card-head">
-            <p className="sec-eyebrow">Approvals</p>
-            <h3>Push approval</h3>
+            <p className="sec-eyebrow">Devices</p>
+            <h3>Pair a new device</h3>
           </div>
-
-          {!status?.totpEnabled ? (
-            <p className="sec-muted">
-              Enable an authenticator app (TOTP) above first. Push approval always keeps TOTP as a
-              fallback, so it can only be turned on once TOTP is active.
-            </p>
+          {pairingOpen ? (
+            <>
+              <PairingPanel
+                onDevicesMayHaveChanged={() => void refreshDevices()}
+                onStatus={setMessage}
+              />
+              <div className="sec-actions">
+                <button type="button" className="sec-action-quiet" onClick={() => setPairingOpen(false)}>
+                  Done
+                </button>
+              </div>
+            </>
           ) : (
             <div className="sec-section">
               <p className="sec-muted">
-                Approve sign-ins from a paired device. You can still use your authenticator code at any
-                time.
+                Pairing shows a code that is valid for ninety seconds. It stays hidden until you ask for
+                it, so simply having this page open never leaves a live pairing code on your screen.
               </p>
+              <div className="sec-actions">
+                <button type="button" onClick={() => setPairingOpen(true)}>
+                  Pair a new device
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className={`sec-card ${approvalsOn ? "sec-card-on" : ""}`}>
+          <div className="sec-card-head">
+            <p className="sec-eyebrow">Devices</p>
+            <h3>Your devices</h3>
+          </div>
+
+          <div className="sec-section">
+            {!status?.totpEnabled ? (
+              <p className="sec-muted">
+                Sign-in approval needs an authenticator app first — set one up on the{" "}
+                <button type="button" className="sec-link-button" onClick={() => setActiveTab("signin")}>
+                  Sign-in tab
+                </button>
+                . Push approval always keeps a code as its fallback, so it can only be turned on once
+                that is active.
+              </p>
+            ) : (
               <label className="sec-check">
                 <input
                   type="checkbox"
@@ -1009,51 +1165,85 @@ export function SecurityPage() {
                   disabled={busy}
                   onChange={(e) => void togglePush(e.target.checked)}
                 />
-                Enable push approval
+                Let a paired device approve sign-ins with a tap
               </label>
-              {status && status.approverDevices.length > 0 ? (
-                <>
-                <p className="sec-eyebrow sec-devices-label">Paired devices</p>
-                <ul className="sec-devices">
-                  {status.approverDevices.map((device) => {
-                    // Older servers omit canApprove entirely; undefined means
-                    // eligible, so this page degrades cleanly against one.
-                    const eligible = device.canApprove !== false;
-                    const name = device.deviceName?.trim() || device.platform || device.deviceId;
-                    return (
-                      <li key={device.deviceId}>
-                        <label className="sec-check">
-                          <input
-                            type="checkbox"
-                            checked={eligible && device.approver}
-                            disabled={busy || !eligible}
-                            onChange={(e) => void toggleApprover(device.deviceId, e.target.checked)}
-                          />
-                          <span>
-                            <span className="sec-device-name">{name}</span>
-                            {!eligible ? <span className="sec-device-tag">cannot approve</span> : null}
-                          </span>
-                        </label>
-                        {!eligible && (
-                          <p className="sec-muted">
-                            {device.cannotApproveReason ||
-                              "This device's push delivery cannot carry sign-in approvals. Mail notifications still work."}
-                          </p>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-                </>
-              ) : (
-                <p className="sec-muted">
-                  No paired devices yet. Pair a device on the Notifications page to use push approval.
-                </p>
-              )}
+            )}
+
+            {devicesError ? (
+              <p className="sec-verdict sec-verdict-risk">{devicesError}</p>
+            ) : (
+              <DeviceList
+                rows={deviceRows}
+                pushEnabled={pushOn && Boolean(status?.totpEnabled)}
+                approvalsKnown={status !== null}
+                busy={busy}
+                removingId={deviceRemoveBusyId}
+                onToggleApprover={(id, approver) => void toggleApprover(id, approver)}
+                onRemove={(id) => void removeDevice(id)}
+              />
+            )}
+          </div>
+
+          <div className="sec-section">
+            <h4>How pushes reach your devices</h4>
+            <p className="sec-muted">
+              App Pull fetches notifications straight from this server over HTTP, bypassing Cloudflare
+              and Firebase.
+            </p>
+            <div className="sec-delivery-toggle" role="group" aria-label="Notification delivery method">
+              <button
+                type="button"
+                className={`sec-delivery-option${deliveryMode === "push" ? " active" : ""}`}
+                aria-pressed={deliveryMode === "push"}
+                onClick={() => void changeDeliveryMode("push")}
+                disabled={deliveryModeBusy}
+              >
+                Relay Push
+              </button>
+              <button
+                type="button"
+                className={`sec-delivery-option${deliveryMode === "pull" ? " active" : ""}`}
+                aria-pressed={deliveryMode === "pull"}
+                onClick={() => void changeDeliveryMode("pull")}
+                disabled={deliveryModeBusy}
+              >
+                App Pull
+              </button>
             </div>
-          )}
+          </div>
+
+          {deviceRows.length > 0 ? (
+            <div className="sec-section">
+              <div className="sec-actions">
+                <button
+                  type="button"
+                  className="sec-action-danger"
+                  onClick={() => void revokePairedDevices()}
+                  disabled={unpairBusy}
+                >
+                  {unpairBusy ? "Revoking..." : "Revoke every paired device"}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
 
+        {/* Kept as its own card rather than folded into the rows above: it
+            applies only to a client-protected account, so as a column it would
+            be blank for everyone else — and it owns the enrollment ceremony,
+            whose security rests on refetching the device list when the identity
+            changes. See api/devices.ts. */}
+        <DeviceEnrollmentCard
+          fingerprint={pgpIdentity?.fingerprint ?? ""}
+          clientProtected={keyCustody === "client"}
+          unlocked={pgpSession?.unlocked ?? false}
+          onRequestUnlock={() => setUnlockOpen(true)}
+        />
+        </>
+        ) : null}
+
+        {activeTab === "mail" ? (
+        <>
         <div
           className={`sec-card ${
             keyCustody === "client" ? "sec-card-on" : keyCustody === "server" ? "sec-card-risk" : ""
@@ -1455,12 +1645,6 @@ export function SecurityPage() {
             </>
           )}
           {pgpStatus ? <p className="sec-muted">{pgpStatus}</p> : null}
-          <PgpUnlockDialog
-            open={unlockOpen}
-            reason="to unlock your PGP key for this session"
-            onUnlocked={() => setUnlockOpen(false)}
-            onCancel={() => setUnlockOpen(false)}
-          />
 
           {discoverySettings ? (
             <div className="sec-subsection">
@@ -1534,14 +1718,19 @@ export function SecurityPage() {
             </div>
           ) : null}
         </div>
-
-        <DeviceEnrollmentCard
-          fingerprint={pgpIdentity?.fingerprint ?? ""}
-          clientProtected={keyCustody === "client"}
-          unlocked={pgpSession?.unlocked ?? false}
-          onRequestUnlock={() => setUnlockOpen(true)}
-        />
+        </>
+        ) : null}
       </div>
+
+      {/* Page level, outside the tabs on purpose: the Devices tab's enrollment
+          card also asks for an unlock, and a dialog mounted only under Mail
+          would leave that button setting a flag nothing renders. */}
+      <PgpUnlockDialog
+        open={unlockOpen}
+        reason="to unlock your PGP key for this session"
+        onUnlocked={() => setUnlockOpen(false)}
+        onCancel={() => setUnlockOpen(false)}
+      />
     </section>
   );
 }

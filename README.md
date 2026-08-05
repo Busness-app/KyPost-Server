@@ -415,7 +415,7 @@ The backend handles mobile pairing directly. It does not require Novu.
 
 Desktop pairing behavior:
 
-- The Notifications page renders a QR code link with `sub`, `hash`, `srv`, `reg`, and `pt`.
+- Security's Devices tab renders a QR code link with `sub`, `hash`, `srv`, `reg`, and `pt`.
 - Set `SERVER_BASE_URL` in `.env`. Then `srv` and `reg` always point to the deployment address that the mobile app must use. Nobody enters a server URL by hand.
 - `pt` is a signed pairing token. It is valid for 90 seconds.
 - The UI shows a 4px countdown bar under the QR code. The bar shrinks over 90 seconds and changes from green to red. It is red for the last 15 seconds.

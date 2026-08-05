@@ -638,7 +638,14 @@ func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.
 		for i, d := range devices {
 			redacted[i] = d.Redacted()
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"devices": redacted})
+		// deliveryMode rides along so the UI can render the Relay Push / App
+		// Pull toggle without calling GET /api/notifications/pairing, which
+		// mints a live 90-second pairing token as a side effect. Reading a
+		// setting should not hand out a credential.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"devices":      redacted,
+			"deliveryMode": store.NativeDeliveryMode(),
+		})
 	case http.MethodDelete:
 		var payload struct {
 			DeviceID string `json:"deviceId"`
