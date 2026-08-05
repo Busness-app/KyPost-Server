@@ -1,10 +1,12 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
@@ -178,5 +180,110 @@ func TestDeviceEnvelopeRejectsUnauthenticated(t *testing.T) {
 	srv.handlePGPDeviceEnvelope(rec, req)
 	if rec.Code == http.StatusOK {
 		t.Fatal("an unauthenticated caller read a device envelope")
+	}
+}
+
+// newNativeRegisterForTest returns a register function that drives the real
+// native-register handler for one device, and can be called repeatedly.
+//
+// It mints a fresh pairing token per call because native pairing tokens are
+// single-use (consumeNativePairingNonce), and it holds deviceToken and platform
+// constant so every call merges into the same device row rather than creating a
+// new one. extra is spliced into the JSON body — pass `"encryptionEnrolled":true`
+// or "" for a body without the field at all.
+func newNativeRegisterForTest(t *testing.T) (srv *Server, userID, deviceID string, register func(*testing.T, string) int) {
+	t.Helper()
+	srv = newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID = all[0].ID
+	store, err := srv.userStore(userID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	deviceID = "enrollment-device"
+
+	register = func(t *testing.T, extra string) int {
+		t.Helper()
+		token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
+		if err != nil {
+			t.Fatalf("createPairingToken: %v", err)
+		}
+		if extra != "" {
+			extra = "," + extra
+		}
+		body := fmt.Sprintf(
+			`{"subscriberId":%q,"pairingToken":%q,"deviceToken":"enrollment-token","deviceId":%q,"platform":"android"%s}`,
+			subscriberID, token, deviceID, extra)
+		req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		srv.handleNotificationNativeRegister(rec, req)
+		return rec.Code
+	}
+	return srv, userID, deviceID, register
+}
+
+// The marker must follow the device DOWN as well as up. An app reinstall
+// destroys the keystore key, and a marker that only ever turned on would show a
+// device as protected when it can no longer read anything.
+func TestNativeRegisterCarriesEncryptionEnrolledBothWays(t *testing.T) {
+	srv, userID, deviceID, register := newNativeRegisterForTest(t)
+
+	if code := register(t, `"encryptionEnrolled":true`); code != http.StatusOK {
+		t.Fatalf("register true: status %d", code)
+	}
+	if !deviceByID(t, srv, userID, deviceID).EncryptionEnrolled {
+		t.Fatal("marker did not turn on")
+	}
+
+	if code := register(t, `"encryptionEnrolled":false`); code != http.StatusOK {
+		t.Fatalf("register false: status %d", code)
+	}
+	if deviceByID(t, srv, userID, deviceID).EncryptionEnrolled {
+		t.Fatal("marker did not turn back off")
+	}
+}
+
+// An older client that does not send the field must not be silently marked
+// un-enrolled — absent means "no opinion", not "no".
+func TestNativeRegisterWithoutTheFieldLeavesTheMarkerAlone(t *testing.T) {
+	srv, userID, deviceID, register := newNativeRegisterForTest(t)
+	if code := register(t, `"encryptionEnrolled":true`); code != http.StatusOK {
+		t.Fatalf("register true: status %d", code)
+	}
+	if code := register(t, ""); code != http.StatusOK {
+		t.Fatalf("register without field: status %d", code)
+	}
+	if !deviceByID(t, srv, userID, deviceID).EncryptionEnrolled {
+		t.Fatal("an absent field cleared the marker")
+	}
+}
+
+// Re-registration must not erase a key the device published through the
+// enrollment route, which is the store-level carry-forward seen from the
+// handler that actually performs the re-registration.
+func TestNativeRegisterPreservesAPublishedEnrollmentKey(t *testing.T) {
+	srv, userID, deviceID, register := newNativeRegisterForTest(t)
+	if code := register(t, ""); code != http.StatusOK {
+		t.Fatalf("first register: status %d", code)
+	}
+	store, err := srv.userStore(userID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	if _, err := store.SetNativeDeviceEnrollmentKey(deviceID, "PUBKEY", "2026-08-04T00:00:00Z"); err != nil {
+		t.Fatalf("SetNativeDeviceEnrollmentKey: %v", err)
+	}
+	if code := register(t, ""); code != http.StatusOK {
+		t.Fatalf("re-register: status %d", code)
+	}
+	if got := deviceByID(t, srv, userID, deviceID).EnrollmentPublicKey; got != "PUBKEY" {
+		t.Fatalf("re-registration erased the published enrollment key: %q", got)
 	}
 }

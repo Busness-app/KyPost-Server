@@ -554,8 +554,8 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// withMailAuth fits a caller that IS a device. Both scope themselves to the
 	// verified device record rather than to anything in the request. See
 	// pgp_device_enrollment.go.
-	mux.HandleFunc("POST /api/pgp/device/enrollment-key", s.handlePGPPublishEnrollmentKey)
-	mux.HandleFunc("GET /api/pgp/device/envelope", s.handlePGPDeviceEnvelope)
+	mux.HandleFunc("POST /api/pgp/device/enrollment-key", withDeviceAuth(s.handlePGPPublishEnrollmentKey))
+	mux.HandleFunc("GET /api/pgp/device/envelope", withDeviceAuth(s.handlePGPDeviceEnvelope))
 	// export-legacy stays session-only on purpose. It is the one endpoint
 	// that returns a private key in the clear, and it re-verifies the account
 	// password before doing so — a device secret is not that password, and a
