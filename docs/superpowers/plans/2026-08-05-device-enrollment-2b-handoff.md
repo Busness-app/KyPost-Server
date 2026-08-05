@@ -183,14 +183,23 @@ AAD prefix together, and strands every enrolled device until it re-enrolls.
 **`sealEnvelopeForDevice` cannot verify the code for itself** — it is handed a key and told
 to seal. That is exactly why the comparison has to gate reaching it, at the call site.
 
-## What is left
+## Shipped
 
-1. **The envelope API client.** `PUT`/`DELETE /api/pgp/identity/envelope/device:<id>` in
-   `src/api/pgp.ts`. Nothing exists — Change 1 shipped those routes with no browser
-   consumer, so there is no call to copy the shape from. Both need the step-up credential.
-2. **The Security page UI** — device list with the enrolled indicator, code entry, and the
-   refusal path.
-3. **Revocation copy**, per the section above.
+All three are done. See
+`docs/superpowers/specs/2026-08-05-device-enrollment-2b-design.md` for the decisions.
+
+1. **The envelope API client** — `putDeviceEnvelope` / `deleteDeviceEnvelope` in
+   `src/api/pgp.ts`. No `GET`: the browser writes, the device reads its own.
+2. **The Security page UI** — `src/components/DeviceEnrollmentCard.tsx`. The device-list
+   fork resolved toward a new card sharing `src/api/devices.ts` as a typed fetch, not a
+   shared render component. One device still appears in three lists; a Devices page is
+   the recorded fix and waits for 2c.
+3. **Revocation copy** — states that removal does not reach what the device already holds,
+   and points at replacing the identity as the real revocation.
+
+**Nothing is user-visible yet.** Enrollment is offered only for a device whose
+`enrollmentPublicKey` is non-empty, which is no device until 2c publishes one. That is the
+gate instead of a feature flag.
 
 ## Test expectations
 

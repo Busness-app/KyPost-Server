@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { toErrorMessage } from "../api/client";
 import { listNativeDevices, type NativeDevice } from "../api/devices";
-import { putDeviceEnvelope } from "../api/pgp";
+import { deleteDeviceEnvelope, putDeviceEnvelope } from "../api/pgp";
 import { requireUnlockedKey } from "../lib/keyVault";
 import {
   explainEnrollmentFailure,
@@ -83,6 +83,8 @@ export function DeviceEnrollmentCard({
   const [failure, setFailure] = useState("");
   const [attempts, setAttempts] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState<NativeDevice | null>(null);
+  const [removePassword, setRemovePassword] = useState("");
 
   function openCeremony(device: NativeDevice) {
     setCeremony({ device, publicKey: device.enrollmentPublicKey ?? "" });
@@ -128,6 +130,21 @@ export function DeviceEnrollmentCard({
       await refresh();
     } catch (e) {
       setFailure(toErrorMessage(e, "Could not store the sealing."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeSealing() {
+    if (!removing || busy) return;
+    setBusy(true);
+    try {
+      await deleteDeviceEnvelope(removing.deviceId, removePassword);
+      setRemoving(null);
+      setRemovePassword("");
+      await refresh();
+    } catch (e) {
+      setError(toErrorMessage(e, "Could not remove the sealing."));
     } finally {
       setBusy(false);
     }
@@ -186,7 +203,12 @@ export function DeviceEnrollmentCard({
               <li key={device.deviceId}>
                 <span className="sec-device-name">{deviceLabel(device)}</span>
                 {state === "enrolled" ? (
-                  <p className="sec-muted">This device can read your encrypted mail.</p>
+                  <>
+                    <p className="sec-muted">This device can read your encrypted mail.</p>
+                    <button type="button" onClick={() => setRemoving(device)}>
+                      Remove sealing
+                    </button>
+                  </>
                 ) : state === "available" ? (
                   <>
                     <p className="sec-muted">Not enrolled. It cannot read your encrypted mail.</p>
@@ -287,6 +309,37 @@ export function DeviceEnrollmentCard({
               </button>
             )}
             <button type="button" disabled={busy} onClick={() => setCeremony(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {removing ? (
+        <div className="sec-inline-form">
+          <h4>Remove {deviceLabel(removing)}'s sealing</h4>
+          <p className="sec-verdict sec-verdict-risk">
+            This removes the copy on the server. It does not erase the copy that device already has
+            — once a device has taken its sealing, it keeps working offline and the server cannot
+            reach it.
+          </p>
+          <p className="sec-muted">
+            To actually stop a device you no longer control from reading new mail, replace your key
+            in the section above. That invalidates every device's sealing, and each one you still
+            use has to enroll again.
+          </p>
+          <label>
+            Account password
+            <input
+              type="password"
+              value={removePassword}
+              onChange={(e) => setRemovePassword(e.target.value)}
+            />
+          </label>
+          <div className="sec-actions">
+            <button type="button" disabled={busy} onClick={() => void removeSealing()}>
+              Remove it
+            </button>
+            <button type="button" disabled={busy} onClick={() => setRemoving(null)}>
               Cancel
             </button>
           </div>

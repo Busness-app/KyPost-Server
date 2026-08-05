@@ -12,11 +12,13 @@ vi.mock("../api/client", () => ({
 }));
 
 const putDeviceEnvelope = vi.fn();
+const deleteDeviceEnvelope = vi.fn();
 const requireUnlockedKey = vi.fn();
 
 vi.mock("../api/pgp", () => ({
   putDeviceEnvelope: (id: string, envelope: unknown, password: string) =>
-    putDeviceEnvelope(id, envelope, password)
+    putDeviceEnvelope(id, envelope, password),
+  deleteDeviceEnvelope: (id: string, password: string) => deleteDeviceEnvelope(id, password)
 }));
 
 vi.mock("../lib/keyVault", () => ({
@@ -99,9 +101,11 @@ beforeEach(() => {
   listNativeDevices.mockReset();
   listNativeDevices.mockResolvedValue({ devices: [] });
   putDeviceEnvelope.mockReset();
+  deleteDeviceEnvelope.mockReset();
   requireUnlockedKey.mockReset();
   sealSpy.mockReset();
   putDeviceEnvelope.mockResolvedValue({ ok: true });
+  deleteDeviceEnvelope.mockResolvedValue({ ok: true });
   requireUnlockedKey.mockReturnValue("-----BEGIN PGP PRIVATE KEY BLOCK-----");
 });
 
@@ -412,5 +416,34 @@ describe("the failure taxonomy", () => {
 
     expect(screen.queryByText(/start enrollment again on the device/i)).toBeNull();
     expect(screen.getByRole("button", { name: "Verify and enroll" })).toBeTruthy();
+  });
+});
+
+describe("revocation", () => {
+  // The honest sentence. Without it "remove" reads as revocation, and the user
+  // walks away believing a phone they no longer control cannot read their mail.
+  it("says removal does not reach what the device already holds", async () => {
+    listNativeDevices.mockResolvedValue({
+      devices: [device({ enrollmentPublicKey: HONEST_KEY, encryptionEnrolled: true })]
+    });
+    renderCard();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
+
+    expect(await screen.findByText(/does not erase the copy that device already has/i)).toBeTruthy();
+    expect(await screen.findByText(/replace your key/i)).toBeTruthy();
+  });
+
+  it("removes the server's copy with the account credential", async () => {
+    listNativeDevices.mockResolvedValue({
+      devices: [device({ enrollmentPublicKey: HONEST_KEY, encryptionEnrolled: true })]
+    });
+    renderCard();
+    await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
+
+    await userEvent.type(screen.getByLabelText("Account password"), "hunter2");
+    await userEvent.click(screen.getByRole("button", { name: "Remove it" }));
+
+    await vi.waitFor(() => expect(deleteDeviceEnvelope).toHaveBeenCalledWith("d1", "hunter2"));
   });
 });
