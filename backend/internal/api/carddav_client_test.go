@@ -1,12 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path"
 	"testing"
+	"time"
 
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/groups"
@@ -302,5 +305,41 @@ func TestCardDAVClientRefusesPlaintextURL(t *testing.T) {
 	// outcome, so the check holds for a host that does not resolve either way.
 	if err := validateOutboundURL("http://nonexistent.invalid/dav/", outboundCardDAVSchemes...); err == nil {
 		t.Error("validateOutboundURL accepted http:// for an unresolvable host, want refusal on scheme alone")
+	}
+}
+
+// TestSSRFSafeClientBoundsResponseBodies pins a bound the CardDAV client's own
+// REPORT path has and its discovery PROPFINDs do not.
+//
+// go-webdav's internal client decodes a PROPFIND multistatus with
+// xml.NewDecoder(resp.Body).Decode(&ms) and no LimitReader — upstream carries a
+// TODO saying the response can be quite large. The 16 MiB LimitReader in
+// fetchAddressBookCards covers only the REPORT, so the three discovery
+// PROPFINDs (repeated per candidate path by the walk-up loop) are unbounded.
+// The remote server is user-configured and the SSRF guard permits any public
+// host by design, so the size is chosen by whoever runs it.
+//
+// Bounding at the transport is what covers every go-webdav call site at once,
+// including ones added later.
+func TestSSRFSafeClientBoundsResponseBodies(t *testing.T) {
+	allowLoopbackOutboundForTest(t)
+
+	huge := bytes.Repeat([]byte("A"), maxOutboundResponseBytes+(1<<20))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(huge)
+	}))
+	defer srv.Close()
+
+	client := newSSRFSafeHTTPClient(30 * time.Second)
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	read, err := io.ReadAll(resp.Body)
+	if err == nil && len(read) > maxOutboundResponseBytes {
+		t.Fatalf("read %d bytes from a user-chosen host; the transport must bound "+
+			"response bodies at %d", len(read), maxOutboundResponseBytes)
 	}
 }
