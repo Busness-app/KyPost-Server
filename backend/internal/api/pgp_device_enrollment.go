@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"kypost-server/backend/internal/users"
 )
 
 // Device-authenticated halves of the enrollment ceremony. Both resolve the
@@ -63,4 +65,38 @@ func (s *Server) handlePGPPublishEnrollmentKey(w http.ResponseWriter, r *http.Re
 	}
 	s.logger.Info("pgp enrollment key published", "user_id", userID, "device_id", device.DeviceID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handlePGPDeviceEnvelope serves the ONE envelope sealed for the calling device.
+//
+// It takes no slot parameter, by design. The general GET on
+// /api/pgp/identity/envelope/{slot} stays session-only because a device asking
+// for another device's sealing — or for the password slot — is exactly what
+// that rule withholds. Here the slot name is built from the verified device
+// record, so there is no input to abuse.
+//
+// Serving this one envelope to this one device is safe: it is sealed to a key
+// whose private half is non-extractable from that device's secure element, so
+// no other caller gains anything by obtaining it.
+func (s *Server) handlePGPDeviceEnvelope(w http.ResponseWriter, r *http.Request) {
+	userID, device, ok, retryAfter := s.deviceAuthFromRequest(r)
+	if !ok {
+		writeDeviceAuthFailure(w, retryAfter)
+		return
+	}
+	u, err := s.users.Get(userID)
+	if err != nil {
+		http.Error(w, "user unavailable", http.StatusInternalServerError)
+		return
+	}
+	slot := users.EnvelopeSlotDevicePrefix + device.DeviceID
+	// WrappedEnvelopes() already omits expired entries, so a transport copy
+	// whose TTL has passed correctly reads as absent rather than being served.
+	for _, e := range u.WrappedEnvelopes() {
+		if e.Slot == slot {
+			writeJSON(w, http.StatusOK, map[string]any{"slot": e.Slot, "envelope": e.Envelope})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]any{"error": "no envelope sealed for this device"})
 }

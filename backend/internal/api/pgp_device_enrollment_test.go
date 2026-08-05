@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"kypost-server/backend/internal/state"
+	"kypost-server/backend/internal/users"
 )
 
 // newPairedDeviceForTest builds a server with one client-protected user and one
@@ -107,5 +108,75 @@ func TestPublishEnrollmentKeyRejectsEmptyKey(t *testing.T) {
 	srv.handlePGPPublishEnrollmentKey(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestDeviceEnvelopeServesOnlyTheCallersOwnSlot(t *testing.T) {
+	srv, userID, deviceID, authDevice := newPairedDeviceForTest(t)
+
+	if _, err := srv.users.SetPGPWrappedEnvelope(userID, users.EnvelopeSlotDevicePrefix+deviceID, `{"v":2,"mine":1}`, ""); err != nil {
+		t.Fatalf("seed own slot: %v", err)
+	}
+	if _, err := srv.users.SetPGPWrappedEnvelope(userID, users.EnvelopeSlotDevicePrefix+"someone-else", `{"v":2,"theirs":1}`, ""); err != nil {
+		t.Fatalf("seed other slot: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/device/envelope", nil)
+	authDevice(req)
+	rec := httptest.NewRecorder()
+	srv.handlePGPDeviceEnvelope(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `mine`) {
+		t.Fatalf("did not serve the caller's own envelope: %s", body)
+	}
+	// The decisive assertion: another device's sealing must not appear, whatever
+	// the caller asks for. There is no slot parameter precisely so this cannot vary.
+	if strings.Contains(body, `theirs`) {
+		t.Fatalf("served another device's envelope: %s", body)
+	}
+}
+
+// A slot parameter must not exist. If someone adds one later, this fails.
+func TestDeviceEnvelopeIgnoresASlotParameter(t *testing.T) {
+	srv, userID, _, authDevice := newPairedDeviceForTest(t)
+	if _, err := srv.users.SetPGPWrappedEnvelope(userID, users.EnvelopeSlotRecovery, `{"v":2,"rec":1}`, ""); err != nil {
+		t.Fatalf("seed recovery: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/device/envelope?slot=recovery", nil)
+	authDevice(req)
+	rec := httptest.NewRecorder()
+	srv.handlePGPDeviceEnvelope(rec, req)
+	if strings.Contains(rec.Body.String(), `rec`) {
+		t.Fatalf("a query parameter reached the slot lookup: %s", rec.Body.String())
+	}
+}
+
+func TestDeviceEnvelopeIs404WhenNothingSealedYet(t *testing.T) {
+	srv, _, _, authDevice := newPairedDeviceForTest(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/device/envelope", nil)
+	authDevice(req)
+	rec := httptest.NewRecorder()
+	srv.handlePGPDeviceEnvelope(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// An expired transport copy reads as absent rather than being served, because
+// the handler iterates WrappedEnvelopes(), which Task 1 made filter them. That
+// filtering is pinned in internal/users (TestDeviceSlotExpires and friends);
+// there is no exported write-back on users.Store to force an expiry from here,
+// so it is not re-tested at this layer.
+
+func TestDeviceEnvelopeRejectsUnauthenticated(t *testing.T) {
+	srv := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/pgp/device/envelope", nil)
+	rec := httptest.NewRecorder()
+	srv.handlePGPDeviceEnvelope(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatal("an unauthenticated caller read a device envelope")
 	}
 }
