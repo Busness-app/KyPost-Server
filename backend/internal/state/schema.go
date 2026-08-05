@@ -216,9 +216,30 @@ var additiveColumns = []struct{ table, column, ddl string }{
 }
 
 func applyAdditiveColumns(db *sql.DB) error {
+	// One transaction around probe-and-add, because the api and daemon
+	// processes both open every state.db at startup.
+	//
+	// Probing with pragma_table_info and then ALTERing in a separate implicit
+	// transaction is a check-then-act across processes: on the first boot after
+	// an upgrade both see the column missing, one adds it, and the other fails
+	// with "duplicate column name". That is a SQL LOGIC error, not SQLITE_BUSY,
+	// so neither busy_timeout nor _txlock=immediate helps — it propagates out of
+	// state.New to log.Fatal and takes the losing process down. supervisord
+	// restarts it and the retry succeeds, so it self-heals, but a startup crash
+	// per install is avoidable for one Begin.
+	//
+	// dsn() sets _txlock=immediate, so this Begin takes the write lock up front;
+	// the second process then blocks on it and afterwards reads a pragma that
+	// already shows the column present.
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin additive column migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	for _, c := range additiveColumns {
 		var n int
-		if err := db.QueryRow(
+		if err := tx.QueryRow(
 			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`,
 			c.table, c.column).Scan(&n); err != nil {
 			return fmt.Errorf("inspect %s.%s: %w", c.table, c.column, err)
@@ -227,12 +248,12 @@ func applyAdditiveColumns(db *sql.DB) error {
 			continue
 		}
 		// Table and column names are constants in this file, never user input.
-		if _, err := db.Exec(fmt.Sprintf(
+		if _, err := tx.Exec(fmt.Sprintf(
 			`ALTER TABLE %s ADD COLUMN %s %s`, c.table, c.column, c.ddl)); err != nil {
 			return fmt.Errorf("add column %s.%s: %w", c.table, c.column, err)
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // metaString reads a meta key, returning "" when absent.
