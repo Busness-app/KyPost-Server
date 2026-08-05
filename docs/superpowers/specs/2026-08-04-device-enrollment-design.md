@@ -107,6 +107,117 @@ because it excludes the character pairs people transcribe wrongly.
 **Valid for two minutes**, matching `GET /api/pgp/qr/token`'s existing TTL. Reuse that
 number rather than inventing a second one; if it moves, both should move together.
 
+### NORMATIVE: the exact bytes
+
+Added 2026-08-05. The paragraph above reads like a specification and is not one — `‖` has
+no byte meaning, `timeBucket` has no encoding, and "50 bits" does not say which. Three
+independent implementations (browser, Android, Qt) have to agree bit-for-bit, and a
+disagreement does not fail loudly: it fails as "the codes do not match" on every honest
+enrollment, which is indistinguishable to the user from a hostile server. Everything below
+is normative. Change it only by changing the version tag with it.
+
+**Public key encoding.** The `publicKey` field carried by
+`POST /api/pgp/device/enrollment-key` is **base64 (standard alphabet, padded) of the
+uncompressed SEC1 point**: `0x04 || X || Y`, with X and Y each left-padded to exactly 32
+bytes. 65 bytes raw, 88 characters encoded.
+
+Chosen because it is what both platforms' primitives natively produce and consume —
+WebCrypto's `exportKey("raw", …)` returns exactly these bytes for P-256, and Android's
+`ECPublicKey.getW()` yields the X and Y integers to pad. DER `SubjectPublicKeyInfo` was
+rejected: more bytes, a parser on both ends, and no benefit when the curve is fixed.
+
+**The hash input is the raw 65 bytes, never the base64 text.** Hashing the transport
+encoding would make base64 padding or alphabet drift a silent mismatch.
+
+```
+bucket   = floor(unixSeconds / 120)          // integer division, UTC, no leap smear
+preimage = rawKey(65 bytes)
+        || uint16BE(byteLength(deviceIdUtf8))
+        || deviceIdUtf8
+        || uint64BE(bucket)
+H        = SHA-256(preimage)                 // 32 bytes
+```
+
+`deviceId` is length-prefixed because it is the only variable-width field; without the
+prefix a device id ending in digits could collide with a different id and bucket.
+
+**Code extraction.** Take the **first 50 bits of `H`, most-significant bit first**, and
+emit ten Crockford base32 characters, character *i* encoding bits `[5i, 5i+5)`. Fifty bits
+is exactly ten characters with no padding. Alphabet:
+`0123456789ABCDEFGHJKMNPQRSTVWXYZ`. Display as `XXXXX-XXXXX`.
+
+**Input normalisation before comparison.** Uppercase; strip hyphens, spaces and tabs; map
+`I` and `L` to `1` and `O` to `0`, per Crockford's decode rules. Compare the normalised
+ten characters, never the display form.
+
+**Bucket acceptance.** The browser accepts the **current bucket and the immediately
+preceding one**, and never a future one. The preceding bucket is needed because the phone
+may have rendered its code just before a boundary that the browser has already crossed.
+A future bucket is refused because accepting one lets an attacker precompute against a
+window that has not started.
+
+Effective validity is therefore between two and four minutes depending on phase — state
+that in the UI rather than promising two. A phone whose clock is more than about two
+minutes **ahead** of the browser will fail every time; that is a device-clock problem and
+the error copy should say so, because the alternative reading a user reaches is "my server
+is compromised."
+
+### NORMATIVE: the envelope
+
+The server never interprets this — it is an opaque, length-bounded string — so the format
+is purely a browser↔device contract and belongs here rather than in any server plan.
+
+```json
+{
+  "v": 1,
+  "alg": "ECDH-P256+HKDF-SHA256+A256GCM",
+  "epk": "<base64 raw ephemeral public key, 65 bytes, same encoding as above>",
+  "iv":  "<base64, 12 bytes>",
+  "ct":  "<base64, AES-256-GCM ciphertext with the 16-byte tag appended>"
+}
+```
+
+- **Shared secret:** ECDH(ephemeral private, device public) → 32 bytes.
+- **Key derivation:** HKDF-SHA256, `ikm` = shared secret, `salt` = the device's raw 65-byte
+  public key, `info` = UTF-8 `"kypost-device-envelope/v1"`, length 32.
+- **AAD** = UTF-8 of `kypost-device-envelope/v1|<deviceId>|<pgpFingerprint>`, fingerprint
+  uppercase hex with no spaces.
+- **Plaintext** = the armored PGP private key, UTF-8.
+
+**The AAD binding is a shipping condition, not an optimisation.** It is what the Android
+side required before withdrawing its rejection of this design. Binding the device id stops
+an envelope minted for one device being replayed at another; binding the fingerprint stops
+an envelope surviving an identity rotation and decrypting into a key the account no longer
+advertises. Without both, a substituted or replayed envelope decrypts successfully into
+the wrong key instead of failing authentication.
+
+### NORMATIVE: test vectors
+
+Every implementation must reproduce these before it is considered conformant. Generated
+from the definitions above.
+
+```
+deviceId  = "test-device"
+bucket    = 14000000            (unixSeconds 1680000000)
+rawKey    = 0x04 followed by X = 0x01 repeated 32 times,
+                                Y = 0x02 repeated 32 times
+
+expected code = 5R9K6FWA18      displayed as 5R9K6-FWA18
+```
+
+Note this key is a valid *encoding* but not a point on P-256, which is deliberate: the
+derivation hashes bytes and must not require a curve operation, so the vector stays
+reproducible in an implementation that has not wired up ECDH yet. Curve membership is
+checked separately, at import time, and has its own test.
+
+`frontend/src/lib/deviceEnrollment.test.ts` holds this as an inline snapshot and is
+**authoritative if the two ever disagree** — it is executed on every frontend run, and this
+document is not. Android and Qt must assert the same string.
+
+A change to that snapshot is a wire-format break, not a test update. It must move the
+`v1` version tag in the envelope and the `kypost-device-envelope/v1` HKDF `info` and AAD
+prefix with it, and it strands every already-enrolled device until it re-enrolls.
+
 ### Why the time bucket is the load-bearing part
 
 The device publishes its public key at pairing, so the server learns it immediately,
