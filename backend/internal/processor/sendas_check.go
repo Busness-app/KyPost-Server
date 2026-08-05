@@ -404,8 +404,5 @@ func rawIsAutoReply(raw []byte) bool {
 			return true
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(msg.Header.Get("Precedence")), "auto_reply") {
-		return true
-	}
-	return false
+	return strings.EqualFold(strings.TrimSpace(msg.Header.Get("Precedence")), "auto_reply")
 }

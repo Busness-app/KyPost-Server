@@ -245,10 +245,14 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 
 ## Verification
 
-- `go build -buildvcs=false ./...` must succeed with zero errors
-- `go vet ./...` must pass
+This list is the CI gate, in the order `ci-backend-api` and `ci-backend-other` run it. Both jobs run all four static steps before any test, so a lint failure fails both jobs in about a minute and no test result is produced at all.
+
 - `gofmt -l .` must print nothing
-- `go test -race ./...` must pass
+- `go vet ./...` must pass
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...` must report `0 issues` — **staticcheck is enabled**, so it rejects things `go vet` accepts (an `if cond { return true }; return false` tail, for one). It is the step most likely to fail a change that passed every other gate locally, because it is the one nothing else approximates
+- `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` must find no called vulnerability
+- `go build -buildvcs=false ./...` must succeed with zero errors
+- `go test -race -count=1 -timeout=20m ./...` must pass. The `-timeout` is not optional: `internal/api` alone exceeds Go's default 600s under `-race`, which is why CI splits it into its own job and passes `-timeout=20m`. Running plain `go test -race ./...` locally reports a timeout that CI would not see
 
 ## Child DOX Index
 
