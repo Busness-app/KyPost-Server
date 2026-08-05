@@ -37,6 +37,14 @@ func TestWithMailAuthMetersMutatingRequests(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// Freeze the bucket's clock for the same reason as
+	// TestMutatingRoutesAreMeteredPerAccount. This leg has ~40x the headroom it
+	// needs today, because session auth costs no KDF per request — but it is the
+	// same shape that made TestDeviceAuthMutatingRouteIsMetered fail in CI, and
+	// the margin is a property of the runner rather than of the assertion.
+	frozen := time.Now()
+	srv.accountWriteLimiter.now = func() time.Time { return frozen }
+
 	throttled := 0
 	for i := 0; i < accountWriteBurst*3; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/api/mail/send", nil)

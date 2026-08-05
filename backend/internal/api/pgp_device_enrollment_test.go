@@ -479,20 +479,41 @@ func TestDeviceAuthRefusedWhileAPasswordChangeIsOwed(t *testing.T) {
 func TestDeviceAuthMutatingRouteIsMetered(t *testing.T) {
 	srv, _, _, authDevice := newPairedDeviceForTest(t)
 
-	throttled := 0
-	total := accountWriteBurst + 50
-	for i := 0; i < total; i++ {
+	// Freeze the bucket's clock, same idiom and same reason as
+	// TestMutatingRoutesAreMeteredPerAccount. The burst is 90 refilling at 10/s,
+	// so a loop that races the refill has to spend the whole burst within ~5s to
+	// observe a throttle at all. Every request here costs a scrypt verify of the
+	// device secret — the one metered path with a KDF per request — which is
+	// ~30ms cheap and ~230ms under -race, so the loop took 32-51s and the bucket
+	// refilled faster than it drained. The test then reported the runner's speed
+	// rather than whether the meter is wired in, and failed in CI while passing
+	// locally with under a second to spare. withProductionHashCost's comment
+	// records the general form of this lesson: stub the stopwatch, because -race
+	// moves measured time by a machine-dependent factor.
+	frozen := time.Now()
+	srv.accountWriteLimiter.now = func() time.Time { return frozen }
+
+	post := func() int {
 		req := httptest.NewRequest(http.MethodPost, "/api/pgp/device/enrollment-key",
 			strings.NewReader(`{"publicKey":"BASE64PUBKEY"}`))
 		authDevice(req)
 		rec := httptest.NewRecorder()
 		srv.handlePGPPublishEnrollmentKey(rec, req)
-		if rec.Code == http.StatusTooManyRequests {
-			throttled++
+		return rec.Code
+	}
+
+	// With no refill to outrun, the burst is exactly what it says: 90 writes
+	// pass and the 91st does not. That also drops 50 scrypt verifies the old
+	// loop only performed to buy wall-clock slack.
+	for i := 0; i < accountWriteBurst; i++ {
+		if code := post(); code == http.StatusTooManyRequests {
+			t.Fatalf("write %d of the burst was throttled (%d); the burst must pass", i+1, code)
 		}
 	}
-	if throttled == 0 {
-		t.Fatalf("%d writes on a device credential, none throttled (accountWriteBurst=%d)", total, accountWriteBurst)
+	if code := post(); code != http.StatusTooManyRequests {
+		t.Fatalf("write %d on a device credential got %d, want 429 — a device credential "+
+			"drives unbounded writes while the trust model ranks it weaker than a session",
+			accountWriteBurst+1, code)
 	}
 }
 
