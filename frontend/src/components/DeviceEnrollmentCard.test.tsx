@@ -216,8 +216,14 @@ describe("the gate", () => {
 
     await submitCeremony(await codeFor(HONEST_KEY));
 
-    expect(putDeviceEnvelope).not.toHaveBeenCalled();
+    // Awaited first: the async chain (WebCrypto digests) has not necessarily
+    // finished the instant the click's await resolves — the happy-path test
+    // below proves that with its own vi.waitFor. Asserting the absence of the
+    // PUT before the ceremony has settled would be vacuous; waiting for the
+    // rendered refusal first proves the chain reached its end, so the absence
+    // assertion after it means what it says.
     expect(await screen.findByText(/not the key on that device/i)).toBeTruthy();
+    expect(putDeviceEnvelope).not.toHaveBeenCalled();
   });
 
   it("seals and uploads when the code matches", async () => {
@@ -269,9 +275,12 @@ describe("the gate", () => {
 
     await submitCeremony(await codeFor(HONEST_KEY));
 
+    // Awaited first for the same reason as the mismatch test above: it proves
+    // the ceremony has settled before the absence assertion is asked to mean
+    // anything.
+    expect(await screen.findByText(/unlock your key/i)).toBeTruthy();
     expect(putDeviceEnvelope).not.toHaveBeenCalled();
     expect(screen.queryByText(/not the key on that device/i)).toBeNull();
-    expect(await screen.findByText(/unlock your key/i)).toBeTruthy();
   });
 
   // There is no "seal anyway" — the refusal is not click-through-able because
@@ -284,11 +293,51 @@ describe("the gate", () => {
     await startCeremony();
     await submitCeremony(await codeFor(HONEST_KEY));
 
+    // Awaited first: the button is also disabled while the submit is in
+    // flight (`busy`), so reading `disabled` before the mismatch has rendered
+    // cannot distinguish "locked by the refusal" from "still working". Waiting
+    // for the rendered mismatch first proves `busy` has cleared via the
+    // `finally`, so the assertion below is pinned on `failure`, not on timing.
+    await screen.findByText(/not the key on that device/i);
+
     expect(screen.queryByRole("button", { name: /anyway|continue|proceed|override/i })).toBeNull();
     // The submit button is disabled until the entry actually changes.
     expect(screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")).toBe(
       true
     );
     expect(putDeviceEnvelope).not.toHaveBeenCalled();
+  });
+
+  // Only a mismatch is non-click-through-able: a rejected step-up credential,
+  // a locked vault, or a transport error is an ordinary retryable failure and
+  // must not dead-end the ceremony behind a disabled button the user cannot
+  // recover from without perturbing the (time-boxed) code field. The sibling
+  // test above already pins that a mismatch stays disabled; this one pins the
+  // other half in the same ceremony — a retryable failure re-enables, and a
+  // mismatch reached afterward still locks it.
+  it("re-enables submit after a retryable failure, but a mismatch still locks it", async () => {
+    putDeviceEnvelope.mockRejectedValueOnce(new Error("wrong password"));
+    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
+    renderCard();
+    await startCeremony();
+
+    await submitCeremony(await codeFor(HONEST_KEY));
+
+    await screen.findByText("wrong password");
+    expect(
+      screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")
+    ).toBe(false);
+
+    // A well-formed but deliberately wrong code: still ten valid characters,
+    // so this exercises the mismatch branch rather than the length check.
+    const codeInput = screen.getByLabelText("Code from your device");
+    await userEvent.clear(codeInput);
+    await userEvent.type(codeInput, "0000000000");
+    await userEvent.click(screen.getByRole("button", { name: "Verify and enroll" }));
+
+    await screen.findByText(/not the key on that device/i);
+    expect(
+      screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")
+    ).toBe(true);
   });
 });

@@ -200,7 +200,7 @@ export function DeviceEnrollmentCard({
         </p>
       ) : null}
       {ceremony ? (
-        <div className="sec-modal">
+        <div className="sec-inline-form">
           <h4>Enroll {deviceLabel(ceremony.device)}</h4>
           <p className="sec-muted">
             Start enrollment on that device and type the ten-character code it shows. The code is
@@ -234,20 +234,35 @@ export function DeviceEnrollmentCard({
               Unlock your key before enrolling this device. Nothing was sent.
             </p>
           ) : failure === "mismatch" ? (
-            <p className="sec-warn">
+            <p className="sec-verdict sec-verdict-risk">
               That code does not match. The key this server gave the browser is not the key on that
               device — so your key was NOT sent to it. Do not try again on this server without
               checking with whoever runs it.
             </p>
           ) : failure ? (
-            <p className="sec-warn">{failure}</p>
+            <p className="sec-verdict sec-verdict-risk">{failure}</p>
           ) : null}
-          <button type="button" disabled={busy || !!failure} onClick={() => void submit()}>
-            Verify and enroll
-          </button>
-          <button type="button" disabled={busy} onClick={() => setCeremony(null)}>
-            Cancel
-          </button>
+          <div className="sec-actions">
+            {/*
+              Locked only by a mismatch, deliberately. A rejected step-up
+              credential, a locked vault or a transport error are ordinary
+              retryable failures — dead-ending the button behind them would
+              force the user to re-enter a code that is only valid for one or
+              two 120-second buckets, making the forced retry likely to fail as
+              expired. A mismatch is the one refusal that must not be
+              click-through-able.
+            */}
+            <button
+              type="button"
+              disabled={busy || failure === "mismatch"}
+              onClick={() => void submit()}
+            >
+              Verify and enroll
+            </button>
+            <button type="button" disabled={busy} onClick={() => setCeremony(null)}>
+              Cancel
+            </button>
+          </div>
         </div>
       ) : null}
     </div>
