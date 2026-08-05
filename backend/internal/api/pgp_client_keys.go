@@ -115,10 +115,19 @@ func (s *Server) handlePGPIdentityClient(w http.ResponseWriter, r *http.Request)
 		writeUserStoreError(w, err)
 		return
 	}
-	// SetPGPIdentityClientProtected cleared PGPWrappedEnvelopes, including any
-	// device: slot. The enrollment record in the other store goes with it —
-	// this is the custody mode device enrollment exists for, so it is the path
-	// where a stale "enrolled" marker is most likely to be believed.
+	// SetPGPIdentityClientProtected clears PGPWrappedEnvelopes, including any
+	// device: slot — but ONLY when the fingerprint actually changed (see the
+	// guard added in 3e50a0e). Re-submitting an unchanged identity leaves the
+	// slots in place, so do not read this call as "the envelopes are already
+	// gone": it is unconditional precisely because the other store's marker
+	// must not be left claiming an enrollment the browser may have just
+	// invalidated. This is the custody mode device enrollment exists for, so it
+	// is the path where a stale "enrolled" marker is most likely to be believed.
+	//
+	// The two stores are therefore not guaranteed to agree after this call, and
+	// that asymmetry is safe only because the marker gates nothing:
+	// handlePGPDeviceEnvelope iterates WrappedEnvelopes() directly and never
+	// reads it. If that ever changes, reconcile the clear conditions first.
 	s.clearDeviceEnrollmentsFor(u.ID, "client-protected identity "+source)
 	s.logger.Info("pgp identity stored with client-side protection",
 		"user_id", u.ID, "fingerprint", u.PGPFingerprint, "source", source)
