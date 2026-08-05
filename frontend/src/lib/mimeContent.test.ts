@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseMimeContent } from "./mimeContent";
 
@@ -171,4 +172,40 @@ describe("parseMimeContent", () => {
     expect(parsed?.mode).toBe("html");
     expect(parsed?.body.trim()).toBe("<b>x</b>");
   });
+});
+
+// The TypeScript half of the shared MIME corpus. The Go half is
+// backend/internal/pgpmail/mime_corpus_test.go, and both read the SAME file.
+//
+// Two independent MIME parsers exist because the server never sees a
+// client-protected account's plaintext, so this file re-implements what the
+// server does. They must agree on which part is the display body:
+// buildPGPDeliveries encrypts one plaintext to every To/CC key in a single
+// call, so recipients on different custody modes receive identical ciphertext
+// under ONE signature. When the parsers disagree, that one signature
+// authenticates two different messages — the property the "signature verified"
+// badge exists to deny. Audit run-10 found two such disagreements.
+//
+// A failure here that the Go suite does not also show is a wire-level trust
+// bug, not a test discrepancy.
+
+describe("shared MIME corpus", () => {
+  // Relative to the vitest project root (frontend/), so this resolves to the
+  // repo-root testdata/ that the Go suite also reads.
+  const corpus = JSON.parse(readFileSync("../testdata/mime-corpus.json", "utf8")) as {
+    cases: { name: string; why?: string; mime: string; expectBody: string; expectMode: string }[];
+  };
+
+  it("is not empty", () => {
+    expect(corpus.cases.length).toBeGreaterThan(0);
+  });
+
+  for (const tc of corpus.cases) {
+    it(tc.name, () => {
+      const parsed = parseMimeContent(tc.mime);
+      expect(parsed).not.toBeNull();
+      expect(parsed?.body).toBe(tc.expectBody);
+      expect(parsed?.mode).toBe(tc.expectMode);
+    });
+  }
 });

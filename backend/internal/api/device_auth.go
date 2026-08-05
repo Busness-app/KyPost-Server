@@ -16,6 +16,10 @@ import (
 // Each device has its own secret minted at registration time — there is no
 // account-wide shared secret and no legacy query-param fallback.
 const (
+	// maxDeviceIDLen matches users.maxDeviceSlotIDLen: a device id becomes the
+	// `device:<id>` envelope slot name, so the two bounds must not disagree.
+	maxDeviceIDLen = 128
+
 	headerDeviceID     = "X-Kypost-Device-Id"
 	headerDeviceSecret = "X-Kypost-Device-Secret"
 )
@@ -134,8 +138,53 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 		s.deviceLockout.cancelAttempt(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
+	// MustChangePassword confines a SESSION to the password-change and logout
+	// routes (see withAuth and withMailAuth). A device credential was exempt
+	// from that entirely, which mattered because an admin password reset is the
+	// standard response to a compromised account: it sets this flag, and a
+	// device credential minted around that moment kept full mail and contacts
+	// access on an account the admin had just confined.
+	//
+	// Refused rather than confined: unlike a browser, a device has nothing
+	// useful to do inside the confinement — it cannot present the
+	// password-change form — so the honest answer is that this credential is
+	// not usable until the account's owner completes the change.
+	//
+	// cancelAttempt for the same reason as the deactivation branch above: the
+	// secret was correct, so the strike goes back rather than backing the client
+	// off forever.
+	if u.MustChangePassword {
+		s.deviceLockout.cancelAttempt(lockoutKey)
+		return "", state.NativeDevice{}, false, 0
+	}
 	s.deviceLockout.recordSuccess(lockoutKey)
 	return ownerID, dev, true, 0
+}
+
+// meterDeviceWrite applies the per-account write meter to a device-authenticated
+// MUTATING route. Call it after deviceAuthFromRequest has succeeded; it reports
+// whether the handler should continue.
+//
+// withAuth, withMailAuth and withDAVBasicAuth all call meterAccountWrite, so
+// every other credential type is capped at accountWriteBurst. withDeviceAuth
+// cannot: it is an inert marker (route_auth_markers.go) with no shared
+// middleware to hang the call on, so commit a8904dd — "meter every auth
+// wrapper" — closed the other three legs and left this one. Four mutating
+// routes accepted an unbounded request rate as a result, which left a device
+// credential STRONGER than a session on this one axis while the trust model
+// ranks it weaker.
+//
+// Called explicitly at each site rather than folded into deviceAuthFromRequest:
+// that function is used by seven production call sites and roughly thirty
+// tests, and it has no ResponseWriter, so metering inside it would mean
+// churning all of them to reach four. Explicit also keeps the double-response
+// hazard visible — meterAccountWrite writes its own 429, so a caller must
+// return immediately rather than fall through to writeDeviceAuthFailure.
+//
+// Safe on a handler serving both verbs: meterAccountWrite returns true
+// immediately for GET, HEAD and OPTIONS, so reads are never throttled.
+func (s *Server) meterDeviceWrite(w http.ResponseWriter, r *http.Request, userID string) bool {
+	return s.meterAccountWrite(w, r, userID)
 }
 
 // writeDeviceAuthFailure writes the HTTP response for a failed
@@ -153,4 +202,38 @@ func writeDeviceAuthFailure(w http.ResponseWriter, retryAfter time.Duration) {
 		return
 	}
 	http.Error(w, "invalid device credentials", http.StatusUnauthorized)
+}
+
+// validDeviceID reports whether a NEW device id is safe to hash.
+//
+// deviceId is client-chosen and becomes part of the enrollment code's hash
+// preimage: SHA-256(rawKey ‖ uint16BE(len(idUtf8)) ‖ idUtf8 ‖ uint64BE(bucket)).
+// Three independent implementations — browser, Android, Qt — must produce the
+// same bytes from the same id, and the spec mandates UTF-8 and a length prefix
+// but says nothing about normalisation or character set.
+//
+// That gap is dangerous out of proportion to its size. If any implementation
+// normalises differently (NFC vs NFD), or a JSON round-trip alters the string,
+// the derived codes never match — and the browser reports a mismatch as "the
+// key this server gave the browser is not the key on that device", the most
+// alarming message in the product. A user cannot tell that apart from a hostile
+// server. An encoding bug would present as an attack.
+//
+// Restricting new ids to an unambiguous ASCII subset removes the class rather
+// than documenting a rule nothing enforces. The set is deliberately narrow:
+// every character survives UTF-8, NFC and NFD identically, and none of them
+// needs escaping in the `device:<id>` envelope slot name.
+func validDeviceID(id string) bool {
+	if id == "" || len(id) > maxDeviceIDLen {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == ':', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }

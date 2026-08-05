@@ -131,9 +131,30 @@ type failureLockout struct {
 	// paid a full scan — the attacker choosing how much work each of their requests
 	// costs the server.
 	lastSweep time.Time
-	// saturated records that the table hit loginLockoutHardCap and shed a new
-	// key. Cleared when a sweep gets it back under the cap. Read via Saturated.
+	// saturated records that the table hit hardCap and shed a new key. Cleared
+	// when a sweep gets it back under the cap. Read via Saturated.
 	saturated bool
+	// sweepThreshold and hardCap default to the package constants of the same
+	// name and are fields only so a test can prove the shedding behaviour at a
+	// fraction of production scale.
+	//
+	// That behaviour is scale-invariant — "past the cap, refuse keys the table
+	// has not seen, never forgive one it has" reads identically at 100 entries
+	// and at 50,000 — and proving it at production scale cost 75,000
+	// race-instrumented map inserts, which measured as 35% of the entire api
+	// package's test runtime.
+	//
+	// Fields on the struct rather than mutable package vars, deliberately:
+	// tests in this package run sequentially precisely BECAUSE an unsynchronized
+	// global that tests rewrite is a data race (see users.hashCostN and
+	// TestNoTestInThisPackageCallsParallel). Adding another one to save typing
+	// would deepen the problem that already forbids t.Parallel here.
+	//
+	// They move together because the RATIO is load-bearing: the sweep is what
+	// keeps a transient flood from reaching the cap, so lowering only the cap
+	// exercises a different machine from the one that ships.
+	sweepThreshold int
+	hardCap        int
 }
 
 // sweepMinInterval is the shortest gap between two crowded-table sweeps, so a
@@ -143,10 +164,19 @@ type failureLockout struct {
 const sweepMinInterval = time.Second
 
 func newFailureLockout(maxFailures int, lockoutFor time.Duration) *failureLockout {
+	return newFailureLockoutSized(maxFailures, lockoutFor, loginLockoutSweepThreshold, loginLockoutHardCap)
+}
+
+// newFailureLockoutSized is newFailureLockout with explicit bounds. Production
+// uses the wrapper above; this exists so a test can exercise shedding at a scale
+// that does not dominate the package's runtime. See sweepThreshold/hardCap.
+func newFailureLockoutSized(maxFailures int, lockoutFor time.Duration, sweepThreshold, hardCap int) *failureLockout {
 	return &failureLockout{
-		maxFailures: maxFailures,
-		lockoutFor:  lockoutFor,
-		entries:     map[string]*loginLockoutEntry{},
+		maxFailures:    maxFailures,
+		lockoutFor:     lockoutFor,
+		entries:        map[string]*loginLockoutEntry{},
+		sweepThreshold: sweepThreshold,
+		hardCap:        hardCap,
 	}
 }
 
@@ -180,7 +210,7 @@ func (l *failureLockout) tryAttempt(username string) (ok bool, retryAfter time.D
 		// entry is either locked or mid-accumulation. Shed this new key rather than
 		// making room by forgiving one of them — see loginLockoutHardCap. Keys already
 		// known to the table proceed normally.
-		if len(l.entries) >= loginLockoutHardCap {
+		if len(l.entries) >= l.hardCap {
 			l.saturated = true
 			return false, l.lockoutFor
 		}
@@ -249,12 +279,12 @@ func (l *failureLockout) cancelAttempt(username string) {
 // refusing new keys, so a saturated table denies service instead of forgiving
 // lockouts. See loginLockoutHardCap.
 func (l *failureLockout) sweepIfCrowdedLocked(now time.Time) {
-	if len(l.entries) < loginLockoutSweepThreshold {
+	if len(l.entries) < l.sweepThreshold {
 		return
 	}
 	// Throttled unless we are at the hard cap, where the scan is what stands
 	// between a transient flood and shedding every new key.
-	if len(l.entries) < loginLockoutHardCap && now.Sub(l.lastSweep) < sweepMinInterval {
+	if len(l.entries) < l.hardCap && now.Sub(l.lastSweep) < sweepMinInterval {
 		return
 	}
 	l.lastSweep = now
@@ -268,10 +298,15 @@ func (l *failureLockout) sweepIfCrowdedLocked(now time.Time) {
 			delete(l.entries, k)
 		}
 	}
-	if len(l.entries) < loginLockoutHardCap {
+	if len(l.entries) < l.hardCap {
 		l.saturated = false
 	}
 }
+
+// HardCap is the size past which this table sheds new keys. Reported by
+// logSaturatedLockouts so an operator sees the bound that actually applied,
+// rather than the package default.
+func (l *failureLockout) HardCap() int { return l.hardCap }
 
 // Saturated reports whether the table has had to shed a new key since the last
 // time it drained below the hard cap. Surfaced rather than handled silently:

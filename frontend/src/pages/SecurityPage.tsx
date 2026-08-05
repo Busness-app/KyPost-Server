@@ -36,6 +36,7 @@ import {
 } from "../lib/pgpSession";
 import { unlockWithArmoredKey } from "../lib/keyVault";
 import { PgpUnlockDialog } from "../components/PgpUnlockDialog";
+import { DeviceEnrollmentCard } from "../components/DeviceEnrollmentCard";
 import { listContacts, type Contact } from "../api/contacts";
 
 type ApproverDevice = {
@@ -1533,6 +1534,13 @@ export function SecurityPage() {
             </div>
           ) : null}
         </div>
+
+        <DeviceEnrollmentCard
+          fingerprint={pgpIdentity?.fingerprint ?? ""}
+          clientProtected={keyCustody === "client"}
+          unlocked={pgpSession?.unlocked ?? false}
+          onRequestUnlock={() => setUnlockOpen(true)}
+        />
       </div>
     </section>
   );
