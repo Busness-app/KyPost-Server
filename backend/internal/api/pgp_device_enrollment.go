@@ -40,6 +40,11 @@ func (s *Server) handlePGPPublishEnrollmentKey(w http.ResponseWriter, r *http.Re
 		writeDeviceAuthFailure(w, retryAfter)
 		return
 	}
+	// This route MUTATES on a device credential, which no shared middleware
+	// meters. See meterDeviceWrite.
+	if !s.meterDeviceWrite(w, r, userID) {
+		return
+	}
 	var req struct {
 		PublicKey string `json:"publicKey"`
 	}

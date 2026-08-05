@@ -470,3 +470,44 @@ func TestDeviceAuthRefusedWhileAPasswordChangeIsOwed(t *testing.T) {
 		t.Fatalf("device %q authenticated on an account owing a password change", deviceID)
 	}
 }
+
+// meterAccountWrite runs in withAuth, withMailAuth and withDAVBasicAuth, but
+// withDeviceAuth is an inert marker with no shared middleware to hang it on, so
+// commit a8904dd ("meter every auth wrapper") closed three legs and left the
+// fourth. A device credential was consequently STRONGER than a session on this
+// one axis, while the trust model ranks it weaker.
+func TestDeviceAuthMutatingRouteIsMetered(t *testing.T) {
+	srv, _, _, authDevice := newPairedDeviceForTest(t)
+
+	throttled := 0
+	total := accountWriteBurst + 50
+	for i := 0; i < total; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/pgp/device/enrollment-key",
+			strings.NewReader(`{"publicKey":"BASE64PUBKEY"}`))
+		authDevice(req)
+		rec := httptest.NewRecorder()
+		srv.handlePGPPublishEnrollmentKey(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			throttled++
+		}
+	}
+	if throttled == 0 {
+		t.Fatalf("%d writes on a device credential, none throttled (accountWriteBurst=%d)", total, accountWriteBurst)
+	}
+}
+
+// ...but the meter must not touch device READS. meterAccountWrite returns true
+// immediately for GET, and the device envelope read is on the same credential.
+func TestDeviceAuthReadRouteIsNotMetered(t *testing.T) {
+	srv, _, _, authDevice := newPairedDeviceForTest(t)
+
+	for i := 0; i < accountWriteBurst+50; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/pgp/device/envelope", nil)
+		authDevice(req)
+		rec := httptest.NewRecorder()
+		srv.handlePGPDeviceEnvelope(rec, req)
+		if rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("device read throttled on request %d; reads must not be metered", i+1)
+		}
+	}
+}

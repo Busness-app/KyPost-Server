@@ -742,6 +742,11 @@ func (s *Server) handleNotificationNativeDeregister(w http.ResponseWriter, r *ht
 		writeDeviceAuthFailure(w, retryAfter)
 		return
 	}
+	// This route MUTATES on a device credential, which no shared middleware
+	// meters. See meterDeviceWrite.
+	if !s.meterDeviceWrite(w, r, userID) {
+		return
+	}
 	store, err := s.userStore(userID)
 	if err != nil {
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)

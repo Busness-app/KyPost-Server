@@ -157,6 +157,32 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 	return ownerID, dev, true, 0
 }
 
+// meterDeviceWrite applies the per-account write meter to a device-authenticated
+// MUTATING route. Call it after deviceAuthFromRequest has succeeded; it reports
+// whether the handler should continue.
+//
+// withAuth, withMailAuth and withDAVBasicAuth all call meterAccountWrite, so
+// every other credential type is capped at accountWriteBurst. withDeviceAuth
+// cannot: it is an inert marker (route_auth_markers.go) with no shared
+// middleware to hang the call on, so commit a8904dd — "meter every auth
+// wrapper" — closed the other three legs and left this one. Four mutating
+// routes accepted an unbounded request rate as a result, which left a device
+// credential STRONGER than a session on this one axis while the trust model
+// ranks it weaker.
+//
+// Called explicitly at each site rather than folded into deviceAuthFromRequest:
+// that function is used by seven production call sites and roughly thirty
+// tests, and it has no ResponseWriter, so metering inside it would mean
+// churning all of them to reach four. Explicit also keeps the double-response
+// hazard visible — meterAccountWrite writes its own 429, so a caller must
+// return immediately rather than fall through to writeDeviceAuthFailure.
+//
+// Safe on a handler serving both verbs: meterAccountWrite returns true
+// immediately for GET, HEAD and OPTIONS, so reads are never throttled.
+func (s *Server) meterDeviceWrite(w http.ResponseWriter, r *http.Request, userID string) bool {
+	return s.meterAccountWrite(w, r, userID)
+}
+
 // writeDeviceAuthFailure writes the HTTP response for a failed
 // deviceAuthFromRequest call: 429 with a Retry-After header when retryAfter
 // is nonzero (the deviceID is locked out), 401 otherwise (missing/unknown/
