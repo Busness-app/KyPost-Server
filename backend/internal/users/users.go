@@ -2160,6 +2160,22 @@ func (s *Store) UpgradeToDerivedAuth(ctx context.Context, id, verifiedPassword, 
 		if !ok {
 			return errors.New("refusing to upgrade auth derivation: password does not match")
 		}
+		// And the secret must actually BE the derivation of that password.
+		//
+		// Re-verifying the plaintext proves the caller knows the password; it
+		// says nothing about the value being pinned as the new credential. The
+		// doc comment above promises this check ("fails closed rather than
+		// pinning the account to a caller-supplied secret") and it was never
+		// performed, so anyone holding the current password — an admin-issued
+		// temporary one, say — could pin the account to a credential of their
+		// choosing and lock the owner out, on a login request that returns
+		// mfaRequired and never proves a second factor.
+		//
+		// The server holds the plaintext here, which is the whole reason this
+		// is the moment the claim is checkable at all.
+		if derr := authSecretMatchesPassword(verifiedPassword, authSecret, loginSalt, iterations); derr != nil {
+			return derr
+		}
 		u.PasswordHash = hash
 		u.AuthDerivation = AuthDerivationPBKDF2
 		u.LoginSalt = loginSalt

@@ -418,3 +418,85 @@ func TestConcurrentStoresDoNotLoseUpdates(t *testing.T) {
 		t.Fatalf("%d/%d fingerprints survived concurrent mutation; lost %d updates", got, n, n-got)
 	}
 }
+
+// TestUpgradeToDerivedAuthRefusesAnUnrelatedSecret pins the property this
+// function's own doc comment already promises: "a bug at the call site fails
+// closed rather than pinning the account to a caller-supplied secret".
+//
+// It re-verifies the plaintext password, but never checks that authSecret is
+// the derivation OF that password — so any caller who knows the current
+// password can pin the account to a credential of their choosing. handleLogin
+// runs this BEFORE the MFA branch, so the rewrite lands on a request that
+// returns mfaRequired with no session and no second-factor proof, and the
+// legitimate owner is locked out of an account the attacker still cannot enter.
+//
+// The server holds the plaintext on this path, so it can derive the expected
+// value rather than trusting the one supplied.
+func TestUpgradeToDerivedAuthRefusesAnUnrelatedSecret(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := LoadOrMigrate(ctx, dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	u, err := store.Create(ctx, "victim", "correct-horse-battery-staple", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const salt = "AAAAAAAAAAAAAAAAAAAAAA=="
+	attacker := strings.Repeat("de", 32) // 64 hex chars, well-formed but unrelated
+
+	err = store.UpgradeToDerivedAuth(ctx, u.ID, "correct-horse-battery-staple", attacker, salt, MinLoginIterations)
+	if err == nil {
+		t.Fatal("upgraded the account to an auth secret that is not the derivation of the verified password")
+	}
+
+	after, err := store.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.UsesDerivedAuth() {
+		t.Fatal("account was converted despite the mismatch")
+	}
+	ok, err := VerifyPassword(ctx, after, "correct-horse-battery-staple")
+	if err != nil || !ok {
+		t.Fatal("the owner's real password no longer authenticates")
+	}
+}
+
+// TestUpgradeToDerivedAuthAcceptsTheGenuineDerivation is the control: the real
+// client flow must still convert.
+func TestUpgradeToDerivedAuthAcceptsTheGenuineDerivation(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := LoadOrMigrate(ctx, dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	u, err := store.Create(ctx, "alice", "correct-horse-battery-staple", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const salt = "AAAAAAAAAAAAAAAAAAAAAA=="
+	genuine, err := DeriveAuthSecret("correct-horse-battery-staple", salt, MinLoginIterations)
+	if err != nil {
+		t.Fatalf("DeriveAuthSecret: %v", err)
+	}
+
+	if err := store.UpgradeToDerivedAuth(ctx, u.ID, "correct-horse-battery-staple", genuine, salt, MinLoginIterations); err != nil {
+		t.Fatalf("UpgradeToDerivedAuth rejected the genuine derivation: %v", err)
+	}
+	after, err := store.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !after.UsesDerivedAuth() {
+		t.Fatal("account was not converted")
+	}
+	ok, err := VerifyAuthSecret(ctx, after, genuine)
+	if err != nil || !ok {
+		t.Fatal("the derived secret does not authenticate after conversion")
+	}
+}
