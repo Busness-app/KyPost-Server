@@ -47,6 +47,25 @@ All code under `backend/internal/mailcache/`. Consumed by both `api/`
   path). `Store.Sync` never sets or clears it — `imapadapter.ListOverviews`
   deliberately never fetches bodies, so `Sync` has nothing to write there;
   it only carries forward whatever `Body` an entry already had.
+- **A cached PGP signature verdict is only valid while the address book that
+  produced it is unchanged.** An entry carries `PGPVerdictSchemaVersion` (the
+  rules it was computed under) and `ContactKeyGen` (`contacts.Store.PGPKeyGeneration`
+  at the time). `dropStaleVerdicts` clears the first on load;
+  `SyncContactKeyGeneration` clears the second, called from the inbox read path,
+  where it is one integer comparison in the common case. That is what makes
+  invalidation cover ALL eleven contact writers rather than the three handlers
+  that called an invalidation helper — three of them are the daemon's Autocrypt
+  writes, in a process with no `*http.Request`, so no handler-level hook could
+  ever have reached them. Dropping a verdict costs one body re-fetch; keeping a
+  stale one shows a green "signature verified" badge for a trust basis the user
+  has already removed.
+- **`Upsert`'s existing-UID branch must copy every field that travels WITH a
+  verdict**, not just the verdict itself. It copied the PGP flags and not
+  `PGPVerdictSchemaVersion`, so an entry created by the poller and then warmed
+  by the API — the production ordering — held a fresh verdict with a zero
+  stamp, which `dropStaleVerdicts` discarded on the very next load along with
+  the warm body. A new verdict-scoped field goes in that branch or it is
+  silently dropped for every message the poller saw first.
 - **Asymmetric coverage by design:** the poller only ever calls `Upsert` for
   the `"INBOX"` key (it never polls other folders). Non-INBOX mailboxes are
   warmed lazily, the same way INBOX gets warmed for a brand-new user: the
