@@ -122,6 +122,15 @@ func authRequest(s *Server, req *http.Request) {
 // X-Kypost-Device-Id/X-Kypost-Device-Secret.
 func pairNativeDevice(t *testing.T, srv *Server, userID, deviceID string) (id, secret string) {
 	t.Helper()
+	// A paired device implies an account past first-run. deviceAuthFromRequest
+	// refuses a credential whose owner owes a password change, because an admin
+	// password reset is the standard response to a compromise and a device
+	// credential must not outlive it. The bootstrap admin these fixtures use
+	// carries MustChangePassword from birth, and a confined session cannot reach
+	// GET /api/notifications/pairing to pair anything — so a device paired to
+	// such an account is a state the product cannot actually produce. Clear it
+	// here rather than let every device test assert against an unreachable one.
+	clearMustChangePassword(t, srv, userID)
 	store, err := srv.userStore(userID)
 	if err != nil {
 		t.Fatalf("userStore: %v", err)
@@ -517,5 +526,21 @@ func TestNativeDeregisterRemovesOnlyItself(t *testing.T) {
 	srv.handleNotificationNativePull(otherPullRec, otherPullReq)
 	if otherPullRec.Code != http.StatusOK {
 		t.Fatalf("unrelated device pull status = %d, want %d; body=%s", otherPullRec.Code, http.StatusOK, otherPullRec.Body.String())
+	}
+}
+
+// clearMustChangePassword takes an account out of the first-run/post-reset
+// confinement, so fixtures can model an ordinary established account.
+func clearMustChangePassword(t *testing.T, srv *Server, userID string) {
+	t.Helper()
+	// Tolerate an unknown user: some fixtures pair a device to a synthetic owner
+	// id that was never created, to prove cross-user isolation. There is no flag
+	// on an account that does not exist.
+	u, err := srv.users.Get(userID)
+	if err != nil || !u.MustChangePassword {
+		return
+	}
+	if _, err := srv.users.ClearMustChangePassword(userID); err != nil {
+		t.Fatalf("clear MustChangePassword: %v", err)
 	}
 }

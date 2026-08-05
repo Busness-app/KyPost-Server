@@ -134,6 +134,25 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 		s.deviceLockout.cancelAttempt(lockoutKey)
 		return "", state.NativeDevice{}, false, 0
 	}
+	// MustChangePassword confines a SESSION to the password-change and logout
+	// routes (see withAuth and withMailAuth). A device credential was exempt
+	// from that entirely, which mattered because an admin password reset is the
+	// standard response to a compromised account: it sets this flag, and a
+	// device credential minted around that moment kept full mail and contacts
+	// access on an account the admin had just confined.
+	//
+	// Refused rather than confined: unlike a browser, a device has nothing
+	// useful to do inside the confinement — it cannot present the
+	// password-change form — so the honest answer is that this credential is
+	// not usable until the account's owner completes the change.
+	//
+	// cancelAttempt for the same reason as the deactivation branch above: the
+	// secret was correct, so the strike goes back rather than backing the client
+	// off forever.
+	if u.MustChangePassword {
+		s.deviceLockout.cancelAttempt(lockoutKey)
+		return "", state.NativeDevice{}, false, 0
+	}
 	s.deviceLockout.recordSuccess(lockoutKey)
 	return ownerID, dev, true, 0
 }

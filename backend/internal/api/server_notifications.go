@@ -449,17 +449,12 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
 		return
 	}
-	// Native pairing tokens are meant to be redeemed exactly once — the
-	// QR/deep-link a user scans to pair a new device. Without this, the same
-	// captured token stays valid for its full TTL and could register an
-	// unlimited number of devices.
-	if !s.consumeNativePairingNonce(claims.Nonce, nativePairingTokenTTL) {
-		http.Error(w, "pairing token already used", http.StatusConflict)
-		return
-	}
-
 	// The pairing token proved this device was handed a QR minted by a
 	// signed-in user; resolve which user's device list to write into.
+	//
+	// Resolved BEFORE the nonce is consumed so that the re-pair check below can
+	// refuse without burning the token: a legitimate device that omits its
+	// secret would otherwise have to send the user back to the QR screen.
 	ownerID, okOwner := s.lookupUserBySubscriber(subscriberID)
 	if !okOwner {
 		http.Error(w, "unknown subscriber", http.StatusUnauthorized)
@@ -468,6 +463,44 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	store, err := s.userStore(ownerID)
 	if err != nil {
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+
+	// RE-BINDING AN EXISTING DEVICE ID IS NOT ORDINARY REGISTRATION.
+	//
+	// A pairing token proves someone held a live session; it does not prove
+	// possession of the device being rebound. Without this check, a stolen
+	// session could point register at a victim's live deviceId and
+	// upsertNativeDeviceTx would overwrite SecretHash and PushToken while
+	// PRESERVING MFAApprover and the enrollment columns — silently revoking the
+	// real phone, redirecting its push notifications, and inheriting its right
+	// to approve sign-ins. No new row appears, so the device list looks
+	// unchanged. That turns an ephemeral stolen cookie into a device credential
+	// with no TTL, which is precisely what pgp_stepup.go refuses to let a
+	// session do to key material.
+	//
+	// Step-up is not reachable here: this route is withTokenAuth and carries no
+	// AuthContext, so there is no session credential to re-prove. A legitimate
+	// device refreshing its push token still holds its current secret, so proof
+	// of possession is the check that fits.
+	if requested := strings.TrimSpace(req.DeviceID); requested != "" {
+		if existing, found := store.GetNativeDevice(requested); found {
+			okSecret, secretErr := users.VerifyDeviceSecret(r.Context(), existing.SecretHash, r.Header.Get(headerDeviceSecret))
+			if secretErr != nil || !okSecret {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error": "device id already registered; present its current secret to re-pair, or unpair it first",
+				})
+				return
+			}
+		}
+	}
+
+	// Native pairing tokens are meant to be redeemed exactly once — the
+	// QR/deep-link a user scans to pair a new device. Without this, the same
+	// captured token stays valid for its full TTL and could register an
+	// unlimited number of devices.
+	if !s.consumeNativePairingNonce(claims.Nonce, nativePairingTokenTTL) {
+		http.Error(w, "pairing token already used", http.StatusConflict)
 		return
 	}
 

@@ -656,6 +656,39 @@ func (s *Store) GetOrCreateSubscriberID() (string, error) {
 	return id, nil
 }
 
+// RotateSubscriberID replaces this account's subscriber ID and returns the
+// previous one, so the caller can evict it from any index that cached it.
+//
+// This is credential revocation, not housekeeping. A native pairing token is a
+// stateless HMAC over {sub, exp, nonce, purpose} — nothing in it is tied to a
+// session, a password or a device — so purging sessions, devices and the
+// CardDAV credential did not reach a token that had already been minted. One
+// held across an admin password reset still redeemed afterwards and minted a
+// working device credential on an account the admin believed was secured.
+//
+// Rotating the subscriber ID invalidates every outstanding token at once: their
+// Sub no longer resolves to any account. It is safe to do here precisely
+// because revocation also deletes every paired device — the subscriber ID is a
+// pairing-time value, and nothing that survives revocation refers to it.
+func (s *Store) RotateSubscriberID() (previous string, err error) {
+	err = s.tx(func(tx *sql.Tx) error {
+		existing, err := metaString(tx, metaSubscriberID)
+		if err != nil {
+			return err
+		}
+		fresh, err := fsutil.NewUUIDv4()
+		if err != nil {
+			return err
+		}
+		previous = existing
+		return setMeta(tx, metaSubscriberID, fresh)
+	})
+	if err != nil {
+		return "", err
+	}
+	return previous, nil
+}
+
 // normalizeDeliveryMode coerces any stored/requested value to a known mode,
 // defaulting to push so an absent or unrecognized value never disables
 // notifications.
