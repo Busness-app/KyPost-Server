@@ -382,6 +382,14 @@ func validateMatchGroupShape(m MatchGroup, depth int, count *int) error {
 		if len(c.Value) > maxConditionValueBytes {
 			return fmt.Errorf("match condition value exceeds maximum length of %d bytes", maxConditionValueBytes)
 		}
+		// Source length bounds neither validity nor compiled size. Compile the
+		// pattern here so an invalid or pathologically-expanding regex is
+		// refused at write time, where the user can still fix it, instead of at
+		// evaluation time where the only available answer is "no match" — which
+		// Negate then inverts into "matches every message".
+		if err := ValidatePattern(c.Comparator, c.Value); err != nil {
+			return err
+		}
 	}
 	return nil
 }
