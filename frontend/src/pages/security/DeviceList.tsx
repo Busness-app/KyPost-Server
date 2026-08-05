@@ -100,15 +100,19 @@ export function DeviceList({
                 />
                 <span>Can approve sign-ins</span>
               </label>
-              {/* Nothing to say per row for the two account-wide cases: the
-                  status not loading is reported once at the card level, and the
-                  control that turns push approval on sits directly above this
-                  list. Repeating either on every row is noise that buries the
-                  per-device reasons that are actually specific. */}
-              {!approvalsKnown || !pushEnabled ? null : row.approvalUnavailable ? (
-                <p className="sec-muted">
-                  This device has not offered itself as an approver. Update its app and pair again.
-                </p>
+              {/* Order matters. An account-wide fact is stated once elsewhere —
+                  a failed status load by the card-level error, push approval
+                  being off by the control directly above this list — so
+                  repeating it per row is noise. A DEVICE-specific refusal is the
+                  opposite: it has to show even while push approval is off,
+                  because it is the only thing that tells the reader turning push
+                  on will not help this particular device. */}
+              {!approvalsKnown ? null : row.approvalUnavailable ? (
+                pushEnabled ? (
+                  <p className="sec-muted">
+                    This device has not offered itself as an approver. Update its app and pair again.
+                  </p>
+                ) : null
               ) : !row.canApprove ? (
                 <p className="sec-muted">
                   {row.cannotApproveReason ||
