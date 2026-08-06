@@ -1,32 +1,30 @@
-import { useAuth } from "../../auth";
-import { PanelTabs, type PanelTab } from "../../components/PanelTabs";
-import { LabelRules } from "../../admin/sections/LabelRules";
-import { PromptTuning } from "../../admin/sections/PromptTuning";
+import { PanelTabs } from "../../components/PanelTabs";
+import { PromptTuning } from "../../settings/sections/PromptTuning";
+import { Decisions } from "../../settings/sections/Decisions";
 
 /**
- * How mail gets classified and labelled.
+ * How this account's mail gets classified and labelled.
  *
- * Under Config rather than Admin because prompt tuning is a per-user setting —
- * every signed-in user has their own TUNING.md and their own decision log, and
- * the endpoints behind them are all withAuth. Label rules are the admin half,
- * so that tab appears only for admins; the server enforces it regardless,
- * since saving them is a PUT /api/config, which is withAdmin.
+ * Everything here is per-user — each account has its own TUNING.md, its own
+ * auto-apply preference and its own decision log, and every endpoint behind
+ * them is withAuth. Nothing on this panel is admin-gated, and nothing that is
+ * instance-wide belongs on it: the label allowlist is global config saved
+ * through an admin-only PUT /api/config, so it lives on Server instead.
  */
 export function AutomationPanel() {
-  const auth = useAuth();
-
-  const tabs: PanelTab[] = [{ id: "prompt-tuning", label: "Prompt Tuning", body: <PromptTuning /> }];
-  if (auth.role === "admin") {
-    tabs.push({ id: "label-rules", label: "Label Rules", body: <LabelRules /> });
-  }
-
   return (
     <section className="panel">
       <div className="config-header">
         <h2>Automation</h2>
-        <p>How mail is classified and labelled.</p>
+        <p>How your mail is classified and labelled.</p>
       </div>
-      <PanelTabs ariaLabel="Automation sections" tabs={tabs} />
+      <PanelTabs
+        ariaLabel="Automation sections"
+        tabs={[
+          { id: "prompt-tuning", label: "Prompt Tuning", body: <PromptTuning /> },
+          { id: "decisions", label: "Decisions", body: <Decisions /> }
+        ]}
+      />
     </section>
   );
 }

@@ -4,15 +4,15 @@ import { MemoryRouter } from "react-router";
 import { AuthContext, type AuthState } from "../../auth";
 import { AutomationPanel } from "./AutomationPanel";
 
-// The sections themselves are covered where they live. What matters here is
-// the gate: Automation moved under Config so non-admins can reach their own
-// prompt tuning, which means the admin-only half must not travel with it.
-vi.mock("../../admin/sections/PromptTuning", () => ({
+// The sections are covered where they live. What matters here is that this
+// panel is entirely per-user: an admin and a non-admin must see exactly the
+// same thing, because everything on it belongs to the account viewing it.
+vi.mock("../../settings/sections/PromptTuning", () => ({
   PromptTuning: () => <p>prompt tuning</p>
 }));
 
-vi.mock("../../admin/sections/LabelRules", () => ({
-  LabelRules: () => <p>label rules</p>
+vi.mock("../../settings/sections/Decisions", () => ({
+  Decisions: () => <p>decisions</p>
 }));
 
 afterEach(cleanup);
@@ -27,29 +27,35 @@ function renderPanel(role: AuthState["role"], tab = "") {
   );
 }
 
+function tabLabels() {
+  return screen.getAllByRole("tab").map((tab) => tab.textContent);
+}
+
 describe("AutomationPanel", () => {
   it("gives a non-admin their prompt tuning", () => {
     renderPanel("user");
     expect(screen.getByText("prompt tuning")).toBeTruthy();
   });
 
-  it("hides Label Rules from a non-admin", () => {
+  it("shows a non-admin and an admin the identical set of tabs", () => {
     renderPanel("user");
-    expect(screen.queryByRole("tab", { name: "Label Rules" })).toBeNull();
-  });
-
-  it("does not render Label Rules for a non-admin even when the URL asks for it", () => {
-    // Saving label rules is a PUT /api/config, which is withAdmin — the server
-    // refuses regardless. This keeps the UI from presenting a form that cannot
-    // succeed.
-    renderPanel("user", "label-rules");
-    expect(screen.queryByText("label rules")).toBeNull();
-    expect(screen.getByText("prompt tuning")).toBeTruthy();
-  });
-
-  it("shows both tabs to an admin", () => {
+    const asUser = tabLabels();
+    cleanup();
     renderPanel("admin");
-    expect(screen.getByRole("tab", { name: "Prompt Tuning" })).toBeTruthy();
-    expect(screen.getByRole("tab", { name: "Label Rules" })).toBeTruthy();
+
+    expect(asUser).toEqual(tabLabels());
+  });
+
+  it("carries nothing instance-wide — Label Rules belongs to Server", () => {
+    // The allowlist saves through PUT /api/config, which is withAdmin. A tab
+    // for it here would be a form a non-admin cannot submit.
+    renderPanel("admin");
+    expect(tabLabels()).toEqual(["Prompt Tuning", "Decisions"]);
+  });
+
+  it("opens the decisions tab from the URL", () => {
+    renderPanel("user", "decisions");
+    expect(screen.getByText("decisions")).toBeTruthy();
+    expect(screen.queryByText("prompt tuning")).toBeNull();
   });
 });
