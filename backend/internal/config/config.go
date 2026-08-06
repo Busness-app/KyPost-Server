@@ -156,6 +156,22 @@ type UserNotificationSettings struct {
 // disabledLabelingFallback in processor/poller.go).
 type UserLabelSettings struct {
 	AutoApplyEnabled bool `yaml:"autoApplyEnabled" json:"autoApplyEnabled"`
+
+	// Seeded records that this account's label set has been copied from the
+	// house list. It exists because "no labels" and "never set up" are
+	// different states that a slice cannot tell apart across a YAML
+	// round-trip: yaml.Marshal writes a nil slice as `[]`, which reads back
+	// as an empty non-nil one. Without this flag an account that
+	// deliberately cleared every label would have the house list poured back
+	// in on the next load, forever.
+	Seeded bool `yaml:"seeded" json:"seeded"`
+
+	// Allowlist is this account's own label set — the labels the classifier
+	// may choose from, applied as IMAP keywords verbatim.
+	Allowlist []string `yaml:"allowlist" json:"allowlist"`
+
+	// KeywordMappings expands one chosen label into several IMAP keywords.
+	KeywordMappings map[string][]string `yaml:"keywordMappings" json:"keywordMappings"`
 }
 
 func DefaultUserSettings() UserSettings {
@@ -163,7 +179,62 @@ func DefaultUserSettings() UserSettings {
 	s.Notifications.Mode = "none"
 	s.Notifications.Keywords = []string{}
 	s.Labels.AutoApplyEnabled = true
+	s.Labels.Allowlist = []string{}
+	s.Labels.KeywordMappings = map[string][]string{}
 	return s
+}
+
+// SeedUserLabels copies the instance house list into an account that has never
+// had one, reporting whether it changed anything.
+//
+// The house list (`labels` in config.yaml, edited by an admin) is the starting
+// point for a new account and the migration path for every account that
+// existed before labels became per-user — those accounts were classified
+// against the house list, so adopting it verbatim is the only change that
+// leaves their mail sorted the way it already was.
+//
+// After seeding, the two are independent: editing the house list does not
+// reach back into an account that already has its own.
+func SeedUserLabels(s *UserSettings, house Config) bool {
+	if s.Labels.Seeded {
+		return false
+	}
+	s.Labels.Seeded = true
+	s.Labels.Allowlist = append([]string{}, house.Labels.Allowlist...)
+	s.Labels.KeywordMappings = map[string][]string{}
+	for label, keywords := range house.Labels.KeywordMappings {
+		s.Labels.KeywordMappings[label] = append([]string{}, keywords...)
+	}
+	return true
+}
+
+// LoadUserLabelSettings reads an account's settings and seeds its labels from
+// the house list on first sight, persisting the seed so it happens once.
+//
+// Callers that only read labels should use this rather than LoadUserSettings,
+// so a pre-existing account gets its list the first time anything asks —
+// there is no separate migration step to run or to forget.
+func LoadUserLabelSettings(path string, house Config) (UserSettings, error) {
+	s, err := LoadUserSettings(path)
+	if err != nil {
+		return UserSettings{}, err
+	}
+	if s.Labels.Seeded {
+		return s, nil
+	}
+	// Re-seed inside the lock rather than saving the copy read above: another
+	// process may have seeded between the read and here.
+	if err := UpdateUserSettings(path, func(locked *UserSettings) error {
+		SeedUserLabels(locked, house)
+		return nil
+	}); err != nil {
+		// Seeding is a convenience, not a precondition. Answer with the
+		// in-memory seed so classification still works on a read-only or
+		// full disk; the next call will try to persist again.
+		SeedUserLabels(&s, house)
+		return s, err
+	}
+	return LoadUserSettings(path)
 }
 
 // LoadUserSettings reads a per-user settings file, returning defaults if it
@@ -182,6 +253,12 @@ func LoadUserSettings(path string) (UserSettings, error) {
 	}
 	if s.Notifications.Keywords == nil {
 		s.Notifications.Keywords = []string{}
+	}
+	if s.Labels.Allowlist == nil {
+		s.Labels.Allowlist = []string{}
+	}
+	if s.Labels.KeywordMappings == nil {
+		s.Labels.KeywordMappings = map[string][]string{}
 	}
 	return s, nil
 }

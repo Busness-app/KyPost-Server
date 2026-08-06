@@ -2,7 +2,6 @@ import { useState } from "react";
 import { deleteJSON, postJSON, putJSON, toErrorMessage } from "../../../api/client";
 import type { NativeDeliveryMode } from "../../../api/devices";
 import { DeviceEnrollmentCard } from "../../../components/DeviceEnrollmentCard";
-import { CardDavAccess } from "../../../settings/sections/CardDavAccess";
 import { DeviceList } from "../DeviceList";
 import { PairingPanel } from "../PairingPanel";
 import type { DeviceRow } from "../deviceJoin";
@@ -39,8 +38,6 @@ export type DevicesProps = {
   setUnlockOpen?: (open: boolean) => void;
   /** Switches SecurityPage to the Sign-in tab. */
   onGoToSignIn?: () => void;
-  /** Reports whether a one-time CardDAV password is on screen, so the page can block tab switches. */
-  onRevealedPasswordChange?: (revealed: boolean) => void;
 };
 
 export function Devices({
@@ -58,8 +55,7 @@ export function Devices({
   pgpClientProtected = false,
   pgpUnlocked = false,
   setUnlockOpen = noop,
-  onGoToSignIn = noop,
-  onRevealedPasswordChange = noop
+  onGoToSignIn = noop
 }: DevicesProps = {}) {
   const [busy, setBusy] = useState(false);
   const [deviceRemoveBusyId, setDeviceRemoveBusyId] = useState("");
@@ -290,14 +286,6 @@ export function Devices({
         unlocked={pgpUnlocked}
         onRequestUnlock={() => setUnlockOpen(true)}
       />
-
-      {/* An app password is another thing connected to the account, so it
-          belongs with the devices rather than in mail connectivity — and
-          issuing one is a credential operation, which is what puts it behind
-          this page's reauth gate. */}
-      <div id="carddav-access">
-        <CardDavAccess onRevealedPasswordChange={onRevealedPasswordChange} />
-      </div>
     </>
   );
 }

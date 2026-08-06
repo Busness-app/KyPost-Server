@@ -18,7 +18,7 @@ beforeEach(() => {
 });
 
 describe("LabelRules — load guard", () => {
-  it("disables Save Configuration until the initial config read lands", async () => {
+  it("disables Save Defaults until the initial config read lands", async () => {
     let resolveConfig: (value: unknown) => void = () => {};
     getJSON.mockImplementation((url: string) => {
       if (url === "/api/config") {
@@ -32,14 +32,14 @@ describe("LabelRules — load guard", () => {
 
     render(<LabelRules />);
 
-    const saveButton = screen.getByRole("button", { name: /save configuration/i }) as HTMLButtonElement;
+    const saveButton = screen.getByRole("button", { name: /save defaults/i }) as HTMLButtonElement;
     expect(saveButton.disabled).toBe(true);
 
     resolveConfig({ labels: { allowlist: ["Work"], keywordMappings: {} } });
     await waitFor(() => expect(saveButton.disabled).toBe(false));
   });
 
-  it("keeps Save Configuration disabled after a failed load, so a click can never overwrite label rules with empties", async () => {
+  it("keeps Save Defaults disabled after a failed load, so a click can never overwrite label rules with empties", async () => {
     getJSON.mockImplementation((url: string) => {
       if (url === "/api/config") {
         return Promise.reject(new Error("boom"));
@@ -50,7 +50,7 @@ describe("LabelRules — load guard", () => {
     render(<LabelRules />);
 
     await screen.findByText("Failed to load configuration data.");
-    const saveButton = screen.getByRole("button", { name: /save configuration/i }) as HTMLButtonElement;
+    const saveButton = screen.getByRole("button", { name: /save defaults/i }) as HTMLButtonElement;
     expect(saveButton.disabled).toBe(true);
 
     // Even if something bypassed the disabled attribute, saveConfigPatch

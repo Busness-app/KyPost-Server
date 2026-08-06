@@ -7,6 +7,10 @@ import { AutomationPanel } from "./AutomationPanel";
 // The sections are covered where they live. What matters here is that this
 // panel is entirely per-user: an admin and a non-admin must see exactly the
 // same thing, because everything on it belongs to the account viewing it.
+vi.mock("../../settings/sections/MyLabels", () => ({
+  MyLabels: () => <p>my labels</p>
+}));
+
 vi.mock("../../settings/sections/PromptTuning", () => ({
   PromptTuning: () => <p>prompt tuning</p>
 }));
@@ -31,9 +35,14 @@ function tabLabels() {
   return screen.getAllByRole("tab").map((tab) => tab.textContent);
 }
 
-describe("AutomationPanel", () => {
-  it("gives a non-admin their prompt tuning", () => {
+describe("Email Labels panel", () => {
+  it("opens on the account's own label list", () => {
     renderPanel("user");
+    expect(screen.getByText("my labels")).toBeTruthy();
+  });
+
+  it("gives a non-admin their prompt tuning", () => {
+    renderPanel("user", "prompt-tuning");
     expect(screen.getByText("prompt tuning")).toBeTruthy();
   });
 
@@ -46,11 +55,12 @@ describe("AutomationPanel", () => {
     expect(asUser).toEqual(tabLabels());
   });
 
-  it("carries nothing instance-wide — Label Rules belongs to Server", () => {
-    // The allowlist saves through PUT /api/config, which is withAdmin. A tab
-    // for it here would be a form a non-admin cannot submit.
+  it("carries nothing instance-wide — the house list belongs to Server", () => {
+    // Every tab here writes through a withAuth endpoint scoped to the calling
+    // account. The house list that seeds a NEW account is a different thing and
+    // saves through the admin-only PUT /api/config.
     renderPanel("admin");
-    expect(tabLabels()).toEqual(["Prompt Tuning", "Decisions"]);
+    expect(tabLabels()).toEqual(["Your Labels", "Prompt Tuning", "Decisions"]);
   });
 
   it("opens the decisions tab from the URL", () => {

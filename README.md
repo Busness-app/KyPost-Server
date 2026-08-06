@@ -11,7 +11,7 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 - Single-container Docker runtime. supervisord manages the processes.
 - Multi-user with two roles. Admins manage users and system settings. Each user connects their own IMAP mailbox.
 - IMAP inbox reader with folder management and drag-and-drop move actions
-- Automatic keyword labels for unread mail. KyPost polls each active user's mailbox separately. Labels are a sorting hint a determined sender can influence — see [Classification flow](#architecture).
+- Automatic keyword labels for unread mail. KyPost polls each active user's mailbox separately, and each account has its OWN label list — copied from the instance defaults when the account is created, then theirs to change. Labels are a sorting hint a determined sender can influence — see [Classification flow](#architecture).
 - Filter Rules: a GUI condition and action builder plus a raw Sieve script editor. A run-now panel applies the rules on demand.
 - Compose flow with SMTP send and IMAP draft save
 - PGP mail encryption. Generate or import a key, search for recipient keys on keys.openpgp.org, and check recipient key status before you send. KyPost has two key-protection modes. Read [Where your PGP private key lives](#where-your-pgp-private-key-lives) before you rely on this.
@@ -20,7 +20,7 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 - Multi-factor authentication: TOTP authenticator apps, one-time recovery codes, and push-approval sign-in
 - CAPTCHA on login, **self-hosted proof-of-work by default** (also Turnstile or Friendly Captcha; `CAPTCHA_PROVIDER=none` turns it off). It works alongside a 3-strikes/15-minute account lockout, a looser per-IP lockout, and an instance-wide login rate limit. Note that proof-of-work needs a secure context in the browser — read the CAPTCHA notes in `.env.example` if you serve over plain HTTP on a LAN.
 - Browser push notifications for each user, for all mail or for keyword matches only. KyPost also supports native push pairing for mobile apps.
-- Settings grouped into panels: Appearance, Mail (IMAP/SMTP, send-as, contact sync, filters), Security, Notifications and Status — plus Automation for each user's own prompt tuning and classification decisions — and an Admin group for server runtime and diagnostics
+- Settings grouped into panels: Appearance, Mail (IMAP/SMTP, send-as, contact sync, filters), Security, Notifications and Status — plus Email Labels for each user's own prompt tuning and classification decisions — and an Admin group for server runtime and diagnostics
 - A dozen theme presets
 
 ## Architecture
@@ -311,7 +311,7 @@ Accounts live in `/kypost/config/users.json`. The roles are `admin` and `user`.
   accounts, alongside runtime settings, updates and verified mail domains.
   Diagnostics holds the full health view, the system logs and health repair.
   Label rules are a Server tab, since the allowlist is instance-wide.
-  Automation is entirely per-user — each account's own prompt tuning and
+  Email Labels is entirely per-user — each account's own prompt tuning and
   classification decisions — so it is not admin-only.
 - Users connect their own IMAP and SMTP account. They read and label their own
   mail, pair their own devices, set their own notification preferences, and tune
