@@ -24,7 +24,28 @@ export function SecurityPage() {
   // tab") can be a link, and so a reload keeps you where you were.
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = resolveSecurityTab(searchParams.get("tab"));
+
+  // A generated CardDAV app password is shown once and is not re-fetchable, so
+  // unmounting the Devices tab while one is on screen destroys the only copy.
+  // While one is showing, tab switches are blocked rather than allowed to
+  // discard it silently. The way out is CardDavAccess's own Copy/Done control,
+  // which clears this flag. Moved here with the section itself: the guard used
+  // to live on Configuration, and CardDavAccess is no longer rendered there.
+  const [davPasswordRevealed, setDavPasswordRevealed] = useState(false);
+  const [tabSwitchBlockedMessage, setTabSwitchBlockedMessage] = useState("");
+  useEffect(() => {
+    if (!davPasswordRevealed) {
+      setTabSwitchBlockedMessage("");
+    }
+  }, [davPasswordRevealed]);
+
   function setActiveTab(tab: SecurityTab) {
+    if (davPasswordRevealed) {
+      setTabSwitchBlockedMessage(
+        "Copy or dismiss the generated CardDAV password before switching tabs — it will not be shown again."
+      );
+      return;
+    }
     const next = new URLSearchParams(searchParams);
     next.set("tab", tab);
     setSearchParams(next, { replace: true });
@@ -236,6 +257,12 @@ export function SecurityPage() {
         ))}
       </div>
 
+      {tabSwitchBlockedMessage ? (
+        <p className="notice notice-error" role="alert">
+          {tabSwitchBlockedMessage}
+        </p>
+      ) : null}
+
       <div className="sec-layout">
         {activeTab === "signin" ? (
           <SignIn
@@ -259,6 +286,7 @@ export function SecurityPage() {
             refreshDevices={refreshDevices}
             deliveryMode={deliveryMode}
             setDeliveryMode={setDeliveryMode}
+            onRevealedPasswordChange={setDavPasswordRevealed}
             pushOn={pushOn}
             approvalsOn={approvalsOn}
             pgpFingerprint={pgpIdentity?.fingerprint ?? ""}

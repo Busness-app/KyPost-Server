@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { AuthContext, type AuthState } from "../auth";
-import { HealthPage } from "./HealthPage";
-import { SystemHealth } from "../settings/sections/SystemHealth";
+import type { AuthState } from "../../auth";
+import { SystemHealth } from "./SystemHealth";
 
 // The bug these cover is not in either endpoint — /api/health and /api/status
 // have always computed and sent these fields — but in the page's TypeScript
@@ -17,7 +16,7 @@ import { SystemHealth } from "../settings/sections/SystemHealth";
 const getJSON = vi.fn();
 const postJSON = vi.fn();
 
-vi.mock("../api/client", () => ({
+vi.mock("../../api/client", () => ({
   getJSON: (url: string) => getJSON(url),
   postJSON: (url: string, body: unknown) => postJSON(url, body),
   toErrorMessage: (_e: unknown, fallback: string) => fallback
@@ -48,12 +47,11 @@ function mockEndpoints(health: object = {}, status: object = {}) {
   });
 }
 
+// The dashboard no longer reads the auth context: what used to be two inline
+// `auth.role === "admin"` checks is now the `full` prop, decided by whichever
+// panel composes it (Status trims, Diagnostics does not).
 function renderPage(role: AuthState["role"] = "admin") {
-  return render(
-    <AuthContext.Provider value={{ authenticated: true, userId: "u1", role }}>
-      <HealthPage />
-    </AuthContext.Provider>
-  );
+  return render(<SystemHealth full={role === "admin"} />);
 }
 
 beforeEach(() => {

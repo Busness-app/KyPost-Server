@@ -227,3 +227,32 @@ describe("no two page-level status regions at once", () => {
     });
   });
 });
+
+// The CardDAV app password is generated once and is not re-fetchable, so
+// unmounting the Devices tab while one is on screen destroys the only copy.
+// The guard that blocks the tab switch used to live on the Configuration page;
+// it moved here with the section, and this pins that it actually came along —
+// without it, one stray tab click silently loses the password.
+describe("CardDAV password blocks tab switches", () => {
+  it("refuses to leave Devices while a generated password is showing", async () => {
+    const user = userEvent.setup();
+    postJSON.mockImplementation((url: string) => {
+      if (url === "/api/contacts/dav-password") {
+        return Promise.resolve({ password: "generated-app-password" });
+      }
+      return Promise.resolve({ ok: true });
+    });
+
+    renderPage("devices");
+
+    const generate = await screen.findByRole("button", { name: /generate/i });
+    await user.click(generate);
+    await screen.findByText("generated-app-password");
+
+    await user.click(screen.getByRole("tab", { name: "Mail" }));
+
+    expect(screen.getByRole("alert").textContent).toContain("before switching tabs");
+    expect(screen.getByRole("tab", { name: "Devices" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("generated-app-password")).toBeTruthy();
+  });
+});

@@ -16,13 +16,9 @@ import { sealPickup } from "./lib/pickupCrypto";
 import { createSealedPickup, resolveRecipientKeys, sendClientEncryptedMail } from "./api/pgp";
 import { PgpUnlockDialog } from "./components/PgpUnlockDialog";
 import type { RecipientFieldState, RecipientToken } from "./lib/recipients";
-import { ConfigPage } from "./pages/ConfigPage";
 import { ContactsPage } from "./pages/ContactsPage";
-import { HealthPage } from "./pages/HealthPage";
 import { LoginPage } from "./pages/LoginPage";
-import { LogsPage } from "./pages/LogsPage";
 import { ReadPage } from "./pages/ReadPage";
-import { RulesPage } from "./pages/RulesPage";
 import { AppearancePanel } from "./pages/settings/AppearancePanel";
 import { MailPanel } from "./pages/settings/MailPanel";
 import { NotificationsPanel } from "./pages/settings/NotificationsPanel";
@@ -31,12 +27,11 @@ import { ServerPanel } from "./pages/admin/ServerPanel";
 import { AutomationPanel } from "./pages/admin/AutomationPanel";
 import { DiagnosticsPanel } from "./pages/admin/DiagnosticsPanel";
 import { SecurityPage } from "./pages/SecurityPage";
-import { TuningPage } from "./pages/TuningPage";
-import { UsersPage } from "./pages/UsersPage";
 import { ReauthGate, clearReauth } from "./components/ReauthGate";
 import agplLicenseText from "./agpl-3.0.txt?raw";
 
 import { APP_VERSION, visibleSettingsGroups } from "./app/navigation";
+import { LEGACY_SETTINGS_PATHS, legacySettingsRedirect } from "./app/routes";
 import type {
   BeforeInstallPromptEvent,
   InboxFolder,
@@ -1265,25 +1260,24 @@ export function App() {
           <Route path="/login" element={<LoginPage auth={auth} onAuthChanged={refreshAuth} />} />
           <Route path="/password" element={protect(<LoginPage auth={auth} onAuthChanged={refreshAuth} mode="password" />)} />
               <Route path="/read" element={protect(<ReadPage onOpenDraft={openDraftInCompose} />)} />
-          <Route path="/health" element={protect(<HealthPage />)} />
-          <Route path="/config" element={protect(<ConfigPage />)} />
-          {/* Retired: notification settings became a Configuration tab and
-              pairing became Security's Devices tab. Keep this redirect — service
-              workers are cached in browsers and installed PWAs, so an old one
-              can still send a notification tap here long after the deploy. */}
-          <Route
-            path="/notifications"
-            element={<Navigate to="/config?tab=notifications" replace />}
-          />
-          <Route
-            path="/security"
-            element={protect(
-              <ReauthGate what="your security settings">
-                <SecurityPage />
-              </ReauthGate>
-            )}
-          />
-          <Route path="/rules" element={protect(<RulesPage />)} />
+          {/* Retired settings paths. They redirect rather than 404: they appear
+              in docs and bookmarks, and in service workers cached inside
+              installed PWAs, which can send a notification tap here long after
+              the deploy. /security carries ?tab=, which Navigate would drop. */}
+          {LEGACY_SETTINGS_PATHS.map((path) => (
+            <Route
+              key={path}
+              path={path}
+              element={
+                <Navigate
+                  to={`${legacySettingsRedirect(path, isAdmin) ?? "/read"}${
+                    path === "/security" ? location.search : ""
+                  }`}
+                  replace
+                />
+              }
+            />
+          ))}
           {/* The new panels. Both these and the old routes above resolve until
               the retired paths become redirects. */}
           <Route path="/settings/appearance" element={protect(<AppearancePanel />)} />
@@ -1299,9 +1293,6 @@ export function App() {
             )}
           />
           <Route path="/contacts" element={protect(<ContactsPage />)} />
-          <Route path="/tuning" element={protect(<TuningPage />)} />
-          <Route path="/users" element={protect(<UsersPage />, true)} />
-          <Route path="/logs" element={protect(<LogsPage />, true)} />
           {/* The admin panels. protect(..., true) redirects non-admins to
               /read; the server enforces every one of these regardless. */}
           <Route path="/admin/server" element={protect(<ServerPanel />, true)} />

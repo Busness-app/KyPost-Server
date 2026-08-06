@@ -39,6 +39,8 @@ export type DevicesProps = {
   setUnlockOpen?: (open: boolean) => void;
   /** Switches SecurityPage to the Sign-in tab. */
   onGoToSignIn?: () => void;
+  /** Reports whether a one-time CardDAV password is on screen, so the page can block tab switches. */
+  onRevealedPasswordChange?: (revealed: boolean) => void;
 };
 
 export function Devices({
@@ -56,7 +58,8 @@ export function Devices({
   pgpClientProtected = false,
   pgpUnlocked = false,
   setUnlockOpen = noop,
-  onGoToSignIn = noop
+  onGoToSignIn = noop,
+  onRevealedPasswordChange = noop
 }: DevicesProps = {}) {
   const [busy, setBusy] = useState(false);
   const [deviceRemoveBusyId, setDeviceRemoveBusyId] = useState("");
@@ -293,7 +296,7 @@ export function Devices({
           issuing one is a credential operation, which is what puts it behind
           this page's reauth gate. */}
       <div id="carddav-access">
-        <CardDavAccess />
+        <CardDavAccess onRevealedPasswordChange={onRevealedPasswordChange} />
       </div>
     </>
   );
