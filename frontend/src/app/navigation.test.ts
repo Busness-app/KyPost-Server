@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { visibleSettingsGroups } from "./navigation";
+import { visibleSettingsGroups, settingsNavItems } from "./navigation";
 
 describe("visibleSettingsGroups", () => {
   it("gives a non-admin one unheaded group, so no header labels a lone list", () => {
@@ -42,6 +42,14 @@ describe("visibleSettingsGroups", () => {
           expect(item.to).toMatch(/^\/(settings|admin)\//);
         }
       }
+    }
+  });
+
+  it("keeps the deprecated shim pointing at routes that currently exist", () => {
+    // The sidebar still renders settingsNavItems. visibleSettingsGroups points at
+    // /settings/* and /admin/*, which App.tsx does not route yet.
+    for (const item of settingsNavItems) {
+      expect(item.to).not.toMatch(/^\/(settings|admin)\//);
     }
   });
 });
