@@ -26,6 +26,7 @@ import { RulesPage } from "./pages/RulesPage";
 import { AppearancePanel } from "./pages/settings/AppearancePanel";
 import { MailPanel } from "./pages/settings/MailPanel";
 import { NotificationsPanel } from "./pages/settings/NotificationsPanel";
+import { StatusPanel } from "./pages/settings/StatusPanel";
 import { SecurityPage } from "./pages/SecurityPage";
 import { TuningPage } from "./pages/TuningPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -1285,6 +1286,7 @@ export function App() {
               the retired paths become redirects. */}
           <Route path="/settings/appearance" element={protect(<AppearancePanel />)} />
           <Route path="/settings/mail" element={protect(<MailPanel />)} />
+          <Route path="/settings/status" element={protect(<StatusPanel />)} />
           <Route path="/settings/notifications" element={protect(<NotificationsPanel />)} />
           <Route
             path="/settings/security"

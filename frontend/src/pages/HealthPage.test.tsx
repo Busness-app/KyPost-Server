@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { AuthContext, type AuthState } from "../auth";
 import { HealthPage } from "./HealthPage";
+import { SystemHealth } from "../settings/sections/SystemHealth";
 
 // The bug these cover is not in either endpoint — /api/health and /api/status
 // have always computed and sent these fields — but in the page's TypeScript
@@ -423,5 +424,36 @@ describe("existing behaviour is preserved", () => {
 
     await waitFor(() => expect(screen.getByText("System Healthy")).toBeTruthy());
     expect(screen.getByText("1420")).toBeTruthy();
+  });
+});
+
+// The Status/Diagnostics split. These two controls are the whole difference
+// between the trimmed view everyone gets and the full one admins get, and the
+// distinction is now carried by a prop rather than an inline role check — so
+// it is worth pinning that the prop actually gates them.
+describe("SystemHealth admin controls", () => {
+  it("hides them when not full, which is what makes Status safe for anyone", async () => {
+    mockEndpoints({}, { clientIp: "203.0.113.7" });
+    render(<SystemHealth full={false} heading="Status" />);
+
+    await screen.findByText("Status");
+    expect(screen.queryByRole("button", { name: /poll mail now/i })).toBeNull();
+    expect(screen.queryByText("Client Address")).toBeNull();
+  });
+
+  it("shows them when full", async () => {
+    mockEndpoints({}, { clientIp: "203.0.113.7" });
+    render(<SystemHealth full heading="Diagnostics" />);
+
+    expect(await screen.findByRole("button", { name: /poll mail now/i })).toBeTruthy();
+    await screen.findByText("Client Address");
+  });
+
+  it("titles itself from the caller, since the heading anchors a space-between row", async () => {
+    mockEndpoints();
+    render(<SystemHealth full={false} heading="Status" />);
+
+    const heading = await screen.findByRole("heading", { name: "Status" });
+    expect(heading.tagName).toBe("H2");
   });
 });
