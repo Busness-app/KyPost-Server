@@ -214,6 +214,15 @@ body {
   gap: 10px;
 }
 
+/* Separates a group that is not one of the settings panels — the PWA install
+   action — from the panel groups above it, so it does not read as belonging to
+   whichever heading happens to come last. */
+.sidebar .nav-subgroup-detached {
+  margin-top: 0.5rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
+}
+
 .sidebar .nav-subheading {
   margin: 0.75rem 0 0.25rem;
   font-size: 0.75rem;
@@ -2018,6 +2027,23 @@ pre {
 .sec-action-quiet:hover:not(:disabled) {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent-soft) 40%, var(--panel));
+  filter: none;
+}
+
+/* The prominent action on a card. Used for downloading the PGP recovery
+   backup: it is the one control that stands between a user and permanently
+   unreadable mail, and as a quiet button it read like an afterthought beside
+   Restore. Built from --accent so it follows every theme preset. */
+.sec-action-primary {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 24%, var(--panel));
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+
+.sec-action-primary:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 38%, var(--panel));
   filter: none;
 }
 

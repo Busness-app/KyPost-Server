@@ -1260,19 +1260,26 @@ export function App() {
                   ))}
                 </div>
               ))}
-              {!pwaInstalled ? (
-                <button
-                  type="button"
-                  className="nav-link-button"
-                  onClick={() => void installPwa()}
-                  disabled={!pwaInstallPrompt}
-                  title={pwaInstallPrompt ? "Install this site as a PWA" : "Wait for browser install support"}
-                >
-                  Install PWA
-                </button>
-              ) : (
-                <span title="This site is already installed as a PWA">PWA Installed</span>
-              )}
+              {/* Its own group, below a rule. It is not admin-only and never
+                  was, but sitting bare after the last group it fell under the
+                  "Admin" heading for an admin and read as an admin action. It
+                  is a browser action available to everyone, so it is separated
+                  from the panels rather than trailing them. */}
+              <div className="nav-subgroup nav-subgroup-detached">
+                {!pwaInstalled ? (
+                  <button
+                    type="button"
+                    className="nav-link-button"
+                    onClick={() => void installPwa()}
+                    disabled={!pwaInstallPrompt}
+                    title={pwaInstallPrompt ? "Install this site as a PWA" : "Wait for browser install support"}
+                  >
+                    Install PWA
+                  </button>
+                ) : (
+                  <span title="This site is already installed as a PWA">PWA Installed</span>
+                )}
+              </div>
             </div>
           ) : null}
           {auth.authenticated ? (
