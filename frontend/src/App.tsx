@@ -1,4 +1,4 @@
-import { type DragEvent, type ReactElement, useEffect, useRef, useState } from "react";
+import { type DragEvent, type MouseEvent as ReactMouseEvent, type ReactElement, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import Quill from "quill";
 import "quill/dist/quill.snow.css";
@@ -32,6 +32,7 @@ import agplLicenseText from "./agpl-3.0.txt?raw";
 
 import { APP_VERSION, visibleSettingsGroups } from "./app/navigation";
 import { LEGACY_SETTINGS_PATHS, legacySettingsRedirect } from "./app/routes";
+import { subscribeSecretHold } from "./lib/secretHold";
 import type {
   BeforeInstallPromptEvent,
   InboxFolder,
@@ -122,6 +123,35 @@ export function App() {
   const licenseDialogRef = useRef<HTMLDialogElement | null>(null);
   const currentMailbox = new URLSearchParams(location.search).get("mailbox")?.trim() ?? "";
   const onReadPage = location.pathname === "/read";
+
+  // Navigation hold. A section showing a value the server issues once and
+  // cannot reissue (a generated CardDAV app password) registers a hold; any
+  // sidebar link would unmount it and destroy the only copy. The tabbed pages
+  // guard their own tab strips, but a link is a route change and never reaches
+  // that guard — this is the other half of the same protection.
+  const [secretHold, setSecretHold] = useState("");
+  const [navBlockedNotice, setNavBlockedNotice] = useState("");
+  useEffect(() => subscribeSecretHold(setSecretHold), []);
+  useEffect(() => {
+    if (!secretHold) {
+      setNavBlockedNotice("");
+    }
+  }, [secretHold]);
+
+  function guardNavigation(event: ReactMouseEvent<HTMLElement>) {
+    if (!secretHold) {
+      return;
+    }
+    // Links only. The buttons inside this nav (Settings disclosure, Install
+    // PWA, Logout) either do not navigate or are a deliberate exit, and
+    // trapping someone signing out would be worse than the loss it prevents.
+    if (!(event.target as HTMLElement).closest("a")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setNavBlockedNotice(secretHold);
+  }
 
   async function refreshAuth() {
     try {
@@ -1034,7 +1064,12 @@ export function App() {
         <button type="button" className="new-email-button" onClick={openComposeWindow}>
           New Email
         </button>
-        <nav>
+        <nav onClickCapture={guardNavigation}>
+          {navBlockedNotice ? (
+            <p className="notice notice-error" role="alert">
+              {navBlockedNotice}
+            </p>
+          ) : null}
           <p className="sidebar-section-label">Mailboxes</p>
           <div className="mobile-quick-nav" aria-label="Mobile mailboxes">
             <Link className={onReadPage && currentMailbox === "" ? "sidebar-link-active" : ""} to="/read">Inbox</Link>

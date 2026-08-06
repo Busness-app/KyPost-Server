@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { CardDavAccess } from "./CardDavAccess";
+import { releaseSecretHold, secretHoldReason } from "../../lib/secretHold";
 
 const getJSON = vi.fn();
 const postJSON = vi.fn();
@@ -14,7 +15,10 @@ vi.mock("../../api/client", () => ({
   toErrorMessage: (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback)
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  releaseSecretHold();
+});
 
 beforeEach(() => {
   getJSON.mockReset();
@@ -43,5 +47,38 @@ describe("CardDavAccess", () => {
       "/api/contacts/dav-password",
       "/api/contacts/dav-password"
     ]);
+  });
+});
+
+// The sidebar bypass. The page-level guard only covers a tab strip; a sidebar
+// link is a route change that unmounts this component and destroys the only
+// copy of the password without ever reaching that guard. This section holds
+// navigation itself, at the source, so the protection applies wherever it is
+// rendered.
+describe("CardDavAccess navigation hold", () => {
+  it("holds navigation while an unacknowledged password is on screen", async () => {
+    postJSON.mockResolvedValue({ password: "generated-app-password" });
+    render(<CardDavAccess />);
+    await waitFor(() => expect(getJSON).toHaveBeenCalled());
+
+    expect(secretHoldReason()).toBe("");
+    await userEvent.click(screen.getByRole("button", { name: /generate/i }));
+    await screen.findByText("generated-app-password");
+
+    expect(secretHoldReason()).toContain("before leaving");
+  });
+
+  it("releases the hold on unmount, so navigating away cannot strand it", async () => {
+    postJSON.mockResolvedValue({ password: "generated-app-password" });
+    const view = render(<CardDavAccess />);
+    await waitFor(() => expect(getJSON).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole("button", { name: /generate/i }));
+    await screen.findByText("generated-app-password");
+
+    view.unmount();
+
+    // A hold that outlived its holder would block every link in the app with
+    // no way to clear it.
+    expect(secretHoldReason()).toBe("");
   });
 });
