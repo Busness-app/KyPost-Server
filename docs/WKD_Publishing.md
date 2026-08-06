@@ -26,7 +26,7 @@ for the domain. Nothing about MX or mail routing changes.
   they actually send from, on a domain the admin has already verified.
 
 **Quick Links:**
-- For admins: **Settings → Configuration → WKD Domains** tab — see
+- For admins: **Settings → Admin → Server**, the **WKD domains** section — see
   [Step 1](#step-1-admin-claim-and-verify-the-domain) and
   [Step 2](#step-2-admin-point-openpgpkeydomain-at-this-server) below
 - For users: **Security** page → "Publish my public key via Web Key
@@ -57,8 +57,8 @@ per-user toggle, on by default, with nothing to configure beyond that.
 
 ## Step 1 (admin): Claim and verify the domain
 
-1. Go to **Settings → Configuration**, then the **WKD Domains** tab (only
-   visible to administrators).
+1. Go to **Settings → Admin → Server**, then the **WKD domains** section (the
+   Admin group is only visible to administrators).
 2. Under **"Domain to publish keys for"**, enter a domain this instance's
    users send mail from and click **Add domain**. Any domain the admin
    controls can be added here — there's no restriction to a domain matching
