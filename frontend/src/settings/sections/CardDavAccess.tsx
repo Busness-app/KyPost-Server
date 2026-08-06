@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toErrorMessage } from "../../api/client";
 import { generateDAVPassword, getDAVPasswordStatus, revokeDAVPassword, type DAVPasswordStatus } from "../../api/contacts";
 import { useAuth } from "../../auth";
@@ -30,6 +30,13 @@ export function CardDavAccess({ setConfigStatus, onRevealedPasswordChange }: Car
   const [copyStatus, setCopyStatus] = useState("");
   const [davMessage, setDavMessage] = useState("");
   const davURL = auth.username ? `${window.location.origin}/dav/${encodeURIComponent(auth.username)}/contacts/` : "";
+
+  // Read inside the clipboard promise, which can settle after a newer password
+  // has replaced the one being copied. State would be stale there; a ref is not.
+  const revealedPasswordRef = useRef(revealedPassword);
+  useEffect(() => {
+    revealedPasswordRef.current = revealedPassword;
+  }, [revealedPassword]);
 
   useEffect(() => {
     const blocking = revealedPassword !== "" && !passwordAcknowledged;
@@ -96,6 +103,11 @@ export function CardDavAccess({ setConfigStatus, onRevealedPasswordChange }: Car
     try {
       await revokeDAVPassword();
       setRevealedPassword("");
+      // Clear the acknowledgement too, so the next generated password starts
+      // unacknowledged and re-arms the guard. dismissRevealedPassword already
+      // does this; leaving it out here only failed to bite because Generate
+      // happens to reset it as well.
+      setPasswordAcknowledged(false);
       await refreshDavStatus();
     } catch (error: unknown) {
       const message = `Failed to revoke CardDAV password: ${toErrorMessage(error, "unknown error")}`;
@@ -107,11 +119,28 @@ export function CardDavAccess({ setConfigStatus, onRevealedPasswordChange }: Car
   }
 
   function copyDavPassword() {
-    if (!revealedPassword || !navigator.clipboard?.writeText) {
+    if (!revealedPassword) {
       return;
     }
-    void navigator.clipboard.writeText(revealedPassword).then(
+    // The Clipboard API is absent on a non-secure origin, which is an ordinary
+    // way to reach a self-hosted server on a LAN. Returning silently left the
+    // button dead while the guard above still told the user to "copy or
+    // dismiss" — say what happened instead, and point at the way out.
+    if (!navigator.clipboard?.writeText) {
+      setCopyStatus(
+        "Copying needs a secure (HTTPS) connection — select the password above and copy it manually, then choose “Done — I saved it”."
+      );
+      return;
+    }
+    const copied = revealedPassword;
+    void navigator.clipboard.writeText(copied).then(
       () => {
+        // Acknowledging a stale copy would un-arm the guard for a password the
+        // user never saw copied, and label it "Copied to clipboard." A newer
+        // one can only exist if Generate ran while this promise was in flight.
+        if (revealedPasswordRef.current !== copied) {
+          return;
+        }
         setCopyStatus("Copied to clipboard.");
         // A successful copy is one of the two ways the ruling allows a
         // caller's navigation guard to clear — the password is safely saved

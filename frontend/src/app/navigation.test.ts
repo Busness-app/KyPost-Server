@@ -11,6 +11,7 @@ describe("visibleSettingsGroups", () => {
       "Mail",
       "Security",
       "Notifications",
+      "Automation",
       "Status"
     ]);
   });
@@ -18,7 +19,7 @@ describe("visibleSettingsGroups", () => {
   it("gives an admin two headed groups", () => {
     const groups = visibleSettingsGroups(true);
     expect(groups.map((g) => g.heading)).toEqual(["Config", "Admin"]);
-    expect(groups[1].items.map((i) => i.label)).toEqual(["Server", "Automation", "Diagnostics"]);
+    expect(groups[1].items.map((i) => i.label)).toEqual(["Server", "Diagnostics"]);
   });
 
   it("hides Status from admins, who have Diagnostics instead", () => {
@@ -67,6 +68,26 @@ describe("every nav target is routed", () => {
 
     for (const target of targets) {
       expect(app, `no <Route path="${target}"> in App.tsx`).toContain(`path="${target}"`);
+    }
+  });
+});
+
+// Automation sits under Config, not Admin. Prompt tuning is per-user — every
+// signed-in user has their own TUNING.md and decision log, and those endpoints
+// are withAuth — so an admin-only entry would have locked users out of their
+// own setting. The panel hides its admin-only Label Rules tab instead.
+describe("Automation placement", () => {
+  it("is reachable by a non-admin", () => {
+    const routes = visibleSettingsGroups(false).flatMap((g) => g.items.map((i) => i.to));
+    expect(routes).toContain("/settings/automation");
+  });
+
+  it("is not under /admin, which would imply a gate it does not have", () => {
+    for (const isAdmin of [true, false]) {
+      const automation = visibleSettingsGroups(isAdmin)
+        .flatMap((g) => g.items)
+        .find((i) => i.label === "Automation");
+      expect(automation?.to).toBe("/settings/automation");
     }
   });
 });

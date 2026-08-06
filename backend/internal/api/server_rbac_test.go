@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"kypost-server/backend/internal/users"
@@ -210,64 +209,5 @@ func TestLastActiveAdminIsProtected(t *testing.T) {
 	srv.withAdmin(srv.handleUsersDeactivate)(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deactivate with second admin present: status = %d, body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestConfigPutRejectsNonAdminClassifierChange(t *testing.T) {
-	srv := newTestServer(t)
-	srv.configPath = filepath.Join(t.TempDir(), "config.yaml")
-	_, regular := newTestUsers(t, srv)
-
-	protected := srv.withAuth(srv.handleConfig)
-
-	// Fetch current config the way the frontend would.
-	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
-	authRequestAs(srv, req, regular.ID)
-	rec := httptest.NewRecorder()
-	protected(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get config: status = %d", rec.Code)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
-		t.Fatalf("unmarshal config: %v", err)
-	}
-
-	// Non-admin PUT with untouched Classifier settings is allowed.
-	body, _ := json.Marshal(cfg)
-	req = httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body))
-	authRequestAs(srv, req, regular.ID)
-	rec = httptest.NewRecorder()
-	protected(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("non-admin PUT without classifier change: status = %d, body=%s", rec.Code, rec.Body.String())
-	}
-
-	// Non-admin PUT that changes Classifier settings is rejected with 403.
-	cfg["classifier"] = map[string]any{"baseUrl": "http://evil.example", "apiKey": "x", "classifyPath": "/"}
-	body, _ = json.Marshal(cfg)
-	req = httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body))
-	authRequestAs(srv, req, regular.ID)
-	rec = httptest.NewRecorder()
-	protected(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("non-admin PUT with classifier change: status = %d, want 403, body=%s", rec.Code, rec.Body.String())
-	}
-
-	// Admin PUT changing Classifier settings is allowed.
-	all, _ := srv.users.List()
-	var adminID string
-	for _, u := range all {
-		if u.Role == users.RoleAdmin {
-			adminID = u.ID
-			break
-		}
-	}
-	req = httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewReader(body))
-	authRequestAs(srv, req, adminID)
-	rec = httptest.NewRecorder()
-	protected(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("admin PUT with classifier change: status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 }

@@ -310,7 +310,7 @@ export function Filters() {
       <div className="security-layout">
         <div className="security-card">
           <div className="security-card-head">
-            <h3>Your rules</h3>
+            <h3>Mailbox Rules</h3>
             <button type="button" onClick={handleCreateRule} disabled={creatingRule}>
               + New rule
             </button>

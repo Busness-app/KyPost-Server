@@ -9,10 +9,10 @@ import (
 // further attempts on that key are refused until the cooldown has elapsed.
 //
 // One type for what were two byte-identical ones — sendAsVerificationCooldown
-// and classifierTestCooldown had the same field names, the same map type, the
+// and its sibling cooldowns had the same field names, the same map type, the
 // same tryConsume body, and differed only in which constant they compared
 // against. Only one of them had a sweep, which is the tell: a copy does not
-// inherit the fix made to its original. classifierTestCooldown's map was keyed
+// inherit the fix made to its original. The copy's map was keyed
 // on admin user ID so it never grew dangerously, but that was luck about the key
 // space rather than a decision, and nothing said so.
 //
@@ -76,18 +76,6 @@ func (c *cooldown) sweep(maxAge time.Duration) {
 // limit how often any single candidate address gets emailed, without penalizing
 // a user who is concurrently verifying a different address of their own.
 const sendAsVerificationCooldownFor = 5 * time.Minute
-
-// classifierTestCooldownFor bounds how often one admin may fire a
-// connectivity-test request against the shared classifier/Ollama instance:
-// handleClassifierTest builds its own ad-hoc classifier client rather than
-// reusing the server's shared instance (to always reflect the currently saved
-// config), which means it bypasses that shared client's own
-// serialization/pacing against live poller traffic. This cooldown is the narrow
-// substitute — it can't prevent a test request from racing a real
-// classification, but it does prevent an admin (or a compromised admin session)
-// from firing unlimited concurrent test requests that pile up unpaced against
-// the same backend. Keyed on the admin's user ID.
-const classifierTestCooldownFor = 10 * time.Second
 
 // notificationTestCooldownFor bounds how often one user may fire
 // POST /api/notifications/test.

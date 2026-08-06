@@ -28,22 +28,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.cfgMu.RLock()
 		cfg := s.cfg
 		s.cfgMu.RUnlock()
-		// The remote LLM API key is a live secret: never echo it back to
-		// any caller, admin included. Report only whether one is set, on
-		// this response copy — the live s.cfg is never mutated.
-		cfg.Classifier.APIKeySet = cfg.Classifier.APIKey != ""
-		cfg.Classifier.APIKey = ""
 		// GET is withAuth while PUT is withAdmin, and that asymmetry is
-		// load-bearing: NotificationsPage is a non-admin page and consumes this.
-		// But the whole document went out, so a non-admin learned
-		// classifier.baseUrl — frequently an internal-network host they have no
-		// other route to discover — and the exact redaction.patterns regexes
-		// stripped from mail before it reaches the model, which tells them
-		// precisely which PII shapes SURVIVE redaction. Neither is needed by any
-		// non-admin surface.
+		// load-bearing: non-admin settings surfaces consume this. But the whole
+		// document goes out, so a non-admin would learn the exact
+		// redaction.patterns regexes stripped from mail before it reaches the
+		// model — which tells them precisely which PII shapes SURVIVE
+		// redaction. No non-admin surface needs them.
 		if ac, ok := authFromContext(r); !ok || ac.Role != users.RoleAdmin {
-			cfg.Classifier.BaseURL = ""
-			cfg.Classifier.ClassifyPath = ""
 			cfg.Redaction.Patterns = nil
 		}
 		writeJSON(w, http.StatusOK, cfg)
@@ -54,30 +45,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.cfgMu.RLock()
-		// APIKeySet is a response-only computed field (see GET above) and is
-		// never meaningful in a PUT payload. Reset it unconditionally before
-		// the change-detection diff so a naive round-trip of a GET response
-		// (which echoes apiKeySet=true when a key is configured) doesn't
-		// spuriously register as a Classifier change.
-		next.Classifier.APIKeySet = false
-		// GET always zeroes APIKey on the wire, so a naive round-trip PUT
-		// will carry apiKey="". Preserve the live key in that case rather
-		// than wiping it, and do so before the diff so that round-trip
-		// isn't misread as the user clearing the key.
-		if next.Classifier.APIKey == "" {
-			next.Classifier.APIKey = s.cfg.Classifier.APIKey
-		}
-		classifierChanged := next.Classifier != s.cfg.Classifier
 		// VAPID key material is server-owned and json:"-" on the wire;
 		// carry it across the round-trip.
 		next.Notifications = s.cfg.Notifications
 		s.cfgMu.RUnlock()
-		// Remote LLM settings are admin-only. Reject (rather than silently
-		// drop) a non-admin change so a broken save is never masked.
-		if ac, ok := authFromContext(r); classifierChanged && (!ok || ac.Role != users.RoleAdmin) {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "remote llm settings require admin access"})
-			return
-		}
 		// Validate here, not only at process start. Values that fail a boot
 		// check were accepted, persisted and echoed back as live, and then took
 		// effect as a crash loop or a silently disabled control at the next
@@ -101,16 +72,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// Only when the classifier block actually changed. This endpoint is how
-		// every other setting on the instance is edited too, and an instance
-		// whose base URL predates this check must not have its timezone field
-		// held hostage by it — but nothing new gets in.
-		if classifierChanged && strings.TrimSpace(next.Classifier.BaseURL) != "" {
-			if err := classifier.ValidateBaseURL(next.Classifier.BaseURL); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-				return
-			}
-		}
 		if next.RateLimits.PerMinute <= 0 || next.RateLimits.PerHour <= 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "rate limits must be greater than zero"})
 			return
@@ -122,9 +83,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.cfgMu.Lock()
 		s.cfg = next
 		s.cfgMu.Unlock()
-		if classifierChanged {
-			classifier.ResetWarmupState()
-		}
 		if s.onConfigUpdated != nil {
 			s.onConfigUpdated(next)
 		}

@@ -478,49 +478,32 @@ func monitorHealth(ctx context.Context, logger *logging.Logger, healthSvc *healt
 	}
 }
 
-// newClassifierClient builds the one shared LLM client. config.yaml wins when it
-// points somewhere real; the OLLAMA_* env vars are the fallback so existing
-// env-only deployments keep working. The persisted legacy config default
-// ("http://127.0.0.1:3333" with path "/") predates the Ollama runtime and
-// is treated as unset.
+// newClassifierClient builds the one shared LLM client from the OLLAMA_* env
+// vars. The config-file endpoint ("Remote LLM") was removed: it let an operator
+// point classification at an arbitrary host from the web UI, which meant email
+// content and an API key could be redirected by anyone who reached that form.
 func newClassifierClient(cfg config.Config) *classifier.HTTPClient {
-	const legacyDeadDefault = "http://127.0.0.1:3333"
-
-	baseURL := strings.TrimSpace(cfg.Classifier.BaseURL)
-	fromConfig := baseURL != "" && baseURL != legacyDeadDefault
-	if !fromConfig {
-		baseURL = strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL"))
-		if baseURL == "" {
-			baseURL = strings.TrimSpace(os.Getenv("CLASSIFIER_BASE_URL"))
-		}
-		if baseURL == "" {
-			baseURL = "http://127.0.0.1:11434"
-		}
+	baseURL := strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL"))
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(os.Getenv("CLASSIFIER_BASE_URL"))
+	}
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:11434"
 	}
 
-	apiKey := strings.TrimSpace(cfg.Classifier.APIKey)
-	if apiKey == "" {
-		apiKey = strings.TrimSpace(os.Getenv("OLLAMA_API_KEY"))
-	}
+	apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY"))
 
-	classifyPath := ""
-	if fromConfig {
-		classifyPath = strings.TrimSpace(cfg.Classifier.ClassifyPath)
-	}
-	if classifyPath == "" || classifyPath == "/" {
-		classifyPath = strings.TrimSpace(os.Getenv("OLLAMA_GENERATE_PATH"))
-	}
+	classifyPath := strings.TrimSpace(os.Getenv("OLLAMA_GENERATE_PATH"))
 	if classifyPath == "" {
 		classifyPath = "/api/generate"
 	}
 
-	// Reported, not enforced. PUT /api/config refuses a base URL that fails
-	// this, so the only way to arrive here with one is a value persisted before
-	// that check existed or an env var the operator set directly — and neither
-	// is a reason to refuse to start a mail server. What it is a reason for is
-	// saying so out loud once per boot, because the failure mode this catches
-	// (email and the API key crossing the public internet in the clear) has no
-	// symptom otherwise: classification keeps working exactly as before.
+	// Reported, not enforced. The only way to arrive here with a failing base
+	// URL is now an env var the operator set directly, which is not a reason to
+	// refuse to start a mail server. What it is a reason for is saying so out
+	// loud once per boot, because the failure mode this catches (email and the
+	// API key crossing the public internet in the clear) has no symptom
+	// otherwise: classification keeps working exactly as before.
 	if err := classifier.ValidateBaseURL(baseURL); err != nil {
 		slog.Error("classifier endpoint fails the transport policy; email content is being sent to it anyway",
 			"error", err.Error())

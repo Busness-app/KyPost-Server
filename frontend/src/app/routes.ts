@@ -8,10 +8,15 @@ const REDIRECTS: Record<string, string> = {
   "/config": "/settings/mail",
   "/notifications": "/settings/notifications",
   "/security": "/settings/security",
-  "/rules": "/settings/mail#filters",
-  "/tuning": "/admin/automation#prompt-tuning",
-  "/users": "/admin/server#users",
-  "/logs": "/admin/diagnostics#logs"
+  // Panels are tabbed, so these point at a ?tab= rather than a #hash: the
+  // section only exists in the DOM while its tab is the active one.
+  "/rules": "/settings/mail?tab=rules",
+  "/tuning": "/settings/automation?tab=prompt-tuning",
+  "/users": "/admin/server?tab=users",
+  "/logs": "/admin/diagnostics?tab=logs",
+  // Automation shipped under /admin before it moved to Config. Prompt tuning
+  // is per-user, so an admin-only path was wrong for it.
+  "/admin/automation": "/settings/automation"
 };
 
 /** Every path this table retires, for wiring the Routes. */

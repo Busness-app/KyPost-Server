@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -84,18 +85,6 @@ func EnvInt(key string, fallback int) int {
 type Config struct {
 	Timezone string `yaml:"timezone" json:"timezone"`
 	LogLevel string `yaml:"logLevel" json:"logLevel"`
-
-	Classifier struct {
-		BaseURL      string `yaml:"baseUrl" json:"baseUrl"`
-		APIKey       string `yaml:"apiKey" json:"apiKey"`
-		ClassifyPath string `yaml:"classifyPath" json:"classifyPath"`
-		// APIKeySet is a computed, response-only indicator of whether an API
-		// key is configured. It is never persisted and never populated on
-		// the live in-memory config; handleConfig sets it on a response
-		// copy only, after zeroing APIKey, so the plaintext key is never
-		// echoed back to any caller.
-		APIKeySet bool `yaml:"-" json:"apiKeySet"`
-	} `yaml:"classifier" json:"classifier"`
 
 	Scan struct {
 		IntervalSeconds int `yaml:"intervalSeconds" json:"intervalSeconds"`
@@ -277,10 +266,6 @@ func Default() Config {
 		Timezone: "America/New_York",
 		LogLevel: "info",
 	}
-	// Empty means "fall back to the OLLAMA_* env vars"; see newClassifierClient.
-	cfg.Classifier.BaseURL = ""
-	cfg.Classifier.APIKey = ""
-	cfg.Classifier.ClassifyPath = ""
 	cfg.Scan.IntervalSeconds = 90
 	cfg.RateLimits.PerMinute = 10
 	cfg.RateLimits.PerHour = 20
@@ -338,7 +323,27 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, err
 	}
+	warnRetiredClassifier(b)
 	return cfg, nil
+}
+
+// warnRetiredClassifier says so out loud when config.yaml still carries the
+// retired `classifier:` block.
+//
+// yaml.Unmarshal ignores unknown keys, so an install that pointed
+// classification at a remote endpoint keeps starting cleanly — but it is now
+// classifying against the OLLAMA_* env vars instead, with no other symptom.
+// A silent change of where email content is sent deserves a line in the log.
+func warnRetiredClassifier(raw []byte) {
+	var probe struct {
+		Classifier map[string]any `yaml:"classifier"`
+	}
+	if err := yaml.Unmarshal(raw, &probe); err != nil || len(probe.Classifier) == 0 {
+		return
+	}
+	slog.Warn("ignoring the retired `classifier:` block in config.yaml; " +
+		"classification now uses the OLLAMA_* environment variables only. " +
+		"Remove the block to silence this warning.")
 }
 
 func Save(path string, cfg Config) error {

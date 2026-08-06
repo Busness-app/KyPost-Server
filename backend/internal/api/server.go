@@ -112,10 +112,9 @@ type Server struct {
 	// ~5us HMAC at 0.2 core-seconds: sixteen free requests emptied the bucket and
 	// denied sign-in to the whole instance, with no per-IP proxy rule able to
 	// restore it.
-	loginParamsLimiter     *ipRateLimiter
-	mfaPushLimiter         *mfaPushLimiter
-	sendAsCooldown         *cooldown
-	classifierTestCooldown *cooldown
+	loginParamsLimiter *ipRateLimiter
+	mfaPushLimiter     *mfaPushLimiter
+	sendAsCooldown     *cooldown
 	// notificationTestCooldown meters POST /api/notifications/test per user:
 	// the one endpoint an authenticated caller can use to trigger the serial
 	// push fanout on demand. See notificationTestCooldownFor.
@@ -318,7 +317,6 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		deviceRescan:             newIntervalGate(deviceRescanInterval),
 		mfaPushLimiter:           newMfaPushLimiter(),
 		sendAsCooldown:           newCooldown(sendAsVerificationCooldownFor),
-		classifierTestCooldown:   newCooldown(classifierTestCooldownFor),
 		notificationTestCooldown: newCooldown(notificationTestCooldownFor),
 		captchaVerifier:          captchaVerifier,
 		captchaProvider:          captchaProvider,
@@ -443,7 +441,6 @@ func (s *Server) routesAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/users/{id}/deactivate", s.withAdmin(s.handleUsersDeactivate))
 	mux.HandleFunc("POST /api/users/{id}/reactivate", s.withAdmin(s.handleUsersReactivate))
 	mux.HandleFunc("POST /api/users/{id}/clear-mfa", s.withAdmin(s.handleUsersClearMFA))
-	mux.HandleFunc("POST /api/classifier/test", s.withAdmin(s.handleClassifierTest))
 	mux.HandleFunc("GET /api/ollama/version", s.withAuth(s.handleOllamaVersion))
 	mux.HandleFunc("GET /api/server/version", s.withAdmin(s.handleServerVersion))
 	mux.HandleFunc("GET /api/tuning", s.withAuth(s.handleTuning))
@@ -949,9 +946,9 @@ var cooldownSweepInterval = 1 * time.Hour
 // StartCooldownSweeper runs sweep on every cooldown map for the process
 // lifetime, mirroring StartPickupSweeper. Call once after NewServer.
 //
-// Both instances, from one ticker. It used to sweep only sendAsCooldown, because
-// that was the instance whose bug prompted the sweep; classifierTestCooldown was
-// a copy of the same type made before the sweep existed and never got one.
+// Every instance, from one ticker. It used to sweep only sendAsCooldown,
+// because that was the instance whose bug prompted the sweep; the copies made
+// before the sweep existed never got one.
 func (s *Server) StartCooldownSweeper(ctx context.Context) {
 	ticker := time.NewTicker(cooldownSweepInterval)
 	defer ticker.Stop()
@@ -960,7 +957,7 @@ func (s *Server) StartCooldownSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, c := range []*cooldown{s.sendAsCooldown, s.classifierTestCooldown, s.notificationTestCooldown} {
+			for _, c := range []*cooldown{s.sendAsCooldown, s.notificationTestCooldown} {
 				c.sweep(cooldownSweepMaxAge)
 			}
 		}

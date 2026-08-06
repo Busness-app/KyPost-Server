@@ -18,14 +18,17 @@ const CONFIG_ITEMS: ReadonlyArray<SettingsNavItem> = [
   { to: "/settings/appearance", label: "Appearance" },
   { to: "/settings/mail", label: "Mail" },
   { to: "/settings/security", label: "Security" },
-  { to: "/settings/notifications", label: "Notifications" }
+  { to: "/settings/notifications", label: "Notifications" },
+  // Automation is Config, not Admin: prompt tuning is per-user (its endpoints
+  // are all withAuth, and every user has their own TUNING.md). The panel hides
+  // its admin-only Label Rules tab from non-admins.
+  { to: "/settings/automation", label: "Automation" }
 ];
 
 const STATUS_ITEM: SettingsNavItem = { to: "/settings/status", label: "Status" };
 
 const ADMIN_ITEMS: ReadonlyArray<SettingsNavItem> = [
   { to: "/admin/server", label: "Server" },
-  { to: "/admin/automation", label: "Automation" },
   { to: "/admin/diagnostics", label: "Diagnostics" }
 ];
 
