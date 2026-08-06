@@ -17,11 +17,18 @@ export type ChangePasswordFormProps = {
   username: string;
   /** The sign-in password carried into a forced reset, so the user need not retype it. Empty on Security. */
   initialCurrentPassword?: string;
+  /** The caller-specific reason shown under the heading — differs by entry point, so it is never hardcoded here. */
+  lede: string;
   /** Called after the password and re-wrapped PGP envelope have both committed. */
   onSuccess: () => void | Promise<void>;
 };
 
-export function ChangePasswordForm({ username, initialCurrentPassword, onSuccess }: ChangePasswordFormProps) {
+export function ChangePasswordForm({
+  username,
+  initialCurrentPassword,
+  lede,
+  onSuccess
+}: ChangePasswordFormProps) {
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [status, setStatus] = useState("");
@@ -99,7 +106,7 @@ export function ChangePasswordForm({ username, initialCurrentPassword, onSuccess
       <form onSubmit={submitPasswordChange} className="auth-form">
         <header className="auth-head">
           <h1 className="auth-title">Choose a new password</h1>
-          <p className="auth-lede">Your PGP key is re-encrypted under the new password automatically.</p>
+          <p className="auth-lede">{lede}</p>
         </header>
 
         <label className="auth-field">

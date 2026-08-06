@@ -161,3 +161,24 @@ it("shows the password form directly to a session that must change its password"
   expect(screen.getByLabelText("New password")).toBeTruthy();
   expect(screen.queryByText(/confirm it.s you/i)).toBeNull();
 });
+
+it("shows only one status region when a login that requires a password change is followed by an invalid new password", async () => {
+  // LoginPage's own `status` and ChangePasswordForm's local `status` are two
+  // independent pieces of state. Before this test's fix, a stale LoginPage
+  // status ("Password change required before using the app.", set by
+  // finishSignIn) stayed on screen underneath the form's own validation
+  // status, producing two simultaneous role="status" regions.
+  stubFetch(jsonResponse(200, { ok: true, mustChangePassword: true }));
+  const user = userEvent.setup();
+  renderLoginPage();
+
+  await submit(user);
+
+  await user.type(await screen.findByLabelText("New password"), "short");
+  await user.click(screen.getByRole("button", { name: /update password/i }));
+
+  const statusRegions = await screen.findAllByRole("status");
+  expect(statusRegions).toHaveLength(1);
+  expect(statusRegions[0].textContent).toContain("at least 14 characters");
+  expect(screen.queryByText(/password change required/i)).toBeNull();
+});

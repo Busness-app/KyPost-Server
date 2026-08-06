@@ -99,8 +99,12 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
 
   function finishSignIn(mustChangePassword: boolean) {
     if (mustChangePassword) {
+      // ChangePasswordForm's lede already says why the user landed here (see
+      // the `lede` prop below); a second, separately-lived status region
+      // saying much the same thing is what let LoginPage's own status
+      // outlive its usefulness once the form owned its own status state,
+      // producing two live role="status" regions at once. See notice below.
       setNeedsPasswordChange(true);
-      setStatus("Password change required before using the app.");
     } else {
       navigate("/read", { replace: true });
     }
@@ -427,6 +431,11 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
     <ChangePasswordForm
       username={username}
       initialCurrentPassword={password}
+      lede={
+        passwordMode
+          ? "Your PGP key is re-encrypted under the new password automatically."
+          : "This account needs a new password before you can go any further."
+      }
       onSuccess={async () => {
         await onAuthChanged();
         setNeedsPasswordChange(false);
@@ -436,7 +445,11 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
     />
   );
 
-  const notice = status ? (
+  // ChangePasswordForm owns its own status region once it is on screen — see
+  // finishSignIn above. Rendering LoginPage's own notice alongside it, from
+  // whatever `status` last held (a login error, an MFA rate-limit notice,
+  // …), would put two role="status" regions live at the same time.
+  const notice = status && !needsPasswordChange ? (
     <p className="auth-status" role="status">
       {status}
     </p>
