@@ -297,7 +297,7 @@ export function DeviceEnrollmentCard({
         <div className="sec-inline-form">
           <h4>Enroll {deviceLabel(ceremony.device)}</h4>
           <p className="sec-muted">
-            Start enrollment on that device and type the ten-character code it shows. The code is
+            Start enrollment on that device and type the fourteen-character code it shows. The code is
             good for two to four minutes depending on when the device generated it.
           </p>
           <label>
@@ -334,7 +334,7 @@ export function DeviceEnrollmentCard({
             </p>
           ) : failure === "malformed" ? (
             <p className="sec-muted">
-              The code is ten characters, shown as XXXXX-XXXXX. Type all of it.
+              The code is fourteen characters, shown as XXXXXXX-XXXXXXX. Type all of it.
             </p>
           ) : failure === "expired" ? (
             <p className="sec-muted">

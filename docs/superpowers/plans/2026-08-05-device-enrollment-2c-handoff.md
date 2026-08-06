@@ -1,3 +1,12 @@
+> **SUPERSEDED — 2026-08-05.** The maintained copy of this handoff lives in `kypost-android` at
+> `docs/superpowers/plans/2026-08-05-device-enrollment-2c-handoff.md`. That copy carries the
+> Hostile Location gate, which this one never had, and both wire-format breaks below. Read it
+> instead; this file is kept only so links to it do not rot.
+>
+> **The wire format on this page is out of date.** The code is now 14 Crockford characters (70
+> bits), not 10, and the envelope is `v2` with a length-prefixed AAD. Both changes came out of
+> security audit run-5.
+
 # 2C (Android) — device enrollment, the device half
 
 **Repo:** `kypost-android` (not this checkout). **Server + browser:** PR #80 on `kypost-server`.

@@ -196,8 +196,10 @@ is purely a browser↔device contract and belongs here rather than in any server
 
 - **Shared secret:** ECDH(ephemeral private, device public) → 32 bytes.
 - **Key derivation:** HKDF-SHA256, `ikm` = shared secret, `salt` = the device's raw 65-byte
-  public key, `info` = UTF-8 `"kypost-device-envelope/v1"`, length 32.
-- **AAD** = UTF-8 of `kypost-device-envelope/v1|<deviceId>|<pgpFingerprint>`, fingerprint
+  public key, `info` = UTF-8 `"kypost-device-envelope/v2"`, length 32.
+- **AAD** = `info || uint16BE(len(deviceId)) || deviceId || uint16BE(len(fp)) || fp`, all
+  UTF-8, `info` = `"kypost-device-envelope/v2"`. **Length-prefixed, not pipe-delimited**
+  (see the v2 note below). Fingerprint
   uppercase hex with no spaces.
 - **Plaintext** = the armored PGP private key, UTF-8.
 
@@ -232,7 +234,7 @@ checked separately, at import time, and has its own test.
 document is not. Android and Qt must assert the same string.
 
 A change to that snapshot is a wire-format break, not a test update. It must move the
-`v1` version tag in the envelope and the `kypost-device-envelope/v1` HKDF `info` and AAD
+`v2` version tag in the envelope and the `kypost-device-envelope/v2` HKDF `info` and AAD
 prefix with it, and it strands every already-enrolled device until it re-enrolls.
 
 ### Why the time bucket is the load-bearing part
