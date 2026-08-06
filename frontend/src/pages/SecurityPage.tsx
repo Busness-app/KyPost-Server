@@ -11,7 +11,7 @@ import {
 import { PgpUnlockDialog } from "../components/PgpUnlockDialog";
 import { countApprovers, joinDeviceRows } from "./security/deviceJoin";
 import { SECURITY_TABS, SECURITY_TAB_LABELS, resolveSecurityTab, type SecurityTab } from "./security/tabs";
-import type { MfaStatus } from "./security/types";
+import type { MfaStatus, TotpSetup } from "./security/types";
 import { SignIn } from "./security/sections/SignIn";
 import { Devices } from "./security/sections/Devices";
 import { MailKeys } from "./security/sections/MailKeys";
@@ -46,6 +46,12 @@ export function SecurityPage() {
   // "Password and code" pip must flip the instant codes are issued, not only
   // after the next status refetch.
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
+
+  // The in-progress TOTP enrollment secret (POST /api/mfa/totp/setup). Kept
+  // here, not in SignIn, so switching Security tabs mid-scan does not
+  // silently destroy the only secret the server will accept for this
+  // enrollment — see SignInProps for the full reasoning.
+  const [totpSetup, setTotpSetup] = useState<TotpSetup | null>(null);
 
   // The one-time secret that opens a just-downloaded PGP recovery backup.
   // Kept here, not in MailKeys, so switching Security tabs away and back
@@ -238,6 +244,8 @@ export function SecurityPage() {
             recoveryCodes={recoveryCodes}
             setRecoveryCodes={setRecoveryCodes}
             setMessage={setMessage}
+            setup={totpSetup}
+            setSetup={setTotpSetup}
           />
         ) : null}
 

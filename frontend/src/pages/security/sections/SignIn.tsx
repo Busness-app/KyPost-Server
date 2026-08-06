@@ -2,12 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { postJSON, toErrorMessage } from "../../../api/client";
 import { credentialFields, deriveCredential } from "../../../api/auth";
-import type { MfaStatus } from "../types";
-
-type SetupResponse = {
-  secret: string;
-  otpauthUri: string;
-};
+import type { MfaStatus, TotpSetup } from "../types";
 
 type ConfirmResponse = {
   ok: boolean;
@@ -31,6 +26,16 @@ export type SignInProps = {
   setRecoveryCodes?: (codes: string[]) => void;
   /** Surfaces a message on SecurityPage's shared, page-level status line. */
   setMessage?: (message: string) => void;
+  // The in-progress TOTP enrollment secret from POST /api/mfa/totp/setup —
+  // shown once (as a QR code and a manual-entry key) and never re-fetchable;
+  // asking again mints a DIFFERENT secret. Lifted to SecurityPage for the
+  // same reason recoveryCodes and MailKeys' recoverySecret are: the tab
+  // strip can unmount this component while the user is mid-scan, and a local
+  // copy would be silently destroyed by a trip to Devices and back, leaving
+  // an orphan entry in the user's authenticator app for a secret the server
+  // will no longer accept.
+  setup?: TotpSetup | null;
+  setSetup?: (setup: TotpSetup | null) => void;
 };
 
 export function SignIn({
@@ -38,12 +43,13 @@ export function SignIn({
   refreshStatus = noopAsync,
   recoveryCodes = [],
   setRecoveryCodes = noop,
-  setMessage = noop
+  setMessage = noop,
+  setup = null,
+  setSetup = noop
 }: SignInProps = {}) {
   const [busy, setBusy] = useState(false);
 
   // Enrollment state.
-  const [setup, setSetup] = useState<SetupResponse | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [confirmCode, setConfirmCode] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -85,7 +91,7 @@ export function SignIn({
     setRecoveryCodes([]);
     setSavedAcknowledged(false);
     try {
-      const res = await postJSON<SetupResponse>("/api/mfa/totp/setup", {});
+      const res = await postJSON<TotpSetup>("/api/mfa/totp/setup", {});
       setSetup(res);
       setConfirmCode("");
     } catch (err) {

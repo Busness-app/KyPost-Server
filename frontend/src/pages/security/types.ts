@@ -9,3 +9,12 @@ export type MfaStatus = {
   pushMfaEnabled: boolean;
   approverDevices: ApproverDevice[];
 };
+
+// The response from POST /api/mfa/totp/setup: a freshly minted secret the
+// server will accept exactly once, for the enrollment that scans it. Shared
+// with SecurityPage because it has to be lifted out of SignIn — see SignIn's
+// props for why.
+export type TotpSetup = {
+  secret: string;
+  otpauthUri: string;
+};
