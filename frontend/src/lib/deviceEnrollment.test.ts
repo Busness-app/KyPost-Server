@@ -145,17 +145,21 @@ describe("buildEnvelopeAad", () => {
 });
 
 describe("formatEnrollmentCode", () => {
-  it("groups as XXXXXXX-XXXXXXX", () => {
-    expect(formatEnrollmentCode("ABCDEFGHJKMNPQ")).toBe("ABCDEFG-HJKMNPQ");
+  it("groups as XXXX-XXX-XXXX-XXX", () => {
+    expect(formatEnrollmentCode("ABCDEFGHJKMNPQ")).toBe("ABCD-EFG-HJKM-NPQ");
   });
 
-  // The grouping is derived from CODE_LENGTH, not hardcoded. Hardcoded slices
-  // silently TRUNCATED the code when the width grew -- and since the short code
-  // is a prefix of the long one, the truncated form looked entirely plausible
-  // while dropping the characters carrying the extra bits.
+  // The grouping must not drop characters. `.replace("-", "")` removed only the FIRST hyphen --
+  // fine when there was one, wrong now there are three -- so this strips every separator the same
+  // way normalizeEnrollmentCode does.
   it("never drops characters", async () => {
     const code = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET);
-    expect(formatEnrollmentCode(code).replace("-", "")).toBe(code);
+    expect(formatEnrollmentCode(code).split("-").join("")).toBe(code);
+  });
+
+  // The phone and the browser must show the same grouping of the same value.
+  it("matches the Android client on the normative vector", () => {
+    expect(formatEnrollmentCode("5R9K6FWA18A8YP")).toBe("5R9K-6FW-A18A-8YP");
   });
 });
 
