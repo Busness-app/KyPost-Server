@@ -20,7 +20,7 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 - Multi-factor authentication: TOTP authenticator apps, one-time recovery codes, and push-approval sign-in
 - CAPTCHA on login, **self-hosted proof-of-work by default** (also Turnstile or Friendly Captcha; `CAPTCHA_PROVIDER=none` turns it off). It works alongside a 3-strikes/15-minute account lockout, a looser per-IP lockout, and an instance-wide login rate limit. Note that proof-of-work needs a secure context in the browser — read the CAPTCHA notes in `.env.example` if you serve over plain HTTP on a LAN.
 - Browser push notifications for each user, for all mail or for keyword matches only. KyPost also supports native push pairing for mobile apps.
-- Config page for IMAP, SMTP, model authentication, tuning, logs, health, and decisions
+- Settings grouped into panels: Appearance, Mail (IMAP/SMTP, send-as, contact sync, filters), Security, Notifications and Status — plus an Admin group for server runtime, automation and diagnostics
 - A dozen theme presets
 
 ## Architecture
@@ -638,7 +638,7 @@ Runtime:
 
 Config and data:
 
-- `GET|PUT /api/config` (a PUT of Remote LLM fields is admin only)
+- `GET|PUT /api/config` (GET omits `redaction.patterns` for non-admins; PUT is admin only)
 - `GET /api/labels`
 - `GET /api/decisions` (the caller's own decisions)
 - `GET|PUT /api/tuning` (the caller's own tuning prompt)

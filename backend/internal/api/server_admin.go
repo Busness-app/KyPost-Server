@@ -1,14 +1,11 @@
-// Admin-only operations: log tail/list, first-run setup state, manual restart
-// and poll triggers, and the classifier connectivity test.
+// Admin-only operations: log tail/list, first-run setup state, and manual
+// restart and poll triggers.
 package api
 
 import (
 	"bufio"
-	"context"
-	"encoding/json"
 	"errors"
 	"io"
-	"kypost-server/backend/internal/adapters/classifier"
 	"kypost-server/backend/internal/config"
 	"net/http"
 	"os"
@@ -94,109 +91,6 @@ func (s *Server) handlePollNow(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("manual mail poll requested")
 	s.poller.TriggerNow()
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
-}
-
-func (s *Server) handleClassifierTest(w http.ResponseWriter, r *http.Request) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-	// This handler deliberately builds its own ad-hoc classifier client (see
-	// below) rather than reusing the server's shared, paced instance, so this
-	// cooldown is the substitute guard against an admin (or a compromised
-	// admin session) firing unpaced concurrent requests at the shared
-	// classifier/Ollama backend.
-	if allowed, retryAfter := s.classifierTestCooldown.tryConsume(ac.UserID); !allowed {
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{
-			"error":             "classifier test already in progress or recently run; try again shortly",
-			"retryAfterSeconds": int(retryAfter.Seconds()) + 1,
-		})
-		return
-	}
-
-	var req struct {
-		Prompt string `json:"prompt"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
-
-	baseURL := strings.TrimSpace(cfg.Classifier.BaseURL)
-	if baseURL == "" {
-		baseURL = strings.TrimSpace(os.Getenv("CLASSIFIER_BASE_URL"))
-	}
-	if baseURL == "" {
-		http.Error(w, "classifier base url is not configured", http.StatusBadRequest)
-		return
-	}
-	// Same policy the config PUT enforces. This handler builds its own client
-	// from whatever is currently stored, so a base URL persisted before that
-	// check existed would otherwise still get a live request sent to it —
-	// carrying the API key, in the clear, on an admin's button press.
-	if err := classifier.ValidateBaseURL(baseURL); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
-	}
-
-	path := strings.TrimSpace(cfg.Classifier.ClassifyPath)
-	if path == "" {
-		path = "/"
-	}
-	apiKey := strings.TrimSpace(cfg.Classifier.APIKey)
-	if apiKey == "" {
-		apiKey = strings.TrimSpace(os.Getenv("CLASSIFIER_API_KEY"))
-	}
-
-	prompt := strings.TrimSpace(req.Prompt)
-	if prompt == "" {
-		prompt = "Email Address: test@example.com  Subject Line: Classifier connectivity test Return only the label Updates"
-	}
-
-	allowed := cfg.Labels.Allowlist
-	if len(allowed) == 0 {
-		allowed = []string{"Questionable", "Important"}
-	}
-
-	tuning := classifier.LoadTuningText()
-	client := classifier.NewHTTPClient(baseURL, apiKey, path, tuning, 120*time.Second)
-	defer client.Close()
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
-	defer cancel()
-
-	result, err := client.Classify(ctx, allowed, "", "", prompt, tuning)
-	if err != nil {
-		// The model answered but off-allowlist: that is a successful round
-		// trip as far as connectivity goes, which is all this endpoint
-		// tests. Show the operator what it actually said.
-		var noLabel *classifier.NoAllowedLabelError
-		if errors.As(err, &noLabel) {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"ok":             true,
-				"response":       noLabel.Output,
-				"matchedAllowed": false,
-				"baseUrl":        baseURL,
-				"path":           path,
-				"allowedLabels":  allowed,
-			})
-			return
-		}
-		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             true,
-		"response":       result,
-		"matchedAllowed": true,
-		"baseUrl":        baseURL,
-		"path":           path,
-	})
 }
 
 // maxLogLineBytes is how much of a single log line tailLines will return.

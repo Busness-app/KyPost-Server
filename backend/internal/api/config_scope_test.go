@@ -23,8 +23,6 @@ import (
 func TestConfigGETIsScopedForNonAdmins(t *testing.T) {
 	srv := newTestServer(t)
 	srv.cfgMu.Lock()
-	srv.cfg.Classifier.BaseURL = "http://ollama.internal:11434"
-	srv.cfg.Classifier.ClassifyPath = "/api/generate"
 	srv.cfg.Redaction.Patterns = []config.Pattern{{Name: "ssn", Regex: `\d{3}-\d{2}-\d{4}`}}
 	srv.cfg.Labels.Allowlist = []string{"Important"}
 	srv.cfgMu.Unlock()
@@ -51,10 +49,6 @@ func TestConfigGETIsScopedForNonAdmins(t *testing.T) {
 	}
 
 	nonAdmin := get(member.ID)
-	classifier, _ := nonAdmin["classifier"].(map[string]any)
-	if classifier["baseUrl"] != "" {
-		t.Fatalf("a non-admin was told the classifier host: %v", classifier["baseUrl"])
-	}
 	redaction, _ := nonAdmin["redaction"].(map[string]any)
 	if patterns, ok := redaction["patterns"].([]any); ok && len(patterns) > 0 {
 		t.Fatalf("a non-admin was told which PII shapes are redacted, i.e. which ones survive: %v", patterns)
@@ -66,17 +60,9 @@ func TestConfigGETIsScopedForNonAdmins(t *testing.T) {
 	}
 
 	admin := get(srv.mustBootstrapUserID(t))
-	adminClassifier, _ := admin["classifier"].(map[string]any)
-	if adminClassifier["baseUrl"] != "http://ollama.internal:11434" {
-		t.Fatalf("an admin lost the classifier host they administer: %v", adminClassifier["baseUrl"])
-	}
 	adminRedaction, _ := admin["redaction"].(map[string]any)
 	if patterns, _ := adminRedaction["patterns"].([]any); len(patterns) != 1 {
 		t.Fatalf("an admin lost the redaction patterns they administer: %v", adminRedaction)
-	}
-	// And the live secret is still never echoed, to anyone.
-	if adminClassifier["apiKey"] != "" {
-		t.Fatal("the classifier API key was echoed back")
 	}
 }
 
