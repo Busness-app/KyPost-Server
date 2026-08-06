@@ -144,3 +144,20 @@ describe("login failure surfaces the server's own message", () => {
     );
   });
 });
+
+it("shows the password form directly to a session that must change its password", () => {
+  render(
+    <MemoryRouter initialEntries={["/password"]}>
+      <LoginPage
+        auth={{ authenticated: true, userId: "u1", username: "gwen", mustChangePassword: true }}
+        onAuthChanged={async () => {}}
+        mode="password"
+      />
+    </MemoryRouter>
+  );
+
+  // No reauth prompt: a user being forced to fix their credential cannot be
+  // asked to re-authenticate with the credential they are being made to change.
+  expect(screen.getByLabelText("New password")).toBeTruthy();
+  expect(screen.queryByText(/confirm it.s you/i)).toBeNull();
+});
