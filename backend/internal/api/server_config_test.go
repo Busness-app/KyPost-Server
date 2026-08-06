@@ -60,10 +60,6 @@ func TestConfigPutRequiresAdmin(t *testing.T) {
 	}
 }
 
-
-
-
-
 // TestChangePasswordRevokesOtherSessions is a regression test: changing a
 // password used to leave every other live session for the account (e.g. a
 // stolen cookie) valid for up to the remaining 24h sliding-expiry window.

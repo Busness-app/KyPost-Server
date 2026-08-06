@@ -112,9 +112,9 @@ type Server struct {
 	// ~5us HMAC at 0.2 core-seconds: sixteen free requests emptied the bucket and
 	// denied sign-in to the whole instance, with no per-IP proxy rule able to
 	// restore it.
-	loginParamsLimiter     *ipRateLimiter
-	mfaPushLimiter         *mfaPushLimiter
-	sendAsCooldown         *cooldown
+	loginParamsLimiter *ipRateLimiter
+	mfaPushLimiter     *mfaPushLimiter
+	sendAsCooldown     *cooldown
 	// notificationTestCooldown meters POST /api/notifications/test per user:
 	// the one endpoint an authenticated caller can use to trigger the serial
 	// push fanout on demand. See notificationTestCooldownFor.

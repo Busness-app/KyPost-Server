@@ -211,4 +211,3 @@ func TestLastActiveAdminIsProtected(t *testing.T) {
 		t.Fatalf("deactivate with second admin present: status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 }
-
