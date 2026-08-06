@@ -2,6 +2,7 @@ import { useState } from "react";
 import { deleteJSON, postJSON, putJSON, toErrorMessage } from "../../../api/client";
 import type { NativeDeliveryMode } from "../../../api/devices";
 import { DeviceEnrollmentCard } from "../../../components/DeviceEnrollmentCard";
+import { CardDavAccess } from "../../../settings/sections/CardDavAccess";
 import { DeviceList } from "../DeviceList";
 import { PairingPanel } from "../PairingPanel";
 import type { DeviceRow } from "../deviceJoin";
@@ -286,6 +287,14 @@ export function Devices({
         unlocked={pgpUnlocked}
         onRequestUnlock={() => setUnlockOpen(true)}
       />
+
+      {/* An app password is another thing connected to the account, so it
+          belongs with the devices rather than in mail connectivity — and
+          issuing one is a credential operation, which is what puts it behind
+          this page's reauth gate. */}
+      <div id="carddav-access">
+        <CardDavAccess />
+      </div>
     </>
   );
 }

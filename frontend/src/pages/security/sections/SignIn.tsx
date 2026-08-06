@@ -3,6 +3,7 @@ import QRCode from "qrcode";
 import { postJSON, toErrorMessage } from "../../../api/client";
 import { credentialFields, deriveCredential } from "../../../api/auth";
 import type { MfaStatus, TotpSetup } from "../types";
+import { Password } from "./Password";
 
 type ConfirmResponse = {
   ok: boolean;
@@ -189,7 +190,12 @@ export function SignIn({
   const totpOn = showRecoveryPanel || Boolean(status?.totpEnabled);
 
   return (
-    <div className={`sec-card ${totpOn ? "sec-card-on" : ""}`}>
+    <>
+      {/* Credentials before factors: "what I know" reads ahead of "what I
+          also have" for someone here to lock the account down. */}
+      <Password />
+
+      <div className={`sec-card ${totpOn ? "sec-card-on" : ""}`}>
       <div className="sec-card-head">
         <p className="sec-eyebrow">Sign-in</p>
         <h3>Authenticator app</h3>
@@ -344,6 +350,7 @@ export function SignIn({
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }

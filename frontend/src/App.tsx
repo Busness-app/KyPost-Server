@@ -1286,6 +1286,14 @@ export function App() {
           <Route path="/settings/appearance" element={protect(<AppearancePanel />)} />
           <Route path="/settings/mail" element={protect(<MailPanel />)} />
           <Route path="/settings/notifications" element={protect(<NotificationsPanel />)} />
+          <Route
+            path="/settings/security"
+            element={protect(
+              <ReauthGate what="your security settings">
+                <SecurityPage />
+              </ReauthGate>
+            )}
+          />
           <Route path="/contacts" element={protect(<ContactsPage />)} />
           <Route path="/tuning" element={protect(<TuningPage />)} />
           <Route path="/users" element={protect(<UsersPage />, true)} />
