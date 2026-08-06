@@ -280,7 +280,7 @@ Some facts apply to both modes, and they are worth a plain statement:
   them in both modes. KyPost protects the subject inside the encrypted part when
   it can, but the outer header remains.
 - **Mobile push notifications are generic by default** for this reason. See
-  Settings → Configuration → Notifications.
+  Settings → Notifications.
 - **A recipient without a key can get a one-time pickup link.** KyPost stores
   that message on this server and encrypts it with the server's own key. The
   message stays until the recipient reads it or it expires. It is not end-to-end
@@ -306,10 +306,11 @@ Some facts apply to both modes, and they are worth a plain statement:
 
 Accounts live in `/kypost/config/users.json`. The roles are `admin` and `user`.
 
-- Admins manage users from the Manage Users page. They create users, change
-  roles, reset passwords, and deactivate or reactivate accounts. Admins also
-  view system logs, edit global settings (Application, Labels, Remote LLM), and
-  start a health repair.
+- Admins manage users from Settings, under Admin. The Server panel creates
+  users, changes roles, resets passwords, and deactivates or reactivates
+  accounts, alongside runtime settings, updates and verified mail domains.
+  Automation holds the label rules and prompt tuning; Diagnostics holds the
+  full health view, the system logs and health repair.
 - Users connect their own IMAP and SMTP account. They read and label their own
   mail, pair their own devices, set their own notification preferences, and tune
   their own prompt.

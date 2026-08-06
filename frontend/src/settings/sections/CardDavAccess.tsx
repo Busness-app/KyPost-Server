@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { toErrorMessage } from "../../api/client";
 import { generateDAVPassword, getDAVPasswordStatus, revokeDAVPassword, type DAVPasswordStatus } from "../../api/contacts";
 import { useAuth } from "../../auth";
+import { holdForSecret, releaseSecretHold } from "../../lib/secretHold";
 
 type CardDavAccessProps = {
   // Optional: when a caller (ConfigPage) has a page-level status banner,
@@ -33,12 +34,26 @@ export function CardDavAccess({ setConfigStatus, onRevealedPasswordChange }: Car
   useEffect(() => {
     const blocking = revealedPassword !== "" && !passwordAcknowledged;
     onRevealedPasswordChange?.(blocking);
+    // The caller's guard only covers its own tab strip. A sidebar link is a
+    // route change, which unmounts this component and destroys the password
+    // without ever going through that guard — so hold navigation here too,
+    // at the source, where it applies wherever this section is rendered.
+    if (blocking) {
+      holdForSecret(
+        "Copy or dismiss the generated CardDAV password before leaving — it will not be shown again."
+      );
+    } else {
+      releaseSecretHold();
+    }
     // If this component unmounts (e.g. the settings sidebar's "Configuration"
     // link re-navigates to the same route while ConfigPage stays mounted)
     // while a password is still on screen and un-acknowledged, the caller
     // would otherwise be left with a guard that can never clear — there is
     // no one left to call onRevealedPasswordChange(false). Un-arm it here.
-    return () => onRevealedPasswordChange?.(false);
+    return () => {
+      onRevealedPasswordChange?.(false);
+      releaseSecretHold();
+    };
   }, [revealedPassword, passwordAcknowledged, onRevealedPasswordChange]);
 
   async function refreshDavStatus() {

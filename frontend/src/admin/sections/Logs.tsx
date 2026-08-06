@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { getJSON } from "../api/client";
+import { getJSON } from "../../api/client";
 
 const LINE_OPTIONS = [50, 100, 200, 500, 1000];
 const REFRESH_OPTIONS = [
@@ -120,7 +120,7 @@ function LogViewer({ filename }: { filename: string }) {
   );
 }
 
-export function LogsPage() {
+export function Logs() {
   const [files, setFiles]   = useState<string[]>([]);
   const [active, setActive] = useState<string>("app.log");
 
@@ -137,8 +137,7 @@ export function LogsPage() {
   }, []);
 
   return (
-    <section className="panel logs-page-panel">
-      <h2 style={{ marginTop: 0 }}>Logs</h2>
+    <>
 
       <div style={{ display: "flex", gap: 0, flexWrap: "wrap", borderBottom: "1px solid var(--line)", marginBottom: "1rem" }}>
         {files.map((f) => (
@@ -164,6 +163,6 @@ export function LogsPage() {
       </div>
 
       {active && <LogViewer key={active} filename={active} />}
-    </section>
+    </>
   );
 }

@@ -2,16 +2,7 @@ import { useEffect, useState } from "react";
 import { deleteJSON, getJSON, postJSON, toErrorMessage } from "../../api/client";
 import type { IMAPConfigStatus, IMAPForm } from "../../pages/config/settings";
 
-type EmailServerProps = {
-  // labelsFromImap is also read by the Labels tab (ConfigPage, admin-only),
-  // so it stays owned by ConfigPage rather than being duplicated here — this
-  // callback just asks it to refresh after a save, exactly like the
-  // pre-extraction code did. Optional so a caller with no such shared state
-  // can still render this with zero props.
-  refreshLabels?: () => Promise<void>;
-};
-
-export function EmailServer({ refreshLabels }: EmailServerProps = {}) {
+export function EmailServer() {
   const [imapStatus, setImapStatus] = useState<IMAPConfigStatus | null>(null);
   const [imapForm, setImapForm] = useState<IMAPForm>({
     host: "",
@@ -53,7 +44,6 @@ export function EmailServer({ refreshLabels }: EmailServerProps = {}) {
       setImapStatus(result);
       setImapForm((prev) => ({ ...prev, password: "" }));
       setImapMessage("IMAP configuration saved.");
-      await refreshLabels?.();
     } catch (error: unknown) {
       const message = toErrorMessage(error, "unknown error");
       setImapMessage(`Failed to save IMAP config: ${message}`);

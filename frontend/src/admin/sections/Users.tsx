@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { toErrorMessage } from "../api/client";
+import { toErrorMessage } from "../../api/client";
 import {
   clearUserMFA,
   createUser,
@@ -9,8 +9,8 @@ import {
   resetUserPassword,
   setUserRole,
   type ManagedUser
-} from "../api/users";
-import { useAuth, type Role } from "../auth";
+} from "../../api/users";
+import { useAuth, type Role } from "../../auth";
 
 function formatJoined(value: string): string {
   const when = new Date(value);
@@ -20,7 +20,7 @@ function formatJoined(value: string): string {
   return when.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-export function UsersPage() {
+export function Users() {
   const auth = useAuth();
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
@@ -155,10 +155,9 @@ export function UsersPage() {
   }
 
   return (
-    <section className="panel users-page">
+    <>
       <header className="users-header">
         <div>
-          <h2>Manage Users</h2>
           <p>
             Create accounts, adjust roles, reset passwords, and deactivate users. Each user connects their own
             mailbox and manages their own devices and tuning.
@@ -319,6 +318,6 @@ export function UsersPage() {
       </div>
 
       {status ? <p className={statusTone}>{status}</p> : null}
-    </section>
+    </>
   );
 }

@@ -1,4 +1,4 @@
-import { type DragEvent, type ReactElement, useEffect, useRef, useState } from "react";
+import { type DragEvent, type MouseEvent as ReactMouseEvent, type ReactElement, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import Quill from "quill";
 import "quill/dist/quill.snow.css";
@@ -16,20 +16,23 @@ import { sealPickup } from "./lib/pickupCrypto";
 import { createSealedPickup, resolveRecipientKeys, sendClientEncryptedMail } from "./api/pgp";
 import { PgpUnlockDialog } from "./components/PgpUnlockDialog";
 import type { RecipientFieldState, RecipientToken } from "./lib/recipients";
-import { ConfigPage } from "./pages/ConfigPage";
 import { ContactsPage } from "./pages/ContactsPage";
-import { HealthPage } from "./pages/HealthPage";
 import { LoginPage } from "./pages/LoginPage";
-import { LogsPage } from "./pages/LogsPage";
 import { ReadPage } from "./pages/ReadPage";
-import { RulesPage } from "./pages/RulesPage";
+import { AppearancePanel } from "./pages/settings/AppearancePanel";
+import { MailPanel } from "./pages/settings/MailPanel";
+import { NotificationsPanel } from "./pages/settings/NotificationsPanel";
+import { StatusPanel } from "./pages/settings/StatusPanel";
+import { ServerPanel } from "./pages/admin/ServerPanel";
+import { AutomationPanel } from "./pages/admin/AutomationPanel";
+import { DiagnosticsPanel } from "./pages/admin/DiagnosticsPanel";
 import { SecurityPage } from "./pages/SecurityPage";
-import { TuningPage } from "./pages/TuningPage";
-import { UsersPage } from "./pages/UsersPage";
 import { ReauthGate, clearReauth } from "./components/ReauthGate";
 import agplLicenseText from "./agpl-3.0.txt?raw";
 
-import { APP_VERSION, settingsNavItems } from "./app/navigation";
+import { APP_VERSION, visibleSettingsGroups } from "./app/navigation";
+import { LEGACY_SETTINGS_PATHS, legacySettingsRedirect } from "./app/routes";
+import { subscribeSecretHold } from "./lib/secretHold";
 import type {
   BeforeInstallPromptEvent,
   InboxFolder,
@@ -120,6 +123,35 @@ export function App() {
   const licenseDialogRef = useRef<HTMLDialogElement | null>(null);
   const currentMailbox = new URLSearchParams(location.search).get("mailbox")?.trim() ?? "";
   const onReadPage = location.pathname === "/read";
+
+  // Navigation hold. A section showing a value the server issues once and
+  // cannot reissue (a generated CardDAV app password) registers a hold; any
+  // sidebar link would unmount it and destroy the only copy. The tabbed pages
+  // guard their own tab strips, but a link is a route change and never reaches
+  // that guard — this is the other half of the same protection.
+  const [secretHold, setSecretHold] = useState("");
+  const [navBlockedNotice, setNavBlockedNotice] = useState("");
+  useEffect(() => subscribeSecretHold(setSecretHold), []);
+  useEffect(() => {
+    if (!secretHold) {
+      setNavBlockedNotice("");
+    }
+  }, [secretHold]);
+
+  function guardNavigation(event: ReactMouseEvent<HTMLElement>) {
+    if (!secretHold) {
+      return;
+    }
+    // Links only. The buttons inside this nav (Settings disclosure, Install
+    // PWA, Logout) either do not navigate or are a deliberate exit, and
+    // trapping someone signing out would be worse than the loss it prevents.
+    if (!(event.target as HTMLElement).closest("a")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setNavBlockedNotice(secretHold);
+  }
 
   async function refreshAuth() {
     try {
@@ -1032,7 +1064,12 @@ export function App() {
         <button type="button" className="new-email-button" onClick={openComposeWindow}>
           New Email
         </button>
-        <nav>
+        <nav onClickCapture={guardNavigation}>
+          {navBlockedNotice ? (
+            <p className="notice notice-error" role="alert">
+              {navBlockedNotice}
+            </p>
+          ) : null}
           <p className="sidebar-section-label">Mailboxes</p>
           <div className="mobile-quick-nav" aria-label="Mobile mailboxes">
             <Link className={onReadPage && currentMailbox === "" ? "sidebar-link-active" : ""} to="/read">Inbox</Link>
@@ -1213,16 +1250,15 @@ export function App() {
 
           {settingsOpen ? (
             <div className="nav-group">
-              {settingsNavItems
-                .filter(({ adminOnly }) => !adminOnly || isAdmin)
-                .map(({ to, label }) => (
-                <Link
-                  key={to}
-                  className={(to === "/login" && auth.authenticated ? "/password" : to) === location.pathname ? "sidebar-link-active" : ""}
-                  to={to === "/login" && auth.authenticated ? "/password" : to}
-                >
-                  {to === "/login" && auth.authenticated ? "Change Password" : label}
-                </Link>
+              {visibleSettingsGroups(isAdmin).map((group) => (
+                <div key={group.heading ?? "settings"} className="nav-subgroup">
+                  {group.heading ? <p className="nav-subheading">{group.heading}</p> : null}
+                  {group.items.map(({ to, label }) => (
+                    <Link key={to} className={to === location.pathname ? "sidebar-link-active" : ""} to={to}>
+                      {label}
+                    </Link>
+                  ))}
+                </div>
               ))}
               {!pwaInstalled ? (
                 <button
@@ -1259,29 +1295,44 @@ export function App() {
           <Route path="/login" element={<LoginPage auth={auth} onAuthChanged={refreshAuth} />} />
           <Route path="/password" element={protect(<LoginPage auth={auth} onAuthChanged={refreshAuth} mode="password" />)} />
               <Route path="/read" element={protect(<ReadPage onOpenDraft={openDraftInCompose} />)} />
-          <Route path="/health" element={protect(<HealthPage />)} />
-          <Route path="/config" element={protect(<ConfigPage />)} />
-          {/* Retired: notification settings became a Configuration tab and
-              pairing became Security's Devices tab. Keep this redirect — service
-              workers are cached in browsers and installed PWAs, so an old one
-              can still send a notification tap here long after the deploy. */}
+          {/* Retired settings paths. They redirect rather than 404: they appear
+              in docs and bookmarks, and in service workers cached inside
+              installed PWAs, which can send a notification tap here long after
+              the deploy. /security carries ?tab=, which Navigate would drop. */}
+          {LEGACY_SETTINGS_PATHS.map((path) => (
+            <Route
+              key={path}
+              path={path}
+              element={
+                <Navigate
+                  to={`${legacySettingsRedirect(path, isAdmin) ?? "/read"}${
+                    path === "/security" ? location.search : ""
+                  }`}
+                  replace
+                />
+              }
+            />
+          ))}
+          {/* The new panels. Both these and the old routes above resolve until
+              the retired paths become redirects. */}
+          <Route path="/settings/appearance" element={protect(<AppearancePanel />)} />
+          <Route path="/settings/mail" element={protect(<MailPanel />)} />
+          <Route path="/settings/status" element={protect(<StatusPanel />)} />
+          <Route path="/settings/notifications" element={protect(<NotificationsPanel />)} />
           <Route
-            path="/notifications"
-            element={<Navigate to="/config?tab=notifications" replace />}
-          />
-          <Route
-            path="/security"
+            path="/settings/security"
             element={protect(
               <ReauthGate what="your security settings">
                 <SecurityPage />
               </ReauthGate>
             )}
           />
-          <Route path="/rules" element={protect(<RulesPage />)} />
           <Route path="/contacts" element={protect(<ContactsPage />)} />
-          <Route path="/tuning" element={protect(<TuningPage />)} />
-          <Route path="/users" element={protect(<UsersPage />, true)} />
-          <Route path="/logs" element={protect(<LogsPage />, true)} />
+          {/* The admin panels. protect(..., true) redirects non-admins to
+              /read; the server enforces every one of these regardless. */}
+          <Route path="/admin/server" element={protect(<ServerPanel />, true)} />
+          <Route path="/admin/automation" element={protect(<AutomationPanel />, true)} />
+          <Route path="/admin/diagnostics" element={protect(<DiagnosticsPanel />, true)} />
         </Routes>
       </main>
       <dialog

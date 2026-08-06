@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getJSON, toErrorMessage } from "../api/client";
+import { getJSON, toErrorMessage } from "../../api/client";
 import {
   type Action,
   type Condition,
@@ -14,9 +14,9 @@ import {
   reorderRules,
   runRulesNow,
   updateRule
-} from "../api/rules";
-import { RulesHelpModal } from "../components/RulesHelpModal";
-import { ACTION_TYPES, ruleActionsError } from "../lib/ruleActions";
+} from "../../api/rules";
+import { RulesHelpModal } from "../../components/RulesHelpModal";
+import { ACTION_TYPES, ruleActionsError } from "../../lib/ruleActions";
 
 const FIELD_OPTIONS = ["from", "to", "cc", "bcc", "subject", "body", "keyword"] as const;
 const COMPARATOR_OPTIONS = ["contains", "is", "matches", "regex"] as const;
@@ -79,7 +79,7 @@ function blankRule(): Partial<Rule> {
   };
 }
 
-export function RulesPage() {
+export function Filters() {
   const [rules, setRules] = useState<Rule[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -295,9 +295,8 @@ export function RulesPage() {
   }
 
   return (
-    <section className="panel security-page">
+    <>
       <header className="security-header">
-        <h2>Filter Rules</h2>
         <p>Automatically tag, move, or act on incoming mail — rules run on every new message and can also be run on demand against existing mail.</p>
         <button type="button" className="contacts-action" onClick={() => setHelpOpen(true)}>
           How to write rules
@@ -531,6 +530,6 @@ export function RulesPage() {
           </div>
         </div>
       </div>
-    </section>
+    </>
   );
 }

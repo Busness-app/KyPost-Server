@@ -1,7 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { getJSON, postJSON, toErrorMessage } from "../api/client";
-import { useAuth } from "../auth";
-import { fetchHealth } from "./health/fetchHealth";
+import { getJSON, postJSON, toErrorMessage } from "../../api/client";
+import { fetchHealth } from "../../pages/health/fetchHealth";
+
+export type SystemHealthProps = {
+  /**
+   * Renders the admin-only controls: "Poll mail now" and the client address.
+   * Presentational only — the server enforces both regardless of what this says.
+   */
+  full?: boolean;
+  /**
+   * The panel's own title. It lives inside `.health-head`, which is a
+   * space-between flex row, so it cannot simply be dropped: without it the
+   * controls collapse to the left.
+   */
+  heading?: string;
+};
 
 // These types are the contract with /api/health and /api/status, and both
 // endpoints send more than this page used to read. The dropped fields were not
@@ -157,8 +170,7 @@ function formatBytes(bytes: number): string {
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 
-export function HealthPage() {
-  const auth = useAuth();
+export function SystemHealth({ full = false, heading = "Health Dashboard" }: SystemHealthProps = {}) {
   const [health, setHealth] = useState<Health | null>(null);
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null);
   const [loading, setLoading] = useState(false);
@@ -256,9 +268,9 @@ export function HealthPage() {
   );
 
   return (
-    <section className="panel health-page-panel">
+    <>
       <div className="health-head">
-        <h2>Health Dashboard</h2>
+        <h2>{heading}</h2>
         <div className="health-controls">
           <label>
             <span>Auto-refresh</span>
@@ -272,7 +284,7 @@ export function HealthPage() {
           <button type="button" onClick={refreshHealth} disabled={loading}>
             {loading ? "Refreshing..." : "Refresh"}
           </button>
-          {auth.role === "admin" && (
+          {full && (
             <button type="button" onClick={() => void pollMailNow()} disabled={polling}>
               {polling ? "Polling..." : "Poll mail now"}
             </button>
@@ -540,7 +552,7 @@ export function HealthPage() {
             </article>
           </div>
 
-          {auth.role === "admin" && runStatus?.clientIp && (
+          {full && runStatus?.clientIp && (
             <div className="health-card" style={{ marginTop: 14 }}>
               <h4>Client Address</h4>
               {/*
@@ -577,6 +589,6 @@ export function HealthPage() {
           </div>
         </>
       )}
-    </section>
+    </>
   );
 }

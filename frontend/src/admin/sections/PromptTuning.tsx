@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { getJSON, putJSON } from "../api/client";
-import { usePagination } from "../hooks/usePagination";
-import { PageTabs } from "../components/PageTabs";
+import { getJSON, putJSON } from "../../api/client";
+import { usePagination } from "../../hooks/usePagination";
+import { PageTabs } from "../../components/PageTabs";
 
 type TuningResponse = {
   content: string;
@@ -38,7 +38,7 @@ type OllamaVersionResponse = {
   error?: string;
 };
 
-export function TuningPage() {
+export function PromptTuning() {
   const [tuningText, setTuningText] = useState("");
   const [tuningStatus, setTuningStatus] = useState("");
   const [activeTab, setActiveTab] = useState<"prompt" | "decisions">("prompt");
@@ -120,7 +120,7 @@ export function TuningPage() {
   const { currentPage, setCurrentPage, totalPages, pageItems: pageDecisions } = usePagination(decisions, 20);
 
   return (
-    <section className="panel">
+    <>
       <div style={{ marginBottom: "1.5em" }}>
         <h2>Ollama Version</h2>
         {ollamaVersion ? (
@@ -230,6 +230,6 @@ export function TuningPage() {
           )}
         </div>
       ) : null}
-    </section>
+    </>
   );
 }

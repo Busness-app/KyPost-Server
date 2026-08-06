@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { AuthContext, type AuthState } from "../auth";
-import { HealthPage } from "./HealthPage";
+import type { AuthState } from "../../auth";
+import { SystemHealth } from "./SystemHealth";
 
 // The bug these cover is not in either endpoint — /api/health and /api/status
 // have always computed and sent these fields — but in the page's TypeScript
@@ -16,7 +16,7 @@ import { HealthPage } from "./HealthPage";
 const getJSON = vi.fn();
 const postJSON = vi.fn();
 
-vi.mock("../api/client", () => ({
+vi.mock("../../api/client", () => ({
   getJSON: (url: string) => getJSON(url),
   postJSON: (url: string, body: unknown) => postJSON(url, body),
   toErrorMessage: (_e: unknown, fallback: string) => fallback
@@ -47,12 +47,11 @@ function mockEndpoints(health: object = {}, status: object = {}) {
   });
 }
 
+// The dashboard no longer reads the auth context: what used to be two inline
+// `auth.role === "admin"` checks is now the `full` prop, decided by whichever
+// panel composes it (Status trims, Diagnostics does not).
 function renderPage(role: AuthState["role"] = "admin") {
-  return render(
-    <AuthContext.Provider value={{ authenticated: true, userId: "u1", role }}>
-      <HealthPage />
-    </AuthContext.Provider>
-  );
+  return render(<SystemHealth full={role === "admin"} />);
 }
 
 beforeEach(() => {
@@ -423,5 +422,36 @@ describe("existing behaviour is preserved", () => {
 
     await waitFor(() => expect(screen.getByText("System Healthy")).toBeTruthy());
     expect(screen.getByText("1420")).toBeTruthy();
+  });
+});
+
+// The Status/Diagnostics split. These two controls are the whole difference
+// between the trimmed view everyone gets and the full one admins get, and the
+// distinction is now carried by a prop rather than an inline role check — so
+// it is worth pinning that the prop actually gates them.
+describe("SystemHealth admin controls", () => {
+  it("hides them when not full, which is what makes Status safe for anyone", async () => {
+    mockEndpoints({}, { clientIp: "203.0.113.7" });
+    render(<SystemHealth full={false} heading="Status" />);
+
+    await screen.findByText("Status");
+    expect(screen.queryByRole("button", { name: /poll mail now/i })).toBeNull();
+    expect(screen.queryByText("Client Address")).toBeNull();
+  });
+
+  it("shows them when full", async () => {
+    mockEndpoints({}, { clientIp: "203.0.113.7" });
+    render(<SystemHealth full heading="Diagnostics" />);
+
+    expect(await screen.findByRole("button", { name: /poll mail now/i })).toBeTruthy();
+    await screen.findByText("Client Address");
+  });
+
+  it("titles itself from the caller, since the heading anchors a space-between row", async () => {
+    mockEndpoints();
+    render(<SystemHealth full={false} heading="Status" />);
+
+    const heading = await screen.findByRole("heading", { name: "Status" });
+    expect(heading.tagName).toBe("H2");
   });
 });
