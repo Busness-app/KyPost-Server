@@ -23,6 +23,9 @@ import { LoginPage } from "./pages/LoginPage";
 import { LogsPage } from "./pages/LogsPage";
 import { ReadPage } from "./pages/ReadPage";
 import { RulesPage } from "./pages/RulesPage";
+import { AppearancePanel } from "./pages/settings/AppearancePanel";
+import { MailPanel } from "./pages/settings/MailPanel";
+import { NotificationsPanel } from "./pages/settings/NotificationsPanel";
 import { SecurityPage } from "./pages/SecurityPage";
 import { TuningPage } from "./pages/TuningPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -1278,6 +1281,11 @@ export function App() {
             )}
           />
           <Route path="/rules" element={protect(<RulesPage />)} />
+          {/* The new panels. Both these and the old routes above resolve until
+              the retired paths become redirects. */}
+          <Route path="/settings/appearance" element={protect(<AppearancePanel />)} />
+          <Route path="/settings/mail" element={protect(<MailPanel />)} />
+          <Route path="/settings/notifications" element={protect(<NotificationsPanel />)} />
           <Route path="/contacts" element={protect(<ContactsPage />)} />
           <Route path="/tuning" element={protect(<TuningPage />)} />
           <Route path="/users" element={protect(<UsersPage />, true)} />
