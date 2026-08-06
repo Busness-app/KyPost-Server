@@ -21,7 +21,6 @@ import { ContactsPage } from "./pages/ContactsPage";
 import { HealthPage } from "./pages/HealthPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogsPage } from "./pages/LogsPage";
-import { NotificationsPage } from "./pages/NotificationsPage";
 import { ReadPage } from "./pages/ReadPage";
 import { RulesPage } from "./pages/RulesPage";
 import { SecurityPage } from "./pages/SecurityPage";
@@ -1262,7 +1261,14 @@ export function App() {
               <Route path="/read" element={protect(<ReadPage onOpenDraft={openDraftInCompose} />)} />
           <Route path="/health" element={protect(<HealthPage />)} />
           <Route path="/config" element={protect(<ConfigPage />)} />
-          <Route path="/notifications" element={protect(<NotificationsPage />)} />
+          {/* Retired: notification settings became a Configuration tab and
+              pairing became Security's Devices tab. Keep this redirect — service
+              workers are cached in browsers and installed PWAs, so an old one
+              can still send a notification tap here long after the deploy. */}
+          <Route
+            path="/notifications"
+            element={<Navigate to="/config?tab=notifications" replace />}
+          />
           <Route
             path="/security"
             element={protect(

@@ -9,7 +9,6 @@ export const settingsNavItems: ReadonlyArray<{ to: string; label: string; adminO
   { to: "/login", label: "Login" },
   { to: "/health", label: "System Health" },
   { to: "/config", label: "Configuration" },
-  { to: "/notifications", label: "Pairing" },
   { to: "/security", label: "Security" },
   { to: "/rules", label: "Filters" },
   { to: "/tuning", label: "Prompt Tuning" },

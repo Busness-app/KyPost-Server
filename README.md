@@ -279,8 +279,8 @@ Some facts apply to both modes, and they are worth a plain statement:
 - **Ordinary PGP/MIME does not encrypt subject lines.** Your mail provider sees
   them in both modes. KyPost protects the subject inside the encrypted part when
   it can, but the outer header remains.
-- **Mobile push notifications are generic by default** for this reason. See the
-  Notifications page.
+- **Mobile push notifications are generic by default** for this reason. See
+  Settings → Configuration → Notifications.
 - **A recipient without a key can get a one-time pickup link.** KyPost stores
   that message on this server and encrypts it with the server's own key. The
   message stays until the recipient reads it or it expires. It is not end-to-end
@@ -415,7 +415,7 @@ The backend handles mobile pairing directly. It does not require Novu.
 
 Desktop pairing behavior:
 
-- The Notifications page renders a QR code link with `sub`, `hash`, `srv`, `reg`, and `pt`.
+- Security's Devices tab renders a QR code link with `sub`, `hash`, `srv`, `reg`, and `pt`.
 - Set `SERVER_BASE_URL` in `.env`. Then `srv` and `reg` always point to the deployment address that the mobile app must use. Nobody enters a server URL by hand.
 - `pt` is a signed pairing token. It is valid for 90 seconds.
 - The UI shows a 4px countdown bar under the QR code. The bar shrinks over 90 seconds and changes from green to red. It is red for the last 15 seconds.

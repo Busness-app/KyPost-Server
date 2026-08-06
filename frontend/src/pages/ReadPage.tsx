@@ -1193,25 +1193,30 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                 <thead>
                   <tr>
                     <th className="inbox-col-select inbox-col-heading">
-                      <input
-                        type="checkbox"
-                        className="inbox-checkbox"
-                        checked={allRowsSelected}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            const ids = pageRows.map((row) => row.messageId);
-                            setSelectedMessageIds((current) => {
-                              const merged = new Set(current);
-                              ids.forEach((id) => merged.add(id));
-                              return Array.from(merged);
-                            });
-                            return;
-                          }
-                          const pageIDs = new Set(pageRows.map((row) => row.messageId));
-                          setSelectedMessageIds((current) => current.filter((id) => !pageIDs.has(id)));
-                        }}
-                        aria-label="Select all emails in page"
-                      />
+                      {/* The label is the hit target, not decoration: it grows to
+                          fill the cell so a near miss still toggles. A bare
+                          <label> forwards the click natively — no handler. */}
+                      <label className="inbox-select-hit">
+                        <input
+                          type="checkbox"
+                          className="inbox-checkbox"
+                          checked={allRowsSelected}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              const ids = pageRows.map((row) => row.messageId);
+                              setSelectedMessageIds((current) => {
+                                const merged = new Set(current);
+                                ids.forEach((id) => merged.add(id));
+                                return Array.from(merged);
+                              });
+                              return;
+                            }
+                            const pageIDs = new Set(pageRows.map((row) => row.messageId));
+                            setSelectedMessageIds((current) => current.filter((id) => !pageIDs.has(id)));
+                          }}
+                          aria-label="Select all emails in page"
+                        />
+                      </label>
                     </th>
                     <th className="inbox-col-heading inbox-col-lock" aria-label="Encrypted" />
                     <th className="inbox-col-heading">
@@ -1263,19 +1268,21 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                       style={swipeState ? { transform: `translateX(${swipeState.offset}px)` } : undefined}
                     >
                       <td className="inbox-cell inbox-col-select">
-                        <input
-                          type="checkbox"
-                          className="inbox-checkbox"
-                          checked={selectedMessageIds.includes(item.messageId)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedMessageIds((current) => (current.includes(item.messageId) ? current : [...current, item.messageId]));
-                              return;
-                            }
-                            setSelectedMessageIds((current) => current.filter((id) => id !== item.messageId));
-                          }}
-                          aria-label={`Select email ${item.subject || item.messageId}`}
-                        />
+                        <label className="inbox-select-hit">
+                          <input
+                            type="checkbox"
+                            className="inbox-checkbox"
+                            checked={selectedMessageIds.includes(item.messageId)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedMessageIds((current) => (current.includes(item.messageId) ? current : [...current, item.messageId]));
+                                return;
+                              }
+                              setSelectedMessageIds((current) => current.filter((id) => id !== item.messageId));
+                            }}
+                            aria-label={`Select email ${item.subject || item.messageId}`}
+                          />
+                        </label>
                       </td>
                       <EncryptionCell email={item} local={decrypted[item.messageId]} clientProtected={isClientProtected()} />
                       <td className="inbox-cell">

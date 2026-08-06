@@ -194,7 +194,7 @@ All of these live in `/kypost/private`. **Back up this volume separately and sto
 
 - **TOTP:** Time-based one-time passwords from an authenticator app.
 - **Recovery codes:** One-time codes for account recovery if you lose your authenticator.
-- **Push approval:** A pairing device receives a push notification and approves or denies the sign-in. Set up on the Notifications page.
+- **Push approval:** A pairing device receives a push notification and approves or denies the sign-in. Set up on Security's Devices tab.
 
 Recovery codes are the only way to regain access if you lose your authenticator and have no paired push device. **Export and store them securely.**
 

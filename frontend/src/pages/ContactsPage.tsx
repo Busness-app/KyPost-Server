@@ -593,16 +593,20 @@ export function ContactsPage() {
                 <table className="contacts-table">
                   <thead>
                     <tr>
-                      <th style={{ width: "40px", textAlign: "center" }}>
-                        <input
-                          type="checkbox"
-                          checked={allPageSelected}
-                          ref={(el) => {
-                            if (el) el.indeterminate = somePageSelected && !allPageSelected;
-                          }}
-                          onChange={() => toggleAllOnPage()}
-                          aria-label="Select all on page"
-                        />
+                      <th className="contacts-col-select">
+                        {/* The label is the hit target, not decoration: it grows
+                            to fill the cell so a near miss still toggles. */}
+                        <label className="contacts-select-hit">
+                          <input
+                            type="checkbox"
+                            checked={allPageSelected}
+                            ref={(el) => {
+                              if (el) el.indeterminate = somePageSelected && !allPageSelected;
+                            }}
+                            onChange={() => toggleAllOnPage()}
+                            aria-label="Select all on page"
+                          />
+                        </label>
                       </th>
                       <th>Name</th>
                       <th>Contact Info</th>
@@ -619,13 +623,15 @@ export function ContactsPage() {
                           className={busy ? "contacts-row contacts-row-busy" : "contacts-row"}
                           onClick={() => setSelectedContact(contact)}
                         >
-                          <td style={{ width: "40px", textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={() => toggleContact(contact.uid)}
-                              aria-label={`Select ${contact.fn}`}
-                            />
+                          <td className="contacts-col-select" onClick={(e) => e.stopPropagation()}>
+                            <label className="contacts-select-hit">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleContact(contact.uid)}
+                                aria-label={`Select ${contact.fn}`}
+                              />
+                            </label>
                           </td>
                           <td>
                             <button

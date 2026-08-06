@@ -6,12 +6,20 @@ import { getJSON } from "./client";
  * Mirrors state.NativeDevice's JSON tags (backend/internal/state/store.go:67)
  * after Redacted() strips the secret hash.
  *
- * This type lives here rather than on a page because two pages now need it and
- * they drifted: NotificationsPage's private copy predates the enrollment
- * fields, so every device read as never having published a key. The fetch is
- * shared; the RENDERING deliberately is not, because "which device can approve
- * a sign-in" and "which device can read my mail" are different questions that
- * have no reason to change together.
+ * This type lives here rather than on a page because more than one caller needs
+ * it and they drifted: a page-private copy predated the enrollment fields, so
+ * every device read as never having published a key.
+ *
+ * Two of the three renderings have since merged. Now that the inventory and the
+ * approver toggles are rows in one table on Security's Devices tab, showing the
+ * same hardware twice was the defect, not the separation — see
+ * `pages/security/deviceJoin.ts` for how the two sources are reconciled.
+ *
+ * "Which device can read my mail" is still rendered apart, in
+ * `components/DeviceEnrollmentCard.tsx`, and that is deliberate rather than
+ * leftover: it applies only to a client-protected account, so as a column it
+ * would be blank for everyone else, and the card owns the enrollment ceremony
+ * whose security rests on refetching when the identity changes.
  */
 export type NativeDevice = {
   deviceId: string;
@@ -38,6 +46,22 @@ export type NativeDevice = {
   encryptionEnrolled: boolean;
 };
 
-export function listNativeDevices(): Promise<{ devices: NativeDevice[] }> {
-  return getJSON<{ devices: NativeDevice[] }>("/api/notifications/native/devices");
+/** How pushes reach paired native devices. Account-wide, not per-device. */
+export type NativeDeliveryMode = "push" | "pull";
+
+/**
+ * The paired-device inventory, plus the account's delivery mode.
+ *
+ * `deliveryMode` is served here rather than read from
+ * `GET /api/notifications/pairing` on purpose: that endpoint mints a live
+ * 90-second pairing token as a side effect, so reading a setting from it would
+ * hand out a credential every time the tab opened. Absent on older servers.
+ */
+export function listNativeDevices(): Promise<{
+  devices: NativeDevice[];
+  deliveryMode?: NativeDeliveryMode;
+}> {
+  return getJSON<{ devices: NativeDevice[]; deliveryMode?: NativeDeliveryMode }>(
+    "/api/notifications/native/devices"
+  );
 }

@@ -435,6 +435,10 @@ body {
 .inbox-table {
   width: 100%;
   border-collapse: collapse;
+  /* One source of truth for row-cell padding. The select column's hit target is
+     sized from it too, and the narrow-viewport override below changes it — so a
+     literal in either place silently desyncs the two at that breakpoint. */
+  --inbox-cell-pad: 10px;
 }
 
 .inbox-col-select {
@@ -471,6 +475,17 @@ body {
   position: sticky;
   top: 0;
   z-index: 2;
+}
+
+/* The select column holds a checkbox, not a label, so its header keeps the
+   column's centering rather than the left-alignment every text heading wants.
+   Two classes deliberately: the <th> carries `inbox-col-heading` and
+   `inbox-col-select` both, those have equal specificity, and `inbox-col-heading`
+   is declared second — so its `text-align: left` silently won and the select-all
+   box sat 4.5px, half the slack in a 22px content box around a 13px checkbox,
+   left of every row checkbox under it. */
+.inbox-col-heading.inbox-col-select {
+  text-align: center;
 }
 
 .inbox-col-time {
@@ -576,13 +591,48 @@ body {
 
 .inbox-cell {
   border-bottom: 1px solid var(--line);
-  padding: 10px;
+  padding: var(--inbox-cell-pad);
   vertical-align: top;
 }
 
 .inbox-checkbox {
   margin: 0;
   vertical-align: middle;
+}
+
+/* A 13px checkbox is a 13px target: a miss most of the time on a phone, and a
+   fussy one with a mouse. The label around it grows to fill its whole cell —
+   42x33 rather than 13x13, about nine times the area — and a <label> forwards
+   the click to its input natively, so this needs no handler.
+
+   Negative margin cancelling equal padding, rather than simply a bigger box: it
+   expands the target outward from where the checkbox already sits, so nothing
+   moves and the alignment with the header holds.
+
+   The values mirror each cell's own padding, which is what keeps the target
+   inside its cell. Both directions of getting that wrong are real: overshooting
+   sideways spills into the encryption column, and overshooting the header
+   downward would put the select-all target over the first row's checkbox, where
+   the sticky header's z-index would win the click. */
+.inbox-select-hit {
+  /* flex, not inline-flex: inline shrink-wraps to the checkbox and leaves the
+     column's spare width unclickable. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.inbox-cell.inbox-col-select .inbox-select-hit {
+  margin: calc(-1 * var(--inbox-cell-pad));
+  padding: var(--inbox-cell-pad);
+}
+
+/* Literals here, deliberately: `.inbox-col-heading` sets its own `9px 10px` and
+   has no responsive override, so these mirror a value that does not move. */
+.inbox-col-heading.inbox-col-select .inbox-select-hit {
+  margin: -9px -10px;
+  padding: 9px 10px;
 }
 
 .inbox-subject-button {
@@ -922,466 +972,6 @@ pre {
   color: var(--ink);
 }
 
-.notifications-page {
-  position: relative;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 92% 10%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 42%),
-    linear-gradient(155deg, color-mix(in srgb, var(--panel) 82%, var(--bg)), color-mix(in srgb, var(--panel) 94%, var(--bg)) 46%);
-}
-
-.notifications-hero {
-  margin-bottom: 14px;
-}
-
-.notifications-hero h2 {
-  margin: 0;
-}
-
-.notifications-hero p {
-  margin: 6px 0 0;
-  color: color-mix(in srgb, var(--ink) 85%, var(--ink-strong));
-}
-
-.notifications-layout {
-  display: grid;
-  gap: 14px;
-  grid-template-columns: minmax(240px, 330px) minmax(0, 1fr);
-}
-
-.notifications-card {
-  border: 1px solid color-mix(in srgb, var(--line) 88%, var(--accent));
-  border-radius: 12px;
-  padding: 14px;
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--panel) 88%, var(--bg)),
-    color-mix(in srgb, var(--panel) 80%, var(--bg))
-  );
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ink-strong) 10%, transparent);
-  animation: notifications-fade-up 220ms ease;
-}
-
-.notifications-card h3 {
-  margin: 0;
-}
-
-.notifications-muted {
-  margin: 7px 0 0;
-  color: color-mix(in srgb, var(--ink) 80%, var(--ink-strong));
-  font-size: 0.9rem;
-}
-
-.notifications-settings-tabs {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.notifications-settings-tab {
-  border: 1px solid color-mix(in srgb, var(--line) 86%, var(--accent));
-  background: color-mix(in srgb, var(--panel) 88%, var(--bg));
-  color: var(--ink-strong);
-  border-radius: 999px;
-  padding: 7px 14px;
-}
-
-.notifications-settings-tab.active {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent-soft) 48%, var(--panel));
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ink-strong) 15%, transparent);
-}
-
-.notifications-settings-panel {
-  margin-top: 12px;
-}
-
-.notifications-mode-grid {
-  margin-top: 12px;
-  display: grid;
-  gap: 10px;
-}
-
-.notifications-mode-option {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: start;
-  gap: 4px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px;
-  background: color-mix(in srgb, var(--panel) 85%, var(--bg));
-  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
-  cursor: pointer;
-}
-
-.notifications-mode-option:hover {
-  border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
-  transform: translateY(-1px);
-}
-
-.notifications-mode-option.active {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent-soft) 48%, var(--panel));
-}
-
-.notifications-mode-input {
-  margin-top: 2px;
-}
-
-.notifications-mode-title {
-  grid-column: 2;
-  color: var(--ink-strong);
-  font-weight: 650;
-}
-
-.notifications-mode-copy {
-  grid-column: 2;
-  color: color-mix(in srgb, var(--ink) 82%, var(--ink-strong));
-  font-size: 0.85rem;
-}
-
-.notifications-android-card {
-  min-height: 240px;
-}
-
-.notifications-android-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
-}
-
-.notifications-pairing {
-  margin-top: 14px;
-  display: grid;
-  grid-template-columns: minmax(0, 260px) minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
-
-.notifications-pairing-scan {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 16px;
-  border: 1px solid color-mix(in srgb, var(--line) 88%, var(--accent));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--panel) 94%, var(--bg));
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ink-strong) 8%, transparent);
-}
-
-.notifications-android-meta {
-  display: grid;
-  gap: 3px;
-  justify-items: center;
-  text-align: center;
-  width: 100%;
-}
-
-.notifications-android-meta span {
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: color-mix(in srgb, var(--ink) 72%, var(--ink-strong));
-}
-
-.notifications-android-meta strong {
-  max-width: 100%;
-  font-size: 0.78rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--ink-strong);
-  word-break: break-all;
-}
-
-.notifications-native-list {
-  min-width: 0;
-}
-
-.notifications-native-list h4 {
-  margin: 0;
-  font-size: 0.92rem;
-  color: var(--ink-strong);
-}
-
-.notifications-native-empty {
-  margin: 8px 0 0;
-  color: color-mix(in srgb, var(--ink) 80%, var(--ink-strong));
-  font-size: 0.86rem;
-}
-
-.notifications-native-items {
-  margin-top: 8px;
-  display: grid;
-  gap: 8px;
-}
-
-.notifications-native-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px;
-  background: color-mix(in srgb, var(--panel) 90%, var(--bg));
-}
-
-.notifications-native-main {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.notifications-native-main strong {
-  font-size: 0.85rem;
-  color: var(--ink-strong);
-}
-
-.notifications-native-name-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.notifications-native-name-row strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.notifications-transport-badge {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 2px 8px;
-  font-size: 0.68rem;
-  white-space: nowrap;
-  background: color-mix(in srgb, var(--panel) 84%, var(--bg));
-  color: color-mix(in srgb, var(--ink) 62%, var(--ink-strong));
-}
-
-.notifications-transport-badge-unifiedpush {
-  border-color: color-mix(in srgb, #7bbf7b 55%, var(--line));
-  background: color-mix(in srgb, #7bbf7b 16%, transparent);
-  color: color-mix(in srgb, #a5dca5 82%, var(--ink-strong));
-}
-
-.notifications-native-main span {
-  font-size: 0.78rem;
-  color: color-mix(in srgb, var(--ink) 78%, var(--ink-strong));
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.notifications-native-detail {
-  font-size: 0.72rem;
-  color: color-mix(in srgb, var(--ink) 72%, var(--ink-strong));
-}
-
-.notifications-qr {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.notifications-qr-image {
-  border-radius: 10px;
-  background: #ffffff;
-  padding: 8px;
-  border: 1px solid var(--line);
-}
-
-.notifications-qr-timer-track {
-  height: 4px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--line) 82%, transparent);
-  overflow: hidden;
-}
-
-.notifications-qr-timer-bar {
-  height: 100%;
-  border-radius: 999px;
-  transition: width 180ms linear, background 220ms linear;
-}
-
-.notifications-qr-hint {
-  margin: 0;
-  font-size: 0.84rem;
-  text-align: center;
-  color: color-mix(in srgb, var(--ink) 80%, var(--ink-strong));
-}
-
-.notifications-store-links {
-  grid-column: 1 / -1;
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: center;
-  padding-top: 4px;
-  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
-}
-
-.notifications-store-disabled {
-  border: 1px dashed var(--line);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 0.82rem;
-  color: color-mix(in srgb, var(--ink) 68%, var(--ink-strong));
-  opacity: 0.75;
-}
-
-.notifications-delivery-toggle {
-  display: inline-flex;
-  align-items: stretch;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 2px;
-  background: color-mix(in srgb, var(--ink) 4%, transparent);
-}
-
-.notifications-delivery-option {
-  border: none;
-  background: transparent;
-  border-radius: 999px;
-  padding: 5px 12px;
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: color-mix(in srgb, var(--ink) 70%, var(--ink-strong));
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.notifications-delivery-option:hover:not(:disabled):not(.active) {
-  color: var(--ink-strong);
-}
-
-.notifications-delivery-option.active {
-  background: var(--accent);
-  color: var(--accent-contrast);
-}
-
-.notifications-delivery-option:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-
-/* Collapse the pairing panel to a single centered column when the card is
-   too narrow for the QR + device-list split. */
-@media (max-width: 640px) {
-  .notifications-pairing {
-    grid-template-columns: 1fr;
-  }
-}
-
-.notifications-keywords-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.notifications-count {
-  border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--line));
-  border-radius: 999px;
-  padding: 4px 9px;
-  font-size: 0.8rem;
-  color: var(--ink-strong);
-  background: color-mix(in srgb, var(--accent-soft) 32%, transparent);
-  white-space: nowrap;
-}
-
-.notifications-keywords-tools {
-  margin-top: 10px;
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.notifications-secondary {
-  background: color-mix(in srgb, var(--accent) 72%, var(--panel));
-  border-color: color-mix(in srgb, var(--accent) 78%, var(--line));
-}
-
-.notifications-ghost {
-  background: transparent;
-  border-color: var(--line);
-  color: var(--ink-strong);
-}
-
-.notifications-keywords-grid {
-  margin-top: 10px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-  gap: 8px;
-  max-height: 310px;
-  overflow: auto;
-  padding-right: 2px;
-}
-
-.notifications-keyword-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 9px;
-  background: color-mix(in srgb, var(--panel) 90%, var(--bg));
-  transition: border-color 160ms ease, background 160ms ease;
-}
-
-.notifications-keyword-option:hover {
-  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
-}
-
-.notifications-keyword-option.selected {
-  border-color: color-mix(in srgb, var(--accent) 90%, var(--line));
-  background: color-mix(in srgb, var(--accent-soft) 42%, var(--panel));
-}
-
-.notifications-keyword-option span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.notifications-keyword-option input {
-  margin: 0;
-}
-
-.notifications-empty {
-  margin-top: 12px;
-  border: 1px dashed color-mix(in srgb, var(--line) 88%, var(--accent));
-  border-radius: 10px;
-  padding: 12px;
-  color: color-mix(in srgb, var(--ink) 82%, var(--ink-strong));
-}
-
-.notifications-hint {
-  margin: 10px 0 0;
-  color: color-mix(in srgb, var(--ink) 78%, var(--ink-strong));
-  font-size: 0.86rem;
-}
-
-.notifications-footer {
-  margin-top: 14px;
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.notifications-save {
-  font-weight: 700;
-}
-
 .config-page {
   position: relative;
   overflow: hidden;
@@ -1523,6 +1113,138 @@ pre {
   border-radius: 10px;
   padding: 10px;
   background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+}
+
+/* Notifications tab. `.config-card label` gives every label a border, padding
+   and panel background, which is right for a field but wrong for these — the
+   mode options and keyword chips are their own selectable surfaces and set all
+   three themselves. */
+.config-card h4 {
+  margin: 16px 0 0;
+  color: var(--ink-strong);
+  font-size: 0.95rem;
+}
+
+.config-notify-mode-grid {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.config-card .config-notify-mode-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--panel) 85%, var(--bg));
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+  cursor: pointer;
+}
+
+.config-card .config-notify-mode-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+  transform: translateY(-1px);
+}
+
+.config-card .config-notify-mode-option.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--panel));
+}
+
+.config-notify-mode-input {
+  margin-top: 2px;
+}
+
+.config-notify-mode-title {
+  grid-column: 2;
+  color: var(--ink-strong);
+  font-weight: 650;
+}
+
+.config-notify-mode-copy {
+  grid-column: 2;
+  display: block;
+  color: color-mix(in srgb, var(--ink) 82%, var(--ink-strong));
+  font-size: 0.85rem;
+}
+
+.config-card .config-notify-preview-toggle {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.config-card .config-notify-preview-toggle input {
+  margin-top: 4px;
+}
+
+.config-notify-keywords-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.config-notify-count {
+  align-self: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--line));
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.8rem;
+  color: var(--ink-strong);
+  background: color-mix(in srgb, var(--accent-soft) 32%, transparent);
+  white-space: nowrap;
+}
+
+.config-notify-keywords-tools {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.config-notify-keywords-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px;
+  max-height: 310px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.config-card .config-notify-keyword-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 9px;
+  background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.config-card .config-notify-keyword-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+}
+
+.config-card .config-notify-keyword-option.selected {
+  border-color: color-mix(in srgb, var(--accent) 90%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 42%, var(--panel));
+}
+
+.config-notify-keyword-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-notify-keyword-option input {
+  margin: 0;
 }
 
 @keyframes notifications-fade-up {
@@ -2401,6 +2123,177 @@ pre {
   white-space: nowrap;
 }
 
+/* Security tabs, mirroring the Configuration tab strip. */
+.sec-tabs {
+  margin-top: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sec-tab {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 14px;
+  background: transparent;
+  color: color-mix(in srgb, var(--ink) 84%, var(--ink-strong));
+  font: inherit;
+  cursor: pointer;
+}
+
+.sec-tab.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 44%, var(--panel));
+  color: var(--ink-strong);
+}
+
+/* A button that reads as a link — used for the cross-tab pointer, which must be
+   a real button because it moves tab state rather than navigating. */
+.sec-link-button {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* One row per device: identity, what it may do, and how to remove it. */
+.sec-device-rows {
+  max-width: none;
+}
+
+.sec-device-row {
+  display: grid;
+  gap: 10px 16px;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.4fr) auto;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .sec-device-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.sec-device-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sec-device-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sec-device-detail {
+  color: color-mix(in srgb, var(--ink) 78%, var(--ink-strong));
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
+/* Overrides .sec-devices .sec-muted's 25px indent: inside a capability cell the
+   explanation sits under its own checkbox, not under a list-level one. */
+.sec-device-capabilities {
+  min-width: 0;
+}
+
+.sec-device-capabilities .sec-muted {
+  margin-left: 25px;
+}
+
+.sec-device-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.sec-transport-badge {
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-strong);
+  background: color-mix(in srgb, var(--accent-soft) 30%, transparent);
+  white-space: nowrap;
+}
+
+.sec-transport-badge-unifiedpush {
+  border-color: color-mix(in srgb, var(--ink) 40%, var(--line));
+  background: color-mix(in srgb, var(--panel) 88%, var(--bg));
+}
+
+/* Pairing panel. */
+.sec-pairing {
+  margin-top: 10px;
+}
+
+.sec-pairing-scan {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.sec-pairing-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sec-pairing-meta strong {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--ink-strong);
+  word-break: break-all;
+}
+
+.sec-qr-timer-track {
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--line) 70%, var(--bg));
+}
+
+.sec-qr-timer-bar {
+  height: 100%;
+  transition: width 200ms linear, background 200ms linear;
+}
+
+.sec-delivery-toggle {
+  margin-top: 10px;
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.sec-delivery-option {
+  border: 0;
+  padding: 7px 14px;
+  background: transparent;
+  color: color-mix(in srgb, var(--ink) 84%, var(--ink-strong));
+  font: inherit;
+  cursor: pointer;
+}
+
+.sec-delivery-option.active {
+  background: color-mix(in srgb, var(--accent-soft) 52%, var(--panel));
+  color: var(--ink-strong);
+}
+
+.sec-delivery-option:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .sec-inline-form {
   margin-top: 16px;
   padding: 15px 16px;
@@ -2817,6 +2710,32 @@ pre {
 
 .contacts-table tbody tr:last-child td {
   border-bottom: 0;
+}
+
+/* Same story as the inbox's select column (see .inbox-select-hit): a bare 13px
+   checkbox is a 13px target. The label grows to fill the cell — 40x33 instead of
+   13x13 — via negative margin cancelling equal padding, so the checkbox does not
+   move and the header stays aligned with the rows.
+
+   Worth more here than it looks: the row's own onClick opens the contact, and
+   this cell already stops that from propagating, so before this the cell's spare
+   space did nothing at all on click. One value pair covers both the th and the
+   td because `.contacts-table th` and `td` share `10px 12px`, and neither has a
+   responsive override — if either gains one, this has to follow it. */
+.contacts-col-select {
+  width: 40px;
+  text-align: center;
+}
+
+.contacts-select-hit {
+  /* flex, not inline-flex: inline shrink-wraps to the checkbox and leaves the
+     column's spare width unclickable. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  margin: -10px -12px;
+  padding: 10px 12px;
 }
 
 .contacts-row {
@@ -4272,8 +4191,8 @@ pre {
     display: none;
   }
 
-  .inbox-cell {
-    padding: 8px;
+  .inbox-table {
+    --inbox-cell-pad: 8px;
   }
 
   .inbox-row-meta {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { labelsToText, textToLabels, mappingToText, textToMapping } from "./settings";
+import { labelsToText, textToLabels, mappingToText, textToMapping, resolveConfigTab } from "./settings";
 
 // These parse operator-typed textarea content into the label allowlist and the
 // label->keyword mapping the classifier is bound to. A silent parse failure
@@ -41,5 +41,38 @@ describe("textToMapping", () => {
   it("round-trips through mappingToText", () => {
     const mapping = { Work: ["boss", "project"], Receipts: ["invoice"] };
     expect(textToMapping(mappingToText(mapping))).toEqual(mapping);
+  });
+});
+
+// The tab now comes from the URL, so it is attacker-and-typo-reachable. A value
+// this function passes through is a value that must have a panel to render.
+describe("resolveConfigTab", () => {
+  it("defaults by role when no tab is asked for", () => {
+    expect(resolveConfigTab(null, true)).toBe("application");
+    expect(resolveConfigTab(null, false)).toBe("email");
+    expect(resolveConfigTab("", false)).toBe("email");
+  });
+
+  it("opens a tab the user is allowed to see", () => {
+    expect(resolveConfigTab("notifications", false)).toBe("notifications");
+    expect(resolveConfigTab("carddav", false)).toBe("carddav");
+    expect(resolveConfigTab("wkd", true)).toBe("wkd");
+  });
+
+  it("falls back instead of rendering a tab strip with no panel under it", () => {
+    expect(resolveConfigTab("nope", true)).toBe("application");
+    expect(resolveConfigTab("nope", false)).toBe("email");
+  });
+
+  it("falls back for an admin-only tab requested by a non-admin", () => {
+    // Reachable by pasting a colleague's URL, not only by typing nonsense.
+    for (const tab of ["application", "labels", "llm", "wkd"]) {
+      expect(resolveConfigTab(tab, false)).toBe("email");
+    }
+  });
+
+  it("keeps notifications available to non-admins — it is a per-account preference", () => {
+    expect(resolveConfigTab("notifications", false)).toBe("notifications");
+    expect(resolveConfigTab("notifications", true)).toBe("notifications");
   });
 });

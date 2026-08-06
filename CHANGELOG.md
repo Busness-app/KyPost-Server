@@ -113,6 +113,45 @@ non-prerelease version.
 
 ### Changed
 
+- **Device pairing moved into Security, which is now tabbed.** Pairing, the
+  paired-device list, and the per-device "can approve sign-ins" switch were
+  spread across two nav sections and rendered the same hardware three times from
+  two endpoints. Security is now Sign-in / Devices / Mail, and a device is one
+  row carrying its identity and what it may do. The `Pairing` nav entry is gone;
+  `/notifications` redirects to the new Notifications tab and is kept
+  indefinitely, because a service worker cached in a browser or installed PWA can
+  still send a notification tap there long after the deploy.
+
+  Two consequences worth knowing. Pairing now sits behind the same step-up prompt
+  as the rest of Security — which is what that prompt's own wording always
+  claimed to cover ("your key fingerprints and paired devices"). And the pairing
+  code is no longer minted just because a page opened: `GET
+  /api/notifications/pairing` hands out a live 90-second pairing token as a side
+  effect of reading, and the old page called it on load and every ninety seconds
+  after, so any forgotten tab was a self-refreshing pairing credential. It is now
+  fetched only while the "Pair a new device" panel is open. `GET
+  /api/notifications/native/devices` gained a `deliveryMode` field so the Relay
+  Push / App Pull toggle can read that setting without minting anything.
+
+  "Encrypted mail on your devices" stays a separate card rather than becoming a
+  column: it applies only to a client-protected account, so it would be blank for
+  everyone else, and it owns the enrollment ceremony whose security rests on
+  refetching when the identity changes.
+
+- **Notification settings moved to Configuration → Notifications.** They were
+  sharing a page with device pairing under a nav entry labelled "Pairing" that
+  routed to `/notifications` and rendered a heading reading "Notifications and
+  Pairing" — three names for two unrelated things. Delivery mode, IMAP keywords,
+  content previews, the test notification and this-device unsubscribe are now a
+  tab on Configuration, visible to every user because they are per-account
+  preferences rather than system config. `/notifications` keeps only pairing for
+  now. Configuration's active tab also moved into the URL (`?tab=`), so a link
+  can open one and a reload no longer drops you back on the first tab; an
+  unrecognised value, or an admin-only tab requested by a non-admin, falls back
+  to that user's default rather than rendering a tab strip with no panel. The
+  test notification and any push carrying no explicit url now land on the new
+  tab.
+
 - **Encrypted mail no longer goes to the classifier.** A PGP-encrypted message
   has no readable body — the poller never decrypts, and the payload is detected
   precisely *because* no MIME part rendered — so every one of them spent an

@@ -5,7 +5,7 @@
 Desktop pairing allows users to initiate pairing with a desktop application. The feature generates a pairing code that can be used by desktop clients to authenticate and pair with the user's account.
 
 **Quick Links:**
-- 👤 **For Users:** Click "Pair Desktop App" button in Settings → Pairing page
+- 👤 **For Users:** Click "Pair a new device", then "Pair Desktop App", in Settings → Security → Devices
 - 👨‍💻 **For Desktop App Developers:** See [Complete API Reference](#complete-api-reference-for-desktop-apps) and [Minimal Working Example](#minimal-working-example-python)
 - 🔐 **For Security:** See [Security Considerations](#security-considerations) and [Security Checklist](#desktop-app-security-checklist)
 - 🧪 **For Testing:** See [Testing](#testing)
@@ -135,7 +135,7 @@ The `handleDesktopPair` handler:
 - ✅ Attempt tracking for security audit trail
 - ✅ 429 response prevents client confusion (not 401/403)
 
-### Frontend (NotificationsPage.tsx)
+### Frontend (pages/security/PairingPanel.tsx)
 
 The `pairDesktopApp()` function:
 1. Shows loading state ("Pairing...")
@@ -180,10 +180,9 @@ Pairing complete ✓
 ```
 
 **UI Integration:**
-- Button location: "Mobile App Pairing" section (replacing "Revoke Paired Devices")
-- "Revoke Paired Devices" moved to footer, left of "Unsubscribe This Device"
-- Navigation label changed from "Notifications" to "Pairing"
-- Page title changed to "Notifications and Pairing"
+- Button location: the "Pair a new device" panel on Settings → Security → Devices, beside "New code"
+- The panel is collapsed by default and only fetches a pairing token once opened — see the pairing note in `frontend/AGENTS.md` for why that matters
+- "Revoke every paired device" sits at the bottom of the "Your devices" card on the same tab
 - Status message shows countdown timer during pairing window
 - Fallback message if desktop app not installed
 
@@ -632,11 +631,11 @@ SecItemAdd(query as CFDictionary, nil)
 
 ## Related Files
 
-- Frontend: [frontend/src/pages/NotificationsPage.tsx](../frontend/src/pages/NotificationsPage.tsx)
+- Frontend: [frontend/src/pages/security/PairingPanel.tsx](../frontend/src/pages/security/PairingPanel.tsx)
 - Backend: [backend/internal/api/server.go](../backend/internal/api/server.go) - `handleDesktopPair` (line 1328+)
 - State store: [backend/internal/state/store.go](../backend/internal/state/store.go) - Desktop pairing methods
 - Mobile pairing reference: [backend/internal/api/server.go](../backend/internal/api/server.go) - `handleNotificationPairing` (line 1020)
-- App navigation: [frontend/src/App.tsx](../frontend/src/App.tsx) - Line 26 (nav label)
+- App navigation: [frontend/src/app/navigation.ts](../frontend/src/app/navigation.ts) (nav labels); tabs in [frontend/src/pages/security/tabs.ts](../frontend/src/pages/security/tabs.ts)
 
 ## Desktop App Security Checklist
 
