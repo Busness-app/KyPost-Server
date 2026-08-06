@@ -5,6 +5,7 @@ describe("resolveSecurityTab", () => {
   it("opens each real tab", () => {
     expect(resolveSecurityTab("signin")).toBe("signin");
     expect(resolveSecurityTab("devices")).toBe("devices");
+    expect(resolveSecurityTab("carddav")).toBe("carddav");
     expect(resolveSecurityTab("mail")).toBe("mail");
   });
 

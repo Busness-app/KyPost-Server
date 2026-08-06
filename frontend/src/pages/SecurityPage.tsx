@@ -15,6 +15,7 @@ import type { MfaStatus, TotpSetup } from "./security/types";
 import { SignIn } from "./security/sections/SignIn";
 import { Devices } from "./security/sections/Devices";
 import { MailKeys } from "./security/sections/MailKeys";
+import { CardDavAccess } from "../settings/sections/CardDavAccess";
 
 export function SecurityPage() {
   const [status, setStatus] = useState<MfaStatus | null>(null);
@@ -26,11 +27,12 @@ export function SecurityPage() {
   const activeTab = resolveSecurityTab(searchParams.get("tab"));
 
   // A generated CardDAV app password is shown once and is not re-fetchable, so
-  // unmounting the Devices tab while one is on screen destroys the only copy.
+  // unmounting the CardDAV tab while one is on screen destroys the only copy.
   // While one is showing, tab switches are blocked rather than allowed to
   // discard it silently. The way out is CardDavAccess's own Copy/Done control,
   // which clears this flag. Moved here with the section itself: the guard used
   // to live on Configuration, and CardDavAccess is no longer rendered there.
+  // lib/secretHold covers the other half: a sidebar link never reaches this.
   const [davPasswordRevealed, setDavPasswordRevealed] = useState(false);
   const [tabSwitchBlockedMessage, setTabSwitchBlockedMessage] = useState("");
   useEffect(() => {
@@ -286,7 +288,6 @@ export function SecurityPage() {
             refreshDevices={refreshDevices}
             deliveryMode={deliveryMode}
             setDeliveryMode={setDeliveryMode}
-            onRevealedPasswordChange={setDavPasswordRevealed}
             pushOn={pushOn}
             approvalsOn={approvalsOn}
             pgpFingerprint={pgpIdentity?.fingerprint ?? ""}
@@ -295,6 +296,10 @@ export function SecurityPage() {
             setUnlockOpen={setUnlockOpen}
             onGoToSignIn={() => setActiveTab("signin")}
           />
+        ) : null}
+
+        {activeTab === "carddav" ? (
+          <CardDavAccess onRevealedPasswordChange={setDavPasswordRevealed} />
         ) : null}
 
         {activeTab === "mail" ? (
