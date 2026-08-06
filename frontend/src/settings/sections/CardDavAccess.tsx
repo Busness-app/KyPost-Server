@@ -20,13 +20,26 @@ export function CardDavAccess({ setConfigStatus, onRevealedPasswordChange }: Car
   const [davStatus, setDavStatus] = useState<DAVPasswordStatus | null>(null);
   const [davBusy, setDavBusy] = useState(false);
   const [revealedPassword, setRevealedPassword] = useState("");
+  // Set once the user has copied the password successfully or clicked "Done"
+  // — either counts as "saved it" per the product ruling, and un-arms the
+  // caller's navigation guard even while the password stays on screen (Copy)
+  // or clears it outright (Done). Reset to false on every newly-generated
+  // password so a fresh secret needs its own acknowledgement.
+  const [passwordAcknowledged, setPasswordAcknowledged] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
   const [davMessage, setDavMessage] = useState("");
   const davURL = auth.username ? `${window.location.origin}/dav/${encodeURIComponent(auth.username)}/contacts/` : "";
 
   useEffect(() => {
-    onRevealedPasswordChange?.(revealedPassword !== "");
-  }, [revealedPassword, onRevealedPasswordChange]);
+    const blocking = revealedPassword !== "" && !passwordAcknowledged;
+    onRevealedPasswordChange?.(blocking);
+    // If this component unmounts (e.g. the settings sidebar's "Configuration"
+    // link re-navigates to the same route while ConfigPage stays mounted)
+    // while a password is still on screen and un-acknowledged, the caller
+    // would otherwise be left with a guard that can never clear — there is
+    // no one left to call onRevealedPasswordChange(false). Un-arm it here.
+    return () => onRevealedPasswordChange?.(false);
+  }, [revealedPassword, passwordAcknowledged, onRevealedPasswordChange]);
 
   async function refreshDavStatus() {
     setDavStatus(await getDAVPasswordStatus());
@@ -43,6 +56,7 @@ export function CardDavAccess({ setConfigStatus, onRevealedPasswordChange }: Car
     try {
       const generated = await generateDAVPassword();
       setRevealedPassword(generated.password);
+      setPasswordAcknowledged(false);
       await refreshDavStatus();
     } catch (error: unknown) {
       const message = `Failed to generate CardDAV password: ${toErrorMessage(error, "unknown error")}`;
@@ -82,16 +96,25 @@ export function CardDavAccess({ setConfigStatus, onRevealedPasswordChange }: Car
       return;
     }
     void navigator.clipboard.writeText(revealedPassword).then(
-      () => setCopyStatus("Copied to clipboard."),
+      () => {
+        setCopyStatus("Copied to clipboard.");
+        // A successful copy is one of the two ways the ruling allows a
+        // caller's navigation guard to clear — the password is safely saved
+        // elsewhere even though it stays visible here. A FAILED copy does
+        // NOT acknowledge it: the guard must stay armed until the user
+        // either retries successfully or clicks "Done" instead.
+        setPasswordAcknowledged(true);
+      },
       () => setCopyStatus("Could not copy automatically — copy it manually.")
     );
   }
 
-  // The only way out of a caller's navigation guard (see
-  // onRevealedPasswordChange): explicit acknowledgement that the password
-  // has been saved, not merely switching away and losing it.
+  // The other way out of a caller's navigation guard: explicit
+  // acknowledgement that the password has been saved, which also hides it
+  // from this screen permanently (see the button's own label/copy below).
   function dismissRevealedPassword() {
     setRevealedPassword("");
+    setPasswordAcknowledged(false);
     setCopyStatus("");
   }
 
@@ -134,6 +157,10 @@ export function CardDavAccess({ setConfigStatus, onRevealedPasswordChange }: Car
               Done — I saved it
             </button>
           </div>
+          <p className="config-muted">
+            Clicking &ldquo;Done — I saved it&rdquo; hides this password from the screen permanently — it cannot be
+            shown again.
+          </p>
           {copyStatus ? <p className="config-muted">{copyStatus}</p> : null}
         </div>
       ) : null}

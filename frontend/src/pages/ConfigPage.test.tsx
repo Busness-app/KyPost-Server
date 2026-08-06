@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { Link, MemoryRouter, Route, Routes } from "react-router";
 import { AuthContext, type AuthState } from "../auth";
 import { ConfigPage } from "./ConfigPage";
 
@@ -36,6 +36,24 @@ function renderConfigPage(role: AuthState["role"] = "user") {
 
 function isSelected(tabName: string): boolean {
   return screen.getByRole("tab", { name: tabName }).getAttribute("aria-selected") === "true";
+}
+
+// Reproduces App.tsx:1263's <Route path="/config" element={<ConfigPage />} />
+// alongside a sidebar-style <Link to="/config"> (App.tsx:1219-1225): both
+// point at the SAME route, so clicking the link while already on /config
+// re-renders ConfigPage in place (never unmounting it) but drops the
+// ?tab=... query, which does unmount CardDavAccess.
+function renderConfigPageAtRoute(role: AuthState["role"] = "user") {
+  return render(
+    <MemoryRouter initialEntries={["/config"]}>
+      <Link to="/config">Configuration</Link>
+      <AuthContext.Provider value={{ authenticated: true, userId: "u1", username: "gwen", role }}>
+        <Routes>
+          <Route path="/config" element={<ConfigPage />} />
+        </Routes>
+      </AuthContext.Provider>
+    </MemoryRouter>
+  );
 }
 
 beforeEach(() => {
@@ -100,5 +118,54 @@ describe("ConfigPage — CardDAV password tab-switch guard", () => {
     await userEvent.click(screen.getByRole("tab", { name: "Email Settings" }));
 
     await waitFor(() => expect(isSelected("Email Settings")).toBe(true));
+  });
+
+  it("unblocks the switch once the password has been copied", async () => {
+    renderConfigPage("user");
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Email Settings" })).toBeTruthy());
+    await userEvent.click(screen.getByRole("tab", { name: "CardDAV" }));
+    await waitFor(() => expect(isSelected("CardDAV")).toBe(true));
+    await userEvent.click(await screen.findByRole("button", { name: /generate password/i }));
+    expect(await screen.findByText("generated-app-password")).toBeTruthy();
+
+    // Blocked before copying, matching the alert's own "Copy or dismiss" wording.
+    await userEvent.click(screen.getByRole("tab", { name: "Email Settings" }));
+    expect(isSelected("CardDAV")).toBe(true);
+
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
+    await userEvent.click(screen.getByRole("button", { name: /^copy$/i }));
+    await screen.findByText("Copied to clipboard.");
+
+    // Copying is the other acknowledged-it path — the switch works now, and
+    // (unlike Done) the password is still on screen, since Copy doesn't hide it.
+    await userEvent.click(screen.getByRole("tab", { name: "Email Settings" }));
+    await waitFor(() => expect(isSelected("Email Settings")).toBe(true));
+  });
+
+  it("does not permanently lock the tab strip if the section unmounts via a same-route navigation while a password is unacknowledged", async () => {
+    // Reproduces the reviewer's finding: the settings sidebar's Link to
+    // "/config" matches the same <Route> ConfigPage already renders under,
+    // so ConfigPage itself never unmounts — only its ?tab=carddav search
+    // param is dropped, which unmounts CardDavAccess without it ever
+    // getting a chance to explicitly clear the guard via user action.
+    renderConfigPageAtRoute("user");
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Email Settings" })).toBeTruthy());
+    await userEvent.click(screen.getByRole("tab", { name: "CardDAV" }));
+    await waitFor(() => expect(isSelected("CardDAV")).toBe(true));
+    await userEvent.click(await screen.findByRole("button", { name: /generate password/i }));
+    expect(await screen.findByText("generated-app-password")).toBeTruthy();
+
+    // Same-route navigation, bypassing ConfigPage's own setActiveTab guard entirely.
+    await userEvent.click(screen.getByRole("link", { name: "Configuration" }));
+
+    // CardDavAccess is gone — its unmount cleanup must have un-armed the guard.
+    await waitFor(() => expect(screen.queryByText("generated-app-password")).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    // The tab strip must be usable again, not stuck forever.
+    await userEvent.click(screen.getByRole("tab", { name: "CardDAV" }));
+    await waitFor(() => expect(isSelected("CardDAV")).toBe(true));
   });
 });
