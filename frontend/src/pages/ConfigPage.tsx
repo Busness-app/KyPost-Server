@@ -1,19 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
-import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
+import { getJSON, postJSON, putJSON, toErrorMessage } from "../api/client";
 import { normalizeConfig, uniqueLabels, type AppConfig } from "../api/config";
-import {
-  deleteCardDAVClientConfig,
-  generateDAVPassword,
-  getCardDAVClientConfig,
-  getDAVPasswordStatus,
-  revokeDAVPassword,
-  saveCardDAVClientConfig,
-  syncCardDAVClient,
-  type CardDAVClientConfig,
-  type DAVPasswordStatus
-} from "../api/contacts";
-import { createSendAsAlias, deleteSendAsAlias, listSendAsAliases, type SendAsAlias } from "../api/sendas";
 import {
   listWKDDomains,
   claimWKDDomain,
@@ -27,9 +15,6 @@ import { applyTheme, getStoredTheme, THEME_OPTIONS, type ThemeName } from "../th
 
 import {
   LOG_LEVEL_OPTIONS,
-  formatWhen,
-  sendAsStatusLabel,
-  sendAsStatusClass,
   getTimezoneOptions,
   labelsToText,
   textToLabels,
@@ -37,19 +22,14 @@ import {
   textToMapping,
   resolveConfigTab,
   type ConfigTab,
-  type LabelsResponse,
-  type IMAPConfigStatus,
-  type IMAPForm
+  type LabelsResponse
 } from "./config/settings";
-import {
-  collectNotificationKeywordOptions,
-  normalizePrefs,
-  shouldWarnAboutSleepState,
-  type NotificationPrefs,
-  type NotificationTestResponse,
-  type NotificationVapidResponse
-} from "./config/notifications";
-import { ContentPreviewWarningDialog } from "../components/ContentPreviewWarningDialog";
+import { Appearance } from "../settings/sections/Appearance";
+import { EmailServer } from "../settings/sections/EmailServer";
+import { SendAs } from "../settings/sections/SendAs";
+import { CardDavClient } from "../settings/sections/CardDavClient";
+import { CardDavAccess } from "../settings/sections/CardDavAccess";
+import { NotificationPrefs } from "../settings/sections/NotificationPrefs";
 
 type ServerVersionResponse = {
   installedVersion: string;
@@ -76,25 +56,6 @@ export function ConfigPage() {
   const [serverVersion, setServerVersion] = useState<ServerVersionResponse | null>(null);
   const [serverVersionError, setServerVersionError] = useState("");
 
-  const [imapStatus, setImapStatus] = useState<IMAPConfigStatus | null>(null);
-  const [imapForm, setImapForm] = useState<IMAPForm>({
-    host: "",
-    port: 993,
-    username: "",
-    password: "",
-    mailbox: "INBOX",
-    smtpHost: "",
-    smtpPort: 587
-  });
-  const [imapMessage, setImapMessage] = useState("");
-  const [imapBusy, setImapBusy] = useState(false);
-
-  const [sendAsAliases, setSendAsAliases] = useState<SendAsAlias[]>([]);
-  const [sendAsEmail, setSendAsEmail] = useState("");
-  const [sendAsDisplayName, setSendAsDisplayName] = useState("");
-  const [sendAsMessage, setSendAsMessage] = useState("");
-  const [sendAsBusy, setSendAsBusy] = useState(false);
-
   const [classifierTestBusy, setClassifierTestBusy] = useState(false);
   const [classifierTestResult, setClassifierTestResult] = useState("");
   // The tab lives in the URL so a link can open one and a reload keeps it —
@@ -111,44 +72,16 @@ export function ConfigPage() {
   }
   const configStatusTone = configStatus.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
-  const [davStatus, setDavStatus] = useState<DAVPasswordStatus | null>(null);
-  const [davBusy, setDavBusy] = useState(false);
-  const [revealedPassword, setRevealedPassword] = useState("");
-  const [copyStatus, setCopyStatus] = useState("");
-  const davURL = auth.username ? `${window.location.origin}/dav/${encodeURIComponent(auth.username)}/contacts/` : "";
-
-  const [clientConfig, setClientConfig] = useState<CardDAVClientConfig | null>(null);
-  const [clientForm, setClientForm] = useState({ serverUrl: "", username: "", password: "", addressBookPath: "" });
-  const [clientBusy, setClientBusy] = useState(false);
-  const [clientSyncBusy, setClientSyncBusy] = useState(false);
-  const [clientMessage, setClientMessage] = useState("");
-
   const [wkdDomains, setWkdDomains] = useState<WKDDomainClaim[]>([]);
   const [wkdLoading, setWkdLoading] = useState(true);
   const [wkdBusy, setWkdBusy] = useState(false);
   const [wkdStatus, setWkdStatus] = useState("");
   const [wkdNewDomain, setWkdNewDomain] = useState("");
 
-  const [prefs, setPrefs] = useState<NotificationPrefs | null>(null);
-  const [notifyStatus, setNotifyStatus] = useState("");
-  const [notifyTestBusy, setNotifyTestBusy] = useState(false);
-  const [notifyUnsubscribeBusy, setNotifyUnsubscribeBusy] = useState(false);
-  // Turning previews on is gated behind a warning the user has to sit through;
-  // turning them back off is not.
-  const [previewWarningOpen, setPreviewWarningOpen] = useState(false);
-  const notifyStatusTone = notifyStatus.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
-
   const effectiveAllowlist = useMemo(() => {
     const cfgLabels = textToLabels(allowlistText);
     return uniqueLabels([...cfgLabels]);
   }, [allowlistText]);
-
-  // Derived, not stored: the saved config and the IMAP labels this page already
-  // holds are the whole input, so a second copy in state could only go stale.
-  const availableKeywords = useMemo(
-    () => (cfg && prefs ? collectNotificationKeywordOptions(cfg, labelsFromImap, prefs.keywords) : []),
-    [cfg, labelsFromImap, prefs]
-  );
 
   const timezoneOptions = useMemo(() => {
     const all = getTimezoneOptions();
@@ -170,48 +103,6 @@ export function ConfigPage() {
   async function refreshLabels() {
     const labelsData = await getJSON<LabelsResponse>("/api/labels");
     setLabelsFromImap(uniqueLabels(labelsData.imap ?? []));
-  }
-
-  async function refreshNotificationPrefs() {
-    const raw = await getJSON<unknown>("/api/notifications/preferences");
-    setPrefs(normalizePrefs(raw));
-  }
-
-  async function refreshIMAPStatus() {
-    const status = await getJSON<IMAPConfigStatus>("/api/imap/config");
-    setImapStatus(status);
-    if (status.configured) {
-      setImapForm((prev) => ({
-        host: status.host ?? prev.host,
-        port: status.port ?? prev.port,
-        username: status.username ?? prev.username,
-        password: "",
-        mailbox: status.mailbox ?? prev.mailbox,
-        smtpHost: status.smtpHost ?? prev.smtpHost,
-        smtpPort: status.smtpPort ?? prev.smtpPort
-      }));
-    }
-  }
-
-  async function refreshDavStatus() {
-    setDavStatus(await getDAVPasswordStatus());
-  }
-
-  async function refreshSendAsAliases() {
-    setSendAsAliases(await listSendAsAliases());
-  }
-
-  async function refreshCardDAVClientConfig() {
-    const status = await getCardDAVClientConfig();
-    setClientConfig(status);
-    if (status.configured) {
-      setClientForm((prev) => ({
-        serverUrl: status.serverUrl ?? prev.serverUrl,
-        username: status.username ?? prev.username,
-        password: "",
-        addressBookPath: status.addressBookPath ?? prev.addressBookPath
-      }));
-    }
   }
 
   async function refreshWKDDomains() {
@@ -247,16 +138,7 @@ export function ConfigPage() {
       }
 
       // Load secondary panels independently so one failure does not block the entire page.
-      const loaders = [
-        refreshLabels().catch(() => undefined),
-        refreshIMAPStatus().catch(() => undefined),
-        refreshDavStatus().catch(() => undefined),
-        refreshCardDAVClientConfig().catch(() => undefined),
-        refreshSendAsAliases().catch(() => undefined),
-        refreshNotificationPrefs().catch(() => {
-          if (!cancelled) setNotifyStatus("Failed to load notification settings.");
-        })
-      ];
+      const loaders = [refreshLabels().catch(() => undefined)];
       // WKD domain management is admin-only on the backend (s.withAdmin) —
       // skip the fetch entirely for non-admins rather than let it 403.
       if (isAdmin) {
@@ -282,21 +164,6 @@ export function ConfigPage() {
       cancelled = true;
     };
   }, []);
-
-  // While any alias is still verifying, poll for status changes so the list
-  // updates on its own once the background verification check (server-side,
-  // typically completing within a couple of minutes) resolves it — the user
-  // never has to do anything or refresh manually. Stops as soon as nothing
-  // is pending, so this never polls indefinitely for an idle account.
-  useEffect(() => {
-    if (!sendAsAliases.some((alias) => alias.status === "pending")) {
-      return;
-    }
-    const interval = window.setInterval(() => {
-      refreshSendAsAliases().catch(() => undefined);
-    }, 15000);
-    return () => window.clearInterval(interval);
-  }, [sendAsAliases]);
 
   if (!cfg) {
     return (
@@ -358,97 +225,6 @@ export function ConfigPage() {
     setConfigStatus("Merged discovered IMAP labels into allowlist (not yet saved).");
   }
 
-  async function saveIMAPConfig() {
-    setImapBusy(true);
-    setImapMessage("");
-    try {
-      const result = await postJSON<IMAPConfigStatus>("/api/imap/config", imapForm);
-      setImapStatus(result);
-      setImapForm((prev) => ({ ...prev, password: "" }));
-      setImapMessage("IMAP configuration saved.");
-      await refreshLabels();
-    } catch (error: unknown) {
-      const message = toErrorMessage(error, "unknown error");
-      setImapMessage(`Failed to save IMAP config: ${message}`);
-    } finally {
-      setImapBusy(false);
-    }
-  }
-
-  async function testIMAPConfig() {
-    setImapBusy(true);
-    setImapMessage("");
-    try {
-      const result = await postJSON<{ ok: boolean; error?: string; host?: string; port?: number; mailbox?: string }>(
-        "/api/imap/test",
-        imapForm
-      );
-      if (result.ok) {
-        setImapMessage(`IMAP test passed (${result.host}:${result.port} ${result.mailbox}).`);
-      } else {
-        setImapMessage(`IMAP test failed: ${result.error ?? "unknown error"}`);
-      }
-    } catch (error: unknown) {
-      const message = toErrorMessage(error, "unknown error");
-      setImapMessage(`IMAP test failed: ${message}`);
-    } finally {
-      setImapBusy(false);
-    }
-  }
-
-  async function deleteIMAPConfig() {
-    setImapBusy(true);
-    setImapMessage("");
-    try {
-      await deleteJSON<{ ok: boolean; configured: boolean }>("/api/imap/config");
-      setImapStatus({ configured: false });
-      setImapForm({ host: "", port: 993, username: "", password: "", mailbox: "INBOX", smtpHost: "", smtpPort: 587 });
-      setImapMessage("Stored IMAP configuration removed.");
-    } catch (error: unknown) {
-      const message = toErrorMessage(error, "unknown error");
-      setImapMessage(`Failed to delete IMAP config: ${message}`);
-    } finally {
-      setImapBusy(false);
-    }
-  }
-
-  async function addSendAsAlias() {
-    const email = sendAsEmail.trim();
-    if (!email) {
-      setSendAsMessage("Enter an email address first.");
-      return;
-    }
-    setSendAsBusy(true);
-    setSendAsMessage("");
-    try {
-      await createSendAsAlias(email, sendAsDisplayName.trim());
-      setSendAsEmail("");
-      setSendAsDisplayName("");
-      setSendAsMessage("Verification email sent. This address will show as verified automatically once the check completes — no action needed.");
-      await refreshSendAsAliases();
-    } catch (error: unknown) {
-      setSendAsMessage(`Failed to start verification: ${toErrorMessage(error, "unknown error")}`);
-    } finally {
-      setSendAsBusy(false);
-    }
-  }
-
-  async function removeSendAsAlias(alias: SendAsAlias) {
-    if (!window.confirm(`Remove ${alias.email} as a send-as address?`)) {
-      return;
-    }
-    setSendAsBusy(true);
-    setSendAsMessage("");
-    try {
-      await deleteSendAsAlias(alias.id);
-      await refreshSendAsAliases();
-    } catch (error: unknown) {
-      setSendAsMessage(`Failed to remove address: ${toErrorMessage(error, "unknown error")}`);
-    } finally {
-      setSendAsBusy(false);
-    }
-  }
-
   async function runClassifierTest() {
     setClassifierTestBusy(true);
     setClassifierTestResult("");
@@ -474,112 +250,6 @@ export function ConfigPage() {
 
   function updateConfig<K extends keyof AppConfig>(key: K, value: AppConfig[K]) {
     setCfg((prev) => (prev ? { ...prev, [key]: value } : prev));
-  }
-
-  async function generateDavPassword() {
-    setDavBusy(true);
-    setCopyStatus("");
-    try {
-      const generated = await generateDAVPassword();
-      setRevealedPassword(generated.password);
-      await refreshDavStatus();
-    } catch (error: unknown) {
-      setConfigStatus(`Failed to generate CardDAV password: ${toErrorMessage(error, "unknown error")}`);
-    } finally {
-      setDavBusy(false);
-    }
-  }
-
-  async function revokeDavPassword() {
-    if (
-      !window.confirm(
-        "Revoke the CardDAV app password? Any connected CardDAV client will stop syncing until you generate a new one."
-      )
-    ) {
-      return;
-    }
-    setDavBusy(true);
-    setCopyStatus("");
-    try {
-      await revokeDAVPassword();
-      setRevealedPassword("");
-      await refreshDavStatus();
-    } catch (error: unknown) {
-      setConfigStatus(`Failed to revoke CardDAV password: ${toErrorMessage(error, "unknown error")}`);
-    } finally {
-      setDavBusy(false);
-    }
-  }
-
-  function copyDavPassword() {
-    if (!revealedPassword || !navigator.clipboard?.writeText) {
-      return;
-    }
-    void navigator.clipboard.writeText(revealedPassword).then(
-      () => setCopyStatus("Copied to clipboard."),
-      () => setCopyStatus("Could not copy automatically — copy it manually.")
-    );
-  }
-
-  async function saveCardDAVClient() {
-    if (!clientForm.serverUrl.trim() || !clientForm.username.trim() || !clientForm.password.trim()) {
-      setClientMessage("Server URL, username, and password are required.");
-      return;
-    }
-    setClientBusy(true);
-    setClientMessage("");
-    try {
-      await saveCardDAVClientConfig({
-        serverUrl: clientForm.serverUrl.trim(),
-        username: clientForm.username.trim(),
-        password: clientForm.password.trim(),
-        addressBookPath: clientForm.addressBookPath.trim()
-      });
-      setClientMessage("CardDAV client configuration saved.");
-      await refreshCardDAVClientConfig();
-    } catch (error: unknown) {
-      setClientMessage(`Failed to save CardDAV client configuration: ${toErrorMessage(error, "unknown error")}`);
-    } finally {
-      setClientBusy(false);
-    }
-  }
-
-  function useDiscoveredAddressBook(path: string) {
-    setClientForm((prev) => ({ ...prev, addressBookPath: path }));
-    setClientMessage(`Address book pinned to ${path} — click "Save CardDAV Client" then "Sync Now" to apply.`);
-  }
-
-  async function deleteCardDAVClient() {
-    if (!window.confirm("Remove the stored CardDAV client configuration?")) {
-      return;
-    }
-    setClientBusy(true);
-    setClientMessage("");
-    try {
-      await deleteCardDAVClientConfig();
-      setClientConfig({ configured: false });
-      setClientForm({ serverUrl: "", username: "", password: "", addressBookPath: "" });
-      setClientMessage("CardDAV client configuration removed.");
-    } catch (error: unknown) {
-      setClientMessage(`Failed to remove CardDAV client configuration: ${toErrorMessage(error, "unknown error")}`);
-    } finally {
-      setClientBusy(false);
-    }
-  }
-
-  async function runCardDAVClientSync() {
-    setClientSyncBusy(true);
-    setClientMessage("");
-    try {
-      const result = await syncCardDAVClient();
-      setClientMessage(`Synced: ${result.imported ?? 0} imported, ${result.updated ?? 0} updated.`);
-      await refreshCardDAVClientConfig();
-    } catch (error: unknown) {
-      setClientMessage(`Sync failed: ${toErrorMessage(error, "unknown error")}`);
-      await refreshCardDAVClientConfig().catch(() => undefined);
-    } finally {
-      setClientSyncBusy(false);
-    }
   }
 
   function copyWKDText(text: string) {
@@ -647,144 +317,6 @@ export function ConfigPage() {
     } finally {
       setWkdBusy(false);
     }
-  }
-
-  async function saveNotificationPrefs() {
-    if (!prefs) {
-      return;
-    }
-
-    const next: NotificationPrefs = {
-      mode: prefs.mode,
-      keywords: uniqueLabels(prefs.keywords),
-      contentPreview: prefs.contentPreview
-    };
-
-    try {
-      await putJSON<{ ok: boolean }>("/api/notifications/preferences", next);
-      setPrefs(next);
-      setNotifyStatus("Notification settings saved.");
-    } catch {
-      setNotifyStatus("Failed to save notification settings.");
-    }
-  }
-
-  function base64URLToUint8Array(base64URL: string): Uint8Array<ArrayBuffer> {
-    const normalized = base64URL.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    return Uint8Array.from(window.atob(padded), (c) => c.charCodeAt(0));
-  }
-
-  async function registerDeviceForPush(): Promise<void> {
-    if (!("Notification" in window)) {
-      throw new Error("Notifications are not supported by this browser.");
-    }
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-      throw new Error("Push notifications are not supported by this browser.");
-    }
-
-    let permission = Notification.permission;
-    if (permission === "default") {
-      permission = await Notification.requestPermission();
-    }
-    if (permission !== "granted") {
-      throw new Error("Notification permission was not granted.");
-    }
-
-    const vapid = await getJSON<NotificationVapidResponse>("/api/notifications/vapid-public-key");
-    const registration = await navigator.serviceWorker.register("/sw.js");
-    const readyRegistration = await navigator.serviceWorker.ready;
-    const target = readyRegistration ?? registration;
-
-    let subscription = await target.pushManager.getSubscription();
-    if (!subscription) {
-      subscription = await target.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: base64URLToUint8Array(vapid.publicKey)
-      });
-    }
-
-    await postJSON<{ ok: boolean; subscriptions: number }>("/api/notifications/subscriptions", subscription.toJSON());
-  }
-
-  async function sendTestNotification() {
-    setNotifyTestBusy(true);
-    try {
-      await registerDeviceForPush();
-      const result = await postJSON<NotificationTestResponse>("/api/notifications/test", {
-        title: "KyPost Test Notification",
-        body: "This test notification was sent to all of your subscribed devices."
-      });
-      const nativeDevices = result.nativeDevices ?? 0;
-      const nativeSent = result.nativeSent ?? 0;
-      const webSummary = `${result.sent}/${result.subscriptions} web`;
-      const nativeSummary = nativeDevices > 0 ? `, ${nativeSent}/${nativeDevices} mobile` : "";
-      const nativeErrorSuffix = result.nativeError ? ` Mobile failed: ${result.nativeError}.` : "";
-      setNotifyStatus(`Test sent: ${webSummary}${nativeSummary} device(s) delivered.${nativeErrorSuffix}`);
-    } catch (error: unknown) {
-      const detail = toErrorMessage(error, "unknown error");
-      setNotifyStatus(`Failed to send test notification: ${detail}`);
-    } finally {
-      setNotifyTestBusy(false);
-    }
-  }
-
-  async function unsubscribeThisDevice() {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
-      setNotifyStatus("Failed to unsubscribe this device: push notifications are not supported by this browser.");
-      return;
-    }
-
-    setNotifyUnsubscribeBusy(true);
-    try {
-      const readyRegistration = await navigator.serviceWorker.ready;
-      const subscription = await readyRegistration.pushManager.getSubscription();
-      if (!subscription) {
-        setNotifyStatus("This device is not currently subscribed.");
-        return;
-      }
-
-      await deleteJSON<{ ok: boolean; removed: boolean; subscriptions: number }>("/api/notifications/subscriptions", {
-        endpoint: subscription.endpoint
-      });
-      await subscription.unsubscribe();
-      setNotifyStatus("Unsubscribed this device from push notifications.");
-    } catch (error: unknown) {
-      const detail = toErrorMessage(error, "unknown error");
-      setNotifyStatus(`Failed to unsubscribe this device: ${detail}`);
-    } finally {
-      setNotifyUnsubscribeBusy(false);
-    }
-  }
-
-  function setNotifyMode(mode: NotificationPrefs["mode"]) {
-    setPrefs((prev) => {
-      if (!prev) {
-        return prev;
-      }
-      if (shouldWarnAboutSleepState(prev.mode, mode, navigator.userAgent)) {
-        window.alert("To help insure notifications work, please remove your browser from sleep state.");
-      }
-      return { ...prev, mode };
-    });
-  }
-
-  function setAllKeywords() {
-    setPrefs((prev) => (prev ? { ...prev, keywords: uniqueLabels(availableKeywords) } : prev));
-  }
-
-  function clearKeywords() {
-    setPrefs((prev) => (prev ? { ...prev, keywords: [] } : prev));
-  }
-
-  function toggleKeyword(keyword: string, checked: boolean) {
-    setPrefs((prev) => {
-      if (!prev) return prev;
-      const nextKeywords = checked
-        ? uniqueLabels([...prev.keywords, keyword])
-        : prev.keywords.filter((item) => item !== keyword);
-      return { ...prev, keywords: nextKeywords };
-    });
   }
 
   return (
@@ -902,470 +434,23 @@ export function ConfigPage() {
         </div>
       ) : null}
 
-      {!isAdmin ? (
-        <div className="config-card">
-          <h3>Appearance</h3>
-          <p className="config-muted">Theme is stored in this browser only.</p>
-          <div className="config-grid config-grid-two">
-            <label>
-              <div>Theme</div>
-              <select value={selectedTheme} onChange={(event) => setSelectedTheme(event.target.value as ThemeName)}>
-                {THEME_OPTIONS.map((theme) => (
-                  <option key={theme} value={theme}>
-                    {theme}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="config-actions">
-            <button type="button" onClick={saveTheme}>Apply Theme</button>
-          </div>
-        </div>
-      ) : null}
+      {!isAdmin ? <Appearance selectedTheme={selectedTheme} setSelectedTheme={setSelectedTheme} saveTheme={saveTheme} /> : null}
 
       {activeTab === "email" ? (
         <div role="tabpanel">
-        <div className="config-card">
-          <h3>Email Settings</h3>
-          <p className="config-muted">Stored mail credentials are encrypted at rest. SMTP host/port are optional overrides.</p>
-          <div className="config-grid config-grid-two">
-            <label>
-              <div>Host</div>
-              <input value={imapForm.host} onChange={(event) => setImapForm((prev) => ({ ...prev, host: event.target.value }))} />
-            </label>
-            <label>
-              <div>Port</div>
-              <input
-                type="number"
-                value={imapForm.port}
-                onChange={(event) => setImapForm((prev) => ({ ...prev, port: Number(event.target.value) || 993 }))}
-              />
-            </label>
-            <label>
-              <div>Username</div>
-              <input value={imapForm.username} onChange={(event) => setImapForm((prev) => ({ ...prev, username: event.target.value }))} />
-            </label>
-            <label>
-              <div>Password or App Password</div>
-              <input
-                type="password"
-                value={imapForm.password}
-                onChange={(event) => setImapForm((prev) => ({ ...prev, password: event.target.value }))}
-                placeholder="Required when saving changes"
-              />
-            </label>
-            <label>
-              <div>Mailbox</div>
-              <input value={imapForm.mailbox} onChange={(event) => setImapForm((prev) => ({ ...prev, mailbox: event.target.value }))} />
-            </label>
-            <label>
-              <div>SMTP Host (optional)</div>
-              <input
-                value={imapForm.smtpHost}
-                onChange={(event) => setImapForm((prev) => ({ ...prev, smtpHost: event.target.value }))}
-                placeholder="Defaults to IMAP-derived host"
-              />
-            </label>
-            <label>
-              <div>SMTP Port (optional)</div>
-              <input
-                type="number"
-                value={imapForm.smtpPort}
-                onChange={(event) => setImapForm((prev) => ({ ...prev, smtpPort: Number(event.target.value) || 587 }))}
-              />
-            </label>
-          </div>
-          <div className="config-actions">
-            <button type="button" onClick={saveIMAPConfig} disabled={imapBusy}>
-              {imapBusy ? "Saving..." : "Save Email Settings"}
-            </button>
-            <button type="button" onClick={testIMAPConfig} disabled={imapBusy}>
-              {imapBusy ? "Testing..." : "Test Email Settings"}
-            </button>
-            <button type="button" onClick={deleteIMAPConfig} disabled={imapBusy}>
-              Delete Stored Email Settings
-            </button>
-          </div>
-
-          {imapStatus ? (
-            <div className="config-status-card">
-              <p>Configured: {imapStatus.configured ? "Yes" : "No"}</p>
-              {imapStatus.path ? <p>Config Path: {imapStatus.path}</p> : null}
-              {imapStatus.keyPath ? <p>Key Path: {imapStatus.keyPath}</p> : null}
-              {imapStatus.host ? <p>Host: {imapStatus.host}</p> : null}
-              {imapStatus.port ? <p>Port: {imapStatus.port}</p> : null}
-              {imapStatus.username ? <p>Username: {imapStatus.username}</p> : null}
-              {imapStatus.mailbox ? <p>Mailbox: {imapStatus.mailbox}</p> : null}
-              {imapStatus.smtpHost ? <p>SMTP Host: {imapStatus.smtpHost}</p> : null}
-              {imapStatus.smtpPort ? <p>SMTP Port: {imapStatus.smtpPort}</p> : null}
-              {imapStatus.updatedAt ? <p>Updated: {imapStatus.updatedAt}</p> : null}
-            </div>
-          ) : null}
-
-          {imapMessage ? <p className="config-muted">{imapMessage}</p> : null}
-        </div>
-
-        <div className="config-card">
-          <h3>Send-As Addresses</h3>
-          <p className="config-muted">
-            Add a secondary email address you also control. KyPost verifies it automatically — it emails the address
-            a one-time code and watches for that same message to come back to this inbox, with no reply or link click
-            needed on your part. Once verified, you can choose it as the From address when composing mail.
-          </p>
-          <div className="config-grid config-grid-two">
-            <label>
-              <div>Email Address</div>
-              <input
-                type="email"
-                value={sendAsEmail}
-                onChange={(event) => setSendAsEmail(event.target.value)}
-                placeholder="you@another-domain.com"
-              />
-            </label>
-            <label>
-              <div>Display Name (optional)</div>
-              <input value={sendAsDisplayName} onChange={(event) => setSendAsDisplayName(event.target.value)} />
-            </label>
-          </div>
-          <div className="config-actions">
-            <button type="button" onClick={() => void addSendAsAlias()} disabled={sendAsBusy}>
-              {sendAsBusy ? "Working..." : "Verify Address"}
-            </button>
-          </div>
-          {sendAsMessage ? <p className="config-muted">{sendAsMessage}</p> : null}
-
-          {sendAsAliases.length > 0 ? (
-            <div className="config-status-card">
-              {sendAsAliases.map((alias) => (
-                <div
-                  key={alias.id}
-                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 0" }}
-                >
-                  <span>
-                    {alias.displayName ? `${alias.displayName} <${alias.email}>` : alias.email}
-                    {" — "}
-                    {alias.status === "verified" && alias.verifiedAt
-                      ? `verified ${formatWhen(alias.verifiedAt)}`
-                      : alias.status === "failed"
-                        ? `verification failed${alias.failedAt ? ` ${formatWhen(alias.failedAt)}` : ""}`
-                        : `verifying, expires ${formatWhen(alias.expiresAt)}`}
-                    {alias.auto ? (
-                      <span className="config-muted">
-                        {alias.status === "failed"
-                          ? " — this is your account address, checked automatically so your public key can be published for it." +
-                            " Your key is not being published while this check is failing, which usually means your mail provider" +
-                            " does not DKIM-sign the mail you send. KyPost retries weekly."
-                          : " — your account address, checked automatically so your public key can be published for it."}
-                      </span>
-                    ) : null}
-                  </span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span className={`contacts-badge ${sendAsStatusClass(alias.status)}`}>
-                      <span className="contacts-dot" aria-hidden="true" />
-                      {sendAsStatusLabel(alias.status)}
-                    </span>
-                    <button type="button" onClick={() => void removeSendAsAlias(alias)} disabled={sendAsBusy}>
-                      Remove
-                    </button>
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="config-muted">No send-as addresses yet.</p>
-          )}
-        </div>
+          <EmailServer refreshLabels={refreshLabels} />
+          <SendAs />
         </div>
       ) : null}
 
       {activeTab === "carddav" ? (
         <div className="config-carddav-layout" role="tabpanel">
-          <div className="config-card">
-            <h3>CardDAV Client</h3>
-            <p className="config-muted">
-              Pull contacts down from an external CardDAV server (iCloud, Google, Nextcloud, Fastmail, etc.) into your
-              KyPost address book. Imported contacts then reach the mobile app the same way locally-added ones do.
-            </p>
-            <div className="config-grid config-grid-two">
-              <label>
-                <div>Server URL</div>
-                <input
-                  value={clientForm.serverUrl}
-                  onChange={(event) => setClientForm((prev) => ({ ...prev, serverUrl: event.target.value }))}
-                  placeholder="https://contacts.example.com/dav/"
-                />
-              </label>
-              <label>
-                <div>Username</div>
-                <input
-                  value={clientForm.username}
-                  onChange={(event) => setClientForm((prev) => ({ ...prev, username: event.target.value }))}
-                />
-              </label>
-              <label>
-                <div>Password or App Password</div>
-                <input
-                  type="password"
-                  value={clientForm.password}
-                  onChange={(event) => setClientForm((prev) => ({ ...prev, password: event.target.value }))}
-                  placeholder="Required when saving changes"
-                />
-              </label>
-              <label>
-                <div>Address Book Path (optional override)</div>
-                <input
-                  value={clientForm.addressBookPath}
-                  onChange={(event) => setClientForm((prev) => ({ ...prev, addressBookPath: event.target.value }))}
-                  placeholder="Leave blank to auto-discover"
-                />
-              </label>
-            </div>
-            <p className="config-muted">
-              By default the server is auto-discovered, and if it reports more than one address book (common on
-              providers like mailbox.org, Nextcloud, or Baikal — a personal book alongside shared/collected ones), the
-              first one that actually contains contacts is used. If it still picks the wrong one, copy a path from the
-              list below into the override field, save, and sync again.
-            </p>
-            <div className="config-actions">
-              <button type="button" onClick={() => void saveCardDAVClient()} disabled={clientBusy}>
-                {clientBusy ? "Saving..." : "Save CardDAV Client"}
-              </button>
-              <button type="button" onClick={() => void runCardDAVClientSync()} disabled={clientSyncBusy || !clientConfig?.configured}>
-                {clientSyncBusy ? "Syncing..." : "Sync Now"}
-              </button>
-              {clientConfig?.configured ? (
-                <button type="button" onClick={() => void deleteCardDAVClient()} disabled={clientBusy}>
-                  Delete Stored Configuration
-                </button>
-              ) : null}
-            </div>
-
-            {clientConfig?.configured ? (
-              <div className="config-status-card">
-                <p>Configured: Yes</p>
-                <p>Server URL: {clientConfig.serverUrl}</p>
-                <p>Username: {clientConfig.username}</p>
-                {clientConfig.addressBookPath ? <p>Address Book: {clientConfig.addressBookPath}</p> : null}
-                {clientConfig.lastSyncedAt ? <p>Last Synced: {clientConfig.lastSyncedAt}</p> : null}
-                {clientConfig.lastSyncError ? (
-                  <p>Last Sync Error: {clientConfig.lastSyncError}</p>
-                ) : clientConfig.lastSyncedAt ? (
-                  <p>Last Sync Result: {clientConfig.lastSyncImported ?? 0} imported, {clientConfig.lastSyncUpdated ?? 0} updated</p>
-                ) : null}
-                {clientConfig.discoveredAddressBooks && clientConfig.discoveredAddressBooks.length > 0 ? (
-                  <div style={{ marginTop: 10 }}>
-                    <p>Address books found on the server:</p>
-                    <div className="config-grid">
-                      {clientConfig.discoveredAddressBooks.map((book) => (
-                        <div
-                          key={book.path}
-                          style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}
-                        >
-                          <span>
-                            {book.path === clientConfig.addressBookPath ? <strong>{book.path}</strong> : book.path}
-                            {book.name ? ` (${book.name})` : ""} — {book.contactCount} contact
-                            {book.contactCount === 1 ? "" : "s"}
-                          </span>
-                          {book.path !== clientForm.addressBookPath ? (
-                            <button type="button" onClick={() => useDiscoveredAddressBook(book.path)}>
-                              Use This
-                            </button>
-                          ) : null}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            {clientMessage ? <p className="config-muted">{clientMessage}</p> : null}
-          </div>
-
-          <div className="config-card">
-            <h3>CardDAV Access</h3>
-            <p className="config-muted">
-              Point a CardDAV-capable app (iOS/macOS Contacts, Nextcloud, Thunderbird, or the KyPost mobile app) at
-              the address below using an app-specific password — never your account login password.
-            </p>
-            {davURL ? (
-              <div className="contacts-dav-url">
-                <code>{davURL}</code>
-              </div>
-            ) : null}
-            <div className="contacts-dav-status">
-              {davStatus?.configured ? (
-                <span className="contacts-badge contacts-status-active">
-                  <span className="contacts-dot" aria-hidden="true" />
-                  app password configured
-                </span>
-              ) : (
-                <span className="contacts-badge contacts-status-inactive">
-                  <span className="contacts-dot" aria-hidden="true" />
-                  no app password yet
-                </span>
-              )}
-            </div>
-            {revealedPassword ? (
-              <div className="contacts-dav-reveal">
-                <p className="config-muted">
-                  Copy this now — it will not be shown again. Use it as the password for the CardDAV account above.
-                </p>
-                <div className="contacts-dav-secret">
-                  <code>{revealedPassword}</code>
-                  <button type="button" onClick={copyDavPassword}>
-                    Copy
-                  </button>
-                </div>
-                {copyStatus ? <p className="config-muted">{copyStatus}</p> : null}
-              </div>
-            ) : null}
-            <div className="config-actions">
-              <button type="button" onClick={() => void generateDavPassword()} disabled={davBusy}>
-                {davBusy ? "Working..." : davStatus?.configured ? "Regenerate Password" : "Generate Password"}
-              </button>
-              {davStatus?.configured ? (
-                <button type="button" onClick={() => void revokeDavPassword()} disabled={davBusy}>
-                  Revoke
-                </button>
-              ) : null}
-            </div>
-          </div>
+          <CardDavClient />
+          <CardDavAccess setConfigStatus={setConfigStatus} />
         </div>
       ) : null}
 
-      {activeTab === "notifications" ? (
-        <div className="config-card" role="tabpanel">
-          <h3>Notifications</h3>
-          <p className="config-muted">Choose how alerts are delivered to this account and which IMAP keywords trigger them.</p>
-
-          {!prefs ? (
-            <p className="config-muted">{notifyStatus || "Loading notification settings..."}</p>
-          ) : (
-            <>
-              <h4>Delivery Mode</h4>
-              <p className="config-muted">Switch between disabled alerts, all-email alerts, or keyword-only alerts.</p>
-
-              <div className="config-notify-mode-grid">
-                <label className={`config-notify-mode-option${prefs.mode === "none" ? " active" : ""}`}>
-                  <input
-                    className="config-notify-mode-input"
-                    type="radio"
-                    checked={prefs.mode === "none"}
-                    onChange={() => setNotifyMode("none")}
-                  />
-                  <span className="config-notify-mode-title">No email</span>
-                  <span className="config-notify-mode-copy">Pause browser notifications.</span>
-                </label>
-
-                <label className={`config-notify-mode-option${prefs.mode === "all" ? " active" : ""}`}>
-                  <input
-                    className="config-notify-mode-input"
-                    type="radio"
-                    checked={prefs.mode === "all"}
-                    onChange={() => setNotifyMode("all")}
-                  />
-                  <span className="config-notify-mode-title">All emails</span>
-                  <span className="config-notify-mode-copy">Notify for every new message.</span>
-                </label>
-
-                <label className={`config-notify-mode-option${prefs.mode === "keywords" ? " active" : ""}`}>
-                  <input
-                    className="config-notify-mode-input"
-                    type="radio"
-                    checked={prefs.mode === "keywords"}
-                    onChange={() => setNotifyMode("keywords")}
-                  />
-                  <span className="config-notify-mode-title">IMAP keywords</span>
-                  <span className="config-notify-mode-copy">Notify only for selected keywords.</span>
-                </label>
-              </div>
-
-              <h4>Notification Content</h4>
-              <label className="config-notify-preview-toggle">
-                <input
-                  type="checkbox"
-                  checked={prefs.contentPreview}
-                  onChange={(event) => {
-                    if (event.target.checked) {
-                      setPreviewWarningOpen(true);
-                      return;
-                    }
-                    setPrefs({ ...prefs, contentPreview: false });
-                  }}
-                />
-                <span>
-                  <span className="config-notify-mode-title">Show sender and subject in notifications</span>
-                  <span className="config-notify-mode-copy">
-                    Off by default. When off, notifications read &ldquo;You have a new email.&rdquo; and carry no
-                    sender, subject, or keyword.
-                  </span>
-                </span>
-              </label>
-
-              <h4>IMAP Keywords</h4>
-              <div className="config-notify-keywords-head">
-                <p className="config-muted">Select which IMAP keywords can trigger notifications.</p>
-                <span className="config-notify-count">{prefs.keywords.length} selected</span>
-              </div>
-
-              <div className="config-notify-keywords-tools">
-                <button type="button" onClick={setAllKeywords} disabled={availableKeywords.length === 0}>
-                  Select All
-                </button>
-                <button type="button" onClick={clearKeywords} disabled={prefs.keywords.length === 0}>
-                  Clear
-                </button>
-              </div>
-
-              {availableKeywords.length === 0 ? (
-                <p className="config-muted">
-                  No IMAP keywords found yet. Configure labels in the Labels tab or sync labels from IMAP first.
-                </p>
-              ) : (
-                <div className="config-notify-keywords-grid">
-                  {availableKeywords.map((keyword) => (
-                    <label key={keyword} className={`config-notify-keyword-option${prefs.keywords.includes(keyword) ? " selected" : ""}`}>
-                      <input
-                        type="checkbox"
-                        checked={prefs.keywords.includes(keyword)}
-                        onChange={(event) => toggleKeyword(keyword, event.target.checked)}
-                      />
-                      <span>{keyword}</span>
-                    </label>
-                  ))}
-                </div>
-              )}
-
-              {prefs.mode !== "keywords" ? (
-                <p className="config-muted">Selections are saved now and will be used when Delivery Mode is set to IMAP keywords.</p>
-              ) : null}
-
-              <div className="config-actions">
-                <button type="button" onClick={() => void saveNotificationPrefs()}>Save Notifications</button>
-                <button type="button" onClick={() => void sendTestNotification()} disabled={notifyTestBusy}>
-                  {notifyTestBusy ? "Sending Test..." : "Send Test Notification"}
-                </button>
-                <button type="button" onClick={() => void unsubscribeThisDevice()} disabled={notifyUnsubscribeBusy || notifyTestBusy}>
-                  {notifyUnsubscribeBusy ? "Unsubscribing..." : "Unsubscribe This Device"}
-                </button>
-              </div>
-            </>
-          )}
-
-          {notifyStatus && prefs ? <p className={notifyStatusTone}>{notifyStatus}</p> : null}
-
-          <ContentPreviewWarningDialog
-            open={previewWarningOpen}
-            onConfirm={() => {
-              setPreviewWarningOpen(false);
-              setPrefs((prev) => (prev ? { ...prev, contentPreview: true } : prev));
-            }}
-            onCancel={() => setPreviewWarningOpen(false)}
-          />
-        </div>
-      ) : null}
+      {activeTab === "notifications" ? <NotificationPrefs cfg={cfg} labelsFromImap={labelsFromImap} /> : null}
 
       {activeTab === "labels" && isAdmin ? (
         <div className="config-card" role="tabpanel">
