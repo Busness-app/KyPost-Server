@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -110,4 +111,60 @@ func (s *Server) handlePGPDeviceEnvelope(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	writeJSON(w, http.StatusNotFound, map[string]any{"error": "no envelope sealed for this device"})
+}
+
+// maxEnrollmentStateBytes bounds the state report. The body is one boolean; this
+// is generous headroom and keeps an unbounded read off a device credential.
+const maxEnrollmentStateBytes = 1 << 10
+
+// handlePGPDeviceEnrollmentState records the calling device's own answer to
+// "can I still open my local envelope".
+//
+// This exists as its own route rather than as a field on registration because the
+// marker must not depend on any push transport. Registration cannot run without a
+// push token -- the Android client returns early on a blank one -- so a pull-mode
+// device with FCM disabled could never restate it, and the marker would freeze at
+// whatever it was when that device last had a token. And on UnifiedPush the
+// registration call is driven by a third-party distributor's cycle, which must not
+// decide when a security-relevant marker is refreshed.
+//
+// The field is REQUIRED here, unlike the tri-state pointer on registration. Absent
+// there means "no opinion", so an older client is never silently marked
+// un-enrolled. Here, stating an opinion is the entire purpose, so an absent field
+// is a malformed request rather than a false report -- accepting it as false would
+// let a truncated body mark a working device unreadable.
+func (s *Server) handlePGPDeviceEnrollmentState(w http.ResponseWriter, r *http.Request) {
+	userID, device, ok, retryAfter := s.deviceAuthFromRequest(r)
+	if !ok {
+		writeDeviceAuthFailure(w, retryAfter)
+		return
+	}
+	// This route MUTATES on a device credential, which no shared middleware meters.
+	if !s.meterDeviceWrite(w, r, userID) {
+		return
+	}
+	var req struct {
+		EncryptionEnrolled *bool `json:"encryptionEnrolled"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxEnrollmentStateBytes)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.EncryptionEnrolled == nil {
+		http.Error(w, "encryptionEnrolled is required", http.StatusBadRequest)
+		return
+	}
+	store, err := s.userStore(userID)
+	if err != nil {
+		http.Error(w, "state unavailable", http.StatusInternalServerError)
+		return
+	}
+	// device.DeviceID comes from the verified credential, never from the body.
+	if err := store.SetNativeDeviceEncryptionEnrolled(device.DeviceID, *req.EncryptionEnrolled); err != nil {
+		http.Error(w, "could not store the enrollment state", http.StatusInternalServerError)
+		return
+	}
+	s.logger.Info("pgp enrollment state reported", "user_id", userID,
+		"device_id", device.DeviceID, "enrolled", strconv.FormatBool(*req.EncryptionEnrolled))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

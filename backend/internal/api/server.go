@@ -556,6 +556,7 @@ func (s *Server) routesPGP(mux *http.ServeMux) {
 	// pgp_device_enrollment.go.
 	mux.HandleFunc("POST /api/pgp/device/enrollment-key", withDeviceAuth(s.handlePGPPublishEnrollmentKey))
 	mux.HandleFunc("GET /api/pgp/device/envelope", withDeviceAuth(s.handlePGPDeviceEnvelope))
+	mux.HandleFunc("POST /api/pgp/device/enrollment-state", withDeviceAuth(s.handlePGPDeviceEnrollmentState))
 	// export-legacy stays session-only on purpose. It is the one endpoint
 	// that returns a private key in the clear, and it re-verifies the account
 	// password before doing so — a device secret is not that password, and a
