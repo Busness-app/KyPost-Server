@@ -99,7 +99,19 @@ export function ApplicationRuntime() {
   }
 
   if (!cfg) {
-    return null;
+    // A bare `null` here would leave a permanently blank tab on a failed
+    // fetch: the status paragraph that reports "Failed to load configuration
+    // data." lives in the JSX below, so returning null skips rendering it
+    // right alongside the fields it would have explained the absence of.
+    // Render the card shell (and the status line, once it exists) so the
+    // tab is never silently empty.
+    return (
+      <div className="config-card" role="tabpanel">
+        <h3>Application</h3>
+        <p className="config-muted">Core runtime and interface settings.</p>
+        {configStatus ? <p className={configStatusTone}>{configStatus}</p> : null}
+      </div>
+    );
   }
 
   return (

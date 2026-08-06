@@ -26,13 +26,12 @@ beforeEach(() => {
 
 describe("EmailServer", () => {
   it("loads the stored settings on mount without being told to", async () => {
-    render(<EmailServer refreshLabels={vi.fn().mockResolvedValue(undefined)} />);
+    render(<EmailServer />);
     await waitFor(() => expect(screen.getByDisplayValue("imap.example.com")).toBeTruthy());
   });
 
   it("saves the form on its own, with no parent involvement", async () => {
-    const refreshLabels = vi.fn().mockResolvedValue(undefined);
-    render(<EmailServer refreshLabels={refreshLabels} />);
+    render(<EmailServer />);
     await waitFor(() => expect(screen.getByDisplayValue("imap.example.com")).toBeTruthy());
     await userEvent.type(screen.getByLabelText(/password/i), "app-password");
     await userEvent.click(screen.getByRole("button", { name: /save email settings/i }));
@@ -51,7 +50,5 @@ describe("EmailServer", () => {
         })
       )
     );
-    // refreshLabels is the sole reason this prop exists; assert it actually fired.
-    await waitFor(() => expect(refreshLabels).toHaveBeenCalledTimes(1));
   });
 });

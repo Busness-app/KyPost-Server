@@ -60,6 +60,17 @@ export function ConfigPage() {
   }
   const configStatusTone = configStatus.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
+  // This banner is now fed only by tabs that still route status through
+  // ConfigPage (Appearance, CardDavAccess, and this file's own Remote LLM
+  // save) — Application/Labels/WKD each show their own local status inside
+  // their own card. Switching tabs never unmounts ConfigPage (the tab lives
+  // in a query param on the same route), so without this a message from one
+  // tab would sit here indefinitely and could appear alongside a *different*
+  // section's own fresh status line, reading as a duplicate notice.
+  useEffect(() => {
+    setConfigStatus("");
+  }, [activeTab]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -94,7 +105,6 @@ export function ConfigPage() {
 
   async function saveConfig() {
     if (!cfg) return;
-    const next: AppConfig = { ...cfg };
 
     // The API key input is write-only (never populated from a loaded
     // config), so a non-empty value here can only mean the user just typed
@@ -102,21 +112,27 @@ export function ConfigPage() {
     // otherwise look like "clear the key" to a naive reader of the diff,
     // even though the server already preserves the existing key on empty.
     // apiKeySet is a response-only computed field; never send it back.
-    const typedApiKey = next.classifier.apiKey.trim();
-    const { apiKeySet: _apiKeySet, apiKey: _apiKey, ...classifierRest } = next.classifier;
-    const payload = {
-      ...next,
-      classifier: typedApiKey ? { ...classifierRest, apiKey: typedApiKey } : classifierRest
-    };
+    const typedApiKey = cfg.classifier.apiKey.trim();
+    const { apiKeySet: _apiKeySet, apiKey: _apiKey, ...classifierRest } = cfg.classifier;
+    const classifierPayload = typedApiKey ? { ...classifierRest, apiKey: typedApiKey } : classifierRest;
 
     try {
+      // ConfigPage's own `cfg` is a one-time snapshot from mount — it never
+      // sees edits ApplicationRuntime/LabelRules make through their own
+      // saveConfigPatch, and this component never unmounts on a tab switch
+      // (the tab lives in a query param on the same route). Spreading the
+      // stale `cfg` here would silently revert whatever those saved in the
+      // meantime, so this reads fresh immediately before writing, same as
+      // saveConfigPatch does.
+      const current = normalizeConfig(await getJSON<unknown>("/api/config"));
+      const payload = { ...current, classifier: classifierPayload };
       await putJSON<{ ok: boolean }>("/api/config", payload);
       setCfg({
-        ...next,
+        ...current,
         classifier: {
-          ...next.classifier,
+          ...classifierRest,
           apiKey: "",
-          apiKeySet: typedApiKey ? true : next.classifier.apiKeySet
+          apiKeySet: typedApiKey ? true : current.classifier.apiKeySet
         }
       });
       setConfigStatus("Configuration saved.");

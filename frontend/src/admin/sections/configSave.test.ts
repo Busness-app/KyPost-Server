@@ -26,7 +26,10 @@ describe("saveConfigPatch", () => {
 
     await saveConfigPatch({ timezone: "Europe/London" });
 
-    const [, body] = putJSON.mock.calls[0];
+    // Pin the endpoint too — destructuring only `body` out of the call would
+    // still pass if the PUT went to the wrong URL.
+    const [url, body] = putJSON.mock.calls[0];
+    expect(url).toBe("/api/config");
     expect(body).toMatchObject({
       timezone: "Europe/London",
       logLevel: "info",
@@ -41,7 +44,8 @@ describe("saveConfigPatch", () => {
     await saveConfigPatch({ timezone: "Europe/London" });
 
     expect(getJSON).toHaveBeenCalledWith("/api/config");
-    const [, body] = putJSON.mock.calls[0];
+    const [url, body] = putJSON.mock.calls[0];
+    expect(url).toBe("/api/config");
     expect(body.labels.allowlist).toEqual(["Later"]);
   });
 });

@@ -15,6 +15,15 @@ export function LabelRules() {
   const [keywordMappingText, setKeywordMappingText] = useState("");
   const [labelsFromImap, setLabelsFromImap] = useState<string[]>([]);
   const [configStatus, setConfigStatus] = useState("");
+  // Guards Save: it isn't safe to PUT until the initial /api/config read has
+  // actually seeded the textareas. Before this component existed, a failed
+  // or in-flight load meant ConfigPage's own `cfg` was null and it rendered
+  // its own error page instead of a tab — there was no card, and no Save
+  // button, to click. Now that this card renders unconditionally, an
+  // unguarded Save while `loaded` is still false would call saveConfigPatch
+  // with allowlist: [] / keywordMappings: {} and PUT those empties over
+  // whatever label rules the server actually has.
+  const [loaded, setLoaded] = useState(false);
 
   const configStatusTone = configStatus.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
@@ -40,6 +49,7 @@ export function LabelRules() {
         const normalized = normalizeConfig(nextConfig);
         setAllowlistText(labelsToText(normalized.labels.allowlist));
         setKeywordMappingText(mappingToText(normalized.labels.keywordMappings));
+        setLoaded(true);
       } catch {
         if (!cancelled) {
           setConfigStatus("Failed to load configuration data.");
@@ -63,6 +73,7 @@ export function LabelRules() {
   }
 
   async function saveConfig() {
+    if (!loaded) return;
     try {
       await saveConfigPatch({
         labels: {
@@ -97,7 +108,7 @@ export function LabelRules() {
       </div>
       <div className="config-actions">
         <button type="button" onClick={applyImapLabelsToAllowlist}>Merge IMAP Labels</button>
-        <button type="button" onClick={saveConfig}>Save Configuration</button>
+        <button type="button" onClick={saveConfig} disabled={!loaded}>Save Configuration</button>
       </div>
       <p className="config-muted">{labelsFromImap.length > 0 ? `Discovered IMAP labels: ${labelsFromImap.join(", ")}` : "No IMAP labels discovered yet."}</p>
       {configStatus ? <p className={configStatusTone}>{configStatus}</p> : null}

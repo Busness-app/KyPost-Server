@@ -38,6 +38,18 @@ function isSelected(tabName: string): boolean {
   return screen.getByRole("tab", { name: tabName }).getAttribute("aria-selected") === "true";
 }
 
+// Lands directly on a given tab via the URL, the same way a bookmarked link
+// or reload would, instead of clicking through the tab strip after mount.
+function renderConfigPageAt(tab: string, role: AuthState["role"] = "admin") {
+  return render(
+    <MemoryRouter initialEntries={[`/config?tab=${tab}`]}>
+      <AuthContext.Provider value={{ authenticated: true, userId: "u1", username: "admin", role }}>
+        <ConfigPage />
+      </AuthContext.Provider>
+    </MemoryRouter>
+  );
+}
+
 // Reproduces App.tsx:1263's <Route path="/config" element={<ConfigPage />} />
 // alongside a sidebar-style <Link to="/config"> (App.tsx:1219-1225): both
 // point at the SAME route, so clicking the link while already on /config
@@ -167,5 +179,62 @@ describe("ConfigPage — CardDAV password tab-switch guard", () => {
     // The tab strip must be usable again, not stuck forever.
     await userEvent.click(screen.getByRole("tab", { name: "CardDAV" }));
     await waitFor(() => expect(isSelected("CardDAV")).toBe(true));
+  });
+});
+
+describe("ConfigPage — Remote LLM save reads config fresh", () => {
+  it("does not revert fields another panel saved in the meantime, because it re-reads /api/config instead of reusing its stale mount-time copy", async () => {
+    // ConfigPage never unmounts on a tab switch (the tab lives in a query
+    // param on the same route — see the CardDAV guard tests above), so its
+    // own `cfg`, captured once at mount, would otherwise still say
+    // timezone: "UTC" even after ApplicationRuntime independently saves a
+    // change via saveConfigPatch. Mutating this object between mount and
+    // Remote LLM's own save stands in for exactly that.
+    const serverConfig = {
+      timezone: "UTC",
+      logLevel: "info",
+      scan: { intervalSeconds: 90 },
+      rateLimits: { perMinute: 10, perHour: 20 },
+      labels: { allowlist: [] as string[], keywordMappings: {} },
+      classifier: { baseUrl: "", apiKey: "", classifyPath: "", apiKeySet: false }
+    };
+    getJSON.mockImplementation((url: string) => {
+      if (url === "/api/config") {
+        return Promise.resolve({ ...serverConfig });
+      }
+      return Promise.resolve({});
+    });
+
+    renderConfigPageAt("llm");
+    await screen.findByRole("heading", { name: "Remote LLM Model" });
+
+    // Simulate ApplicationRuntime (or LabelRules) having saved elsewhere
+    // while the admin stayed on this tab.
+    serverConfig.timezone = "Europe/London";
+    serverConfig.labels = { allowlist: ["Later"], keywordMappings: {} };
+
+    await userEvent.click(screen.getByRole("button", { name: /save configuration/i }));
+
+    await waitFor(() => expect(putJSON).toHaveBeenCalledWith("/api/config", expect.anything()));
+    const [, body] = putJSON.mock.calls[0];
+    expect(body.timezone).toBe("Europe/London");
+    expect(body.labels.allowlist).toEqual(["Later"]);
+  });
+});
+
+describe("ConfigPage — page-level status does not duplicate a section's own status", () => {
+  it("never shows two 'Configuration saved.' notices at once across a tab switch", async () => {
+    renderConfigPageAt("llm");
+    await screen.findByRole("heading", { name: "Remote LLM Model" });
+
+    await userEvent.click(screen.getByRole("button", { name: /save configuration/i }));
+    await screen.findByText("Configuration saved.");
+
+    await userEvent.click(screen.getByRole("tab", { name: "Application" }));
+    await screen.findByRole("heading", { name: "Application" });
+
+    await userEvent.click(screen.getByRole("button", { name: /save configuration/i }));
+
+    await waitFor(() => expect(screen.getAllByText("Configuration saved.")).toHaveLength(1));
   });
 });
