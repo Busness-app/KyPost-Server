@@ -4,38 +4,50 @@ import { generateDAVPassword, getDAVPasswordStatus, revokeDAVPassword, type DAVP
 import { useAuth } from "../../auth";
 
 type CardDavAccessProps = {
-  // Errors here have always surfaced through ConfigPage's page-level status
-  // banner (below every tab), not a local message — that banner's state
-  // stays in ConfigPage since Application/Labels/LLM also write to it, so
-  // this is threaded through rather than duplicated.
-  setConfigStatus: (status: string) => void;
+  // Optional: when a caller (ConfigPage) has a page-level status banner,
+  // errors are also mirrored there, matching the pre-extraction behaviour.
+  // Every caller still gets feedback from the message rendered in this
+  // card's own body below, regardless of whether this is supplied.
+  setConfigStatus?: (status: string) => void;
+  // Optional: lets a caller (ConfigPage) know a just-generated password is
+  // on screen and unrecoverable if lost, so it can block navigation that
+  // would unmount this component and destroy the only copy of it.
+  onRevealedPasswordChange?: (revealed: boolean) => void;
 };
 
-export function CardDavAccess({ setConfigStatus }: CardDavAccessProps) {
+export function CardDavAccess({ setConfigStatus, onRevealedPasswordChange }: CardDavAccessProps = {}) {
   const auth = useAuth();
   const [davStatus, setDavStatus] = useState<DAVPasswordStatus | null>(null);
   const [davBusy, setDavBusy] = useState(false);
   const [revealedPassword, setRevealedPassword] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
+  const [davMessage, setDavMessage] = useState("");
   const davURL = auth.username ? `${window.location.origin}/dav/${encodeURIComponent(auth.username)}/contacts/` : "";
+
+  useEffect(() => {
+    onRevealedPasswordChange?.(revealedPassword !== "");
+  }, [revealedPassword, onRevealedPasswordChange]);
 
   async function refreshDavStatus() {
     setDavStatus(await getDAVPasswordStatus());
   }
 
   useEffect(() => {
-    void refreshDavStatus();
+    void refreshDavStatus().catch(() => undefined);
   }, []);
 
   async function generateDavPassword() {
     setDavBusy(true);
     setCopyStatus("");
+    setDavMessage("");
     try {
       const generated = await generateDAVPassword();
       setRevealedPassword(generated.password);
       await refreshDavStatus();
     } catch (error: unknown) {
-      setConfigStatus(`Failed to generate CardDAV password: ${toErrorMessage(error, "unknown error")}`);
+      const message = `Failed to generate CardDAV password: ${toErrorMessage(error, "unknown error")}`;
+      setDavMessage(message);
+      setConfigStatus?.(message);
     } finally {
       setDavBusy(false);
     }
@@ -51,12 +63,15 @@ export function CardDavAccess({ setConfigStatus }: CardDavAccessProps) {
     }
     setDavBusy(true);
     setCopyStatus("");
+    setDavMessage("");
     try {
       await revokeDAVPassword();
       setRevealedPassword("");
       await refreshDavStatus();
     } catch (error: unknown) {
-      setConfigStatus(`Failed to revoke CardDAV password: ${toErrorMessage(error, "unknown error")}`);
+      const message = `Failed to revoke CardDAV password: ${toErrorMessage(error, "unknown error")}`;
+      setDavMessage(message);
+      setConfigStatus?.(message);
     } finally {
       setDavBusy(false);
     }
@@ -70,6 +85,14 @@ export function CardDavAccess({ setConfigStatus }: CardDavAccessProps) {
       () => setCopyStatus("Copied to clipboard."),
       () => setCopyStatus("Could not copy automatically — copy it manually.")
     );
+  }
+
+  // The only way out of a caller's navigation guard (see
+  // onRevealedPasswordChange): explicit acknowledgement that the password
+  // has been saved, not merely switching away and losing it.
+  function dismissRevealedPassword() {
+    setRevealedPassword("");
+    setCopyStatus("");
   }
 
   return (
@@ -107,6 +130,9 @@ export function CardDavAccess({ setConfigStatus }: CardDavAccessProps) {
             <button type="button" onClick={copyDavPassword}>
               Copy
             </button>
+            <button type="button" onClick={dismissRevealedPassword}>
+              Done — I saved it
+            </button>
           </div>
           {copyStatus ? <p className="config-muted">{copyStatus}</p> : null}
         </div>
@@ -121,6 +147,7 @@ export function CardDavAccess({ setConfigStatus }: CardDavAccessProps) {
           </button>
         ) : null}
       </div>
+      {davMessage ? <p className="config-muted">{davMessage}</p> : null}
     </div>
   );
 }

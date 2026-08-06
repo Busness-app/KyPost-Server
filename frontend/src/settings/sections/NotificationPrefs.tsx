@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { deleteJSON, getJSON, postJSON, putJSON, toErrorMessage } from "../../api/client";
-import { uniqueLabels, type AppConfig } from "../../api/config";
+import { normalizeConfig, uniqueLabels, type AppConfig } from "../../api/config";
 import {
   collectNotificationKeywordOptions,
   normalizePrefs,
@@ -9,17 +9,18 @@ import {
   type NotificationTestResponse,
   type NotificationVapidResponse
 } from "../../pages/config/notifications";
+import type { LabelsResponse } from "../../pages/config/settings";
 import { ContentPreviewWarningDialog } from "../../components/ContentPreviewWarningDialog";
 
-type NotificationPrefsProps = {
-  // cfg and labelsFromImap are also read by the (admin-only) Labels tab and
-  // by EmailServer's post-save refresh, so both stay owned by ConfigPage
-  // rather than being fetched a second time here.
-  cfg: AppConfig;
-  labelsFromImap: string[];
-};
-
-export function NotificationPrefs({ cfg, labelsFromImap }: NotificationPrefsProps) {
+// cfg and labelsFromImap looked like candidates to share with ConfigPage
+// (the admin-only Labels tab and EmailServer's post-save refresh both touch
+// them), but neither is ever mounted at the same time as this component —
+// Labels is a different, admin-only tab, and EmailServer only triggers a
+// refresh of ConfigPage's own copy. So this fetches its own copies on mount,
+// like every sibling section, and takes no props.
+export function NotificationPrefs() {
+  const [cfg, setCfg] = useState<AppConfig | null>(null);
+  const [labelsFromImap, setLabelsFromImap] = useState<string[]>([]);
   const [prefs, setPrefs] = useState<NotificationPrefsData | null>(null);
   const [notifyStatus, setNotifyStatus] = useState("");
   const [notifyTestBusy, setNotifyTestBusy] = useState(false);
@@ -29,8 +30,9 @@ export function NotificationPrefs({ cfg, labelsFromImap }: NotificationPrefsProp
   const [previewWarningOpen, setPreviewWarningOpen] = useState(false);
   const notifyStatusTone = notifyStatus.toLowerCase().includes("failed") ? "notice notice-error" : "notice notice-success";
 
-  // Derived, not stored: the saved config and the IMAP labels this page already
-  // holds are the whole input, so a second copy in state could only go stale.
+  // Derived, not stored: the loaded config and the IMAP labels this
+  // component already holds are the whole input, so a second copy in state
+  // could only go stale.
   const availableKeywords = useMemo(
     () => (cfg && prefs ? collectNotificationKeywordOptions(cfg, labelsFromImap, prefs.keywords) : []),
     [cfg, labelsFromImap, prefs]
@@ -45,6 +47,15 @@ export function NotificationPrefs({ cfg, labelsFromImap }: NotificationPrefsProp
     refreshNotificationPrefs().catch(() => {
       setNotifyStatus("Failed to load notification settings.");
     });
+  }, []);
+
+  useEffect(() => {
+    getJSON<unknown>("/api/config")
+      .then((raw) => setCfg(normalizeConfig(raw)))
+      .catch(() => undefined);
+    getJSON<LabelsResponse>("/api/labels")
+      .then((labelsData) => setLabelsFromImap(uniqueLabels(labelsData.imap ?? [])))
+      .catch(() => undefined);
   }, []);
 
   async function saveNotificationPrefs() {

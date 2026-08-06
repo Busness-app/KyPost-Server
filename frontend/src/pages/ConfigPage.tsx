@@ -63,7 +63,25 @@ export function ConfigPage() {
   // Notifications tab instead of dumping the user on Email Settings.
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = resolveConfigTab(searchParams.get("tab"), isAdmin);
+  // A just-generated CardDAV app password is shown exactly once and cannot
+  // be re-fetched (see CardDavAccess). Switching tabs unmounts it and
+  // destroys the only copy, so while one is on screen, tab switches are
+  // blocked rather than allowed to silently discard it. The only way out is
+  // CardDavAccess's own Copy/Done control, which clears this flag.
+  const [davPasswordRevealed, setDavPasswordRevealed] = useState(false);
+  const [tabSwitchBlockedMessage, setTabSwitchBlockedMessage] = useState("");
+  useEffect(() => {
+    if (!davPasswordRevealed) {
+      setTabSwitchBlockedMessage("");
+    }
+  }, [davPasswordRevealed]);
   function setActiveTab(tab: ConfigTab) {
+    if (davPasswordRevealed) {
+      setTabSwitchBlockedMessage(
+        "Copy or dismiss the generated CardDAV password before switching tabs — it will not be shown again."
+      );
+      return;
+    }
     const next = new URLSearchParams(searchParams);
     next.set("tab", tab);
     // Replace, not push: switching tabs is not navigation, and pushing would
@@ -344,6 +362,12 @@ export function ConfigPage() {
         ) : null}
       </div>
 
+      {tabSwitchBlockedMessage ? (
+        <p className="notice notice-error" role="alert">
+          {tabSwitchBlockedMessage}
+        </p>
+      ) : null}
+
       {activeTab === "application" && isAdmin ? (
         <div className="config-card" role="tabpanel">
           <h3>Application</h3>
@@ -434,7 +458,7 @@ export function ConfigPage() {
         </div>
       ) : null}
 
-      {!isAdmin ? <Appearance selectedTheme={selectedTheme} setSelectedTheme={setSelectedTheme} saveTheme={saveTheme} /> : null}
+      {!isAdmin ? <Appearance onStatus={setConfigStatus} /> : null}
 
       {activeTab === "email" ? (
         <div role="tabpanel">
@@ -446,11 +470,11 @@ export function ConfigPage() {
       {activeTab === "carddav" ? (
         <div className="config-carddav-layout" role="tabpanel">
           <CardDavClient />
-          <CardDavAccess setConfigStatus={setConfigStatus} />
+          <CardDavAccess setConfigStatus={setConfigStatus} onRevealedPasswordChange={setDavPasswordRevealed} />
         </div>
       ) : null}
 
-      {activeTab === "notifications" ? <NotificationPrefs cfg={cfg} labelsFromImap={labelsFromImap} /> : null}
+      {activeTab === "notifications" ? <NotificationPrefs /> : null}
 
       {activeTab === "labels" && isAdmin ? (
         <div className="config-card" role="tabpanel">

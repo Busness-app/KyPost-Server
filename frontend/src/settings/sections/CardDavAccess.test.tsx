@@ -31,15 +31,17 @@ describe("CardDavAccess", () => {
     await userEvent.click(screen.getByRole("button", { name: /generate/i }));
 
     expect(await screen.findByText("generated-app-password")).toBeTruthy();
-    // The status endpoint is the only GET, and it shares its base path with
-    // the POST that generates the password (they differ by HTTP method, not
-    // URL), so a URL-text check can't distinguish them. Assert directly on
-    // what the GET actually resolved to instead: a real DAVPasswordStatus
-    // response, which carries no password field. A GET that returned one
-    // would mean the password is retrievable, defeating the point of an app
-    // password.
-    for (const result of getJSON.mock.results) {
-      await expect(result.value).resolves.not.toHaveProperty("password");
-    }
+    // The status endpoint (GET /api/contacts/dav-password) shares its base
+    // path with the POST that generates the password — they differ only by
+    // HTTP method — so this pins the exact set of GET calls made rather than
+    // inspecting response bodies (a fixture-shape check can't fail no matter
+    // what the component does with the response, since the test itself
+    // controls the fixture). Any GET beyond the status check — e.g. a
+    // "/reveal" endpoint the component reads the password back from — fails
+    // this.
+    expect(getJSON.mock.calls.map(([url]) => url)).toEqual([
+      "/api/contacts/dav-password",
+      "/api/contacts/dav-password"
+    ]);
   });
 });

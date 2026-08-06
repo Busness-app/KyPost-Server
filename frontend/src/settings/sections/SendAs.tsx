@@ -15,7 +15,7 @@ export function SendAs() {
   }
 
   useEffect(() => {
-    void refreshSendAsAliases();
+    void refreshSendAsAliases().catch(() => undefined);
   }, []);
 
   // While any alias is still verifying, poll for status changes so the list

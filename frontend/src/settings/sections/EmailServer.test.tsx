@@ -37,6 +37,21 @@ describe("EmailServer", () => {
     await userEvent.type(screen.getByLabelText(/password/i), "app-password");
     await userEvent.click(screen.getByRole("button", { name: /save email settings/i }));
 
-    await waitFor(() => expect(postJSON).toHaveBeenCalled());
+    // Pin the actual save request, not just "postJSON ran" — that would
+    // still pass if Save posted to the wrong endpoint or an empty body.
+    await waitFor(() =>
+      expect(postJSON).toHaveBeenCalledWith(
+        "/api/imap/config",
+        expect.objectContaining({
+          host: "imap.example.com",
+          port: 993,
+          username: "gwen",
+          password: "app-password",
+          mailbox: "INBOX"
+        })
+      )
+    );
+    // refreshLabels is the sole reason this prop exists; assert it actually fired.
+    await waitFor(() => expect(refreshLabels).toHaveBeenCalledTimes(1));
   });
 });

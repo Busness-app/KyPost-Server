@@ -29,7 +29,7 @@ export function CardDavClient() {
   }
 
   useEffect(() => {
-    void refreshCardDAVClientConfig();
+    void refreshCardDAVClientConfig().catch(() => undefined);
   }, []);
 
   async function saveCardDAVClient() {

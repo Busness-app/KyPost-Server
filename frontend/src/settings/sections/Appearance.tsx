@@ -1,15 +1,21 @@
-import { THEME_OPTIONS, type ThemeName } from "../../theme";
+import { useState } from "react";
+import { applyTheme, getStoredTheme, THEME_OPTIONS, type ThemeName } from "../../theme";
 
 type AppearanceProps = {
-  // selectedTheme and saveTheme are also used by the (admin-only) Application
-  // tab's embedded theme selector, so both stay owned by ConfigPage rather
-  // than being duplicated here.
-  selectedTheme: ThemeName;
-  setSelectedTheme: (theme: ThemeName) => void;
-  saveTheme: () => void;
+  // The only genuine coupling to a caller: ConfigPage mirrors this into its
+  // page-level status banner. Optional so a caller with no such banner can
+  // still render this with zero props.
+  onStatus?: (status: string) => void;
 };
 
-export function Appearance({ selectedTheme, setSelectedTheme, saveTheme }: AppearanceProps) {
+export function Appearance({ onStatus }: AppearanceProps = {}) {
+  const [selectedTheme, setSelectedTheme] = useState<ThemeName>(getStoredTheme());
+
+  function saveTheme() {
+    applyTheme(selectedTheme);
+    onStatus?.(`Theme set to ${selectedTheme}.`);
+  }
+
   return (
     <div className="config-card">
       <h3>Appearance</h3>
