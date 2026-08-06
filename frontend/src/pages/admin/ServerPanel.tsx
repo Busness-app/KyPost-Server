@@ -1,3 +1,4 @@
+import { PanelTabs } from "../../components/PanelTabs";
 import { ApplicationRuntime } from "../../admin/sections/ApplicationRuntime";
 import { WkdDomains } from "../../admin/sections/WkdDomains";
 import { Users } from "../../admin/sections/Users";
@@ -18,9 +19,14 @@ export function ServerPanel() {
         <h2>Server</h2>
         <p>Runtime behaviour, updates, verified mail domains, and user accounts.</p>
       </div>
-      <div id="runtime"><ApplicationRuntime /></div>
-      <div id="wkd-domains"><WkdDomains /></div>
-      <div id="users"><Users /></div>
+      <PanelTabs
+        ariaLabel="Server sections"
+        tabs={[
+          { id: "runtime", label: "Application", body: <ApplicationRuntime /> },
+          { id: "wkd-domains", label: "WKD Domains", body: <WkdDomains /> },
+          { id: "users", label: "Manage Users", body: <Users /> }
+        ]}
+      />
     </section>
   );
 }

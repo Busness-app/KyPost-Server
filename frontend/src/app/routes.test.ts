@@ -6,10 +6,15 @@ describe("legacySettingsRedirect", () => {
     expect(legacySettingsRedirect("/config", false)).toBe("/settings/mail");
     expect(legacySettingsRedirect("/notifications", false)).toBe("/settings/notifications");
     expect(legacySettingsRedirect("/security", false)).toBe("/settings/security");
-    expect(legacySettingsRedirect("/rules", false)).toBe("/settings/mail#filters");
-    expect(legacySettingsRedirect("/tuning", true)).toBe("/admin/automation#prompt-tuning");
-    expect(legacySettingsRedirect("/users", true)).toBe("/admin/server#users");
-    expect(legacySettingsRedirect("/logs", true)).toBe("/admin/diagnostics#logs");
+    expect(legacySettingsRedirect("/rules", false)).toBe("/settings/mail?tab=rules");
+    expect(legacySettingsRedirect("/tuning", true)).toBe("/settings/automation?tab=prompt-tuning");
+    expect(legacySettingsRedirect("/users", true)).toBe("/admin/server?tab=users");
+    expect(legacySettingsRedirect("/logs", true)).toBe("/admin/diagnostics?tab=logs");
+  });
+
+  it("keeps the pre-move Automation path working, since it shipped once", () => {
+    expect(legacySettingsRedirect("/admin/automation", true)).toBe("/settings/automation");
+    expect(legacySettingsRedirect("/admin/automation", false)).toBe("/settings/automation");
   });
 
   it("splits health by role, because Status is the trimmed view", () => {
@@ -41,7 +46,7 @@ describe("legacySettingsRedirect", () => {
     for (const path of LEGACY_SETTINGS_PATHS) {
       for (const isAdmin of [true, false]) {
         const target = legacySettingsRedirect(path, isAdmin) ?? "";
-        expect(LEGACY_SETTINGS_PATHS).not.toContain(target.split("#")[0]);
+        expect(LEGACY_SETTINGS_PATHS).not.toContain(target.split("?")[0].split("#")[0]);
       }
     }
   });

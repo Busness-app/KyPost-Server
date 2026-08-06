@@ -1,3 +1,4 @@
+import { PanelTabs } from "../../components/PanelTabs";
 import { SystemHealth } from "../../settings/sections/SystemHealth";
 import { Logs } from "../../admin/sections/Logs";
 
@@ -8,8 +9,13 @@ import { Logs } from "../../admin/sections/Logs";
 export function DiagnosticsPanel() {
   return (
     <section className="panel health-page-panel">
-      <div id="health"><SystemHealth full heading="Diagnostics" /></div>
-      <div id="logs"><Logs /></div>
+      <PanelTabs
+        ariaLabel="Diagnostics sections"
+        tabs={[
+          { id: "health", label: "System Health", body: <SystemHealth full heading="Diagnostics" /> },
+          { id: "logs", label: "Logs", body: <Logs /> }
+        ]}
+      />
     </section>
   );
 }

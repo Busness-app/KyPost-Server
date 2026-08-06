@@ -24,7 +24,7 @@ import { MailPanel } from "./pages/settings/MailPanel";
 import { NotificationsPanel } from "./pages/settings/NotificationsPanel";
 import { StatusPanel } from "./pages/settings/StatusPanel";
 import { ServerPanel } from "./pages/admin/ServerPanel";
-import { AutomationPanel } from "./pages/admin/AutomationPanel";
+import { AutomationPanel } from "./pages/settings/AutomationPanel";
 import { DiagnosticsPanel } from "./pages/admin/DiagnosticsPanel";
 import { SecurityPage } from "./pages/SecurityPage";
 import { ReauthGate, clearReauth } from "./components/ReauthGate";
@@ -1318,6 +1318,7 @@ export function App() {
           <Route path="/settings/appearance" element={protect(<AppearancePanel />)} />
           <Route path="/settings/mail" element={protect(<MailPanel />)} />
           <Route path="/settings/status" element={protect(<StatusPanel />)} />
+          <Route path="/settings/automation" element={protect(<AutomationPanel />)} />
           <Route path="/settings/notifications" element={protect(<NotificationsPanel />)} />
           <Route
             path="/settings/security"
@@ -1331,7 +1332,6 @@ export function App() {
           {/* The admin panels. protect(..., true) redirects non-admins to
               /read; the server enforces every one of these regardless. */}
           <Route path="/admin/server" element={protect(<ServerPanel />, true)} />
-          <Route path="/admin/automation" element={protect(<AutomationPanel />, true)} />
           <Route path="/admin/diagnostics" element={protect(<DiagnosticsPanel />, true)} />
         </Routes>
       </main>
