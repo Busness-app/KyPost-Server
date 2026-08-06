@@ -27,6 +27,9 @@ import { AppearancePanel } from "./pages/settings/AppearancePanel";
 import { MailPanel } from "./pages/settings/MailPanel";
 import { NotificationsPanel } from "./pages/settings/NotificationsPanel";
 import { StatusPanel } from "./pages/settings/StatusPanel";
+import { ServerPanel } from "./pages/admin/ServerPanel";
+import { AutomationPanel } from "./pages/admin/AutomationPanel";
+import { DiagnosticsPanel } from "./pages/admin/DiagnosticsPanel";
 import { SecurityPage } from "./pages/SecurityPage";
 import { TuningPage } from "./pages/TuningPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -1300,6 +1303,11 @@ export function App() {
           <Route path="/tuning" element={protect(<TuningPage />)} />
           <Route path="/users" element={protect(<UsersPage />, true)} />
           <Route path="/logs" element={protect(<LogsPage />, true)} />
+          {/* The admin panels. protect(..., true) redirects non-admins to
+              /read; the server enforces every one of these regardless. */}
+          <Route path="/admin/server" element={protect(<ServerPanel />, true)} />
+          <Route path="/admin/automation" element={protect(<AutomationPanel />, true)} />
+          <Route path="/admin/diagnostics" element={protect(<DiagnosticsPanel />, true)} />
         </Routes>
       </main>
       <dialog
