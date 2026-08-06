@@ -207,6 +207,21 @@ body {
   padding-left: 10px;
 }
 
+/* One group per audience. A non-admin sees a single unheaded group, so the
+   subgroup is invisible to them and only the spacing above applies. */
+.sidebar .nav-subgroup {
+  display: grid;
+  gap: 10px;
+}
+
+.sidebar .nav-subheading {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+}
+
 .sidebar-folder-form {
   display: grid;
   gap: 8px;

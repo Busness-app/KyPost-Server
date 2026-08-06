@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { visibleSettingsGroups, settingsNavItems } from "./navigation";
+import { visibleSettingsGroups } from "./navigation";
 
 describe("visibleSettingsGroups", () => {
   it("gives a non-admin one unheaded group, so no header labels a lone list", () => {
@@ -45,11 +45,28 @@ describe("visibleSettingsGroups", () => {
     }
   });
 
-  it("keeps the deprecated shim pointing at routes that currently exist", () => {
-    // The sidebar still renders settingsNavItems. visibleSettingsGroups points at
-    // /settings/* and /admin/*, which App.tsx does not route yet.
-    for (const item of settingsNavItems) {
-      expect(item.to).not.toMatch(/^\/(settings|admin)\//);
+});
+
+// The sidebar renders whatever this module returns, so an entry with no matching
+// route in App.tsx is a dead link — which is exactly what shipped once during
+// this restructure, when the nav pointed at panels that did not exist yet.
+// Reading the router source is blunt, but it is the only thing that actually
+// couples the two files.
+describe("every nav target is routed", () => {
+  it("has a Route in App.tsx for each item both roles can see", async () => {
+    const { readFileSync } = await import("node:fs");
+    // Relative to the vitest root (frontend/), not this file: import.meta.url
+    // is not a file: URL under the jsdom environment.
+    const app = readFileSync("src/App.tsx", "utf8");
+
+    const targets = new Set(
+      [true, false].flatMap((isAdmin) =>
+        visibleSettingsGroups(isAdmin).flatMap((group) => group.items.map((item) => item.to))
+      )
+    );
+
+    for (const target of targets) {
+      expect(app, `no <Route path="${target}"> in App.tsx`).toContain(`path="${target}"`);
     }
   });
 });

@@ -36,7 +36,7 @@ import { UsersPage } from "./pages/UsersPage";
 import { ReauthGate, clearReauth } from "./components/ReauthGate";
 import agplLicenseText from "./agpl-3.0.txt?raw";
 
-import { APP_VERSION, settingsNavItems } from "./app/navigation";
+import { APP_VERSION, visibleSettingsGroups } from "./app/navigation";
 import type {
   BeforeInstallPromptEvent,
   InboxFolder,
@@ -1220,16 +1220,15 @@ export function App() {
 
           {settingsOpen ? (
             <div className="nav-group">
-              {settingsNavItems
-                .filter(({ adminOnly }) => !adminOnly || isAdmin)
-                .map(({ to, label }) => (
-                <Link
-                  key={to}
-                  className={(to === "/login" && auth.authenticated ? "/password" : to) === location.pathname ? "sidebar-link-active" : ""}
-                  to={to === "/login" && auth.authenticated ? "/password" : to}
-                >
-                  {to === "/login" && auth.authenticated ? "Change Password" : label}
-                </Link>
+              {visibleSettingsGroups(isAdmin).map((group) => (
+                <div key={group.heading ?? "settings"} className="nav-subgroup">
+                  {group.heading ? <p className="nav-subheading">{group.heading}</p> : null}
+                  {group.items.map(({ to, label }) => (
+                    <Link key={to} className={to === location.pathname ? "sidebar-link-active" : ""} to={to}>
+                      {label}
+                    </Link>
+                  ))}
+                </div>
               ))}
               {!pwaInstalled ? (
                 <button

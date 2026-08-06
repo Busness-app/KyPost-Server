@@ -43,17 +43,3 @@ export function visibleSettingsGroups(isAdmin: boolean): ReadonlyArray<SettingsN
     { heading: "Admin", items: ADMIN_ITEMS }
   ];
 }
-
-/** @deprecated The sidebar still renders this until the grouped rewrite replaces it.
- *  It must keep pointing at the CURRENT routes: the /settings/* and /admin/* paths in
- *  visibleSettingsGroups do not exist yet. Deleted when the sidebar is rewired. */
-export const settingsNavItems: ReadonlyArray<{ to: string; label: string; adminOnly?: boolean }> = [
-  { to: "/login", label: "Login" },
-  { to: "/health", label: "System Health" },
-  { to: "/config", label: "Configuration" },
-  { to: "/security", label: "Security" },
-  { to: "/rules", label: "Filters" },
-  { to: "/tuning", label: "Prompt Tuning" },
-  { to: "/users", label: "Manage Users", adminOnly: true },
-  { to: "/logs", label: "System Logs", adminOnly: true }
-];
