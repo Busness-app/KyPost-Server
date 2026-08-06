@@ -634,7 +634,7 @@ export function MailKeys({
                 <div className="sec-actions">
                   <button
                     type="button"
-                    className="sec-action-quiet"
+                    className="sec-action-primary"
                     disabled={pgpBusy || !pgpSession.unlocked}
                     onClick={() => void handleDownloadRecoveryBackup()}
                   >
@@ -740,7 +740,7 @@ export function MailKeys({
                   <div className="sec-actions">
                     <button
                       type="button"
-                      className="sec-action-quiet"
+                      className="sec-action-primary"
                       onClick={() => setLegacyBackupOpen(true)}
                       disabled={pgpBusy}
                     >
