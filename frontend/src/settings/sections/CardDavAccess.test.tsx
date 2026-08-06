@@ -82,3 +82,64 @@ describe("CardDavAccess navigation hold", () => {
     expect(secretHoldReason()).toBe("");
   });
 });
+
+describe("CardDavAccess copy edge cases", () => {
+  it("explains itself when the Clipboard API is absent, rather than doing nothing", async () => {
+    // No clipboard is the normal case on a non-secure origin — plain-HTTP LAN
+    // access to a self-hosted server. The guard tells the user to copy or
+    // dismiss, so a Copy button that silently no-ops is a dead end.
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    try {
+      postJSON.mockResolvedValue({ password: "generated-app-password" });
+      render(<CardDavAccess />);
+      await waitFor(() => expect(getJSON).toHaveBeenCalled());
+      await userEvent.click(screen.getByRole("button", { name: /generate/i }));
+      await screen.findByText("generated-app-password");
+
+      await userEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+      expect(await screen.findByText(/secure \(HTTPS\) connection/i)).toBeTruthy();
+      // Still armed: nothing was copied, so nothing was saved.
+      expect(secretHoldReason()).toContain("before leaving");
+    } finally {
+      Object.defineProperty(navigator, "clipboard", { value: originalClipboard, configurable: true });
+    }
+  });
+
+  it("does not let a late copy acknowledge a newer password", async () => {
+    let settleCopy: () => void = () => {};
+    const writeText = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settleCopy = resolve;
+        })
+    );
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    try {
+      postJSON.mockResolvedValueOnce({ password: "password-one" });
+      render(<CardDavAccess />);
+      await waitFor(() => expect(getJSON).toHaveBeenCalled());
+      await userEvent.click(screen.getByRole("button", { name: /generate/i }));
+      await screen.findByText("password-one");
+
+      await userEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+      // A second password arrives before the clipboard promise settles.
+      postJSON.mockResolvedValueOnce({ password: "password-two" });
+      await userEvent.click(screen.getByRole("button", { name: /generate/i }));
+      await screen.findByText("password-two");
+
+      settleCopy();
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith("password-one"));
+
+      // password-two was never copied, so the guard must stay armed and the
+      // screen must not claim it reached the clipboard.
+      expect(secretHoldReason()).toContain("before leaving");
+      expect(screen.queryByText("Copied to clipboard.")).toBeNull();
+    } finally {
+      Object.defineProperty(navigator, "clipboard", { value: originalClipboard, configurable: true });
+    }
+  });
+});
