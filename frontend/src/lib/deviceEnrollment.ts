@@ -190,18 +190,32 @@ export function normalizeEnrollmentCode(input: string): string {
 }
 
 /**
- * The display grouping: two groups of seven, `XXXXXXX-XXXXXXX`. Never compare
- * this form.
+ * Group sizes for the displayed code: `5R9K-6FW-A18A-8YP`, not `5R9K6FW-A18A8YP`.
  *
- * Derived from CODE_LENGTH rather than hardcoded. It was `slice(0,5)-slice(5,10)`,
- * which silently truncated the code to its first ten characters when the width
- * grew -- and because the short code is a PREFIX of the long one, the result
- * looked entirely plausible while dropping the four characters that carry the
- * extra 20 bits.
+ * At 14 characters, two groups of seven are long runs that are easy to lose your place in. Four
+ * groups of at most four is the pattern people already read off bank cards, and short runs make an
+ * omitted character visible as a wrong-length group rather than a silently mistyped one. The code
+ * is transcribed across two devices, so that is the failure this prevents.
+ *
+ * The Android client groups identically -- see `EnrollmentCodeFormat.kt` in kypost-android. The two
+ * must move together: a display disagreement between the two screens showing the same code reads to
+ * the user as the codes not matching, which is this feature's one alarm.
  */
+const CODE_GROUPS = [4, 3, 4, 3];
+
 export function formatEnrollmentCode(code: string): string {
-  const half = CODE_LENGTH / 2;
-  return `${code.slice(0, half)}-${code.slice(half)}`;
+  const parts: string[] = [];
+  let index = 0;
+  for (const size of CODE_GROUPS) {
+    if (index >= code.length) break;
+    parts.push(code.slice(index, index + size));
+    index += size;
+  }
+  // Anything past the last group is appended rather than dropped. A hardcoded slice is how this
+  // function silently truncated the code when CODE_LENGTH grew from 10 to 14 -- and because the
+  // short code is a prefix of the long one, the truncated form looked entirely plausible.
+  if (index < code.length) parts.push(code.slice(index));
+  return parts.join("-");
 }
 
 /**
