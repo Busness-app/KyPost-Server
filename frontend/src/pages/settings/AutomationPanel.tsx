@@ -15,11 +15,11 @@ export function AutomationPanel() {
   return (
     <section className="panel">
       <div className="config-header">
-        <h2>Automation</h2>
+        <h2>Email Labels</h2>
         <p>How your mail is classified and labelled.</p>
       </div>
       <PanelTabs
-        ariaLabel="Automation sections"
+        ariaLabel="Email Labels sections"
         tabs={[
           { id: "prompt-tuning", label: "Prompt Tuning", body: <PromptTuning /> },
           { id: "decisions", label: "Decisions", body: <Decisions /> }

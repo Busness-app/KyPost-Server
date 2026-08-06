@@ -11,7 +11,7 @@ describe("visibleSettingsGroups", () => {
       "Mail",
       "Security",
       "Notifications",
-      "Automation",
+      "Email Labels",
       "Status"
     ]);
   });
@@ -72,11 +72,11 @@ describe("every nav target is routed", () => {
   });
 });
 
-// Automation sits under Config, not Admin. Prompt tuning is per-user — every
-// signed-in user has their own TUNING.md and decision log, and those endpoints
-// are withAuth — so an admin-only entry would have locked users out of their
-// own setting. The panel hides its admin-only Label Rules tab instead.
-describe("Automation placement", () => {
+// Email Labels sits under Config, not Admin. Everything on it is per-user —
+// every signed-in user has their own TUNING.md and decision log, and those
+// endpoints are withAuth — so an admin-only entry would have locked users out
+// of their own settings. Nothing on the panel is role-gated.
+describe("Email Labels placement", () => {
   it("is reachable by a non-admin", () => {
     const routes = visibleSettingsGroups(false).flatMap((g) => g.items.map((i) => i.to));
     expect(routes).toContain("/settings/automation");
@@ -86,7 +86,7 @@ describe("Automation placement", () => {
     for (const isAdmin of [true, false]) {
       const automation = visibleSettingsGroups(isAdmin)
         .flatMap((g) => g.items)
-        .find((i) => i.label === "Automation");
+        .find((i) => i.label === "Email Labels");
       expect(automation?.to).toBe("/settings/automation");
     }
   });

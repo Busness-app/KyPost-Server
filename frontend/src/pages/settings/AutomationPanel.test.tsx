@@ -31,7 +31,7 @@ function tabLabels() {
   return screen.getAllByRole("tab").map((tab) => tab.textContent);
 }
 
-describe("AutomationPanel", () => {
+describe("Email Labels panel", () => {
   it("gives a non-admin their prompt tuning", () => {
     renderPanel("user");
     expect(screen.getByText("prompt tuning")).toBeTruthy();
