@@ -606,3 +606,106 @@ func TestAnAlreadyRegisteredDeviceIDIsNotStrandedByTheCharsetBound(t *testing.T)
 		t.Fatalf("a pre-existing device was stranded by the charset bound: status %d, body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// The device's own answer to "can I still open my local envelope". Reported over
+// its own route rather than on registration, because registration cannot run
+// without a push token (a pull-mode device with FCM disabled has none) and on
+// UnifiedPush it is driven by a third-party distributor's cycle.
+func TestEnrollmentStateStoresTheReportedValue(t *testing.T) {
+	for _, reported := range []bool{true, false} {
+		srv, userID, deviceID, authDevice := newPairedDeviceForTest(t)
+
+		// Start from the opposite value so a handler that writes nothing fails.
+		store, err := srv.userStore(userID)
+		if err != nil {
+			t.Fatalf("userStore: %v", err)
+		}
+		if err := store.SetNativeDeviceEncryptionEnrolled(deviceID, !reported); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+
+		body := fmt.Sprintf(`{"encryptionEnrolled":%t}`, reported)
+		req := httptest.NewRequest(http.MethodPost, "/api/pgp/device/enrollment-state",
+			strings.NewReader(body))
+		authDevice(req)
+		rec := httptest.NewRecorder()
+		srv.handlePGPDeviceEnrollmentState(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("reported=%t: status = %d; body=%s", reported, rec.Code, rec.Body.String())
+		}
+		if got := deviceByID(t, srv, userID, deviceID).EncryptionEnrolled; got != reported {
+			t.Fatalf("reported=%t but stored %t", reported, got)
+		}
+	}
+}
+
+// Required, not tri-state. On register an absent field means "no opinion" so an
+// older client is never silently marked un-enrolled. This route's only purpose is
+// to state an opinion, so an absent field is a malformed request -- accepting it
+// as false would let a truncated body mark a working device unreadable.
+func TestEnrollmentStateRequiresTheField(t *testing.T) {
+	srv, userID, deviceID, authDevice := newPairedDeviceForTest(t)
+	store, err := srv.userStore(userID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	if err := store.SetNativeDeviceEncryptionEnrolled(deviceID, true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/pgp/device/enrollment-state",
+		strings.NewReader(`{}`))
+	authDevice(req)
+	rec := httptest.NewRecorder()
+	srv.handlePGPDeviceEnrollmentState(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !deviceByID(t, srv, userID, deviceID).EncryptionEnrolled {
+		t.Fatal("an absent field must leave the stored marker untouched")
+	}
+}
+
+// The device id comes from the verified credential. A device that could name
+// another device's id would be able to mark a healthy device unreadable, or --
+// worse -- mark a device readable that can read nothing.
+func TestEnrollmentStateIgnoresAnyDeviceIdInTheBody(t *testing.T) {
+	srv, userID, deviceID, authDevice := newPairedDeviceForTest(t)
+	otherID, _ := pairNativeDevice(t, srv, userID, "other-device")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/pgp/device/enrollment-state",
+		strings.NewReader(`{"encryptionEnrolled":true,"deviceId":"other-device"}`))
+	authDevice(req)
+	rec := httptest.NewRecorder()
+	srv.handlePGPDeviceEnrollmentState(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if !deviceByID(t, srv, userID, deviceID).EncryptionEnrolled {
+		t.Fatal("the calling device's marker was not set")
+	}
+	if deviceByID(t, srv, userID, otherID).EncryptionEnrolled {
+		t.Fatal("wrote onto the device named in the body, not the verified one")
+	}
+}
+
+// Without credentials this must fail closed, through the same shared path every
+// other device-authed route uses so the lockout counts these attempts too.
+func TestEnrollmentStateRejectsAnUnauthenticatedCaller(t *testing.T) {
+	srv, userID, deviceID, _ := newPairedDeviceForTest(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/pgp/device/enrollment-state",
+		strings.NewReader(`{"encryptionEnrolled":true}`))
+	rec := httptest.NewRecorder()
+	srv.handlePGPDeviceEnrollmentState(rec, req)
+
+	if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 401 or 429; body=%s", rec.Code, rec.Body.String())
+	}
+	if deviceByID(t, srv, userID, deviceID).EncryptionEnrolled {
+		t.Fatal("an unauthenticated call changed the marker")
+	}
+}

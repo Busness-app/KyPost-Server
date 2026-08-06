@@ -360,11 +360,11 @@ describe("the gate", () => {
       screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")
     ).toBe(false);
 
-    // A well-formed but deliberately wrong code: still ten valid characters,
+    // A well-formed but deliberately wrong code: still fourteen valid characters,
     // so this exercises the mismatch branch rather than the length check.
     const codeInput = screen.getByLabelText("Code from your device");
     await userEvent.clear(codeInput);
-    await userEvent.type(codeInput, "0000000000");
+    await userEvent.type(codeInput, "00000000000000");
     await userEvent.click(screen.getByRole("button", { name: "Verify and enroll" }));
 
     await screen.findByText(/not the key on that device/i);
@@ -410,7 +410,7 @@ describe("the failure taxonomy", () => {
     // `busy`), before trusting the absence of the PUT — see the gate's
     // "issues no PUT" test above for why the ordering matters under a
     // warn-then-seal shape.
-    expect(await screen.findByText(/ten characters/i)).toBeTruthy();
+    expect(await screen.findByText(/fourteen characters/i)).toBeTruthy();
     await vi.waitFor(() =>
       expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(false)
     );

@@ -196,8 +196,10 @@ is purely a browser↔device contract and belongs here rather than in any server
 
 - **Shared secret:** ECDH(ephemeral private, device public) → 32 bytes.
 - **Key derivation:** HKDF-SHA256, `ikm` = shared secret, `salt` = the device's raw 65-byte
-  public key, `info` = UTF-8 `"kypost-device-envelope/v1"`, length 32.
-- **AAD** = UTF-8 of `kypost-device-envelope/v1|<deviceId>|<pgpFingerprint>`, fingerprint
+  public key, `info` = UTF-8 `"kypost-device-envelope/v2"`, length 32.
+- **AAD** = `info || uint16BE(len(deviceId)) || deviceId || uint16BE(len(fp)) || fp`, all
+  UTF-8, `info` = `"kypost-device-envelope/v2"`. **Length-prefixed, not pipe-delimited**
+  (see the v2 note below). Fingerprint
   uppercase hex with no spaces.
 - **Plaintext** = the armored PGP private key, UTF-8.
 
@@ -232,7 +234,7 @@ checked separately, at import time, and has its own test.
 document is not. Android and Qt must assert the same string.
 
 A change to that snapshot is a wire-format break, not a test update. It must move the
-`v1` version tag in the envelope and the `kypost-device-envelope/v1` HKDF `info` and AAD
+`v2` version tag in the envelope and the `kypost-device-envelope/v2` HKDF `info` and AAD
 prefix with it, and it strands every already-enrolled device until it re-enrolls.
 
 ### Why the time bucket is the load-bearing part
@@ -365,10 +367,46 @@ destroys the Keystore key, as does a biometric-enrollment change on some
 configurations. A marker that drifts optimistic is worse than none — it tells the user
 a device is protected when it cannot read anything.
 
-The device therefore reports its own enrollment state on the native registration call
-it already makes at pairing and on every FCM token refresh, based on whether it can
-still open its local envelope. One boolean on an existing call, no new endpoint, and
-the marker becomes self-healing rather than write-once.
+The device therefore reports its own enrollment state, based on whether it can still
+open its local envelope, so the marker becomes self-healing rather than write-once.
+
+**Superseded 2026-08-05: this now has its own route.** The original design carried the
+boolean on the native registration call the device already makes — "one boolean on an
+existing call, no new endpoint". That was wrong for two reasons, both found while
+building the Android client:
+
+- **Registration cannot run without a push token.** The client returns early on a blank
+  one, so a **pull-mode device with FCM disabled has no way to invoke it at all**, and
+  its marker freezes at whatever it was when the device last had a token.
+- **On UnifiedPush the call is driven by a third-party distributor's registration
+  cycle.** A distributor must not decide when a security-relevant marker is refreshed,
+  and the WebPush `p256dh`/`auth` material rides the same request.
+
+The requirement is architectural — *this marker must not depend on any push transport* —
+so it is stated that way rather than patched per transport.
+
+### NORMATIVE: `POST /api/pgp/device/enrollment-state`
+
+- **Auth:** device credential headers only, `X-Kypost-Device-Id` / `X-Kypost-Device-Secret`.
+  Not a session.
+- **Body:** `{"encryptionEnrolled": true|false}`. **Required.** Unlike the tri-state
+  pointer on registration — where absent means "no opinion", so an older client is never
+  silently marked un-enrolled — stating an opinion is this route's entire purpose. An
+  absent field is `400`, because accepting it as `false` would let a truncated body mark
+  a working device unreadable.
+- **Success:** `200` → `{"ok":true}`.
+- **Failure:** `401` on bad credentials; `429` with `Retry-After` when the device-auth
+  lockout trips. Both via the shared `writeDeviceAuthFailure`, so the lockout counts these
+  attempts. Refused while the account owes a password change, like every device-authed
+  route. `500` if the device row was removed while the credential still exists.
+- **The device id comes from the verified credential**, never from the body. A device that
+  could name another's id could mark a healthy device unreadable, or — worse — mark a
+  device readable that can read nothing.
+- **Metered** by `meterDeviceWrite`: it mutates on a device credential, which no shared
+  middleware meters.
+
+The `encryptionEnrolled` field on `POST /api/notifications/native/register` is unchanged
+and still honoured, so other platforms and older clients keep working.
 
 ### Where the marker is shown
 

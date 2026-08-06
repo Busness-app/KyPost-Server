@@ -20,7 +20,7 @@ vi.mock("./auth", () => ({
 }));
 
 const ENVELOPE: DeviceEnvelope = {
-  v: 1,
+  v: 2,
   alg: "ECDH-P256+HKDF-SHA256+A256GCM",
   epk: "EPK",
   iv: "IV",

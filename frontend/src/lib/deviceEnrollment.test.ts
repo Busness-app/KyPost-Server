@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CODE_BUCKET_SECONDS,
   bucketFor,
+  buildEnvelopeAad,
   deriveEnrollmentCode,
   explainEnrollmentFailure,
   formatEnrollmentCode,
@@ -30,16 +31,31 @@ describe("bucketFor", () => {
 });
 
 describe("deriveEnrollmentCode", () => {
-  it("produces ten Crockford characters", async () => {
+  it("produces fourteen Crockford characters", async () => {
     const code = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET);
-    expect(code).toMatch(/^[0123456789ABCDEFGHJKMNPQRSTVWXYZ]{10}$/);
+    expect(code).toMatch(/^[0123456789ABCDEFGHJKMNPQRSTVWXYZ]{14}$/);
+  });
+
+  // The width is load-bearing, not cosmetic. With no commitment in the preimage
+  // the attacker's search is offline, so the output width is the only thing
+  // setting its cost: at 50 bits a collision is ~2^50 SHA-256 compressions, about
+  // 14 GPU-hours and a few dollars per 120-second window. A silent regression to
+  // a shorter code would not fail the vector test alone, because the shorter code
+  // is a PREFIX of the longer one.
+  it("is 70 bits wide", async () => {
+    const code = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET);
+    expect(code).toHaveLength(14);
   });
 
   it("is stable — this is the cross-implementation vector", async () => {
     const code = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET);
     // Locked in on first green run. A change here is a wire-format break and
     // must move the version tag in the design doc with it.
-    expect(code).toMatchInlineSnapshot(`"5R9K6FWA18"`);
+    //
+    // Widened from "5R9K6FWA18" (50 bits) on 2026-08-05 -- see CODE_LENGTH. The
+    // old value is a prefix of this one, which is exactly why a client left at 10
+    // characters fails silently as "the codes never match" rather than loudly.
+    expect(code).toMatchInlineSnapshot(`"5R9K6FWA18A8YP"`);
   });
 
   // The whole feature exists to detect a substituted key, so the code must
@@ -97,9 +113,49 @@ describe("normalizeEnrollmentCode", () => {
   });
 });
 
+describe("buildEnvelopeAad", () => {
+  // The SAME assertion exists in kypost-android's DeviceEnvelopeTest
+  // (aad_isTheExactContractBytes). Two implementations of the same prose is how
+  // the fingerprint-format bug got in -- the spec said "uppercase hex, no spaces"
+  // and only one side did it. Assert the bytes on both sides instead.
+  it("is the exact contract bytes, length-prefixed", () => {
+    const aad = buildEnvelopeAad("dev-1", "ABCD1234");
+    const enc = new TextEncoder();
+    const expected = new Uint8Array([
+      ...enc.encode("kypost-device-envelope/v2"),
+      0, 5, ...enc.encode("dev-1"),
+      0, 8, ...enc.encode("ABCD1234"),
+    ]);
+    expect(Array.from(aad)).toEqual(Array.from(expected));
+  });
+
+  // A pipe in one field must not be able to shift the boundary into the next.
+  it("is unambiguous across a field boundary", () => {
+    const a = buildEnvelopeAad("dev", "BADC0FFEE0123456789ABCDEF");
+    const b = buildEnvelopeAad("devBADC0FFEE", "0123456789ABCDEF");
+    expect(Array.from(a)).not.toEqual(Array.from(b));
+  });
+
+  // Both clients' natural fingerprint producers emit space-grouped hex.
+  it("normalises a space-grouped fingerprint", () => {
+    const grouped = buildEnvelopeAad("dev-1", "164D 5B83 4E7F E927");
+    const flat = buildEnvelopeAad("dev-1", "164D5B834E7FE927");
+    expect(Array.from(grouped)).toEqual(Array.from(flat));
+  });
+});
+
 describe("formatEnrollmentCode", () => {
-  it("groups as XXXXX-XXXXX", () => {
-    expect(formatEnrollmentCode("ABCDEFGHJK")).toBe("ABCDE-FGHJK");
+  it("groups as XXXXXXX-XXXXXXX", () => {
+    expect(formatEnrollmentCode("ABCDEFGHJKMNPQ")).toBe("ABCDEFG-HJKMNPQ");
+  });
+
+  // The grouping is derived from CODE_LENGTH, not hardcoded. Hardcoded slices
+  // silently TRUNCATED the code when the width grew -- and since the short code
+  // is a prefix of the long one, the truncated form looked entirely plausible
+  // while dropping the characters carrying the extra bits.
+  it("never drops characters", async () => {
+    const code = await deriveEnrollmentCode(VECTOR_KEY_B64, VECTOR_DEVICE_ID, VECTOR_BUCKET);
+    expect(formatEnrollmentCode(code).replace("-", "")).toBe(code);
   });
 });
 

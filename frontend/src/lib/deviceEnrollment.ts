@@ -29,14 +29,37 @@ export const CODE_BUCKET_SECONDS = 120;
 /** Crockford base32 — excludes the character pairs people transcribe wrongly. */
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-const CODE_LENGTH = 10;
-const CODE_BITS = CODE_LENGTH * 5; // 50
+// Fourteen characters at five bits each -- 70 bits.
+//
+// This was 10 (50 bits), and 50 is not enough. The comparison has NO COMMITMENT
+// STEP: nothing the browser contributes enters the preimage, so every input is
+// fixed, public or attacker-chosen and the search is entirely OFFLINE -- a work
+// factor, not a per-attempt probability. An adversary who can write the device
+// table (explicitly in this design's threat model: "a compromised database")
+// grinds a key, or the deviceId, whose code collides with the honest device's at
+// a chosen FUTURE bucket, then waits for it to arrive. That is ~2^50 SHA-256
+// compressions: roughly 14 GPU-hours and a few dollars per 120-second window.
+//
+// The original argument -- "2^47 in 120 seconds, short of 2^50 with margin" --
+// assumed an online bound. Refusing future buckets (which acceptBucket below
+// does) does not prevent precomputing INTO one. 70 bits puts the same search at
+// ~2^70, about a million GPU-years per window.
+//
+// The principled fix is a commitment, not length: Matrix's SAS is SHORTER than
+// even the old code at 36-39 bits and is sound, because m.key.verification.accept
+// carries a required hash commitment to the peer's ephemeral key, so the attacker
+// gets exactly one online guess. That needs a browser-to-device channel this
+// protocol does not have. Tracked as decision 8 in the 2c crypto-core spec.
+const CODE_LENGTH = 14;
+const CODE_BITS = CODE_LENGTH * 5; // 70
 
-const ENVELOPE_VERSION = "kypost-device-envelope/v1";
+// v1 -> v2 (2026-08-05): the AAD stopped being pipe-delimited concatenation and
+// became length-prefixed. See buildEnvelopeAad.
+const ENVELOPE_VERSION = "kypost-device-envelope/v2";
 const RAW_KEY_BYTES = 65; // 0x04 || X(32) || Y(32)
 
 export type DeviceEnvelope = {
-  v: 1;
+  v: 2;
   alg: "ECDH-P256+HKDF-SHA256+A256GCM";
   epk: string;
   iv: string;
@@ -108,7 +131,7 @@ function uint64BE(n: number): Uint8Array {
 }
 
 /**
- * Derives the ten-character code for a key, device and bucket.
+ * Derives the fourteen-character code for a key, device and bucket.
  *
  * Hashes the RAW 65 bytes rather than the base64 text: hashing the transport
  * encoding would make padding or alphabet drift between implementations a
@@ -166,15 +189,25 @@ export function normalizeEnrollmentCode(input: string): string {
     .replace(/O/g, "0");
 }
 
-/** The display grouping. Never compare this form. */
+/**
+ * The display grouping: two groups of seven, `XXXXXXX-XXXXXXX`. Never compare
+ * this form.
+ *
+ * Derived from CODE_LENGTH rather than hardcoded. It was `slice(0,5)-slice(5,10)`,
+ * which silently truncated the code to its first ten characters when the width
+ * grew -- and because the short code is a PREFIX of the long one, the result
+ * looked entirely plausible while dropping the four characters that carry the
+ * extra 20 bits.
+ */
 export function formatEnrollmentCode(code: string): string {
-  return `${code.slice(0, 5)}-${code.slice(5, 10)}`;
+  const half = CODE_LENGTH / 2;
+  return `${code.slice(0, half)}-${code.slice(half)}`;
 }
 
 /**
  * Constant-time-ish comparison of two already-normalised codes.
  *
- * Fifty bits typed by a human is not a timing-attack target in any practical
+ * Seventy bits typed by a human is not a timing-attack target in any practical
  * sense, but an early-return compare on a security decision is the kind of
  * thing that gets copied into somewhere it does matter.
  */
@@ -234,6 +267,47 @@ export async function importDevicePublicKey(publicKeyB64: string): Promise<Crypt
 }
 
 /**
+ * The envelope's additional authenticated data, as LENGTH-PREFIXED fields.
+ *
+ *   info || uint16BE(len(deviceId)) || deviceId || uint16BE(len(fp)) || fp
+ *
+ * It used to be `info|deviceId|fingerprint`, which is ambiguous: an envelope
+ * sealed under (deviceId "dev|BADC0FFEE", fp "0123...") produces byte-identical
+ * AAD to one sealed under (deviceId "dev", fp "BADC0FFEE|0123..."), and each
+ * opens under the other. Not exploitable as it stood -- cross-device replay
+ * already fails at the HKDF, whose salt is the device's own public key, and two
+ * fixed-length hex fingerprints cannot collide across the boundary -- but Matrix
+ * moved to a structured transcript precisely because this class produced real
+ * key-binding CVEs. Length prefixing removes the class instead of re-arguing
+ * reachability every time a field's charset changes.
+ *
+ * The fingerprint is normalised here (uppercase, whitespace stripped) because the
+ * clients' natural fingerprint producers emit it space-grouped, and an AAD that
+ * cannot authenticate surfaces to the user as a substituted-key alarm.
+ */
+export function buildEnvelopeAad(deviceId: string, pgpFingerprint: string): Uint8Array<ArrayBuffer> {
+  const enc = new TextEncoder();
+  const info = enc.encode(ENVELOPE_VERSION);
+  const id = enc.encode(deviceId);
+  const fp = enc.encode(pgpFingerprint.toUpperCase().replace(/\s/g, ""));
+  if (id.length > 0xffff || fp.length > 0xffff) {
+    throw new Error("AAD field too long to length-prefix");
+  }
+  const out = new Uint8Array(info.length + 2 + id.length + 2 + fp.length);
+  let o = 0;
+  out.set(info, o);
+  o += info.length;
+  out[o++] = (id.length >> 8) & 0xff;
+  out[o++] = id.length & 0xff;
+  out.set(id, o);
+  o += id.length;
+  out[o++] = (fp.length >> 8) & 0xff;
+  out[o++] = fp.length & 0xff;
+  out.set(fp, o);
+  return out;
+}
+
+/**
  * Seals the armored private key to a device.
  *
  * CALLERS MUST HAVE VERIFIED THE CODE FIRST. This function cannot check that
@@ -275,9 +349,7 @@ export async function sealEnvelopeForDevice(
   );
 
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const aad = new TextEncoder().encode(
-    `${ENVELOPE_VERSION}|${deviceId}|${pgpFingerprint.toUpperCase().replace(/\s/g, "")}`,
-  );
+  const aad = buildEnvelopeAad(deviceId, pgpFingerprint);
   const ct = new Uint8Array(
     await crypto.subtle.encrypt(
       { name: "AES-GCM", iv, additionalData: aad },
@@ -288,7 +360,7 @@ export async function sealEnvelopeForDevice(
 
   const epk = new Uint8Array(await crypto.subtle.exportKey("raw", ephemeral.publicKey));
   return {
-    v: 1,
+    v: 2,
     alg: "ECDH-P256+HKDF-SHA256+A256GCM",
     epk: bytesToBase64(epk),
     iv: bytesToBase64(iv),
