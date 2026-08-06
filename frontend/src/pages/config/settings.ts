@@ -36,6 +36,52 @@ export type IMAPForm = {
 
 export const LOG_LEVEL_OPTIONS = ["trace", "debug", "info", "warn", "error", "fatal", "panic"];
 
+/**
+ * The Configuration tabs, in the order they render.
+ *
+ * `notifications` sits with `email` and `carddav` in the everyone-sees-it set
+ * because notification delivery is a per-account preference, not system
+ * configuration — the admin-only tabs are the ones backed by the global config.
+ */
+export const CONFIG_TABS = [
+  "application",
+  "email",
+  "carddav",
+  "notifications",
+  "labels",
+  "llm",
+  "wkd"
+] as const;
+
+export type ConfigTab = (typeof CONFIG_TABS)[number];
+
+const ADMIN_ONLY_TABS: ReadonlySet<ConfigTab> = new Set<ConfigTab>([
+  "application",
+  "labels",
+  "llm",
+  "wkd"
+]);
+
+/**
+ * Which tab a `?tab=` value should open.
+ *
+ * Falls back rather than trusting the URL, in both directions: an unrecognised
+ * value and an admin-only tab requested by a non-admin both land on that user's
+ * default tab. Returning the raw value would render a page with a tab strip and
+ * no panel under it, which reads as a broken page rather than as a bad link —
+ * and the non-admin case is reachable by pasting a colleague's URL, not just by
+ * typing nonsense.
+ */
+export function resolveConfigTab(raw: string | null, isAdmin: boolean): ConfigTab {
+  const fallback: ConfigTab = isAdmin ? "application" : "email";
+  const value = (raw ?? "").trim();
+  if (!CONFIG_TABS.includes(value as ConfigTab)) {
+    return fallback;
+  }
+  const tab = value as ConfigTab;
+  return ADMIN_ONLY_TABS.has(tab) && !isAdmin ? fallback : tab;
+}
+
 export function formatWhen(value?: string): string {
   if (!value) {
     return "";

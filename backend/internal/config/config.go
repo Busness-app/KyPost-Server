@@ -151,7 +151,7 @@ type UserNotificationSettings struct {
 	//
 	// Users who want previews can have them — this is their mail and their
 	// call — but it must be a decision they made, not a default they never
-	// saw. See the copy on the Notifications page.
+	// saw. See the copy on Configuration's Notifications tab.
 	//
 	// Note the absence of omitempty: false must serialize, or a user who
 	// turns previews off round-trips back to "unset" and the field reads as

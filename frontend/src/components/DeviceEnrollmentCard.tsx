@@ -238,7 +238,7 @@ export function DeviceEnrollmentCard({
         <p className="sec-muted">{error}</p>
       ) : devices.length === 0 ? (
         <p className="sec-muted">
-          No paired devices yet. Pair a device on the Notifications page first.
+          No paired devices yet. Use &ldquo;Pair a new device&rdquo; above first.
         </p>
       ) : (
         <ul className="sec-devices">

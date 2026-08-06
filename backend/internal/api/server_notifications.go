@@ -209,10 +209,12 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		body = "Push delivery is working across all subscribed devices."
 	}
 
+	// A test notification's only job is to prove delivery, so it lands the user
+	// back on the settings that configure it — a tab on Configuration.
 	message := map[string]any{
 		"title": title,
 		"body":  body,
-		"url":   "/notifications",
+		"url":   "/config?tab=notifications",
 		"tag":   "kypost-test",
 	}
 	payloadBytes, err := json.Marshal(message)
@@ -261,7 +263,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		nativeMessage := processor.NativePushMessage{
 			Title: title,
 			Body:  body,
-			Data:  map[string]string{"url": "/notifications"},
+			Data:  map[string]string{"url": "/config?tab=notifications"},
 		}
 		outcome, err := processor.SendNativePush(r.Context(), s.nativePushDispatcher, s.health, store, nativeMessage, func(device state.NativeDevice, platform string, sendErr error) {
 			// "sent_via", not "sender" — this names the delivery path, not an
@@ -636,7 +638,14 @@ func (s *Server) handleNotificationNativeDevices(w http.ResponseWriter, r *http.
 		for i, d := range devices {
 			redacted[i] = d.Redacted()
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"devices": redacted})
+		// deliveryMode rides along so the UI can render the Relay Push / App
+		// Pull toggle without calling GET /api/notifications/pairing, which
+		// mints a live 90-second pairing token as a side effect. Reading a
+		// setting should not hand out a credential.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"devices":      redacted,
+			"deliveryMode": store.NativeDeliveryMode(),
+		})
 	case http.MethodDelete:
 		var payload struct {
 			DeviceID string `json:"deviceId"`
