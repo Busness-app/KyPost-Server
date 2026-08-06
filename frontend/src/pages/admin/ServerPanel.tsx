@@ -13,9 +13,9 @@ import { Users } from "../../admin/sections/Users";
  * classification. The per-user "publish my key" opt-in is a different control
  * and stays on Security.
  *
- * Label rules are here for the same reason: the allowlist is instance-wide and
- * saved through PUT /api/config, which is withAdmin. Automation holds only
- * per-user settings.
+ * The default label list is here for the same reason: it is the house list a
+ * new account is seeded from, saved through PUT /api/config (withAdmin). Each
+ * account's OWN labels live on Email Labels and are not affected by it.
  */
 export function ServerPanel() {
   return (
@@ -28,7 +28,7 @@ export function ServerPanel() {
         ariaLabel="Server sections"
         tabs={[
           { id: "runtime", label: "Application", body: <ApplicationRuntime /> },
-          { id: "label-rules", label: "Label Rules", body: <LabelRules /> },
+          { id: "label-rules", label: "Default Labels", body: <LabelRules /> },
           { id: "wkd-domains", label: "WKD Domains", body: <WkdDomains /> },
           { id: "users", label: "Manage Users", body: <Users /> }
         ]}

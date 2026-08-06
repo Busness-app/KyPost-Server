@@ -702,6 +702,11 @@ func TestHandleMessage_AutoLabelDisabledUsesConfiguredLabel(t *testing.T) {
 		mail:             mail,
 		store:            store,
 		autoLabelEnabled: false,
+		// Labels are per-user now; the house list on p.cfg is only what a new
+		// account is seeded FROM, so a userCtx built by hand has to carry the
+		// account's own list.
+		allowlist:       p.cfg.Labels.Allowlist,
+		keywordMappings: p.cfg.Labels.KeywordMappings,
 	}
 	msg := imapadapter.Message{ID: "44", Subject: "Invoice due", Sender: "billing@example.com"}
 

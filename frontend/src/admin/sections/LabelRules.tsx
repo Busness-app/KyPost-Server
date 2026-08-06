@@ -89,8 +89,12 @@ export function LabelRules() {
 
   return (
     <div className="config-card" role="tabpanel">
-      <h3>Label Rules</h3>
-      <p className="config-muted">One label per line. Use keyword mappings to route alternate IMAP keywords.</p>
+      <h3>Default labels for new accounts</h3>
+      <p className="config-muted">
+        One label per line. This is the house list a NEW account's own labels are copied from — it is not what
+        existing accounts use. Everyone already on this server has their own list under Email Labels, and
+        editing this does not reach into theirs. Use keyword mappings to route alternate IMAP keywords.
+      </p>
       <div className="config-grid">
         <label>
           <div>Allowlist</div>
@@ -108,7 +112,7 @@ export function LabelRules() {
       </div>
       <div className="config-actions">
         <button type="button" onClick={applyImapLabelsToAllowlist}>Merge IMAP Labels</button>
-        <button type="button" onClick={saveConfig} disabled={!loaded}>Save Configuration</button>
+        <button type="button" onClick={saveConfig} disabled={!loaded}>Save Defaults</button>
       </div>
       <p className="config-muted">{labelsFromImap.length > 0 ? `Discovered IMAP labels: ${labelsFromImap.join(", ")}` : "No IMAP labels discovered yet."}</p>
       {configStatus ? <p className={configStatusTone}>{configStatus}</p> : null}

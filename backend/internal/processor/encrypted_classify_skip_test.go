@@ -38,7 +38,7 @@ func TestHandleMessage_EncryptedMessageSkipsTheClassifier(t *testing.T) {
 	p.cfg.Labels.Allowlist = []string{"Primary", "Bills"}
 
 	mail := &noopMailClient{}
-	uc := userCtx{id: "user-1", mail: mail, store: store, autoLabelEnabled: true}
+	uc := userCtx{id: "user-1", mail: mail, store: store, autoLabelEnabled: true, allowlist: p.cfg.Labels.Allowlist, keywordMappings: p.cfg.Labels.KeywordMappings}
 	msg := imapadapter.Message{
 		ID:           "51",
 		Subject:      "[Encrypted] Email Sent by KyPost",
@@ -81,7 +81,7 @@ func TestHandleMessage_EncryptedMessageTagsAConfiguredLabel(t *testing.T) {
 	p.cfg.Labels.Allowlist = []string{"Work", "Bills"} // no "Primary"
 
 	mail := &noopMailClient{}
-	uc := userCtx{id: "user-1", mail: mail, store: store, autoLabelEnabled: true}
+	uc := userCtx{id: "user-1", mail: mail, store: store, autoLabelEnabled: true, allowlist: p.cfg.Labels.Allowlist, keywordMappings: p.cfg.Labels.KeywordMappings}
 	msg := imapadapter.Message{ID: "52", Subject: "encrypted", Sender: "bob@example.com", PGPEncrypted: true}
 
 	if err := p.handleMessage(context.Background(), uc, msg); err != nil {
@@ -124,7 +124,7 @@ func TestHandleMessage_EncryptedMessageIsNotTaggedAsEncrypted(t *testing.T) {
 	p.cfg.Labels.Allowlist = []string{"Primary"}
 
 	mail := &noopMailClient{}
-	uc := userCtx{id: "user-1", mail: mail, store: store, autoLabelEnabled: true}
+	uc := userCtx{id: "user-1", mail: mail, store: store, autoLabelEnabled: true, allowlist: p.cfg.Labels.Allowlist, keywordMappings: p.cfg.Labels.KeywordMappings}
 	msg := imapadapter.Message{ID: "53", Subject: "encrypted", Sender: "bob@example.com", PGPEncrypted: true}
 
 	if err := p.handleMessage(context.Background(), uc, msg); err != nil {

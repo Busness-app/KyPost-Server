@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getJSON, putJSON } from "../../api/client";
+import { loadLabelPrefs, saveLabelPrefsPatch } from "./labelPrefs";
 
 type TuningResponse = {
   content: string;
@@ -11,10 +12,6 @@ type TuningSaveResponse = {
   path?: string;
   restartOk?: boolean;
   restartError?: string;
-};
-
-type LabelPreferences = {
-  autoApplyEnabled: boolean;
 };
 
 type OllamaVersionResponse = {
@@ -45,7 +42,9 @@ export function PromptTuning() {
     const previous = autoApplyEnabled;
     setAutoApplyEnabled(enabled);
     try {
-      await putJSON<{ ok: boolean }>("/api/labels/preferences", { autoApplyEnabled: enabled });
+      // Read-merge-write: this endpoint replaces the account's whole label
+      // block, so sending only this field would blank their label list.
+      await saveLabelPrefsPatch({ autoApplyEnabled: enabled });
       setLabelPrefsStatus(
         enabled
           ? "Automatic keyword labeling enabled."
@@ -79,8 +78,8 @@ export function PromptTuning() {
   }, []);
 
   useEffect(() => {
-    getJSON<LabelPreferences>("/api/labels/preferences")
-      .then((prefs) => setAutoApplyEnabled(prefs.autoApplyEnabled ?? true))
+    loadLabelPrefs()
+      .then((prefs) => setAutoApplyEnabled(prefs.autoApplyEnabled))
       .catch(() => setLabelPrefsStatus("Failed to load labeling preference."));
   }, []);
 

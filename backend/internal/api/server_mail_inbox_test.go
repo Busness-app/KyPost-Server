@@ -530,7 +530,17 @@ func TestServeInbox_TabBucketingByKeyword(t *testing.T) {
 	userID := all[0].ID
 	cache := testInboxCache(t)
 	cfg := config.Default()
-	cfg.Labels.Allowlist = []string{"Work"}
+
+	// The tabs come from THIS ACCOUNT's label set, not the house list — that
+	// is what per-user labels changed. Set it directly rather than relying on
+	// the seed, so the test says which list it means.
+	if err := config.UpdateUserSettings(srv.userSettingsPath(userID), func(us *config.UserSettings) error {
+		us.Labels.Seeded = true
+		us.Labels.Allowlist = []string{"Work"}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed user labels: %v", err)
+	}
 
 	fake := &fakeMailClient{unread: []imapadapter.UnreadMessage{
 		{MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "b1", Keywords: []string{"Work"}},

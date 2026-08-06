@@ -127,6 +127,11 @@ type userCtx struct {
 	// classification entirely and tags every message with the account's
 	// default label instead (disabledLabelingFallback).
 	autoLabelEnabled bool
+	// allowlist and keywordMappings are this account's own label set, seeded
+	// from the house list the first time the account is seen. Per-user, not
+	// per-instance: two accounts on one server sort their mail differently.
+	allowlist       []string
+	keywordMappings map[string][]string
 	// rules holds every filter rule (enabled and disabled) loaded for this
 	// tick; rules.Evaluate skips disabled rules and rules out of Scope for
 	// the evaluated folder itself, so no pre-filtering happens here.
@@ -703,10 +708,13 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	// DELETEs in one transaction against a 30-day retention window, and there
 	// is no reason to pay them on the poll path.
 
-	settings, err := config.LoadUserSettings(p.userSettingsPath(u.ID))
+	settings, err := config.LoadUserLabelSettings(p.userSettingsPath(u.ID), p.currentConfig())
 	if err != nil {
-		p.log.Error("failed to load user settings, using defaults", "user_id", u.ID, "error", err.Error())
-		settings = config.DefaultUserSettings()
+		// LoadUserLabelSettings still answers with a seeded copy when only the
+		// persist failed, so keep what it gave us rather than falling back to
+		// defaults — defaults mean an empty allowlist and a tick that labels
+		// nothing.
+		p.log.Error("failed to persist seeded label settings; using the in-memory seed", "user_id", u.ID, "error", err.Error())
 	}
 
 	tuning := ""
@@ -746,6 +754,8 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 		tuning:           tuning,
 		settings:         settings.Notifications,
 		autoLabelEnabled: settings.Labels.AutoApplyEnabled,
+		allowlist:        settings.Labels.Allowlist,
+		keywordMappings:  settings.Labels.KeywordMappings,
 		rules:            activeRules,
 	}
 
@@ -1426,7 +1436,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	sender := truncateRunes(strings.TrimSpace(msg.Sender), maxClassifySenderRunes)
 	subject := truncateRunes(strings.TrimSpace(msg.Subject), maxClassifySubjectRunes)
 
-	label, err := classifyWithRetry(ctx, p.classifier, cfg.Labels.Allowlist, sender, subject, redacted, uc.tuning)
+	label, err := classifyWithRetry(ctx, p.classifier, uc.allowlist, sender, subject, redacted, uc.tuning)
 	// The model answering with something that isn't an allowed label is a
 	// normal outcome, not a classifier failure: fall through to the
 	// "no known label returned" skip path below (which retires the message
@@ -1459,9 +1469,9 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 	// subject are recorded in the state.Decision row below, which lives in the
 	// user's own state.db; the message id joins the two when debugging.
 	p.log.Info("classification result", "user_id", uc.id, "message_id", msg.ID, "raw_label", clipForLog(label))
-	selected := classifier.SelectLabelFromText(cfg.Labels.Allowlist, label)
+	selected := classifier.SelectLabelFromText(uc.allowlist, label)
 	if selected == "" {
-		p.log.Info("classification skipped", "user_id", uc.id, "message_id", msg.ID, "reason", "no known label returned", "raw_label", clipForLog(label), "allowlist_count", strconv.Itoa(len(cfg.Labels.Allowlist)))
+		p.log.Info("classification skipped", "user_id", uc.id, "message_id", msg.ID, "reason", "no known label returned", "raw_label", clipForLog(label), "allowlist_count", strconv.Itoa(len(uc.allowlist)))
 		if err := uc.store.RecordProcessedDecision(state.Decision{
 			MessageID: msg.ID,
 			Sender:    msg.Sender,
@@ -1476,7 +1486,7 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		p.maybeSendNativePushNotification(uc, msg, "", nil)
 		return nil
 	}
-	keywords := keywordsForSelectedLabel(selected, cfg.Labels.KeywordMappings)
+	keywords := keywordsForSelectedLabel(selected, uc.keywordMappings)
 	p.log.Info(
 		"applying label",
 		"user_id", uc.id,
@@ -1941,8 +1951,8 @@ func applySingleKeywordWithRetry(ctx context.Context, c imapadapter.Client, mess
 // and an encrypted message with no readable body — so the two cannot drift
 // apart in what they write to the mailbox or to the decision log.
 func (p *Poller) tagWithFallbackLabel(ctx context.Context, uc userCtx, cfg config.Config, msg imapadapter.Message, reason string) error {
-	defaultLabel := disabledLabelingFallback(cfg.Labels.Allowlist)
-	keywords := keywordsForSelectedLabel(defaultLabel, cfg.Labels.KeywordMappings)
+	defaultLabel := disabledLabelingFallback(uc.allowlist)
+	keywords := keywordsForSelectedLabel(defaultLabel, uc.keywordMappings)
 	p.log.Info(
 		"classification skipped; tagging default label",
 		"user_id", uc.id,

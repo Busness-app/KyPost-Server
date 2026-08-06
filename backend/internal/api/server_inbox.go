@@ -134,7 +134,11 @@ func firstMatchingKeyword(keywords []string, allowed []string) string {
 	return ""
 }
 
-func collectAllowedKeywords(cfg config.Config) []string {
+// collectAllowedKeywords flattens one ACCOUNT's label set into the keyword
+// list the inbox tabs are built from. Per-user since labels became per-user:
+// building the tabs from the house list would show every account the same
+// tabs regardless of the labels its own mail is actually tagged with.
+func collectAllowedKeywords(labels config.UserLabelSettings) []string {
 	out := []string{}
 	seen := map[string]bool{}
 	appendKeyword := func(value string) {
@@ -150,10 +154,10 @@ func collectAllowedKeywords(cfg config.Config) []string {
 		out = append(out, clean)
 	}
 
-	for _, label := range cfg.Labels.Allowlist {
+	for _, label := range labels.Allowlist {
 		appendKeyword(label)
 	}
-	for _, mappedKeywords := range cfg.Labels.KeywordMappings {
+	for _, mappedKeywords := range labels.KeywordMappings {
 		for _, keyword := range mappedKeywords {
 			appendKeyword(keyword)
 		}
@@ -289,7 +293,7 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// No mailbox configured yet — show the empty tab scaffold rather
 		// than an error so the page still renders.
-		tabs, byTab := buildInboxTabScaffold(collectAllowedKeywords(cfg))
+		tabs, byTab := buildInboxTabScaffold(collectAllowedKeywords(s.userLabels(ac.UserID)))
 		tabs = append(tabs, inboxUncategorizedTab)
 		writeJSON(w, http.StatusOK, map[string]any{"tabs": tabs, "byTab": byTab})
 		return
@@ -309,7 +313,7 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 // param/auth/store resolution) so it can be exercised directly in tests
 // against a fake imapadapter.Client, without a real IMAP connection.
 func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID string, mailClient imapadapter.Client, cache *mailcache.Store, cfg config.Config, mailbox string, limit int, since int64, useDelta bool) {
-	allowedKeywords := collectAllowedKeywords(cfg)
+	allowedKeywords := collectAllowedKeywords(s.userLabels(userID))
 	tabs, byTab := buildInboxTabScaffold(allowedKeywords)
 
 	// bucket appends entry into the tab its keywords match (or
@@ -878,10 +882,12 @@ func (s *Server) handleMailSearch(w http.ResponseWriter, r *http.Request) {
 		limit = 200
 	}
 
-	s.cfgMu.RLock()
-	cfg := s.cfg
-	s.cfgMu.RUnlock()
-	allowedKeywords := collectAllowedKeywords(cfg)
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	allowedKeywords := collectAllowedKeywords(s.userLabels(ac.UserID))
 
 	results, err := mailClient.SearchMessages(r.Context(), mailbox, field, q, limit)
 	if err != nil {

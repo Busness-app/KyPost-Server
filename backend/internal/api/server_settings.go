@@ -131,8 +131,13 @@ func (s *Server) handleNotificationPreferences(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// handleLabelPreferences reads/writes the calling user's preference for
-// whether the AI classifier automatically applies keyword labels.
+// handleLabelPreferences reads/writes the calling user's OWN label set: the
+// allowlist the classifier may choose from, the keyword expansions, and whether
+// it runs at all.
+//
+// withAuth, not withAdmin, and that is the point — these are this account's
+// labels, seeded once from the instance house list and independent of it
+// afterwards. The house list itself is still admin-only, on PUT /api/config.
 func (s *Server) handleLabelPreferences(w http.ResponseWriter, r *http.Request) {
 	ac, ok := authFromContext(r)
 	if !ok {
@@ -142,18 +147,40 @@ func (s *Server) handleLabelPreferences(w http.ResponseWriter, r *http.Request) 
 	path := s.userSettingsPath(ac.UserID)
 	switch r.Method {
 	case http.MethodGet:
-		settings, err := config.LoadUserSettings(path)
-		if err != nil {
-			http.Error(w, "failed to read label preferences", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, settings.Labels)
+		// Seeding read: an account that has never had a list gets the house
+		// list here, so the form opens on what its mail is actually being
+		// classified against rather than on nothing.
+		writeJSON(w, http.StatusOK, s.userLabels(ac.UserID))
 	case http.MethodPut:
 		var prefs config.UserLabelSettings
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&prefs); err != nil {
 			http.Error(w, "invalid preferences payload", http.StatusBadRequest)
 			return
 		}
+		// Allowlist labels become IMAP keywords verbatim. Mailbox names may
+		// contain spaces and keywords may not, and the UI populates this list
+		// from discovered mailbox names — so an unvalidated entry here is a
+		// per-message stall in the shared poller later. This is the same check
+		// PUT /api/config applied when the list was global; it has to travel
+		// with the field, not stay behind on the admin endpoint.
+		for _, label := range prefs.Allowlist {
+			if err := imapadapter.ValidateKeyword(label); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "label cannot be used as an IMAP keyword: " + err.Error()})
+				return
+			}
+		}
+		for _, keywords := range prefs.KeywordMappings {
+			for _, keyword := range keywords {
+				if err := imapadapter.ValidateKeyword(keyword); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "mapped keyword cannot be used as an IMAP keyword: " + err.Error()})
+					return
+				}
+			}
+		}
+		// A caller that saved a list has one, whatever it contains — including
+		// an empty one. Without this an account that deliberately cleared every
+		// label would be re-seeded from the house list on the next read.
+		prefs.Seeded = true
 		if err := config.UpdateUserSettings(path, func(settings *config.UserSettings) error {
 			settings.Labels = prefs
 			return nil

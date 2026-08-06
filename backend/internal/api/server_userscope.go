@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"kypost-server/backend/internal/config"
+
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/fsutil"
@@ -201,6 +203,27 @@ func (s *Server) userTuningPath(userID string) string {
 
 func (s *Server) userSettingsPath(userID string) string {
 	return filepath.Join(s.userConfigDir(userID), "config.yaml")
+}
+
+// userLabels reads one account's label set, seeding it from the house list the
+// first time the account is seen.
+//
+// An error is answered with the house list rather than an empty one: an empty
+// allowlist means "this account labels nothing", which is a much louder wrong
+// answer than "this account still has the defaults" for a read that only feeds
+// the inbox tab scaffold.
+func (s *Server) userLabels(userID string) config.UserLabelSettings {
+	s.cfgMu.RLock()
+	house := s.cfg
+	s.cfgMu.RUnlock()
+
+	settings, err := config.LoadUserLabelSettings(s.userSettingsPath(userID), house)
+	if err != nil {
+		s.logger.Error("failed to read label settings; falling back to the house list",
+			"user_id", userID, "error", err.Error())
+		return settings.Labels
+	}
+	return settings.Labels
 }
 
 // userCardDAVAuthPath is where the user's app-specific CardDAV password hash

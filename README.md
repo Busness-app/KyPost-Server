@@ -11,7 +11,7 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 - Single-container Docker runtime. supervisord manages the processes.
 - Multi-user with two roles. Admins manage users and system settings. Each user connects their own IMAP mailbox.
 - IMAP inbox reader with folder management and drag-and-drop move actions
-- Automatic keyword labels for unread mail. KyPost polls each active user's mailbox separately. Labels are a sorting hint a determined sender can influence — see [Classification flow](#architecture).
+- Automatic keyword labels for unread mail. KyPost polls each active user's mailbox separately, and each account has its OWN label list — copied from the instance defaults when the account is created, then theirs to change. Labels are a sorting hint a determined sender can influence — see [Classification flow](#architecture).
 - Filter Rules: a GUI condition and action builder plus a raw Sieve script editor. A run-now panel applies the rules on demand.
 - Compose flow with SMTP send and IMAP draft save
 - PGP mail encryption. Generate or import a key, search for recipient keys on keys.openpgp.org, and check recipient key status before you send. KyPost has two key-protection modes. Read [Where your PGP private key lives](#where-your-pgp-private-key-lives) before you rely on this.
