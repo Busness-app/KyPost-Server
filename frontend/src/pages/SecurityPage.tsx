@@ -9,7 +9,7 @@ import {
   type PGPSessionState
 } from "../lib/pgpSession";
 import { PgpUnlockDialog } from "../components/PgpUnlockDialog";
-import { countApprovers, joinDeviceRows } from "./security/deviceJoin";
+import { countApprovers, countMailEnrolled, joinDeviceRows } from "./security/deviceJoin";
 import { SECURITY_TABS, SECURITY_TAB_LABELS, resolveSecurityTab, type SecurityTab } from "./security/tabs";
 import type { MfaStatus, TotpSetup } from "./security/types";
 import { SignIn } from "./security/sections/SignIn";
@@ -147,9 +147,19 @@ export function SecurityPage() {
     }
   }, []);
 
+  // `pgpIdentity?.fingerprint` is in the deps deliberately. Replacing the
+  // identity clears every non-password envelope slot on the server, so every
+  // device's enrollment marker becomes false — and a list cached across that
+  // change would keep showing devices as able to read mail they can no longer
+  // open. This is the guarantee DeviceEnrollmentCard's own fingerprint-keyed
+  // refetch used to provide; it lives here now that the rows render enrollment.
+  //
+  // The cost is one extra GET per page load, because the identity arrives after
+  // the first run. That is cheaper than any scheme for suppressing it, all of
+  // which can go stale in the direction that matters.
   useEffect(() => {
     void refreshDevices();
-  }, [refreshDevices]);
+  }, [refreshDevices, pgpIdentity?.fingerprint]);
 
   const showRecoveryPanel = recoveryCodes.length > 0;
   const totpOn = showRecoveryPanel || Boolean(status?.totpEnabled);
@@ -158,6 +168,7 @@ export function SecurityPage() {
   // happens when they disagree.
   const deviceRows = joinDeviceRows(nativeDevices, status?.approverDevices ?? []);
   const approverCount = countApprovers(deviceRows);
+  const mailEnrolledCount = countMailEnrolled(deviceRows);
   const approvalsOn = pushOn && approverCount > 0;
   const pairedCount = nativeDevices.length;
 
@@ -233,8 +244,15 @@ export function SecurityPage() {
                   : "Checking"}
           </span>
           <p>
+            {/* "Only this browser" stops being true the moment a device is
+                enrolled — enrolling is precisely the act of giving something
+                other than this browser a copy of the key. pairedCount is the
+                denominator so this agrees with the "n paired" beside it, and so
+                a row known only to the MFA status cannot inflate it. */}
             {keyCustody === "client"
-              ? "Only this browser can open mail encrypted to you."
+              ? mailEnrolledCount > 0
+                ? `Only this browser and ${mailEnrolledCount} of your ${pairedCount} devices can open mail encrypted to you.`
+                : "Only this browser can open mail encrypted to you."
               : keyCustody === "server"
                 ? "This server, and anyone who reaches it or its backups, can read your encrypted mail."
                 : keyCustody === "none"

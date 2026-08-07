@@ -1,12 +1,12 @@
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { DeviceEnrollmentCard } from "./DeviceEnrollmentCard";
+import { DeviceMailAccessStatus, DeviceMailPanel, type MailPanel } from "./DeviceMailAccess";
 import type { NativeDevice } from "../api/devices";
+import type { MailAccess } from "../pages/security/deviceJoin";
 import { deriveEnrollmentCode, bucketFor } from "../lib/deviceEnrollment";
 
-const listNativeDevices = vi.fn();
-vi.mock("../api/devices", () => ({ listNativeDevices: () => listNativeDevices() }));
 vi.mock("../api/client", () => ({
   toErrorMessage: (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback)
 }));
@@ -83,23 +83,59 @@ function device(over: Partial<NativeDevice> = {}): NativeDevice {
   };
 }
 
-function renderCard(over: Partial<Parameters<typeof DeviceEnrollmentCard>[0]> = {}) {
-  return render(
-    <DeviceEnrollmentCard
-      fingerprint="AAAA1111BBBB2222"
-      clientProtected
-      unlocked
-      onRequestUnlock={() => {}}
-      {...over}
-    />
+// A stateful harness, so "click Enroll then submit" reads the same here as it
+// does in the app: the parent owns which panel is open, the row asks for it.
+function Harness({
+  dev = device({ enrollmentPublicKey: HONEST_KEY }),
+  mailAccess = "available" as MailAccess,
+  clientProtected = true,
+  fingerprint = "AAAA1111BBBB2222",
+  unlocked = true,
+  onRequestUnlock = () => {},
+  onChanged = () => {},
+  // Confirmed by default: the tests below are about the ceremony, not about
+  // the wait, and an unset one would fall through to the real poller and keep
+  // running after teardown.
+  awaitEnrollment = async () => true
+}: {
+  dev?: NativeDevice;
+  mailAccess?: MailAccess;
+  clientProtected?: boolean;
+  fingerprint?: string;
+  unlocked?: boolean;
+  onRequestUnlock?: () => void;
+  onChanged?: () => void;
+  awaitEnrollment?: (deviceId: string) => Promise<boolean>;
+}) {
+  const [panel, setPanel] = useState<MailPanel>("none");
+  return (
+    <>
+      <DeviceMailAccessStatus
+        mailAccess={mailAccess}
+        clientProtected={clientProtected}
+        fingerprint={fingerprint}
+        onOpenPanel={setPanel}
+      />
+      <DeviceMailPanel
+        device={dev}
+        panel={panel}
+        fingerprint={fingerprint}
+        unlocked={unlocked}
+        onRequestUnlock={onRequestUnlock}
+        onClose={() => setPanel("none")}
+        onChanged={onChanged}
+        awaitEnrollment={awaitEnrollment}
+      />
+    </>
   );
 }
+
+const enrolledDevice = () =>
+  device({ enrollmentPublicKey: HONEST_KEY, encryptionEnrolled: true });
 
 afterEach(cleanup);
 
 beforeEach(() => {
-  listNativeDevices.mockReset();
-  listNativeDevices.mockResolvedValue({ devices: [] });
   putDeviceEnvelope.mockReset();
   deleteDeviceEnvelope.mockReset();
   requireUnlockedKey.mockReset();
@@ -109,100 +145,53 @@ beforeEach(() => {
   requireUnlockedKey.mockReturnValue("-----BEGIN PGP PRIVATE KEY BLOCK-----");
 });
 
-describe("DeviceEnrollmentCard", () => {
-  it("offers enrollment for a device that has published a key", async () => {
-    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: "KEY" })] });
-    renderCard();
-
-    expect(await screen.findByText("Pixel")).toBeTruthy();
-    expect(await screen.findByRole("button", { name: "Enroll" })).toBeTruthy();
+describe("the status cell", () => {
+  it("offers enrollment for a device that has published a key", () => {
+    render(<Harness />);
+    expect(screen.getByText("Not enrolled. It cannot read your encrypted mail.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Enroll" })).toBeTruthy();
   });
 
   // Self-gating: until the mobile half ships, every device looks like this, so
-  // the card offers nothing rather than a button leading nowhere.
-  it("offers nothing for a device that has published no key", async () => {
-    listNativeDevices.mockResolvedValue({ devices: [device()] });
-    renderCard();
-
-    expect(await screen.findByText("Pixel")).toBeTruthy();
+  // the row offers nothing rather than a button leading nowhere.
+  it("offers nothing for a device that has published no key", () => {
+    render(<Harness mailAccess="unsupported" />);
+    expect(screen.getByText(/too old to be enrolled/i)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Enroll" })).toBeNull();
   });
 
-  it("shows an enrolled device as able to read encrypted mail", async () => {
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: "KEY", encryptionEnrolled: true })]
-    });
-    renderCard();
-
-    expect(await screen.findByText(/can read your encrypted mail/i)).toBeTruthy();
+  it("shows an enrolled device as able to read encrypted mail", () => {
+    render(<Harness mailAccess="enrolled" />);
+    expect(screen.getByText("This device can read your encrypted mail.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove sealing" })).toBeTruthy();
   });
 
-  // Nothing to seal without a client-held key: the PGP card above already
-  // tells that story, and repeating it here as a broken affordance is worse.
+  // Nothing to seal without a client-held key: the Encryption tab already tells
+  // that story, and repeating it here as a broken affordance is worse.
   it("renders nothing when the account holds no client-protected key", () => {
-    const { container } = renderCard({ clientProtected: false });
+    const { container } = render(
+      <DeviceMailAccessStatus
+        mailAccess="available"
+        clientProtected={false}
+        fingerprint="AAAA"
+        onOpenPanel={() => {}}
+      />
+    );
     expect(container.firstChild).toBeNull();
   });
 
-  // Replacing the identity clears every non-password slot on the server, so a
-  // list cached across that change would keep showing devices as able to read
-  // mail they can no longer open.
-  it("re-reads the list when the identity changes", async () => {
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: "KEY", encryptionEnrolled: true })]
-    });
-    const { rerender } = renderCard();
-    await screen.findByText("Pixel");
-    expect(listNativeDevices).toHaveBeenCalledTimes(1);
-
-    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: "KEY" })] });
-    rerender(
-      <DeviceEnrollmentCard
-        fingerprint="CCCC3333DDDD4444"
+  // Only the inventory knows about sealings, so a row it does not back has no
+  // answer — and must not render the reassuring guess.
+  it("renders nothing for a row the inventory does not back", () => {
+    const { container } = render(
+      <DeviceMailAccessStatus
+        mailAccess="unknown"
         clientProtected
-        unlocked
-        onRequestUnlock={() => {}}
+        fingerprint="AAAA"
+        onOpenPanel={() => {}}
       />
     );
-
-    await vi.waitFor(() => expect(listNativeDevices).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText(/not enrolled/i)).toBeTruthy();
-  });
-
-  // A failed fetch must not present as "no devices are enrolled" — that is the
-  // reassuring answer and may be the wrong one.
-  it("shows the error instead of the reassuring empty-state on a failed first load", async () => {
-    listNativeDevices.mockRejectedValue(new Error("network down"));
-    renderCard();
-
-    expect(await screen.findByText("network down")).toBeTruthy();
-    expect(screen.queryByText(/no paired devices yet/i)).toBeNull();
-  });
-
-  // Pins the security property the `fingerprint` dependency exists for: if the
-  // identity-change refetch fails, the previous identity's device list must not
-  // linger on screen claiming devices can still read mail they can no longer
-  // open under the new identity.
-  it("clears the device list on a failed refetch, rather than showing stale enrollment", async () => {
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: "KEY", encryptionEnrolled: true })]
-    });
-    const { rerender } = renderCard();
-    await screen.findByText(/can read your encrypted mail/i);
-
-    listNativeDevices.mockRejectedValue(new Error("network down"));
-    rerender(
-      <DeviceEnrollmentCard
-        fingerprint="CCCC3333DDDD4444"
-        clientProtected
-        unlocked
-        onRequestUnlock={() => {}}
-      />
-    );
-
-    await screen.findByText("network down");
-    expect(screen.queryByText(/can read your encrypted mail/i)).toBeNull();
-    expect(screen.queryByText("Pixel")).toBeNull();
+    expect(container.firstChild).toBeNull();
   });
 });
 
@@ -212,10 +201,7 @@ describe("the gate", () => {
   // presence of a warning — a warning beside a sent request is the failure
   // this whole design exists to prevent.
   it("issues no PUT when the served key is not the device's key", async () => {
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: SUBSTITUTED_KEY })]
-    });
-    renderCard();
+    render(<Harness dev={device({ enrollmentPublicKey: SUBSTITUTED_KEY })} />);
     await startCeremony();
 
     await submitCeremony(await codeFor(HONEST_KEY));
@@ -236,8 +222,7 @@ describe("the gate", () => {
   });
 
   it("seals and uploads when the code matches", async () => {
-    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
-    renderCard();
+    render(<Harness />);
     await startCeremony();
 
     await submitCeremony(await codeFor(HONEST_KEY));
@@ -249,38 +234,25 @@ describe("the gate", () => {
     expect(envelope.alg).toBe("ECDH-P256+HKDF-SHA256+A256GCM");
   });
 
-  // The original attack arriving through the back door of a refetch: verify
-  // against an honest key, then seal against whatever the list holds now. The
-  // ceremony snapshots the key when it opens, so a mid-ceremony refresh cannot
-  // change what gets sealed to.
+  // The original attack arriving through the back door of a later render:
+  // verify against an honest key, then seal against whatever the props hold
+  // now. The panel snapshots the key when it mounts, so a mid-ceremony change
+  // cannot alter what gets sealed to.
   it("seals to the key it verified, not to a later one", async () => {
-    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
-    const { rerender } = renderCard();
+    const { rerender } = render(<Harness dev={device({ enrollmentPublicKey: HONEST_KEY })} />);
     await startCeremony();
 
-    // The server flips its answer after the dialog is open, and a refetch
-    // actually lands before submit — otherwise `devices` would still hold
-    // HONEST_KEY at submit time regardless of where the implementation reads
-    // the key from, and this test would be blind to the mutation it exists to
-    // catch.
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: SUBSTITUTED_KEY })]
-    });
-    rerender(
-      <DeviceEnrollmentCard
-        fingerprint="CCCC3333DDDD4444"
-        clientProtected
-        unlocked
-        onRequestUnlock={() => {}}
-      />
-    );
-    await vi.waitFor(() => expect(listNativeDevices).toHaveBeenCalledTimes(2));
+    // The server flips its answer after the panel is open. Rerendering with the
+    // substituted key is the props-level equivalent of the refetch this used to
+    // be exposed to — if the panel read the key at seal time, this is where it
+    // would pick up the wrong bytes.
+    rerender(<Harness dev={device({ enrollmentPublicKey: SUBSTITUTED_KEY })} />);
 
     await submitCeremony(await codeFor(HONEST_KEY));
 
     await vi.waitFor(() => expect(putDeviceEnvelope).toHaveBeenCalledTimes(1));
     // The assertion that carries the property: the bytes handed to the seal are
-    // the bytes that were verified, not the ones the list holds now.
+    // the bytes that were verified, not the ones the props hold now.
     expect(sealSpy.mock.calls[0][0]).toBe(HONEST_KEY);
     expect(sealSpy.mock.calls[0][0]).not.toBe(SUBSTITUTED_KEY);
   });
@@ -291,8 +263,7 @@ describe("the gate", () => {
     requireUnlockedKey.mockImplementation(() => {
       throw new Error("vault is locked");
     });
-    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
-    renderCard();
+    render(<Harness />);
     await startCeremony();
 
     await submitCeremony(await codeFor(HONEST_KEY));
@@ -301,7 +272,7 @@ describe("the gate", () => {
     // the ceremony has reached the message. Then wait for `busy` to clear
     // (Cancel disables only on `busy`) before trusting the absence assertion —
     // under a warn-then-seal shape the message can paint before the PUT fires.
-    expect(await screen.findByText(/unlock your key/i)).toBeTruthy();
+    expect(await screen.findByText(/nothing was sent/i)).toBeTruthy();
     await vi.waitFor(() =>
       expect(screen.getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(false)
     );
@@ -312,10 +283,7 @@ describe("the gate", () => {
   // There is no "seal anyway" — the refusal is not click-through-able because
   // there is nothing to click. Stronger than a warning asked to be respected.
   it("offers no way from a refusal to a seal", async () => {
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: SUBSTITUTED_KEY })]
-    });
-    renderCard();
+    render(<Harness dev={device({ enrollmentPublicKey: SUBSTITUTED_KEY })} />);
     await startCeremony();
     await submitCeremony(await codeFor(HONEST_KEY));
 
@@ -349,16 +317,15 @@ describe("the gate", () => {
   // mismatch reached afterward still locks it.
   it("re-enables submit after a retryable failure, but a mismatch still locks it", async () => {
     putDeviceEnvelope.mockRejectedValueOnce(new Error("wrong password"));
-    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
-    renderCard();
+    render(<Harness />);
     await startCeremony();
 
     await submitCeremony(await codeFor(HONEST_KEY));
 
     await screen.findByText("wrong password");
-    expect(
-      screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")
-    ).toBe(false);
+    expect(screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")).toBe(
+      false
+    );
 
     // A well-formed but deliberately wrong code: still fourteen valid characters,
     // so this exercises the mismatch branch rather than the length check.
@@ -368,16 +335,73 @@ describe("the gate", () => {
     await userEvent.click(screen.getByRole("button", { name: "Verify and enroll" }));
 
     await screen.findByText(/not the key on that device/i);
-    expect(
-      screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")
-    ).toBe(true);
+    expect(screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")).toBe(
+      true
+    );
+  });
+});
+
+// The ceremony has two parties and only one of them is this browser. The PUT
+// stores the sealed envelope; `encryptionEnrolled` is written ONLY by the
+// device, on a device-authenticated route, after it has fetched that envelope
+// and opened it. So at the instant the PUT returns, the device is still
+// correctly reported as not enrolled — and reporting that as the outcome of the
+// ceremony calls a success a failure.
+describe("waiting for the device to confirm", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it("keeps waiting instead of declaring an outcome when the PUT returns", async () => {
+    const gate = deferred<boolean>();
+    render(<Harness awaitEnrollment={() => gate.promise} />);
+    await startCeremony();
+    await submitCeremony(await codeFor(HONEST_KEY));
+
+    await vi.waitFor(() => expect(putDeviceEnvelope).toHaveBeenCalledTimes(1));
+
+    // Still on screen, still waiting — not closed, and not calling it done.
+    expect(await screen.findByText(/waiting for Pixel to confirm/i)).toBeTruthy();
+    gate.resolve(true);
+  });
+
+  it("reports success once the device confirms", async () => {
+    const onChanged = vi.fn();
+    render(<Harness awaitEnrollment={async () => true} onChanged={onChanged} />);
+    await startCeremony();
+    await submitCeremony(await codeFor(HONEST_KEY));
+
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalled());
+    // Closed: the row behind it now tells the story.
+    await vi.waitFor(() =>
+      expect(screen.queryByLabelText("Code from your device")).toBeNull()
+    );
+  });
+
+  // The defect this whole describe exists for. A device that has not answered
+  // yet has not failed — the key IS sealed and stored for it. Saying otherwise
+  // sends the user to redo work that already succeeded.
+  it("does not call a stored sealing a failure when the device is slow", async () => {
+    render(<Harness awaitEnrollment={async () => false} />);
+    await startCeremony();
+    await submitCeremony(await codeFor(HONEST_KEY));
+
+    const note = await screen.findByText(/hasn't confirmed yet/i);
+    expect(note).toBeTruthy();
+    expect(note.textContent).toMatch(/sealed and stored/i);
+    // No failure language anywhere in the panel.
+    expect(screen.queryByText(/could not store the sealing/i)).toBeNull();
+    expect(screen.queryByText(/not the key on that device/i)).toBeNull();
   });
 });
 
 describe("the failure taxonomy", () => {
   it("reports an expired code as expiry, not as a substituted key", async () => {
-    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
-    renderCard();
+    render(<Harness />);
     await startCeremony();
 
     const stale = await deriveEnrollmentCode(
@@ -400,8 +424,7 @@ describe("the failure taxonomy", () => {
   });
 
   it("names a short entry as incomplete rather than as a mismatch", async () => {
-    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
-    renderCard();
+    render(<Harness />);
     await startCeremony();
 
     await submitCeremony("5R9K6");
@@ -421,10 +444,7 @@ describe("the failure taxonomy", () => {
   // Three, not one. The MFA control allows a single attempt because guessing
   // is cheap there; here guessing fifty bits is hopeless and typos are not.
   it("aborts the ceremony after three real attempts", async () => {
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: SUBSTITUTED_KEY })]
-    });
-    renderCard();
+    render(<Harness dev={device({ enrollmentPublicKey: SUBSTITUTED_KEY })} />);
     await startCeremony();
 
     for (let i = 0; i < 3; i += 1) {
@@ -451,8 +471,7 @@ describe("the failure taxonomy", () => {
   // A malformed entry is the user's finger, not the server's key. Spending an
   // attempt on it would end the ceremony over three typos.
   it("does not spend an attempt on a malformed entry", async () => {
-    listNativeDevices.mockResolvedValue({ devices: [device({ enrollmentPublicKey: HONEST_KEY })] });
-    renderCard();
+    render(<Harness />);
     await startCeremony();
 
     for (let i = 0; i < 4; i += 1) {
@@ -472,10 +491,7 @@ describe("revocation", () => {
   // The honest sentence. Without it "remove" reads as revocation, and the user
   // walks away believing a phone they no longer control cannot read their mail.
   it("says removal does not reach what the device already holds", async () => {
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: HONEST_KEY, encryptionEnrolled: true })]
-    });
-    renderCard();
+    render(<Harness mailAccess="enrolled" dev={enrolledDevice()} />);
 
     await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
 
@@ -484,10 +500,7 @@ describe("revocation", () => {
   });
 
   it("removes the server's copy with the account credential", async () => {
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: HONEST_KEY, encryptionEnrolled: true })]
-    });
-    renderCard();
+    render(<Harness mailAccess="enrolled" dev={enrolledDevice()} />);
     await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
 
     await userEvent.type(screen.getByLabelText("Account password"), "hunter2");
@@ -499,117 +512,40 @@ describe("revocation", () => {
   // Pins the review finding: a wrong step-up credential is a routine failure
   // for this control, and it must read as "this removal failed" — not as
   // "we can't see your paired devices," which is what happened when the
-  // handler borrowed the fetch-level `error` state that gates the whole list.
-  it("keeps the device list on screen when a removal fails, and scopes the error to the confirmation", async () => {
+  // handler borrowed the fetch-level error state that gates the whole list.
+  // Structural now — this panel has no state that could gate a list — but the
+  // assertion stays, because that is the property, not the implementation.
+  it("keeps the error scoped to the confirmation when a removal fails", async () => {
     deleteDeviceEnvelope.mockRejectedValue(new Error("wrong password"));
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: HONEST_KEY, encryptionEnrolled: true })]
-    });
-    renderCard();
+    render(<Harness mailAccess="enrolled" dev={enrolledDevice()} />);
     await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
 
     await userEvent.type(screen.getByLabelText("Account password"), "wrong");
     await userEvent.click(screen.getByRole("button", { name: "Remove it" }));
 
     expect(await screen.findByText("wrong password")).toBeTruthy();
-    // The list-level failure message must not have fired, and the device
-    // itself must still be visible underneath the still-open confirmation.
-    expect(screen.getByText("Pixel")).toBeTruthy();
+    // The confirmation is still open and still names its device.
+    expect(screen.getByText(/Pixel/)).toBeTruthy();
     expect(screen.queryByText(/could not read your paired devices/i)).toBeNull();
   });
 });
 
 describe("panel exclusivity", () => {
-  function twoDevices() {
-    return {
-      devices: [
-        device({
-          deviceId: "d1",
-          deviceName: "Pixel",
-          enrollmentPublicKey: HONEST_KEY,
-          encryptionEnrolled: false
-        }),
-        device({
-          deviceId: "d2",
-          deviceName: "iPhone",
-          enrollmentPublicKey: HONEST_KEY,
-          encryptionEnrolled: true
-        })
-      ]
-    };
-  }
-
-  // Without this, an open remove confirmation and a newly opened enroll
-  // ceremony would render two "Account password" fields at once, inviting a
-  // credential typed into the wrong one — a security-relevant UI hazard, not
-  // just visual clutter. Assert on the count of fields sharing that label,
-  // which is the property that actually matters here.
-  it("closes an open remove confirmation when an enroll ceremony opens", async () => {
-    listNativeDevices.mockResolvedValue(twoDevices());
-    renderCard();
-
-    await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
-    expect(screen.getAllByLabelText("Account password")).toHaveLength(1);
-
-    await userEvent.click(screen.getByRole("button", { name: "Enroll" }));
-    expect(screen.getAllByLabelText("Account password")).toHaveLength(1);
-  });
-
-  // The other direction of the same hazard: opening a remove confirmation
-  // while an enroll ceremony is already open must not leave both rendered.
-  it("closes an open enroll ceremony when a remove confirmation opens", async () => {
-    listNativeDevices.mockResolvedValue(twoDevices());
-    renderCard();
-
-    await userEvent.click(await screen.findByRole("button", { name: "Enroll" }));
-    expect(screen.getAllByLabelText("Account password")).toHaveLength(1);
-
+  it("shows one panel at a time, so two password fields never coexist", async () => {
+    render(<Harness mailAccess="enrolled" dev={enrolledDevice()} />);
     await userEvent.click(screen.getByRole("button", { name: "Remove sealing" }));
     expect(screen.getAllByLabelText("Account password")).toHaveLength(1);
   });
 
-  // A clean slate on reopen: without this, reopening the remove confirmation
-  // for a different device could still show a password typed for the last
-  // one — the same "wrong field" hazard as the mutual exclusion above, but
-  // arriving from the panel's own history instead of the sibling panel.
-  it("clears the typed password when the remove confirmation reopens for a different device", async () => {
-    listNativeDevices.mockResolvedValue(twoDevices());
-    renderCard();
-
-    const removeButtons = await screen.findAllByRole("button", { name: "Remove sealing" });
-    await userEvent.click(removeButtons[0]);
-    await userEvent.type(screen.getByLabelText("Account password"), "hunter2");
+  // No clearing code to forget to write: closing unmounts the panel, so the
+  // typed password goes with it.
+  it("forgets a typed password when the panel closes", async () => {
+    render(<Harness mailAccess="enrolled" dev={enrolledDevice()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Remove sealing" }));
+    await userEvent.type(screen.getByLabelText("Account password"), "typed-here");
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
-    await userEvent.click(screen.getAllByRole("button", { name: "Remove sealing" })[0]);
+    await userEvent.click(screen.getByRole("button", { name: "Remove sealing" }));
     expect((screen.getByLabelText("Account password") as HTMLInputElement).value).toBe("");
-  });
-});
-
-describe("the remove panel and the identity-change refetch", () => {
-  // The remove-sealing panel has no key snapshot to protect it and no reason
-  // to survive an identity change, unlike the enroll ceremony (see the gate's
-  // "seals to the key it verified, not to a later one" test, and the comment
-  // on the identity-change effect, for why THAT one deliberately stays open).
-  it("closes an open remove confirmation when the identity changes", async () => {
-    listNativeDevices.mockResolvedValue({
-      devices: [device({ enrollmentPublicKey: HONEST_KEY, encryptionEnrolled: true })]
-    });
-    const { rerender } = renderCard();
-
-    await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
-    expect(screen.getByLabelText("Account password")).toBeTruthy();
-
-    listNativeDevices.mockResolvedValue({ devices: [] });
-    rerender(
-      <DeviceEnrollmentCard
-        fingerprint="CCCC3333DDDD4444"
-        clientProtected
-        unlocked
-        onRequestUnlock={() => {}}
-      />
-    );
-
-    await vi.waitFor(() => expect(screen.queryByLabelText("Account password")).toBeNull());
   });
 });

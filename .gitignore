@@ -22,6 +22,14 @@ pnpm-debug.log*
 frontend/node_modules/
 frontend/dist/
 
+# Root-level too, not just frontend/. Running npm or npx from the repo root
+# creates one here, and an unignored copy is worse than clutter: it shadows
+# frontend's toolchain, so `npx vitest` from the root silently resolves a
+# config-less vitest that runs in the "node" environment and fails every jsdom
+# test with "document is not defined". It also sits directly in the path of
+# `git add -A`.
+/node_modules/
+
 # Go / backend
 backend/bin/
 backend/.cache/

@@ -65,3 +65,37 @@ export function listNativeDevices(): Promise<{
     "/api/notifications/native/devices"
   );
 }
+
+/**
+ * Polls until `deviceId` reports that it can open its envelope, or gives up.
+ *
+ * Enrollment has two parties and the browser is only one of them. The browser
+ * seals the private key to the device's public key and PUTs it; that request
+ * returning 200 means the envelope is STORED, not that the device has taken it.
+ * `encryptionEnrolled` is written only by the device itself, on a
+ * device-authenticated route, after it has fetched that envelope and opened it.
+ *
+ * So at the instant the PUT returns, the inventory still correctly reports the
+ * device as not enrolled — and a UI that reads the answer right then reports a
+ * success as a failure. This waits for the other party instead of guessing.
+ *
+ * Returns false on timeout, which is NOT failure: the sealing is stored either
+ * way and the device will pick it up. Callers must not word it as an error.
+ */
+export async function waitForDeviceEnrollment(
+  deviceId: string,
+  { timeoutMs = 12_000, intervalMs = 1_500 }: { timeoutMs?: number; intervalMs?: number } = {}
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const { devices } = await listNativeDevices();
+      if (devices?.some((d) => d.deviceId === deviceId && d.encryptionEnrolled)) return true;
+    } catch {
+      // A failed poll is not a failed enrollment. Keep waiting until the
+      // deadline; the caller's pending wording is true either way.
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}

@@ -181,6 +181,189 @@ describe("recovery backup with a drifted identity response", () => {
   });
 });
 
+describe("the device list and the identity change", () => {
+  // Replacing the identity clears every non-password envelope slot on the
+  // server, so a list cached across that change would keep showing devices as
+  // able to read mail they can no longer open. Observed here through the
+  // null -> identity transition every page load already makes, rather than
+  // through the generate flow: "Generate new identity" renders only in
+  // MailKeys' NO-identity branch, and storeClientPGPIdentity goes through
+  // deriveCredential, which this file does not mock.
+  // Rendered on Sign-in deliberately: SecurityPage fetches the device list
+  // whatever tab is showing, and Sign-in mounts nothing else that fetches it,
+  // so the count below is SecurityPage's own effect and nothing else.
+  it("re-reads the devices once the identity's fingerprint arrives", async () => {
+    renderPage("signin");
+
+    await waitFor(() => {
+      const calls = getJSON.mock.calls.filter((c) =>
+        String(c[0]).startsWith("/api/notifications/native/devices")
+      );
+      expect(calls.length).toBeGreaterThan(1);
+    });
+  });
+
+  it("reads them once when there is no identity to change", async () => {
+    getJSON.mockImplementation((url: string) => {
+      if (url === "/api/mfa/status") {
+        return Promise.resolve({
+          totpEnabled: true,
+          recoveryCodesRemaining: 8,
+          pushMfaEnabled: false,
+          approverDevices: []
+        });
+      }
+      if (url === "/api/pgp/identity") return Promise.reject(new Error("none"));
+      if (url.startsWith("/api/notifications/native/devices")) {
+        return Promise.resolve({ devices: [], deliveryMode: "push" });
+      }
+      return Promise.resolve({});
+    });
+
+    renderPage("signin");
+    await waitFor(() => expect(getJSON).toHaveBeenCalledWith("/api/pgp/identity"));
+
+    const calls = getJSON.mock.calls.filter((c) =>
+      String(c[0]).startsWith("/api/notifications/native/devices")
+    );
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe("a failed device refetch", () => {
+  // Re-homed from DeviceEnrollmentCard, which used to hold this for its own
+  // copy of the list. An empty list here is not the reassuring "nothing is
+  // paired" story — leaving a stale one would keep asserting that a device can
+  // read your encrypted mail after the sealing behind that claim is gone.
+  it("empties the list and says why, rather than showing stale enrollment", async () => {
+    // The first read lands a device; the refetch the arriving identity triggers
+    // fails. The device must not survive it — that is the whole point.
+    let deviceReads = 0;
+    getJSON.mockImplementation((url: string) => {
+      if (url === "/api/mfa/status") {
+        return Promise.resolve({
+          totpEnabled: true,
+          recoveryCodesRemaining: 8,
+          pushMfaEnabled: false,
+          approverDevices: []
+        });
+      }
+      if (url === "/api/pgp/identity") {
+        return Promise.resolve({
+          fingerprint: "ABCDEF0123456789",
+          keyId: "0123456789",
+          publicKey: "PUB",
+          source: "generated",
+          createdAt: "2026-01-01T00:00:00Z"
+        });
+      }
+      if (url.startsWith("/api/notifications/native/devices")) {
+        deviceReads += 1;
+        if (deviceReads === 1) {
+          return Promise.resolve({
+            deliveryMode: "push",
+            devices: [
+              {
+                deviceId: "d1",
+                platform: "android",
+                pushToken: "tok",
+                deviceName: "Pixel",
+                enrollmentPublicKey: "K",
+                encryptionEnrolled: true
+              }
+            ]
+          });
+        }
+        return Promise.reject(new Error("Could not read your paired devices."));
+      }
+      if (url.startsWith("/api/pgp/discovery/suppressions")) {
+        return Promise.resolve({ suppressions: [] });
+      }
+      if (url.startsWith("/api/contacts")) return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+
+    renderPage("devices");
+
+    // It was there first — otherwise its absence below proves nothing.
+    expect(await screen.findByText("Pixel")).toBeTruthy();
+
+    expect(await screen.findByText("Could not read your paired devices.")).toBeTruthy();
+    expect(screen.queryByText("Pixel")).toBeNull();
+    expect(screen.queryByText("This device can read your encrypted mail.")).toBeNull();
+
+    // The assertion that actually pins the CLEARING rather than the error
+    // branch: the tab swaps the list for the error message either way, so only
+    // the page-level summary — which renders regardless — can tell "the list
+    // was emptied" from "the list is merely hidden behind an error".
+    await waitFor(() => expect(screen.getByText("None paired")).toBeTruthy());
+  });
+});
+
+describe("the encryption summary", () => {
+  function withDevices(devices: unknown[]) {
+    getJSON.mockImplementation((url: string) => {
+      if (url === "/api/mfa/status") {
+        return Promise.resolve({
+          totpEnabled: true,
+          recoveryCodesRemaining: 8,
+          pushMfaEnabled: false,
+          approverDevices: []
+        });
+      }
+      if (url === "/api/pgp/identity") {
+        return Promise.resolve({
+          fingerprint: "ABCDEF0123456789",
+          keyId: "0123456789",
+          publicKey: "PUB",
+          source: "generated",
+          createdAt: "2026-01-01T00:00:00Z"
+        });
+      }
+      if (url.startsWith("/api/notifications/native/devices")) {
+        return Promise.resolve({ devices, deliveryMode: "push" });
+      }
+      if (url.startsWith("/api/pgp/discovery/suppressions")) {
+        return Promise.resolve({ suppressions: [] });
+      }
+      if (url.startsWith("/api/contacts")) return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+  }
+
+  const dev = (id: string, enrolled: boolean) => ({
+    deviceId: id,
+    platform: "android",
+    pushToken: "tok",
+    deviceName: id,
+    enrollmentPublicKey: "K",
+    encryptionEnrolled: enrolled
+  });
+
+  // "Only this browser" stops being true the moment a device is enrolled —
+  // enrolling is precisely the act of giving something other than this browser
+  // a copy of the key.
+  it("counts the devices that can also read your mail", async () => {
+    withDevices([dev("a", true), dev("b", false)]);
+    renderPage("devices");
+
+    expect(
+      await screen.findByText(
+        "Only this browser and 1 of your 2 devices can open mail encrypted to you."
+      )
+    ).toBeTruthy();
+  });
+
+  it("says only this browser when nothing is enrolled", async () => {
+    withDevices([dev("a", false), dev("b", false)]);
+    renderPage("devices");
+
+    expect(
+      await screen.findByText("Only this browser can open mail encrypted to you.")
+    ).toBeTruthy();
+  });
+});
+
 describe("SIBLING: recovery codes survive a tab switch", () => {
   it("keeps just-issued recovery codes across Sign-in -> Devices -> Sign-in", async () => {
     const user = userEvent.setup();

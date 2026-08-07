@@ -2205,7 +2205,16 @@ pre {
   max-width: none;
 }
 
+/* The row is a column, not the grid itself: an open enroll or remove-sealing
+   panel goes underneath at full width, and a form squeezed into the middle
+   third of a three-column grid is unusable. */
 .sec-device-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sec-device-grid {
   display: grid;
   gap: 10px 16px;
   grid-template-columns: minmax(0, 2fr) minmax(0, 1.4fr) auto;
@@ -2213,7 +2222,7 @@ pre {
 }
 
 @media (max-width: 860px) {
-  .sec-device-row {
+  .sec-device-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }
@@ -2246,6 +2255,18 @@ pre {
 
 .sec-device-capabilities .sec-muted {
   margin-left: 25px;
+}
+
+/* Overrides .sec-details' card-level top margin: inside a row this sits
+   directly under the device's name, not below a section. */
+.sec-device-details {
+  margin-top: 2px;
+}
+
+.sec-device-details[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .sec-device-actions {

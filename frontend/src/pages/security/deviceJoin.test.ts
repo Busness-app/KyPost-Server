@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { countApprovers, deviceLabel, joinDeviceRows, type ApproverDevice } from "./deviceJoin";
+import {
+  countApprovers,
+  countMailEnrolled,
+  deviceLabel,
+  joinDeviceRows,
+  type ApproverDevice
+} from "./deviceJoin";
 import type { NativeDevice } from "../../api/devices";
 
 function device(over: Partial<NativeDevice> = {}): NativeDevice {
@@ -120,5 +126,45 @@ describe("countApprovers", () => {
       ]
     );
     expect(countApprovers(rows)).toBe(1);
+  });
+});
+
+describe("mailAccess", () => {
+  it("reports a device that has taken its sealing as enrolled", () => {
+    const rows = joinDeviceRows([device({ enrollmentPublicKey: "K", encryptionEnrolled: true })], []);
+    expect(rows[0].mailAccess).toBe("enrolled");
+  });
+
+  it("reports a device that published a key but has not enrolled as available", () => {
+    const rows = joinDeviceRows([device({ enrollmentPublicKey: "K" })], []);
+    expect(rows[0].mailAccess).toBe("available");
+  });
+
+  // Not an error: this is every device before the mobile half ships, and the
+  // permanent state of any client that cannot hold a non-extractable key.
+  it("reports a device that published no key as unsupported", () => {
+    const rows = joinDeviceRows([device()], []);
+    expect(rows[0].mailAccess).toBe("unsupported");
+  });
+
+  // The inventory is the only source that knows about sealings, so a row it
+  // does not back must not claim a state. Otherwise an approver-only row would
+  // render as "too old to enroll", which is a guess presented as a fact.
+  it("reports a row the inventory does not back as unknown", () => {
+    const rows = joinDeviceRows([], [approver({ deviceId: "ghost", approver: true })]);
+    expect(rows[0].missingFromInventory).toBe(true);
+    expect(rows[0].mailAccess).toBe("unknown");
+  });
+
+  it("counts only enrolled devices", () => {
+    const rows = joinDeviceRows(
+      [
+        device({ deviceId: "a", enrollmentPublicKey: "K", encryptionEnrolled: true }),
+        device({ deviceId: "b", enrollmentPublicKey: "K" }),
+        device({ deviceId: "c" })
+      ],
+      []
+    );
+    expect(countMailEnrolled(rows)).toBe(1);
   });
 });
