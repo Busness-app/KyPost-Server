@@ -20,7 +20,11 @@ export const SECURITY_TAB_LABELS: Record<SecurityTab, string> = {
   signin: "Sign-in",
   devices: "Devices",
   carddav: "CardDAV",
-  mail: "Mail"
+  // "Encryption", not "Mail": the tab holds nothing but the PGP key and who
+  // can read with it, and "Mail" collided with the top-level Mail nav item
+  // that goes somewhere else entirely. The `mail` slug stays — it is in
+  // ?tab= links people already have.
+  mail: "Encryption"
 };
 
 /** Falls back to Sign-in for anything unrecognised, so a bad link still renders. */

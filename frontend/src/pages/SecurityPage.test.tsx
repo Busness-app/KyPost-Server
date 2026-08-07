@@ -20,6 +20,7 @@ vi.mock("../api/client", () => ({
 const SESSION = {
   bootstrap: {
     protection: "client" as const,
+    fingerprint: "ABCDEF0123456789",
     publicKey: "PUB",
     suggestedUserIDs: ["gwen@example.com"],
     displayName: "Gwen",
@@ -113,7 +114,7 @@ function renderPage(tab = "mail") {
 }
 
 describe("recoverySecret survives a tab switch", () => {
-  it("still shows the one-time secret after leaving and returning to Mail", async () => {
+  it("still shows the one-time secret after leaving and returning to Encryption", async () => {
     const user = userEvent.setup();
     renderPage("mail");
 
@@ -125,12 +126,58 @@ describe("recoverySecret survives a tab switch", () => {
     await user.click(screen.getByRole("tab", { name: "Devices" }));
     expect(screen.queryByText("SECRET-ABCD-1234")).toBeNull();
 
-    await user.click(screen.getByRole("tab", { name: "Mail" }));
+    await user.click(screen.getByRole("tab", { name: "Encryption" }));
     await screen.findByText("SECRET-ABCD-1234");
 
     // Only one backup was ever created — the secret came back from state,
     // not from a second createRecoveryBackup() call.
     expect(createRecoveryBackup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("recovery backup with a drifted identity response", () => {
+  // POST /api/pgp/identity/client used to answer with users.Public, whose PGP
+  // fields are named pgpFingerprint — so after generating or migrating to a
+  // client-held key, the identity this page held had no `fingerprint` at all.
+  // "Download recovery backup" then died on `fingerprint.slice(0, 8)`, AFTER
+  // the backup and its one-time secret had been built, and reported only
+  // "Backup failed: can't access property slice". The server shape is fixed;
+  // this holds the client to failing safely rather than crashing if any
+  // identity response ever drifts again.
+  it("does not crash when the stored identity carries no fingerprint", async () => {
+    const user = userEvent.setup();
+    getJSON.mockImplementation((url: string) => {
+      if (url === "/api/mfa/status") {
+        return Promise.resolve({
+          totpEnabled: true,
+          recoveryCodesRemaining: 8,
+          pushMfaEnabled: false,
+          approverDevices: []
+        });
+      }
+      if (url === "/api/pgp/identity") {
+        // The old, wrong shape: an identity object with no `fingerprint`.
+        return Promise.resolve({ pgpFingerprint: "ABCDEF0123456789", pgpKeyId: "0123456789" });
+      }
+      if (url.startsWith("/api/pgp/discovery/suppressions")) {
+        return Promise.resolve({ suppressions: [] });
+      }
+      if (url.startsWith("/api/notifications/native/devices")) {
+        return Promise.resolve({ devices: [], deliveryMode: "push" });
+      }
+      if (url.startsWith("/api/contacts")) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve({});
+    });
+
+    renderPage("mail");
+    await user.click(await screen.findByRole("button", { name: "Download recovery backup" }));
+
+    // The secret still reaches the user, from the bootstrap's fingerprint.
+    await screen.findByText("SECRET-ABCD-1234");
+    expect(createRecoveryBackup).toHaveBeenCalledWith("ARMORED", "ABCDEF0123456789", "PUB");
+    expect(screen.queryByText(/Backup failed/)).toBeNull();
   });
 });
 
@@ -249,7 +296,7 @@ describe("CardDAV password blocks tab switches", () => {
     await user.click(generate);
     await screen.findByText("generated-app-password");
 
-    await user.click(screen.getByRole("tab", { name: "Mail" }));
+    await user.click(screen.getByRole("tab", { name: "Encryption" }));
 
     expect(screen.getByRole("alert").textContent).toContain("before switching tabs");
     expect(screen.getByRole("tab", { name: "CardDAV" }).getAttribute("aria-selected")).toBe("true");
