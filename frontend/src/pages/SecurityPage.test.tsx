@@ -300,6 +300,70 @@ describe("a failed device refetch", () => {
   });
 });
 
+describe("the encryption summary", () => {
+  function withDevices(devices: unknown[]) {
+    getJSON.mockImplementation((url: string) => {
+      if (url === "/api/mfa/status") {
+        return Promise.resolve({
+          totpEnabled: true,
+          recoveryCodesRemaining: 8,
+          pushMfaEnabled: false,
+          approverDevices: []
+        });
+      }
+      if (url === "/api/pgp/identity") {
+        return Promise.resolve({
+          fingerprint: "ABCDEF0123456789",
+          keyId: "0123456789",
+          publicKey: "PUB",
+          source: "generated",
+          createdAt: "2026-01-01T00:00:00Z"
+        });
+      }
+      if (url.startsWith("/api/notifications/native/devices")) {
+        return Promise.resolve({ devices, deliveryMode: "push" });
+      }
+      if (url.startsWith("/api/pgp/discovery/suppressions")) {
+        return Promise.resolve({ suppressions: [] });
+      }
+      if (url.startsWith("/api/contacts")) return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+  }
+
+  const dev = (id: string, enrolled: boolean) => ({
+    deviceId: id,
+    platform: "android",
+    pushToken: "tok",
+    deviceName: id,
+    enrollmentPublicKey: "K",
+    encryptionEnrolled: enrolled
+  });
+
+  // "Only this browser" stops being true the moment a device is enrolled —
+  // enrolling is precisely the act of giving something other than this browser
+  // a copy of the key.
+  it("counts the devices that can also read your mail", async () => {
+    withDevices([dev("a", true), dev("b", false)]);
+    renderPage("devices");
+
+    expect(
+      await screen.findByText(
+        "Only this browser and 1 of your 2 devices can open mail encrypted to you."
+      )
+    ).toBeTruthy();
+  });
+
+  it("says only this browser when nothing is enrolled", async () => {
+    withDevices([dev("a", false), dev("b", false)]);
+    renderPage("devices");
+
+    expect(
+      await screen.findByText("Only this browser can open mail encrypted to you.")
+    ).toBeTruthy();
+  });
+});
+
 describe("SIBLING: recovery codes survive a tab switch", () => {
   it("keeps just-issued recovery codes across Sign-in -> Devices -> Sign-in", async () => {
     const user = userEvent.setup();
