@@ -552,3 +552,80 @@ func TestSignerKeysRequireTheContactPin(t *testing.T) {
 		t.Fatalf("a key that does not match the contact's pin was offered as a signer (%d keys)", len(got))
 	}
 }
+
+// Most keys are Autocrypt-harvested. If the wire cannot distinguish them
+// from a fingerprint-confirmed key, the client can only show one badge,
+// and it would claim identity on evidence that shows only continuity.
+func TestBoundSignerKeysCarriesProvenance(t *testing.T) {
+	_, _, store, _ := pgpVictimWithIdentity(t)
+
+	key, err := pgpmail.GenerateIdentity("Shared", "shared@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+
+	if _, err := store.Upsert(contacts.Contact{
+		Emails:            []contacts.ContactValue{{Value: "confirmed@example.com"}},
+		PGPKey:            key.ArmoredPublicKey,
+		PGPKeyFingerprint: key.Fingerprint,
+		PGPKeySource:      "qr",
+		PGPKeyVerified:    true,
+	}); err != nil {
+		t.Fatalf("Upsert confirmed contact: %v", err)
+	}
+	if _, err := store.Upsert(contacts.Contact{
+		Emails:            []contacts.ContactValue{{Value: "harvested@example.com"}},
+		PGPKey:            key.ArmoredPublicKey,
+		PGPKeyFingerprint: key.Fingerprint,
+		PGPKeySource:      contacts.PGPSourceAutocrypt,
+		PGPKeyVerified:    false,
+	}); err != nil {
+		t.Fatalf("Upsert harvested contact: %v", err)
+	}
+
+	got := boundSignerKeys(store)
+
+	byAddr := map[string]boundSignerKey{}
+	for _, k := range got {
+		byAddr[k.Addresses[0]] = k
+	}
+	if c := byAddr["confirmed@example.com"]; !c.Verified || c.Source != "qr" {
+		t.Fatalf("confirmed key lost its provenance: %+v", c)
+	}
+	if h := byAddr["harvested@example.com"]; h.Verified || h.Source != contacts.PGPSourceAutocrypt {
+		t.Fatalf("harvested key misreported: %+v", h)
+	}
+}
+
+// A key that no longer matches its TOFU pin is the one alarm TOFU exists
+// to raise. Dropping the contact made it arrive as "no key bound to this
+// sender", which is what an ordinary new correspondent looks like.
+func TestBoundSignerKeysMarksPinConflictInsteadOfDropping(t *testing.T) {
+	_, _, store, _ := pgpVictimWithIdentity(t)
+
+	key, err := pgpmail.GenerateIdentity("Rotated", "rotated@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+
+	if _, err := store.Upsert(contacts.Contact{
+		Emails:            []contacts.ContactValue{{Value: "rotated@example.com"}},
+		PGPKey:            key.ArmoredPublicKey,
+		PGPKeyFingerprint: "0000NOTTHEPINNEDFINGERPRINT0000",
+		PGPKeySource:      contacts.PGPSourceAutocrypt,
+	}); err != nil {
+		t.Fatalf("Upsert rotated contact: %v", err)
+	}
+
+	got := boundSignerKeys(store)
+
+	if len(got) != 1 {
+		t.Fatalf("want the conflicted contact reported, got %d entries", len(got))
+	}
+	if !got[0].Conflict {
+		t.Fatal("a pin mismatch was not marked as a conflict")
+	}
+	if got[0].PublicKey != "" {
+		t.Fatal("a conflicted key must not ship key material; it can never be trusted to verify")
+	}
+}

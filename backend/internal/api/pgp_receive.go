@@ -199,17 +199,30 @@ func (s *Server) verifyDetachedForUser(userID, body, sig, senderAddress string) 
 	return result.Verified, result.SignerFingerprint
 }
 
-// boundSignerKey is one contact's public key together with the addresses the
-// ADDRESS BOOK says that key belongs to — the contact's own email addresses,
-// never anything the key asserts about itself.
+// boundSignerKey is one address-bound contact key as the client sees it.
 //
-// This shape exists because the browser needs the same binding the server
-// applies and must not re-derive it. See signerKeysForSender for why a key's
-// self-asserted User IDs are not a trust anchor, and boundSignerKeys for why
-// the browser is handed the answer rather than the inputs.
+// Verified and Source exist because a flat "signature verified" would
+// claim identity on evidence that often shows only continuity: most keys
+// arrive by Autocrypt harvest, and TOFU guarantees "same key as last
+// time", not "this is who they say they are". The client renders the two
+// differently.
+//
+// Conflict reports a contact whose stored key no longer matches its TOFU
+// pin. Such a contact used to be skipped, so a CHANGED key reached the
+// client as "no key bound to this sender" — indistinguishable from an
+// ordinary new correspondent, which is the one case TOFU must shout
+// about. PublicKey is deliberately empty on a conflicted entry: it can
+// never be trusted to verify anything, and shipping it invites a client
+// to try.
+//
+// Nothing secret crosses the wire. This is the user's own address book
+// describing itself, and the public key was already here.
 type boundSignerKey struct {
 	Addresses []string `json:"addresses"`
 	PublicKey string   `json:"publicKey"`
+	Verified  bool     `json:"verified,omitempty"`
+	Source    string   `json:"source,omitempty"`
+	Conflict  bool     `json:"conflict,omitempty"`
 }
 
 // senderAddrSpec extracts the bare addr-spec from a From header value.
@@ -340,7 +353,7 @@ func signerKeysForSender(store *contacts.Store, senderAddress string) []string {
 func boundSignerKeys(store *contacts.Store) []boundSignerKey {
 	out := []boundSignerKey{}
 	for _, c := range store.List() {
-		if c.PGPKey == "" || !keyMatchesPin(c) {
+		if c.PGPKey == "" {
 			continue
 		}
 		addresses := make([]string, 0, len(c.Emails))
@@ -356,7 +369,18 @@ func boundSignerKeys(store *contacts.Store) []boundSignerKey {
 		if len(addresses) == 0 {
 			continue
 		}
-		out = append(out, boundSignerKey{Addresses: addresses, PublicKey: c.PGPKey})
+		// A pin mismatch is reported, not dropped — but without key
+		// material, so no client can verify against it.
+		if !keyMatchesPin(c) {
+			out = append(out, boundSignerKey{Addresses: addresses, Conflict: true})
+			continue
+		}
+		out = append(out, boundSignerKey{
+			Addresses: addresses,
+			PublicKey: c.PGPKey,
+			Verified:  c.PGPKeyVerified,
+			Source:    c.PGPKeySource,
+		})
 	}
 	return out
 }
