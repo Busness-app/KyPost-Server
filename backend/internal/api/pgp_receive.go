@@ -384,3 +384,34 @@ func boundSignerKeys(store *contacts.Store) []boundSignerKey {
 	}
 	return out
 }
+
+// boundSignerKeysForSender is boundSignerKeys narrowed to one sender.
+//
+// This is now THE signature binding for the Android client, which no longer
+// parses the From header at all. Its hand-rolled parser diverged from
+// net/mail.ParseAddressList on 27 of 111 adversarial headers — most seriously
+// on RFC 5322 comments, where `Bob (Eve <eve@evil>) <bob@x>` is a valid header
+// that Go binds to bob@x and the client bound to eve@evil, letting any contact
+// forge a verified badge for anyone. Three client-side fix rounds each closed
+// one construct and opened another. Shipping the decision instead of the inputs
+// removes the second parser, exactly as boundSignerKeys' own comment says of
+// the browser.
+//
+// address must already be a bare addr-spec from senderAddrSpec. An empty
+// address matches nothing, which is the safe direction: no keys, so no verdict
+// beyond "signed, but not by a key you hold for this sender".
+func boundSignerKeysForSender(store *contacts.Store, address string) []boundSignerKey {
+	out := []boundSignerKey{}
+	if address == "" {
+		return out
+	}
+	for _, k := range boundSignerKeys(store) {
+		for _, a := range k.Addresses {
+			if a == address {
+				out = append(out, k)
+				break
+			}
+		}
+	}
+	return out
+}

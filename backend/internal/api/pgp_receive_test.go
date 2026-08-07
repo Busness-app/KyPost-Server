@@ -629,3 +629,114 @@ func TestBoundSignerKeysMarksPinConflictInsteadOfDropping(t *testing.T) {
 		t.Fatal("a conflicted key must not ship key material; it can never be trusted to verify")
 	}
 }
+
+// The client no longer parses From at all, so this narrowing IS the binding.
+// A key bound to some OTHER contact must never reach a client that is
+// displaying this sender.
+func TestBoundSignerKeysForSenderExcludesOtherContacts(t *testing.T) {
+	_, _, store, _ := pgpVictimWithIdentity(t)
+
+	bob, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity bob: %v", err)
+	}
+	if _, err := store.Upsert(contacts.Contact{
+		Emails:         []contacts.ContactValue{{Value: "bob@example.com"}},
+		PGPKey:         bob.ArmoredPublicKey,
+		PGPKeySource:   "qr",
+		PGPKeyVerified: true,
+	}); err != nil {
+		t.Fatalf("Upsert bob contact: %v", err)
+	}
+
+	eve, err := pgpmail.GenerateIdentity("Eve", "eve@evil.example")
+	if err != nil {
+		t.Fatalf("GenerateIdentity eve: %v", err)
+	}
+	if _, err := store.Upsert(contacts.Contact{
+		Emails:       []contacts.ContactValue{{Value: "eve@evil.example"}},
+		PGPKey:       eve.ArmoredPublicKey,
+		PGPKeySource: contacts.PGPSourceAutocrypt,
+	}); err != nil {
+		t.Fatalf("Upsert eve contact: %v", err)
+	}
+
+	got := boundSignerKeysForSender(store, "bob@example.com")
+
+	if len(got) != 1 {
+		t.Fatalf("want only the sender's key, got %d: %+v", len(got), got)
+	}
+	if got[0].Addresses[0] != "bob@example.com" || !got[0].Verified {
+		t.Fatalf("wrong key or lost provenance: %+v", got[0])
+	}
+}
+
+// The RFC 5322 comment attack, at the layer that now owns the decision.
+// Go's mail.ParseAddressList binds the real mailbox; the decoy inside the
+// comment must not select Eve's key.
+func TestBoundSignerKeysForSenderIgnoresAnAddressHiddenInAComment(t *testing.T) {
+	_, _, store, _ := pgpVictimWithIdentity(t)
+
+	bob, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity bob: %v", err)
+	}
+	if _, err := store.Upsert(contacts.Contact{
+		Emails:         []contacts.ContactValue{{Value: "bob@example.com"}},
+		PGPKey:         bob.ArmoredPublicKey,
+		PGPKeySource:   "qr",
+		PGPKeyVerified: true,
+	}); err != nil {
+		t.Fatalf("Upsert bob contact: %v", err)
+	}
+
+	eve, err := pgpmail.GenerateIdentity("Eve", "eve@evil.example")
+	if err != nil {
+		t.Fatalf("GenerateIdentity eve: %v", err)
+	}
+	if _, err := store.Upsert(contacts.Contact{
+		Emails:       []contacts.ContactValue{{Value: "eve@evil.example"}},
+		PGPKey:       eve.ArmoredPublicKey,
+		PGPKeySource: contacts.PGPSourceAutocrypt,
+	}); err != nil {
+		t.Fatalf("Upsert eve contact: %v", err)
+	}
+
+	resolved := senderAddrSpec("Bob Smith (Eve <eve@evil.example>) <bob@example.com>")
+	got := boundSignerKeysForSender(store, resolved)
+
+	if resolved != "bob@example.com" {
+		t.Fatalf("senderAddrSpec bound the decoy: %q", resolved)
+	}
+	if len(got) != 1 || got[0].Addresses[0] != "bob@example.com" {
+		t.Fatalf("comment decoy selected the wrong key: %+v", got)
+	}
+}
+
+// A conflicted key for THIS sender must still be reported, with no key
+// material — it is the only way the client can say the key changed.
+func TestBoundSignerKeysForSenderStillReportsAConflict(t *testing.T) {
+	_, _, store, _ := pgpVictimWithIdentity(t)
+
+	rotated, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	if _, err := store.Upsert(contacts.Contact{
+		Emails:            []contacts.ContactValue{{Value: "bob@example.com"}},
+		PGPKey:            rotated.ArmoredPublicKey,
+		PGPKeyFingerprint: "0000NOTTHEPINNEDFINGERPRINT0000",
+		PGPKeySource:      contacts.PGPSourceAutocrypt,
+	}); err != nil {
+		t.Fatalf("Upsert bob contact: %v", err)
+	}
+
+	got := boundSignerKeysForSender(store, "bob@example.com")
+
+	if len(got) != 1 || !got[0].Conflict {
+		t.Fatalf("want a conflict marker, got %+v", got)
+	}
+	if got[0].PublicKey != "" {
+		t.Fatal("a conflicted key must ship no key material")
+	}
+}

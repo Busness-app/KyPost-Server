@@ -92,6 +92,12 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The sender the client will display, and the addr-spec the binding uses.
+	// Both are shipped: the client renders one and binds on the other, and it
+	// must never re-derive the second from the first. See boundSignerKeysForSender.
+	sender := strings.TrimSpace(content.Sender)
+	resolvedSender := senderAddrSpec(sender)
+
 	// signerKeys lets the client verify an embedded signature without a
 	// second round trip for the whole address book. Public keys only —
 	// nothing here is secret.
@@ -100,11 +106,13 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 	// client accepts a signature only from a key bound to the sender it is
 	// displaying. It used to receive every key it held with no binding at all
 	// and re-derive one from the keys' User IDs, which is both forgeable (one
-	// key, two self-asserted User IDs) and parser-dependent. See
-	// boundSignerKeys.
+	// key, two self-asserted User IDs) and parser-dependent. Narrowed further
+	// here to just this message's sender: the client no longer parses the
+	// From header itself at all, so this narrowing IS the binding. See
+	// boundSignerKeysForSender.
 	signerKeys := []boundSignerKey{}
 	if contactsStore, cerr := s.userContactsStore(ac.UserID); cerr == nil {
-		signerKeys = boundSignerKeys(contactsStore)
+		signerKeys = boundSignerKeysForSender(contactsStore, resolvedSender)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -114,6 +122,8 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 		"signaturePayload": signature,
 		"body":             signedOnlyBody(content, encrypted),
 		"signerKeys":       signerKeys,
+		"sender":           sender,
+		"resolvedSender":   resolvedSender,
 	})
 }
 

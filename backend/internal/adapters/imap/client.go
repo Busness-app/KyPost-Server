@@ -120,6 +120,18 @@ type MessageContent struct {
 	// BodyMode is BodyModeHTML or BodyModePlain — see clientBody.
 	BodyMode       string
 	HasAttachments bool
+	// Sender is the raw From header, exactly as ListOverviews reports it
+	// (`Name <addr>` when a display name is present).
+	//
+	// Carried here so handlePGPPayload can resolve the signature binding with
+	// the SAME parser the rest of the server uses. The Android client used to
+	// parse this header itself, and a differential harness found 27 divergences
+	// from net/mail.ParseAddressList — including RFC 5322 comments, where
+	// `Bob (Eve <eve@evil>) <bob@x>` is valid and the client bound Eve. One
+	// parser, server-side, removes that entire class.
+	//
+	// Free: GetMessageBodies already holds the *goimap.Email this comes from.
+	Sender string
 	// TooLarge is set instead of populating Body/HasAttachments when this UID was
 	// identified as oversized by GetMessageBodies's server-side
 	// "UID <set> LARGER <cap>" SEARCH, or by the post-fetch emailContentSize
@@ -1211,7 +1223,12 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 			continue
 		}
 		body, bodyMode := clientBody(e)
-		content := MessageContent{Body: body, BodyMode: bodyMode, HasAttachments: len(e.Attachments) > 0}
+		content := MessageContent{
+			Body:           body,
+			BodyMode:       bodyMode,
+			HasAttachments: len(e.Attachments) > 0,
+			Sender:         strings.TrimSpace(e.From.String()),
+		}
 		if body == "" {
 			if payload := envelopes[uid].Payload; payload != "" {
 				content.PGPEncryptedPayload = payload
