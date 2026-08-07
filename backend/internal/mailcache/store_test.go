@@ -502,6 +502,16 @@ func TestUpsertNeverStoresADecryptError(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 
+	// White-box: package mailcache can read unexported state directly,
+	// bypassing the disk round trip (Snapshot's refreshFromDiskLocked +
+	// json:"-") that would otherwise mask whether the in-memory clear at
+	// store.go's new-UID branch actually runs. This is the only assertion
+	// in this test that covers that line; the Snapshot-based checks below
+	// are covered by the json:"-" tag alone regardless of it.
+	if got := s.mailboxes["INBOX"].Entries[0].PGPDecryptError; got != "" {
+		t.Fatalf("in-memory window kept a decrypt error: %q", got)
+	}
+
 	entries, _ := s.Snapshot("INBOX", 1)
 	if len(entries) != 1 {
 		t.Fatalf("want 1 entry, got %d", len(entries))

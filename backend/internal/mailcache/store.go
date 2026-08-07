@@ -444,9 +444,14 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 			e.FirstRev = win.Seq
 			// PGPDecryptError is a transient signal for this Upsert call's
 			// guard, not durable state (see its doc comment in mailcache.go).
-			// json:"-" already keeps it off disk, but `e := in` above copied
-			// it into the in-memory window entry too; clear it here so a
-			// later Snapshot can't hand a caller a stale decrypt error.
+			// The persistence guarantee is the json:"-" tag: persistLocked
+			// strips it before it ever reaches disk, and every Store method
+			// reloads from disk first, so no caller of Snapshot or Sync can
+			// observe it regardless of this line. `e := in` above did copy
+			// it into the in-memory window entry, though, so this clear is
+			// belt-and-braces for that in-memory copy — it protects a
+			// same-process reader of win.Entries that bypasses a fresh
+			// disk round trip, not Snapshot itself.
 			e.PGPDecryptError = ""
 			win.Entries = append(win.Entries, e)
 			byUID[e.UID] = len(win.Entries) - 1
