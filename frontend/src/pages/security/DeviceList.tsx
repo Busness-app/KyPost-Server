@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { deviceAppVersion, deviceTransport, formatDeviceTime, maskToken } from "./format";
 import type { DeviceRow } from "./deviceJoin";
 
@@ -26,6 +27,17 @@ export type DeviceListProps = {
   removingId: string;
   onToggleApprover: (deviceId: string, approver: boolean) => void;
   onRemove: (deviceId: string) => void;
+  /**
+   * Whether this device can read encrypted mail, rendered in the capabilities
+   * cell beside the approver checkbox. Optional so a caller with no PGP context
+   * — and this component's own tests — need not supply one.
+   */
+  renderMailAccess?: (row: DeviceRow) => ReactNode;
+  /**
+   * The row's open enroll or remove-sealing panel. Rendered full width beneath
+   * the row rather than inside the capabilities cell, which is a third of it.
+   */
+  renderMailPanel?: (row: DeviceRow) => ReactNode;
 };
 
 export function DeviceList({
@@ -35,7 +47,9 @@ export function DeviceList({
   busy,
   removingId,
   onToggleApprover,
-  onRemove
+  onRemove,
+  renderMailAccess,
+  renderMailPanel
 }: DeviceListProps) {
   if (rows.length === 0) {
     return (
@@ -56,6 +70,7 @@ export function DeviceList({
         const removable = Boolean(row.device);
         return (
           <li key={row.deviceId} className="sec-device-row">
+            <div className="sec-device-grid">
             <div className="sec-device-identity">
               <span className="sec-device-name-row">
                 <span className="sec-device-name">{row.name}</span>
@@ -119,6 +134,7 @@ export function DeviceList({
                     "This device's push delivery cannot carry sign-in approvals. Mail notifications still work."}
                 </p>
               ) : null}
+              {renderMailAccess?.(row)}
             </div>
 
             {removable ? (
@@ -133,6 +149,8 @@ export function DeviceList({
                 </button>
               </div>
             ) : null}
+            </div>
+            {renderMailPanel?.(row)}
           </li>
         );
       })}

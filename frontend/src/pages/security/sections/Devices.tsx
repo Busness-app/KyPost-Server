@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { deleteJSON, postJSON, putJSON, toErrorMessage } from "../../../api/client";
 import type { NativeDeliveryMode } from "../../../api/devices";
-import { DeviceEnrollmentCard } from "../../../components/DeviceEnrollmentCard";
+import {
+  DeviceMailAccessStatus,
+  DeviceMailPanel,
+  type MailPanel
+} from "../../../components/DeviceMailAccess";
 import { DeviceList } from "../DeviceList";
 import { PairingPanel } from "../PairingPanel";
 import type { DeviceRow } from "../deviceJoin";
@@ -62,6 +66,13 @@ export function Devices({
   const [unpairBusy, setUnpairBusy] = useState(false);
   const [pairingOpen, setPairingOpen] = useState(false);
   const [deliveryModeBusy, setDeliveryModeBusy] = useState(false);
+  // Which row has a panel open, and which panel. Lifted out of the rows so
+  // opening one closes every other: two "Account password" fields on screen at
+  // once invites an entry into the wrong one.
+  const [openPanel, setOpenPanel] = useState<{ deviceId: string; panel: MailPanel }>({
+    deviceId: "",
+    panel: "none"
+  });
 
   async function changeDeliveryMode(mode: NativeDeliveryMode) {
     if (mode === deliveryMode || deliveryModeBusy) {
@@ -227,6 +238,32 @@ export function Devices({
               removingId={deviceRemoveBusyId}
               onToggleApprover={(id, approver) => void toggleApprover(id, approver)}
               onRemove={(id) => void removeDevice(id)}
+              // Reading encrypted mail is a per-device capability, like
+              // approving sign-ins, so it belongs in the row rather than in a
+              // second list of the same hardware further down the tab. It shows
+              // only for a client-protected account — DeviceMailAccessStatus
+              // returns null otherwise, so nobody else gets a blank column.
+              renderMailAccess={(row) => (
+                <DeviceMailAccessStatus
+                  mailAccess={row.mailAccess}
+                  clientProtected={pgpClientProtected}
+                  fingerprint={pgpFingerprint}
+                  onOpenPanel={(panel) => setOpenPanel({ deviceId: row.deviceId, panel })}
+                />
+              )}
+              renderMailPanel={(row) =>
+                row.device ? (
+                  <DeviceMailPanel
+                    device={row.device}
+                    panel={openPanel.deviceId === row.deviceId ? openPanel.panel : "none"}
+                    fingerprint={pgpFingerprint}
+                    unlocked={pgpUnlocked}
+                    onRequestUnlock={() => setUnlockOpen(true)}
+                    onClose={() => setOpenPanel({ deviceId: "", panel: "none" })}
+                    onChanged={() => void refreshDevices()}
+                  />
+                ) : null
+              }
             />
           )}
         </div>
@@ -275,17 +312,10 @@ export function Devices({
         ) : null}
       </div>
 
-      {/* Kept as its own card rather than folded into the rows above: it
-          applies only to a client-protected account, so as a column it would
-          be blank for everyone else — and it owns the enrollment ceremony,
-          whose security rests on refetching the device list when the identity
-          changes. See api/devices.ts. */}
-      <DeviceEnrollmentCard
-        fingerprint={pgpFingerprint}
-        clientProtected={pgpClientProtected}
-        unlocked={pgpUnlocked}
-        onRequestUnlock={() => setUnlockOpen(true)}
-      />
+      {/* Enrollment used to live here, as a second card listing the same
+          devices again. It is in the rows above now — see the renderMailAccess
+          prop. The refetch-on-identity-change its security rests on moved to
+          SecurityPage, which owns the list both readings come from. */}
     </>
   );
 }

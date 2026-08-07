@@ -230,6 +230,76 @@ describe("the device list and the identity change", () => {
   });
 });
 
+describe("a failed device refetch", () => {
+  // Re-homed from DeviceEnrollmentCard, which used to hold this for its own
+  // copy of the list. An empty list here is not the reassuring "nothing is
+  // paired" story — leaving a stale one would keep asserting that a device can
+  // read your encrypted mail after the sealing behind that claim is gone.
+  it("empties the list and says why, rather than showing stale enrollment", async () => {
+    // The first read lands a device; the refetch the arriving identity triggers
+    // fails. The device must not survive it — that is the whole point.
+    let deviceReads = 0;
+    getJSON.mockImplementation((url: string) => {
+      if (url === "/api/mfa/status") {
+        return Promise.resolve({
+          totpEnabled: true,
+          recoveryCodesRemaining: 8,
+          pushMfaEnabled: false,
+          approverDevices: []
+        });
+      }
+      if (url === "/api/pgp/identity") {
+        return Promise.resolve({
+          fingerprint: "ABCDEF0123456789",
+          keyId: "0123456789",
+          publicKey: "PUB",
+          source: "generated",
+          createdAt: "2026-01-01T00:00:00Z"
+        });
+      }
+      if (url.startsWith("/api/notifications/native/devices")) {
+        deviceReads += 1;
+        if (deviceReads === 1) {
+          return Promise.resolve({
+            deliveryMode: "push",
+            devices: [
+              {
+                deviceId: "d1",
+                platform: "android",
+                pushToken: "tok",
+                deviceName: "Pixel",
+                enrollmentPublicKey: "K",
+                encryptionEnrolled: true
+              }
+            ]
+          });
+        }
+        return Promise.reject(new Error("Could not read your paired devices."));
+      }
+      if (url.startsWith("/api/pgp/discovery/suppressions")) {
+        return Promise.resolve({ suppressions: [] });
+      }
+      if (url.startsWith("/api/contacts")) return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+
+    renderPage("devices");
+
+    // It was there first — otherwise its absence below proves nothing.
+    expect(await screen.findByText("Pixel")).toBeTruthy();
+
+    expect(await screen.findByText("Could not read your paired devices.")).toBeTruthy();
+    expect(screen.queryByText("Pixel")).toBeNull();
+    expect(screen.queryByText("This device can read your encrypted mail.")).toBeNull();
+
+    // The assertion that actually pins the CLEARING rather than the error
+    // branch: the tab swaps the list for the error message either way, so only
+    // the page-level summary — which renders regardless — can tell "the list
+    // was emptied" from "the list is merely hidden behind an error".
+    await waitFor(() => expect(screen.getByText("None paired")).toBeTruthy());
+  });
+});
+
 describe("SIBLING: recovery codes survive a tab switch", () => {
   it("keeps just-issued recovery codes across Sign-in -> Devices -> Sign-in", async () => {
     const user = userEvent.setup();
