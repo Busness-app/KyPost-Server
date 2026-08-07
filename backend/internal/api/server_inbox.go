@@ -214,6 +214,11 @@ func mailCacheEntryFromUnreadMessage(msg imapadapter.UnreadMessage, status strin
 		PGPVerified:          msg.PGPVerified,
 		PGPSignerFingerprint: msg.PGPSignerFingerprint,
 		PGPProtectedSubject:  msg.PGPProtectedSubject,
+		// The classic (non-delta) path feeds this straight into
+		// mailcache.Upsert's guard (see mailcache.Entry.PGPDecryptError):
+		// without it, a failed decrypt would look like a clean
+		// classification here and get cached as one.
+		PGPDecryptError: msg.PGPDecryptError,
 	}
 }
 
@@ -501,7 +506,17 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 		// classic-path load doesn't re-fetch them live.
 		warmEntries := make([]mailcache.Entry, 0, len(needBodies))
 		for i, e := range result.New {
-			if c, ok := contents[e.UID]; ok && c.Body != "" {
+			// Same rule as mailcache.Upsert: a client-protected message is
+			// classified correctly AND bodyless, so the body cannot be the
+			// only sentinel. A failed decrypt stays uncached.
+			// Check payload directly — the IMAP layer already decided bodyless
+			// means PGPEncrypted, so re-deriving from flags duplicates that
+			// decision. TrimSpace mirrors pgp_client_read.go:88.
+			c, ok := contents[e.UID]
+			if ok && strings.TrimSpace(c.Body) == "" && (strings.TrimSpace(c.PGPEncryptedPayload) == "" || c.PGPDecryptError != "") {
+				ok = false
+			}
+			if ok {
 				e.Body = c.Body
 				e.BodyMode = c.BodyMode
 				e.HasAttachments = c.HasAttachments
@@ -510,6 +525,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 				e.PGPVerified = c.PGPVerified
 				e.PGPSignerFingerprint = c.PGPSignerFingerprint
 				e.PGPProtectedSubject = c.PGPProtectedSubject
+				e.PGPDecryptError = c.PGPDecryptError
 				result.New[i] = e
 				warmEntries = append(warmEntries, e)
 			}

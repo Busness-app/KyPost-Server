@@ -119,6 +119,24 @@ type Entry struct {
 	// on every poll; internal/api substitutes this value into the response
 	// subject instead.
 	PGPProtectedSubject string `json:"pgpProtectedSubject,omitempty"`
+
+	// PGPDecryptError is the transient outcome of the caller's decrypt
+	// ATTEMPT, not durable state — hence `json:"-"`, unlike every other
+	// field here.
+	//
+	// It exists so Upsert can tell two bodyless cases apart. A
+	// client-protected message is encrypted and bodyless because the server
+	// deliberately does not decrypt it, and its classification is a stable
+	// fact worth caching. A FAILED decrypt is also encrypted and bodyless,
+	// and may be transient, so caching it would make one bad moment stick
+	// until the entry rolls out of the window. Without this field the two
+	// are indistinguishable at the Upsert boundary and the guard cannot
+	// honour that distinction.
+	//
+	// Never written into a stored entry: it is read by the guard and
+	// discarded. Persisting it would be the stale-error bug in a different
+	// place.
+	PGPDecryptError string `json:"-"`
 }
 
 // Overview is the caller-supplied live snapshot for one message, sourced

@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"kypost-server/backend/internal/contacts"
+	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/users"
 )
 
@@ -178,6 +181,109 @@ func TestPGPPayloadRefusesServerProtectedAccount(t *testing.T) {
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandlePGPPayloadNarrowsSignerKeysToTheResolvedSender is review round 1
+// finding #4: every existing test of the sender-narrowing logic calls
+// boundSignerKeysForSender directly, so nothing proved handlePGPPayload
+// itself wires content.Sender into senderAddrSpec, narrows signerKeys with
+// the result, or emits "sender"/"resolvedSender" in the response. Deleting
+// that wiring (reverting to the un-narrowed boundSignerKeys(contactsStore)
+// call and dropping the two new response fields) would not fail a single
+// test before this one existed.
+//
+// This drives the real HTTP handler with a fake IMAP client, using the exact
+// RFC 5322 comment header from the task's own threat model — Bob's real
+// mailbox with Eve's address hidden in a parenthesised comment — to prove
+// end to end that only Bob's key reaches the client.
+func TestHandlePGPPayloadNarrowsSignerKeysToTheResolvedSender(t *testing.T) {
+	srv := newTestServer(t)
+	srv.imapConfigKeyPath = filepath.Join(t.TempDir(), "imap-config.key")
+	u := clientProtectedUser(t, srv)
+
+	contactsStore, err := srv.userContactsStore(u.ID)
+	if err != nil {
+		t.Fatalf("userContactsStore: %v", err)
+	}
+	bob, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity bob: %v", err)
+	}
+	if _, err := contactsStore.Upsert(contacts.Contact{
+		Emails:         []contacts.ContactValue{{Value: "bob@example.com"}},
+		PGPKey:         bob.ArmoredPublicKey,
+		PGPKeySource:   "qr",
+		PGPKeyVerified: true,
+	}); err != nil {
+		t.Fatalf("Upsert bob contact: %v", err)
+	}
+	eve, err := pgpmail.GenerateIdentity("Eve", "eve@evil.example")
+	if err != nil {
+		t.Fatalf("GenerateIdentity eve: %v", err)
+	}
+	if _, err := contactsStore.Upsert(contacts.Contact{
+		Emails:       []contacts.ContactValue{{Value: "eve@evil.example"}},
+		PGPKey:       eve.ArmoredPublicKey,
+		PGPKeySource: contacts.PGPSourceAutocrypt,
+	}); err != nil {
+		t.Fatalf("Upsert eve contact: %v", err)
+	}
+
+	// mailFor/userMailClient only reuses a cached client when the cached
+	// updatedAt matches what's on disk (see rules_handlers_test.go) — write a
+	// real (if inert) IMAP config payload stamped with the same updatedAt
+	// used below so mailFor resolves to the injected fake.
+	if err := writeIMAPConfigPayload(srv.userIMAPConfigPath(u.ID), srv.imapConfigKeyPath, imapConfigPayload{
+		Host: "imap.example.com", Port: 993, Username: "e2e-tester@example.com", Password: "pw",
+		Mailbox: "INBOX", UpdatedAt: "test",
+	}); err != nil {
+		t.Fatalf("writeIMAPConfigPayload: %v", err)
+	}
+	rawSender := "Bob Smith (Eve <eve@evil.example>) <bob@example.com>"
+	fake := &fakeMailClient{
+		bodies: map[int]string{5: ""},
+		bodyPGPEncryptedPayload: map[int]string{
+			5: "-----BEGIN PGP MESSAGE-----\nfake\n-----END PGP MESSAGE-----\n",
+		},
+		bodySender: map[int]string{5: rawSender},
+	}
+	srv.userMu.Lock()
+	srv.userMail[u.ID] = &serverMailEntry{client: fake, updatedAt: "test"}
+	srv.userMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/mail/pgp-payload?mailbox=INBOX&messageId=5", nil)
+	authRequestAs(srv, req, u.ID)
+	rec := httptest.NewRecorder()
+	srv.withMailAuth(srv.handlePGPPayload)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["sender"] != rawSender {
+		t.Errorf("sender = %v, want the raw header %q", got["sender"], rawSender)
+	}
+	if got["resolvedSender"] != "bob@example.com" {
+		t.Errorf("resolvedSender = %v, want bob@example.com — the comment-hidden decoy must not win", got["resolvedSender"])
+	}
+	signerKeys, ok := got["signerKeys"].([]any)
+	if !ok {
+		t.Fatalf("signerKeys missing or wrong type: %+v", got["signerKeys"])
+	}
+	if len(signerKeys) != 1 {
+		t.Fatalf("want exactly one signer key bound to bob@example.com, got %d: %+v", len(signerKeys), signerKeys)
+	}
+	key, ok := signerKeys[0].(map[string]any)
+	if !ok {
+		t.Fatalf("signerKeys[0] has unexpected shape: %+v", signerKeys[0])
+	}
+	addresses, _ := key["addresses"].([]any)
+	if len(addresses) != 1 || addresses[0] != "bob@example.com" {
+		t.Fatalf("signerKeys[0].addresses = %+v, want [bob@example.com]; eve's key must not be offered", addresses)
 	}
 }
 

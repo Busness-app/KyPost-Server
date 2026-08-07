@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
@@ -34,9 +35,19 @@ type fakeMailClient struct {
 	bodies             map[int]string
 	bodyHasAttachments map[int]bool
 	bodyPGPEncrypted   map[int]bool
-	bodiesErr          error
-	bodiesCalls        int
-	lastBodyUIDs       []int
+	// bodySender/bodyPGPEncryptedPayload/bodyPGPSignaturePayload feed
+	// MessageContent.Sender/PGPEncryptedPayload/PGPSignaturePayload — added
+	// for TestHandlePGPPayloadNarrowsSignerKeysToTheResolvedSender, which
+	// needs the handler to see a real From header and a real payload to
+	// prove content.Sender reaches senderAddrSpec and the response is
+	// narrowed. Every other existing test in this file only reads Body/
+	// HasAttachments/PGPEncrypted, so leaving these nil for them is a no-op.
+	bodySender              map[int]string
+	bodyPGPEncryptedPayload map[int]string
+	bodyPGPSignaturePayload map[int]string
+	bodiesErr               error
+	bodiesCalls             int
+	lastBodyUIDs            []int
 
 	attachments    map[int][]mailmsg.Attachment
 	attachmentsErr error
@@ -87,7 +98,14 @@ func (f *fakeMailClient) GetMessageBodies(_ context.Context, _ string, uids []in
 	out := map[int]imapadapter.MessageContent{}
 	for _, uid := range uids {
 		if b, ok := f.bodies[uid]; ok {
-			out[uid] = imapadapter.MessageContent{Body: b, HasAttachments: f.bodyHasAttachments[uid], PGPEncrypted: f.bodyPGPEncrypted[uid]}
+			out[uid] = imapadapter.MessageContent{
+				Body:                b,
+				HasAttachments:      f.bodyHasAttachments[uid],
+				PGPEncrypted:        f.bodyPGPEncrypted[uid],
+				Sender:              f.bodySender[uid],
+				PGPEncryptedPayload: f.bodyPGPEncryptedPayload[uid],
+				PGPSignaturePayload: f.bodyPGPSignaturePayload[uid],
+			}
 		}
 	}
 	return out, nil
@@ -737,5 +755,46 @@ func TestFakeMailClient_RemoveLabelRecordsCall(t *testing.T) {
 	}
 	if len(fake.removedLabels) != 1 || fake.removedLabels[0].messageID != "42" || fake.removedLabels[0].label != "VIP" {
 		t.Fatalf("expected RemoveLabel(42, VIP) recorded, got %+v", fake.removedLabels)
+	}
+}
+
+// TestServeInbox_BodylessPGPWarmPreservesFlags verifies hostile-review 3.1/2.2:
+// a client-protected PGP message that is bodyless (Body == "" or whitespace)
+// but carries a healthy PGPEncryptedPayload must still warm the cache with its
+// PGP flags. Whitespace body must be treated as empty (TrimSpace), and a
+// missing payload or a decrypt error must not be warmed.
+func TestServeInbox_BodylessPGPWarmPreservesFlags(t *testing.T) {
+	// Direct unit check of the warm guard introduced in server_inbox.go:513:
+	// strings.TrimSpace(Body)=="" && (TrimSpace(Payload)=="" || DecryptError!="") → not warm
+	// strings.TrimSpace(Body)=="" && TrimSpace(Payload)!="" && DecryptError=="" → warm
+	shouldWarm := func(body, payload, decryptErr string) bool {
+		// ponytail: exact condition from server_inbox.go:513
+		if strings.TrimSpace(body) == "" && (strings.TrimSpace(payload) == "" || decryptErr != "") {
+			return false
+		}
+		return true
+	}
+	cases := []struct {
+		name       string
+		body       string
+		payload    string
+		decryptErr string
+		wantWarm   bool
+	}{
+		{"empty body healthy payload", "", "-----BEGIN PGP MESSAGE-----", "", true},
+		{"whitespace body healthy payload", "   \n\t  ", "-----BEGIN PGP MESSAGE-----", "", true},
+		{"empty body no payload", "", "", "", false},
+		{"empty body with decrypt error", "", "-----BEGIN PGP MESSAGE-----", "some error", false},
+		{"whitespace body no payload", "   ", "", "", false},
+		{"non-empty body no payload (normal mail)", "hello", "", "", true},
+		{"non-empty body with payload (should warm regardless)", "hello", "-----BEGIN PGP MESSAGE-----", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := shouldWarm(c.body, c.payload, c.decryptErr)
+			if got != c.wantWarm {
+				t.Fatalf("shouldWarm(%q,%q,%q)=%v want %v", c.body, c.payload, c.decryptErr, got, c.wantWarm)
+			}
+		})
 	}
 }

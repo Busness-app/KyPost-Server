@@ -386,3 +386,45 @@ func TestClampCheckpoint(t *testing.T) {
 		}
 	})
 }
+
+// TestSingleMailboxSender covers review round 1 finding #1: EmailAddresses is
+// a map[address]displayName, and its String() ranges over the map with no
+// fixed order, so a From naming two or more mailboxes rendered differently on
+// different fetches of the same UID (measured 175/25 across 200 renders of a
+// two-mailbox From). That value feeds senderAddrSpec, now the entire
+// signer-key binding, so a coin-flipping input is a coin-flipping security
+// decision. A multi-mailbox From has no single-signer semantics anyway, so ""
+// — "match nothing" to senderAddrSpec/boundSignerKeysForSender — is correct.
+func TestSingleMailboxSender(t *testing.T) {
+	t.Run("single mailbox renders normally", func(t *testing.T) {
+		e := &goimap.Email{From: goimap.EmailAddresses{"bob@example.com": "Bob"}}
+		if got := singleMailboxSender(e); got != "Bob <bob@example.com>" {
+			t.Fatalf("singleMailboxSender = %q, want %q", got, "Bob <bob@example.com>")
+		}
+	})
+
+	t.Run("no mailbox is empty", func(t *testing.T) {
+		e := &goimap.Email{From: goimap.EmailAddresses{}}
+		if got := singleMailboxSender(e); got != "" {
+			t.Fatalf("singleMailboxSender = %q, want empty", got)
+		}
+	})
+
+	t.Run("a From naming two mailboxes is empty, not an arbitrary pick", func(t *testing.T) {
+		// This is the case that used to be nondeterministic: with two entries,
+		// EmailAddresses.String() would render "Bob <bob@example.com>, Eve
+		// <eve@evil.example>" or the reverse depending on map iteration order.
+		// Run it repeatedly so a regression to e.From.String() (deterministic
+		// per-process but order-varying across the many process starts a real
+		// deployment sees) still has a chance to show up in one run.
+		e := &goimap.Email{From: goimap.EmailAddresses{
+			"bob@example.com":  "Bob",
+			"eve@evil.example": "Eve",
+		}}
+		for i := 0; i < 50; i++ {
+			if got := singleMailboxSender(e); got != "" {
+				t.Fatalf("singleMailboxSender = %q, want empty for a multi-mailbox From", got)
+			}
+		}
+	})
+}

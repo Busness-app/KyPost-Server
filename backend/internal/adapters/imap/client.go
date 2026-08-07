@@ -113,19 +113,56 @@ type UnreadMessage struct {
 	PGPProtectedSubject string
 }
 
-// MessageContent is the per-UID result of GetMessageBodies: the rendered body
-// plus whether the message carries attachments, both from one GetEmails parse.
+// MessageContent is the per-UID result of GetMessageBodies: the rendered body,
+// the sender, plus whether the message carries attachments, all from one
+// GetEmails parse.
 type MessageContent struct {
 	Body string
 	// BodyMode is BodyModeHTML or BodyModePlain — see clientBody.
 	BodyMode       string
 	HasAttachments bool
-	// TooLarge is set instead of populating Body/HasAttachments when this UID was
-	// identified as oversized by GetMessageBodies's server-side
+	// Sender is go-imap's re-render of the parsed From envelope
+	// (EmailAddresses.String(), `Name <addr>` when a display name is
+	// present) — NOT the on-wire From header. go-imap parses the message
+	// with enmime into a map[address]displayName and this is that map
+	// serialised back to a string, so by the time this package sees it an
+	// RFC 5322 comment such as `Bob (Eve <eve@evil>) <bob@x>` has already
+	// been stripped by the enmime parse; senderAddrSpec's net/mail parse
+	// never has to see it. Two parsers still run — enmime here, net/mail
+	// in internal/api — but the comment-hiding class of attack dies at the
+	// first one.
+	//
+	// The re-render's own quoting is imperfect: a display name is
+	// double-quoted only when it contains a comma, and `"` is escaped but
+	// `\` is not. senderAddrSpec's angle-addr fallback (LastIndex "<" ... ">")
+	// exists to catch what net/mail.ParseAddressList then rejects because of
+	// that imperfect quoting — it is load-bearing for this field, not a
+	// spare code path.
+	//
+	// Set only when the envelope names exactly one mailbox (see
+	// GetMessageBodies) — EmailAddresses is a map, and String() ranges over
+	// it in random order, so a From with two or more mailboxes would
+	// otherwise re-render in a different order on every call. A multi-mailbox
+	// From has no single-signer semantics to bind to anyway, so "" is the
+	// correct value, not an arbitrary pick of one of the mailboxes.
+	//
+	// Carried here so handlePGPPayload can resolve the signature binding with
+	// the SAME parser the rest of the server uses on the sender it displays.
+	// The Android client used to parse the header itself, and a differential
+	// harness found 27 divergences from net/mail.ParseAddressList across the
+	// two parsers combined. Shipping the server's own resolved sender removes
+	// the client's parser from the trust decision entirely.
+	//
+	// Free: GetMessageBodies already holds the *goimap.Email this comes from.
+	Sender string
+	// TooLarge is set instead of populating Body/HasAttachments/Sender when
+	// this UID was identified as oversized by GetMessageBodies's server-side
 	// "UID <set> LARGER <cap>" SEARCH, or by the post-fetch emailContentSize
-	// fallback. Mirrors Message.TooLarge. Set per-UID rather than failing the whole
-	// call: one oversized message must not make every other UID in the batch
-	// unreadable.
+	// fallback. Mirrors Message.TooLarge. Set per-UID rather than failing the
+	// whole call: one oversized message must not make every other UID in the
+	// batch unreadable. Sender staying "" on this path is what makes the 413
+	// response safe to build from a zero-valued MessageContent: there is no
+	// sender to leak and nothing for a caller to bind a signature to.
 	TooLarge bool
 	// PGPEncryptedPayload holds the armored OpenPGP message when the fetched email's
 	// Content-Type was multipart/encrypted (RFC 3156), detected by sniffing
@@ -1135,6 +1172,28 @@ func (c *APIClient) SearchMessages(ctx context.Context, mailbox, field, query st
 	return out, nil
 }
 
+// singleMailboxSender returns MessageContent.Sender for e: go-imap's re-render
+// of the parsed From envelope, but only when the envelope names exactly one
+// mailbox.
+//
+// e.From is EmailAddresses, a map[address]displayName, and its String()
+// ranges over that map with no fixed iteration order. Measured over 200
+// renders of a two-mailbox From, the output split roughly 175/25 between the
+// two possible orderings — the same message rendering differently on
+// different fetches of the SAME UID. That is tolerable for display text, but
+// this value is the sole input to senderAddrSpec, which is now the entire
+// signer-key binding: a security decision that returns a different answer on
+// every call is not a decision. A From naming more than one mailbox also has
+// no single-signer semantics to bind a signature to in the first place, so ""
+// — which senderAddrSpec and boundSignerKeysForSender already both treat as
+// "match nothing" — is correct here, not an arbitrary pick of one mailbox.
+func singleMailboxSender(e *goimap.Email) string {
+	if len(e.From) != 1 {
+		return ""
+	}
+	return strings.TrimSpace(e.From.String())
+}
+
 // GetMessageBodies fetches full body content (HTML preferred, falling back
 // to plain text) and attachment presence for exactly the given UIDs — the
 // selective counterpart to ListOverviews, called only for UIDs the mail cache
@@ -1211,7 +1270,12 @@ func (c *APIClient) GetMessageBodies(ctx context.Context, mailbox string, uids [
 			continue
 		}
 		body, bodyMode := clientBody(e)
-		content := MessageContent{Body: body, BodyMode: bodyMode, HasAttachments: len(e.Attachments) > 0}
+		content := MessageContent{
+			Body:           body,
+			BodyMode:       bodyMode,
+			HasAttachments: len(e.Attachments) > 0,
+			Sender:         singleMailboxSender(e),
+		}
 		if body == "" {
 			if payload := envelopes[uid].Payload; payload != "" {
 				content.PGPEncryptedPayload = payload

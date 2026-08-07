@@ -102,10 +102,17 @@ func (s *Server) decryptPGPPayload(userID, payload, senderAddress string) pgpDec
 // is able to, and otherwise leaves the ciphertext for the client. On any
 // failure it returns c with a PGPDecryptError set rather than erroring the
 // whole inbox fetch — one bad message must not break the list.
+//
+// Keep decryptPGPMessageContent and decryptPGPUnreadMessage in sync — they
+// are the same logic over two structurally-identical IMAP types that cannot be
+// unified without reflection. A drift is a silent PGP badge bug, so both
+// must call applyPGPDecryptResult.
 func (s *Server) decryptPGPMessageContent(userID, senderAddress string, c imapadapter.MessageContent) imapadapter.MessageContent {
 	c.PGPEncrypted = true
 	r := s.decryptPGPPayload(userID, c.PGPEncryptedPayload, senderAddress)
 	if r.KeepPayload {
+		// ponytail: KeepPayload means Body == "" intentionally — not a missing body.
+		// The cache warm at server_inbox.go:513 must treat this as healthy.
 		return c
 	}
 	c.PGPEncryptedPayload = ""
@@ -113,15 +120,7 @@ func (s *Server) decryptPGPMessageContent(userID, senderAddress string, c imapad
 		c.PGPDecryptError = r.DecryptError
 		return c
 	}
-	c.Body = r.Body
-	c.BodyMode = r.BodyMode
-	c.HasAttachments = r.HasAttachments
-	c.PGPSigned = r.Signed
-	c.PGPVerified = r.Verified
-	c.PGPSignerFingerprint = r.SignerFingerprint
-	if r.ProtectedSubject != "" {
-		c.PGPProtectedSubject = r.ProtectedSubject
-	}
+	applyPGPDecryptResult(&c.Body, &c.BodyMode, &c.HasAttachments, &c.PGPSigned, &c.PGPVerified, &c.PGPSignerFingerprint, &c.PGPProtectedSubject, r)
 	return c
 }
 
@@ -139,16 +138,20 @@ func (s *Server) decryptPGPUnreadMessage(userID string, msg imapadapter.UnreadMe
 		msg.PGPDecryptError = r.DecryptError
 		return msg
 	}
-	msg.Body = r.Body
-	msg.BodyMode = r.BodyMode
-	msg.HasAttachments = r.HasAttachments
-	msg.PGPSigned = r.Signed
-	msg.PGPVerified = r.Verified
-	msg.PGPSignerFingerprint = r.SignerFingerprint
-	if r.ProtectedSubject != "" {
-		msg.PGPProtectedSubject = r.ProtectedSubject
-	}
+	applyPGPDecryptResult(&msg.Body, &msg.BodyMode, &msg.HasAttachments, &msg.PGPSigned, &msg.PGPVerified, &msg.PGPSignerFingerprint, &msg.PGPProtectedSubject, r)
 	return msg
+}
+
+func applyPGPDecryptResult(body *string, mode *string, hasAttachments *bool, signed *bool, verified *bool, fingerprint *string, protectedSubject *string, r pgpDecryptResult) {
+	*body = r.Body
+	*mode = r.BodyMode
+	*hasAttachments = r.HasAttachments
+	*signed = r.Signed
+	*verified = r.Verified
+	*fingerprint = r.SignerFingerprint
+	if r.ProtectedSubject != "" {
+		*protectedSubject = r.ProtectedSubject
+	}
 }
 
 // verifySignedOnlyMessageContent verifies c's PGPSignaturePayload — a
@@ -160,6 +163,8 @@ func (s *Server) decryptPGPUnreadMessage(userID string, msg imapadapter.UnreadMe
 // canonicalization can differ from what was actually signed, so a
 // verification failure just leaves PGPVerified false rather than erroring
 // the whole inbox fetch.
+//
+// Keep verifySignedOnlyMessageContent and verifySignedOnlyUnreadMessage in sync.
 func (s *Server) verifySignedOnlyMessageContent(userID, senderAddress string, c imapadapter.MessageContent) imapadapter.MessageContent {
 	c.PGPSigned = true
 	sig := c.PGPSignaturePayload
@@ -199,17 +204,30 @@ func (s *Server) verifyDetachedForUser(userID, body, sig, senderAddress string) 
 	return result.Verified, result.SignerFingerprint
 }
 
-// boundSignerKey is one contact's public key together with the addresses the
-// ADDRESS BOOK says that key belongs to — the contact's own email addresses,
-// never anything the key asserts about itself.
+// boundSignerKey is one address-bound contact key as the client sees it.
 //
-// This shape exists because the browser needs the same binding the server
-// applies and must not re-derive it. See signerKeysForSender for why a key's
-// self-asserted User IDs are not a trust anchor, and boundSignerKeys for why
-// the browser is handed the answer rather than the inputs.
+// Verified and Source exist because a flat "signature verified" would
+// claim identity on evidence that often shows only continuity: most keys
+// arrive by Autocrypt harvest, and TOFU guarantees "same key as last
+// time", not "this is who they say they are". The client renders the two
+// differently.
+//
+// Conflict reports a contact whose stored key no longer matches its TOFU
+// pin. Such a contact used to be skipped, so a CHANGED key reached the
+// client as "no key bound to this sender" — indistinguishable from an
+// ordinary new correspondent, which is the one case TOFU must shout
+// about. PublicKey is deliberately empty on a conflicted entry: it can
+// never be trusted to verify anything, and shipping it invites a client
+// to try.
+//
+// Nothing secret crosses the wire. This is the user's own address book
+// describing itself, and the public key was already here.
 type boundSignerKey struct {
 	Addresses []string `json:"addresses"`
 	PublicKey string   `json:"publicKey"`
+	Verified  bool     `json:"verified,omitempty"`
+	Source    string   `json:"source,omitempty"`
+	Conflict  bool     `json:"conflict,omitempty"`
 }
 
 // senderAddrSpec extracts the bare addr-spec from a From header value.
@@ -226,19 +244,34 @@ type boundSignerKey struct {
 // mail.ParseAddressList is the primary parser. It rejects some headers that
 // arrive in real mail (unquoted specials in the display name), so the
 // angle-addr fallback covers those rather than failing the whole verification.
+// A multi-address From is rejected — RFC 5322 allows it, but this binding must
+// be deterministic: the first address wins for an attacker who lists two.
 func senderAddrSpec(sender string) string {
 	raw := strings.TrimSpace(sender)
 	if raw == "" {
 		return ""
 	}
-	if list, err := mail.ParseAddressList(raw); err == nil && len(list) > 0 {
-		return strings.ToLower(strings.TrimSpace(list[0].Address))
+	if list, err := mail.ParseAddressList(raw); err == nil {
+		if len(list) == 1 {
+			return strings.ToLower(strings.TrimSpace(list[0].Address))
+		}
+		if len(list) > 1 {
+			// ponytail: multiple addresses — attacker-controlled ordering;
+			// returning none forces verification to fail closed rather than
+			// crediting the first attacker-chosen address.
+			return ""
+		}
 	}
 	if open := strings.LastIndex(raw, "<"); open >= 0 {
 		if close := strings.Index(raw[open+1:], ">"); close >= 0 {
-			return strings.ToLower(strings.TrimSpace(raw[open+1 : open+1+close]))
+			candidate := strings.ToLower(strings.TrimSpace(raw[open+1 : open+1+close]))
+			if candidate != "" {
+				return candidate
+			}
 		}
 	}
+	// ponytail: fall back to raw lowercased — caller will handle "" as no keys
+	// rather than silently crediting a display name. See testdata/from-corpus.json
 	return strings.ToLower(raw)
 }
 
@@ -340,7 +373,7 @@ func signerKeysForSender(store *contacts.Store, senderAddress string) []string {
 func boundSignerKeys(store *contacts.Store) []boundSignerKey {
 	out := []boundSignerKey{}
 	for _, c := range store.List() {
-		if c.PGPKey == "" || !keyMatchesPin(c) {
+		if c.PGPKey == "" {
 			continue
 		}
 		addresses := make([]string, 0, len(c.Emails))
@@ -356,7 +389,49 @@ func boundSignerKeys(store *contacts.Store) []boundSignerKey {
 		if len(addresses) == 0 {
 			continue
 		}
-		out = append(out, boundSignerKey{Addresses: addresses, PublicKey: c.PGPKey})
+		// A pin mismatch is reported, not dropped — but without key
+		// material, so no client can verify against it.
+		if !keyMatchesPin(c) {
+			out = append(out, boundSignerKey{Addresses: addresses, Conflict: true})
+			continue
+		}
+		out = append(out, boundSignerKey{
+			Addresses: addresses,
+			PublicKey: c.PGPKey,
+			Verified:  c.PGPKeyVerified,
+			Source:    c.PGPKeySource,
+		})
+	}
+	return out
+}
+
+// boundSignerKeysForSender is boundSignerKeys narrowed to one sender.
+//
+// This is now THE signature binding for the Android client, which no longer
+// parses the From header at all. Its hand-rolled parser diverged from
+// net/mail.ParseAddressList on 27 of 111 adversarial headers — most seriously
+// on RFC 5322 comments, where `Bob (Eve <eve@evil>) <bob@x>` is a valid header
+// that Go binds to bob@x and the client bound to eve@evil, letting any contact
+// forge a verified badge for anyone. Three client-side fix rounds each closed
+// one construct and opened another. Shipping the decision instead of the inputs
+// removes the second parser, exactly as boundSignerKeys' own comment says of
+// the browser.
+//
+// address must already be a bare addr-spec from senderAddrSpec. An empty
+// address matches nothing, which is the safe direction: no keys, so no verdict
+// beyond "signed, but not by a key you hold for this sender".
+func boundSignerKeysForSender(store *contacts.Store, address string) []boundSignerKey {
+	out := []boundSignerKey{}
+	if address == "" {
+		return out
+	}
+	for _, k := range boundSignerKeys(store) {
+		for _, a := range k.Addresses {
+			if a == address {
+				out = append(out, k)
+				break
+			}
+		}
 	}
 	return out
 }
