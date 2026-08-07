@@ -509,8 +509,11 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			// Same rule as mailcache.Upsert: a client-protected message is
 			// classified correctly AND bodyless, so the body cannot be the
 			// only sentinel. A failed decrypt stays uncached.
+			// Check payload directly — the IMAP layer already decided bodyless
+			// means PGPEncrypted, so re-deriving from flags duplicates that
+			// decision. TrimSpace mirrors pgp_client_read.go:88.
 			c, ok := contents[e.UID]
-			if ok && c.Body == "" && (!c.PGPEncrypted || c.PGPDecryptError != "") {
+			if ok && strings.TrimSpace(c.Body) == "" && (strings.TrimSpace(c.PGPEncryptedPayload) == "" || c.PGPDecryptError != "") {
 				ok = false
 			}
 			if ok {

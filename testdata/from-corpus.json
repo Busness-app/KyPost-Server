@@ -1,0 +1,70 @@
+{
+  "$comment": [
+    "From header corpus for senderAddrSpec — the function that binds 'signature verified' to the sender.",
+    "Each case is a raw From header as it arrives from IMAP (e.From.String()) and the expected bare addr-spec.",
+    "An empty expected means verification must fail closed (no signer keys), not silently credit a display name.",
+    "See backend/internal/api/pgp_receive.go:senderAddrSpec. This corpus is executed by pgp_receive_test.go."
+  ],
+  "cases": [
+    {
+      "name": "bare addr-spec",
+      "from": "bob@example.com",
+      "expect": "bob@example.com"
+    },
+    {
+      "name": "display name + angle addr",
+      "from": "Bob Smith <bob@example.com>",
+      "expect": "bob@example.com"
+    },
+    {
+      "name": "quoted display name with comma",
+      "from": "\"Person, Bob\" <bob@example.com>",
+      "expect": "bob@example.com"
+    },
+    {
+      "name": "display name is itself an email (attacker separable)",
+      "from": "bob@example.com <eve@evil.example>",
+      "expect": "eve@evil.example"
+    },
+    {
+      "name": "parenthesized comment around angle addr",
+      "from": "Bob Smith (Eve <eve@evil.example>) <bob@example.com>",
+      "expect": "bob@example.com"
+    },
+    {
+      "name": "multiple addresses must fail closed",
+      "from": "eve@evil.example, bob@example.com",
+      "expect": ""
+    },
+    {
+      "name": "empty From",
+      "from": "",
+      "expect": ""
+    },
+    {
+      "name": "angle with quoted empty local part",
+      "from": "<\"\"@evil>",
+      "expect": "\"\"@evil"
+    },
+    {
+      "name": "UTF-8 encoded display name",
+      "from": "=?UTF-8?B?Qm9i?= <bob@example.com>",
+      "expect": "bob@example.com"
+    },
+    {
+      "name": "unquoted special in display name - angle fallback",
+      "from": "Bob (comment) <bob@example.com>",
+      "expect": "bob@example.com"
+    },
+    {
+      "name": "case is lowered",
+      "from": "BOB@EXAMPLE.COM",
+      "expect": "bob@example.com"
+    },
+    {
+      "name": "whitespace trimmed",
+      "from": "  <bob@example.com>  ",
+      "expect": "bob@example.com"
+    }
+  ]
+}

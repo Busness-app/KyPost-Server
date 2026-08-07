@@ -102,10 +102,17 @@ func (s *Server) decryptPGPPayload(userID, payload, senderAddress string) pgpDec
 // is able to, and otherwise leaves the ciphertext for the client. On any
 // failure it returns c with a PGPDecryptError set rather than erroring the
 // whole inbox fetch — one bad message must not break the list.
+//
+// Keep decryptPGPMessageContent and decryptPGPUnreadMessage in sync — they
+// are the same logic over two structurally-identical IMAP types that cannot be
+// unified without reflection. A drift is a silent PGP badge bug, so both
+// must call applyPGPDecryptResult.
 func (s *Server) decryptPGPMessageContent(userID, senderAddress string, c imapadapter.MessageContent) imapadapter.MessageContent {
 	c.PGPEncrypted = true
 	r := s.decryptPGPPayload(userID, c.PGPEncryptedPayload, senderAddress)
 	if r.KeepPayload {
+		// ponytail: KeepPayload means Body == "" intentionally — not a missing body.
+		// The cache warm at server_inbox.go:513 must treat this as healthy.
 		return c
 	}
 	c.PGPEncryptedPayload = ""
@@ -113,15 +120,7 @@ func (s *Server) decryptPGPMessageContent(userID, senderAddress string, c imapad
 		c.PGPDecryptError = r.DecryptError
 		return c
 	}
-	c.Body = r.Body
-	c.BodyMode = r.BodyMode
-	c.HasAttachments = r.HasAttachments
-	c.PGPSigned = r.Signed
-	c.PGPVerified = r.Verified
-	c.PGPSignerFingerprint = r.SignerFingerprint
-	if r.ProtectedSubject != "" {
-		c.PGPProtectedSubject = r.ProtectedSubject
-	}
+	applyPGPDecryptResult(&c.Body, &c.BodyMode, &c.HasAttachments, &c.PGPSigned, &c.PGPVerified, &c.PGPSignerFingerprint, &c.PGPProtectedSubject, r)
 	return c
 }
 
@@ -139,16 +138,20 @@ func (s *Server) decryptPGPUnreadMessage(userID string, msg imapadapter.UnreadMe
 		msg.PGPDecryptError = r.DecryptError
 		return msg
 	}
-	msg.Body = r.Body
-	msg.BodyMode = r.BodyMode
-	msg.HasAttachments = r.HasAttachments
-	msg.PGPSigned = r.Signed
-	msg.PGPVerified = r.Verified
-	msg.PGPSignerFingerprint = r.SignerFingerprint
-	if r.ProtectedSubject != "" {
-		msg.PGPProtectedSubject = r.ProtectedSubject
-	}
+	applyPGPDecryptResult(&msg.Body, &msg.BodyMode, &msg.HasAttachments, &msg.PGPSigned, &msg.PGPVerified, &msg.PGPSignerFingerprint, &msg.PGPProtectedSubject, r)
 	return msg
+}
+
+func applyPGPDecryptResult(body *string, mode *string, hasAttachments *bool, signed *bool, verified *bool, fingerprint *string, protectedSubject *string, r pgpDecryptResult) {
+	*body = r.Body
+	*mode = r.BodyMode
+	*hasAttachments = r.HasAttachments
+	*signed = r.Signed
+	*verified = r.Verified
+	*fingerprint = r.SignerFingerprint
+	if r.ProtectedSubject != "" {
+		*protectedSubject = r.ProtectedSubject
+	}
 }
 
 // verifySignedOnlyMessageContent verifies c's PGPSignaturePayload — a
@@ -160,6 +163,8 @@ func (s *Server) decryptPGPUnreadMessage(userID string, msg imapadapter.UnreadMe
 // canonicalization can differ from what was actually signed, so a
 // verification failure just leaves PGPVerified false rather than erroring
 // the whole inbox fetch.
+//
+// Keep verifySignedOnlyMessageContent and verifySignedOnlyUnreadMessage in sync.
 func (s *Server) verifySignedOnlyMessageContent(userID, senderAddress string, c imapadapter.MessageContent) imapadapter.MessageContent {
 	c.PGPSigned = true
 	sig := c.PGPSignaturePayload
@@ -239,19 +244,34 @@ type boundSignerKey struct {
 // mail.ParseAddressList is the primary parser. It rejects some headers that
 // arrive in real mail (unquoted specials in the display name), so the
 // angle-addr fallback covers those rather than failing the whole verification.
+// A multi-address From is rejected — RFC 5322 allows it, but this binding must
+// be deterministic: the first address wins for an attacker who lists two.
 func senderAddrSpec(sender string) string {
 	raw := strings.TrimSpace(sender)
 	if raw == "" {
 		return ""
 	}
-	if list, err := mail.ParseAddressList(raw); err == nil && len(list) > 0 {
-		return strings.ToLower(strings.TrimSpace(list[0].Address))
+	if list, err := mail.ParseAddressList(raw); err == nil {
+		if len(list) == 1 {
+			return strings.ToLower(strings.TrimSpace(list[0].Address))
+		}
+		if len(list) > 1 {
+			// ponytail: multiple addresses — attacker-controlled ordering;
+			// returning none forces verification to fail closed rather than
+			// crediting the first attacker-chosen address.
+			return ""
+		}
 	}
 	if open := strings.LastIndex(raw, "<"); open >= 0 {
 		if close := strings.Index(raw[open+1:], ">"); close >= 0 {
-			return strings.ToLower(strings.TrimSpace(raw[open+1 : open+1+close]))
+			candidate := strings.ToLower(strings.TrimSpace(raw[open+1 : open+1+close]))
+			if candidate != "" {
+				return candidate
+			}
 		}
 	}
+	// ponytail: fall back to raw lowercased — caller will handle "" as no keys
+	// rather than silently crediting a display name. See testdata/from-corpus.json
 	return strings.ToLower(raw)
 }
 
