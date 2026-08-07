@@ -21,6 +21,22 @@ export type ApproverDevice = {
   cannotApproveReason?: string;
 };
 
+/**
+ * Whether this device can open mail encrypted to the account.
+ *
+ * "unsupported" is the pre-2c state and also the permanent state of any client
+ * that cannot hold a non-extractable key — it is not an error and must not read
+ * as one. "unknown" is the row the inventory does not back: only the inventory
+ * knows about sealings, so a row built from the MFA status alone has no answer
+ * and must not invent the reassuring one.
+ */
+export type MailAccess = "enrolled" | "available" | "unsupported" | "unknown";
+
+function mailAccessFor(device: NativeDevice): MailAccess {
+  if (!device.enrollmentPublicKey) return "unsupported";
+  return device.encryptionEnrolled ? "enrolled" : "available";
+}
+
 export type DeviceRow = {
   deviceId: string;
   /** Best available human label. Never the empty string. */
@@ -41,6 +57,8 @@ export type DeviceRow = {
   missingFromInventory: boolean;
   /** True when the device is paired but the MFA status did not mention it. */
   approvalUnavailable: boolean;
+  /** Whether this device can open mail encrypted to the account. */
+  mailAccess: MailAccess;
 };
 
 export function deviceLabel(device: NativeDevice): string {
@@ -94,7 +112,8 @@ export function joinDeviceRows(
       canApprove: approver ? approver.canApprove !== false : false,
       cannotApproveReason: approver?.cannotApproveReason,
       missingFromInventory: false,
-      approvalUnavailable: !approver
+      approvalUnavailable: !approver,
+      mailAccess: mailAccessFor(device)
     };
   });
 
@@ -107,7 +126,9 @@ export function joinDeviceRows(
       canApprove: approver.canApprove !== false,
       cannotApproveReason: approver.cannotApproveReason,
       missingFromInventory: true,
-      approvalUnavailable: false
+      approvalUnavailable: false,
+      // No inventory entry means nothing here knows about sealings.
+      mailAccess: "unknown"
     });
   }
 
@@ -122,4 +143,9 @@ export function joinDeviceRows(
  */
 export function countApprovers(rows: DeviceRow[]): number {
   return rows.filter((row) => row.approver && row.canApprove).length;
+}
+
+/** How many devices hold a sealing that can open encrypted mail. */
+export function countMailEnrolled(rows: DeviceRow[]): number {
+  return rows.filter((row) => row.mailAccess === "enrolled").length;
 }
