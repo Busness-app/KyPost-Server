@@ -433,3 +433,80 @@ func TestSnapshot_FullyWarmedBoundary(t *testing.T) {
 		t.Fatalf("expected fullyWarmed=true when all requested entries have Body")
 	}
 }
+
+// A client-protected message is encrypted AND has no body, by design — the
+// server does not decrypt it. The flags must survive an Upsert into an
+// existing entry anyway, or the message is cached as ordinary mail and the
+// phone never offers to decrypt it.
+func TestUpsertKeepsPGPFlagsForBodylessClientProtectedMessage(t *testing.T) {
+	s := newTestStore(t)
+
+	// The poller/Sync creates the entry first, from overviews, with no PGP data.
+	if err := s.Upsert("INBOX", []Entry{{UID: 7, MessageID: "7", Subject: "..."}}); err != nil {
+		t.Fatalf("seed upsert: %v", err)
+	}
+	// Then the API warms it with the classification and no body.
+	if err := s.Upsert("INBOX", []Entry{{
+		UID: 7, MessageID: "7", Subject: "...",
+		Body:         "",
+		PGPEncrypted: true,
+	}}); err != nil {
+		t.Fatalf("warm upsert: %v", err)
+	}
+
+	entries, _ := s.Snapshot("INBOX", 1)
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	if !entries[0].PGPEncrypted {
+		t.Fatal("PGPEncrypted was dropped for a bodyless client-protected message")
+	}
+}
+
+// The other half of the original comment is real: a FAILED decrypt also
+// leaves an empty body, and caching that would make a transient failure
+// sticky. Only a clean classification is durable.
+func TestUpsertStillDropsFlagsWhenDecryptFailed(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.Upsert("INBOX", []Entry{{UID: 8, MessageID: "8"}}); err != nil {
+		t.Fatalf("seed upsert: %v", err)
+	}
+	if err := s.Upsert("INBOX", []Entry{{
+		UID: 8, MessageID: "8",
+		Body:            "",
+		PGPEncrypted:    true,
+		PGPDecryptError: "no secret key",
+	}}); err != nil {
+		t.Fatalf("warm upsert: %v", err)
+	}
+
+	entries, _ := s.Snapshot("INBOX", 1)
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	if entries[0].PGPEncrypted {
+		t.Fatal("a failed decrypt was cached; it must stay uncached and retryable")
+	}
+}
+
+// The error is a signal for the guard, not durable state. If it survived
+// into the window, a transient failure would keep suppressing the flags
+// long after the decrypt would have succeeded.
+func TestUpsertNeverStoresADecryptError(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.Upsert("INBOX", []Entry{{
+		UID: 9, MessageID: "9", PGPEncrypted: true, PGPDecryptError: "no secret key",
+	}}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	entries, _ := s.Snapshot("INBOX", 1)
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	if entries[0].PGPDecryptError != "" {
+		t.Fatalf("a decrypt error was stored: %q", entries[0].PGPDecryptError)
+	}
+}

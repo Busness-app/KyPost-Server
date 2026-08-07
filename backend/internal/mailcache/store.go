@@ -442,6 +442,12 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 			e.Body = warmBody(mailboxKey, in)
 			e.Rev = win.Seq
 			e.FirstRev = win.Seq
+			// PGPDecryptError is a transient signal for this Upsert call's
+			// guard, not durable state (see its doc comment in mailcache.go).
+			// json:"-" already keeps it off disk, but `e := in` above copied
+			// it into the in-memory window entry too; clear it here so a
+			// later Snapshot can't hand a caller a stale decrypt error.
+			e.PGPDecryptError = ""
 			win.Entries = append(win.Entries, e)
 			byUID[e.UID] = len(win.Entries) - 1
 			continue
@@ -455,24 +461,30 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 		updated.Subject, updated.Sender, updated.SentTo = in.Subject, in.Sender, in.SentTo
 		updated.CC, updated.BCC = in.CC, in.BCC
 		updated.Keywords, updated.Status, updated.AtUTC = in.Keywords, in.Status, in.AtUTC
-		if in.Body != "" {
-			// warmBody, not in.Body: a decrypted OpenPGP body is never
-			// persisted. Assigning it here also clears any plaintext an
-			// older build already wrote for this UID.
-			updated.Body = warmBody(mailboxKey, in)
-			// PGP fields are only ever known alongside a freshly fetched
-			// body (see decryptPGPMessageContent/decryptPGPUnreadMessage in
-			// internal/api — a failed decrypt leaves Body empty and is
-			// deliberately never warmed into the cache), so gate them on
-			// the same sentinel as Body. Note the sentinel is the *incoming*
-			// body, so the flags still land even though warmBody drops the
-			// body itself.
+		// The body is the sentinel for a freshly fetched message, but it is NOT
+		// the only evidence of a correct classification. A client-protected
+		// message is encrypted AND bodyless by design — the server deliberately
+		// does not decrypt it — so gating on the body alone filtered the flags
+		// out of exactly the messages end-to-end custody exists for, and the
+		// phone cached them as ordinary mail.
+		//
+		// A decrypt FAILURE also leaves an empty body, and that half of the
+		// original reasoning still holds: it may be transient, so it stays
+		// uncached and retryable. Hence the error must be empty too.
+		classified := in.PGPEncrypted && in.PGPDecryptError == ""
+		if in.Body != "" || classified {
+			if in.Body != "" {
+				// warmBody, not in.Body: a decrypted OpenPGP body is never
+				// persisted. Assigning it here also clears any plaintext an
+				// older build already wrote for this UID.
+				updated.Body = warmBody(mailboxKey, in)
+				updated.BodyMode = in.BodyMode
+			}
 			updated.PGPEncrypted = in.PGPEncrypted
 			updated.PGPSigned = in.PGPSigned
 			updated.PGPVerified = in.PGPVerified
 			updated.PGPSignerFingerprint = in.PGPSignerFingerprint
 			updated.PGPProtectedSubject = in.PGPProtectedSubject
-			updated.BodyMode = in.BodyMode
 			// The stamp travels with the verdict it describes. Without this the
 			// existing-UID branch kept a zero version alongside a fresh verdict,
 			// and dropStaleVerdicts then discarded both on the very next load —
