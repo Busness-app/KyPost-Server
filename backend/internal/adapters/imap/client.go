@@ -380,11 +380,14 @@ type Overview struct {
 	// something for a legitimate multi-mailbox From. But e.From is a
 	// map[address]displayName, and String() ranges over that map with no
 	// fixed iteration order — measured 175/25 across 200 renders of the SAME
-	// two-mailbox message. Overview.Sender flows into UnreadMessage.Sender and
-	// from there into decryptPGPUnreadMessage/verifySignedOnlyUnreadMessage and
-	// the inbox handler's delta-path sender lookup, all the way to
-	// signerKeysForSender — the server-side signature binding for
-	// server-protected accounts. A binding that coin-flips is not a binding.
+	// two-mailbox message. This Overview reaches signerKeysForSender — the
+	// server-side signature binding for server-protected accounts — by two
+	// separate routes: Overview.Sender flows into UnreadMessage.Sender and
+	// from there into decryptPGPUnreadMessage/verifySignedOnlyUnreadMessage
+	// (the classic inbox path); and this Overview is also read directly,
+	// without ever passing through UnreadMessage, by the inbox handler's
+	// delta-path sender lookup (server_inbox.go's senderByUID). A binding
+	// that coin-flips is not a binding, on either route.
 	//
 	// SenderBindingAddress is "" whenever e.From names more than one mailbox
 	// (see singleMailboxSender) — which also has no single-signer semantics to

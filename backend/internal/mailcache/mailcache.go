@@ -35,9 +35,15 @@ import (
 // signerKeysForSender for a message with a multi-mailbox From used to be
 // e.From.String(), which go-imap renders from a map with no fixed iteration
 // order — a coin flip on every fetch of the same UID (measured 175/25 across
-// 200 renders). A verdict cached under schema 2 for such a message may have
-// verified against whichever address won that flip, not a resolved single
-// sender. 2 is the address-book anchor itself: a key verifies for the
+// 200 renders). A well-formed multi-address rendering already resolved to no
+// keys on its own (senderAddrSpec's mail.ParseAddressList rejects a From
+// naming more than one address), so the affected population is narrower: the
+// flip only lands a verdict when the rendering instead defeats
+// ParseAddressList and senderAddrSpec's angle-addr fallback
+// (LastIndex("<")...) credits whichever mailbox happened to render last. A
+// verdict cached under schema 2 for such a message may have verified against
+// that fallback's pick, not a resolved single sender. 2 is the address-book
+// anchor itself: a key verifies for the
 // addresses its CONTACT carries, checked against that contact's TOFU pin. 1
 // was the any-User-ID binding, forgeable with a second self-asserted User ID.
 // 0 is "written before this field existed", i.e. also 1 or earlier.
