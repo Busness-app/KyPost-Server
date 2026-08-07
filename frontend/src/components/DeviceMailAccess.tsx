@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { toErrorMessage } from "../api/client";
-import type { NativeDevice } from "../api/devices";
+import { waitForDeviceEnrollment, type NativeDevice } from "../api/devices";
 import { deleteDeviceEnvelope, putDeviceEnvelope } from "../api/pgp";
 import { requireUnlockedKey } from "../lib/keyVault";
 import type { MailAccess } from "../pages/security/deviceJoin";
@@ -98,7 +98,8 @@ export function DeviceMailPanel({
   unlocked,
   onRequestUnlock,
   onClose,
-  onChanged
+  onChanged,
+  awaitEnrollment = waitForDeviceEnrollment
 }: {
   device: NativeDevice;
   panel: MailPanel;
@@ -107,6 +108,8 @@ export function DeviceMailPanel({
   onRequestUnlock: () => void;
   onClose: () => void;
   onChanged: () => void;
+  /** Injectable so tests need not wait on real polling. */
+  awaitEnrollment?: (deviceId: string) => Promise<boolean>;
 }) {
   if (panel === "enroll") {
     return (
@@ -120,6 +123,7 @@ export function DeviceMailPanel({
         onRequestUnlock={onRequestUnlock}
         onClose={onClose}
         onChanged={onChanged}
+        awaitEnrollment={awaitEnrollment}
       />
     );
   }
@@ -137,7 +141,8 @@ function EnrollPanel({
   unlocked,
   onRequestUnlock,
   onClose,
-  onChanged
+  onChanged,
+  awaitEnrollment
 }: {
   device: NativeDevice;
   fingerprint: string;
@@ -145,6 +150,7 @@ function EnrollPanel({
   onRequestUnlock: () => void;
   onClose: () => void;
   onChanged: () => void;
+  awaitEnrollment: (deviceId: string) => Promise<boolean>;
 }) {
   // THE SNAPSHOT. Captured once, when this panel mounts, and never re-read from
   // props. Verifying against one answer and sealing against another would let a
@@ -164,6 +170,10 @@ function EnrollPanel({
   const [ceremonyError, setCeremonyError] = useState("");
   const [attempts, setAttempts] = useState(0);
   const [busy, setBusy] = useState(false);
+  // The second party's half of the ceremony. "waiting" is after a stored PUT
+  // while the device has not answered; "pending" is that wait timing out, which
+  // is a slow device and not a failed enrollment.
+  const [confirming, setConfirming] = useState<"" | "waiting" | "pending">("");
 
   async function submit() {
     if (busy) return;
@@ -206,13 +216,66 @@ function EnrollPanel({
 
       const envelope = await sealEnvelopeForDevice(publicKey, device.deviceId, fingerprint, armored);
       await putDeviceEnvelope(device.deviceId, envelope, password);
+
+      // PAST THE POINT OF FAILURE. The sealing is stored; nothing below may
+      // word itself as an error. All that is left is whether the device has
+      // picked it up yet, and only the device can answer that — it reports
+      // `encryptionEnrolled` itself, on its own route, after fetching and
+      // opening this envelope. Reading the inventory at this instant always
+      // says "not enrolled", which is how a success came to be shown as a
+      // failure until the user reloaded the page.
+      setConfirming("waiting");
+      const confirmed = await awaitEnrollment(device.deviceId);
       onChanged();
-      onClose();
+      if (confirmed) {
+        onClose();
+        return;
+      }
+      setConfirming("pending");
     } catch (e) {
       setCeremonyError(toErrorMessage(e, "Could not store the sealing."));
     } finally {
       setBusy(false);
     }
+  }
+
+  // Both of these are downstream of a stored sealing, so the panel stops being
+  // a form: there is nothing left to submit and nothing left that can fail.
+  if (confirming === "waiting") {
+    return (
+      <div className="sec-inline-form">
+        <h4>Enroll {deviceLabel(device)}</h4>
+        {/* A live indicator for the same reason LoginPage's approval wait has
+            one: without it, waiting on another device is indistinguishable
+            from a stalled page. */}
+        <p className="auth-waiting-row">
+          <span className="auth-waiting" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          Sealed. Waiting for {deviceLabel(device)} to confirm…
+        </p>
+      </div>
+    );
+  }
+
+  if (confirming === "pending") {
+    return (
+      <div className="sec-inline-form">
+        <h4>Enroll {deviceLabel(device)}</h4>
+        <p className="sec-muted">
+          Your key is sealed and stored for {deviceLabel(device)}. It hasn't confirmed yet — it will
+          pick this up the next time it syncs, and this page will say so once it does. You do not
+          need to enroll it again.
+        </p>
+        <div className="sec-actions">
+          <button type="button" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (

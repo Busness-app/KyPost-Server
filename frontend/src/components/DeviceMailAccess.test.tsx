@@ -92,7 +92,11 @@ function Harness({
   fingerprint = "AAAA1111BBBB2222",
   unlocked = true,
   onRequestUnlock = () => {},
-  onChanged = () => {}
+  onChanged = () => {},
+  // Confirmed by default: the tests below are about the ceremony, not about
+  // the wait, and an unset one would fall through to the real poller and keep
+  // running after teardown.
+  awaitEnrollment = async () => true
 }: {
   dev?: NativeDevice;
   mailAccess?: MailAccess;
@@ -101,6 +105,7 @@ function Harness({
   unlocked?: boolean;
   onRequestUnlock?: () => void;
   onChanged?: () => void;
+  awaitEnrollment?: (deviceId: string) => Promise<boolean>;
 }) {
   const [panel, setPanel] = useState<MailPanel>("none");
   return (
@@ -119,6 +124,7 @@ function Harness({
         onRequestUnlock={onRequestUnlock}
         onClose={() => setPanel("none")}
         onChanged={onChanged}
+        awaitEnrollment={awaitEnrollment}
       />
     </>
   );
@@ -332,6 +338,64 @@ describe("the gate", () => {
     expect(screen.getByRole("button", { name: "Verify and enroll" }).hasAttribute("disabled")).toBe(
       true
     );
+  });
+});
+
+// The ceremony has two parties and only one of them is this browser. The PUT
+// stores the sealed envelope; `encryptionEnrolled` is written ONLY by the
+// device, on a device-authenticated route, after it has fetched that envelope
+// and opened it. So at the instant the PUT returns, the device is still
+// correctly reported as not enrolled — and reporting that as the outcome of the
+// ceremony calls a success a failure.
+describe("waiting for the device to confirm", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it("keeps waiting instead of declaring an outcome when the PUT returns", async () => {
+    const gate = deferred<boolean>();
+    render(<Harness awaitEnrollment={() => gate.promise} />);
+    await startCeremony();
+    await submitCeremony(await codeFor(HONEST_KEY));
+
+    await vi.waitFor(() => expect(putDeviceEnvelope).toHaveBeenCalledTimes(1));
+
+    // Still on screen, still waiting — not closed, and not calling it done.
+    expect(await screen.findByText(/waiting for Pixel to confirm/i)).toBeTruthy();
+    gate.resolve(true);
+  });
+
+  it("reports success once the device confirms", async () => {
+    const onChanged = vi.fn();
+    render(<Harness awaitEnrollment={async () => true} onChanged={onChanged} />);
+    await startCeremony();
+    await submitCeremony(await codeFor(HONEST_KEY));
+
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalled());
+    // Closed: the row behind it now tells the story.
+    await vi.waitFor(() =>
+      expect(screen.queryByLabelText("Code from your device")).toBeNull()
+    );
+  });
+
+  // The defect this whole describe exists for. A device that has not answered
+  // yet has not failed — the key IS sealed and stored for it. Saying otherwise
+  // sends the user to redo work that already succeeded.
+  it("does not call a stored sealing a failure when the device is slow", async () => {
+    render(<Harness awaitEnrollment={async () => false} />);
+    await startCeremony();
+    await submitCeremony(await codeFor(HONEST_KEY));
+
+    const note = await screen.findByText(/hasn't confirmed yet/i);
+    expect(note).toBeTruthy();
+    expect(note.textContent).toMatch(/sealed and stored/i);
+    // No failure language anywhere in the panel.
+    expect(screen.queryByText(/could not store the sealing/i)).toBeNull();
+    expect(screen.queryByText(/not the key on that device/i)).toBeNull();
   });
 });
 
