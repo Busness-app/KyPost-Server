@@ -95,6 +95,15 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 	// The sender the client will display, and the addr-spec the binding uses.
 	// Both are shipped: the client renders one and binds on the other, and it
 	// must never re-derive the second from the first. See boundSignerKeysForSender.
+	//
+	// The two are attacker-separable, not just differently-derived: a From
+	// with display name "bob@example.com" and mailbox eve@evil.example
+	// renders as `sender = "bob@example.com <eve@evil.example>"` while
+	// `resolvedSender` — and therefore signerKeys — correctly binds to
+	// eve@evil.example. Showing "sender" as the identity next to a verified
+	// badge would credit the display-name text an attacker chose freely, not
+	// the mailbox that actually signed. Any UI that renders a verification
+	// verdict must key it off resolvedSender, never off sender.
 	sender := strings.TrimSpace(content.Sender)
 	resolvedSender := senderAddrSpec(sender)
 

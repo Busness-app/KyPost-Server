@@ -715,6 +715,13 @@ func TestBoundSignerKeysForSenderIgnoresAnAddressHiddenInAComment(t *testing.T) 
 
 // A conflicted key for THIS sender must still be reported, with no key
 // material — it is the only way the client can say the key changed.
+// A second contact's conflict must not leak into this sender's result: a
+// narrowing that reports every conflicted key regardless of address would
+// tell the client "bob's key changed" when it was actually eve's, a false
+// TOFU alarm attributed to the wrong party. Review round 1 finding #3 —
+// hoisting `if k.Conflict { out = append(out, k); continue }` above the
+// address-match loop passed all three original assertions here because there
+// was only ever one contact in play.
 func TestBoundSignerKeysForSenderStillReportsAConflict(t *testing.T) {
 	_, _, store, _ := pgpVictimWithIdentity(t)
 
@@ -731,10 +738,29 @@ func TestBoundSignerKeysForSenderStillReportsAConflict(t *testing.T) {
 		t.Fatalf("Upsert bob contact: %v", err)
 	}
 
+	// A second, unrelated contact whose key ALSO conflicts its pin. Its
+	// conflict belongs to eve@evil.example and must never appear in a
+	// lookup for bob@example.com.
+	rotatedEve, err := pgpmail.GenerateIdentity("Eve", "eve@evil.example")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	if _, err := store.Upsert(contacts.Contact{
+		Emails:            []contacts.ContactValue{{Value: "eve@evil.example"}},
+		PGPKey:            rotatedEve.ArmoredPublicKey,
+		PGPKeyFingerprint: "1111NOTTHEPINNEDFINGERPRINT1111",
+		PGPKeySource:      contacts.PGPSourceAutocrypt,
+	}); err != nil {
+		t.Fatalf("Upsert eve contact: %v", err)
+	}
+
 	got := boundSignerKeysForSender(store, "bob@example.com")
 
 	if len(got) != 1 || !got[0].Conflict {
 		t.Fatalf("want a conflict marker, got %+v", got)
+	}
+	if got[0].Addresses[0] != "bob@example.com" {
+		t.Fatalf("a conflict for a different contact leaked into bob's result: %+v", got)
 	}
 	if got[0].PublicKey != "" {
 		t.Fatal("a conflicted key must ship no key material")

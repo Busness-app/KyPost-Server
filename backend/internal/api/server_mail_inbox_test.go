@@ -34,9 +34,19 @@ type fakeMailClient struct {
 	bodies             map[int]string
 	bodyHasAttachments map[int]bool
 	bodyPGPEncrypted   map[int]bool
-	bodiesErr          error
-	bodiesCalls        int
-	lastBodyUIDs       []int
+	// bodySender/bodyPGPEncryptedPayload/bodyPGPSignaturePayload feed
+	// MessageContent.Sender/PGPEncryptedPayload/PGPSignaturePayload — added
+	// for TestHandlePGPPayloadNarrowsSignerKeysToTheResolvedSender, which
+	// needs the handler to see a real From header and a real payload to
+	// prove content.Sender reaches senderAddrSpec and the response is
+	// narrowed. Every other existing test in this file only reads Body/
+	// HasAttachments/PGPEncrypted, so leaving these nil for them is a no-op.
+	bodySender              map[int]string
+	bodyPGPEncryptedPayload map[int]string
+	bodyPGPSignaturePayload map[int]string
+	bodiesErr               error
+	bodiesCalls             int
+	lastBodyUIDs            []int
 
 	attachments    map[int][]mailmsg.Attachment
 	attachmentsErr error
@@ -87,7 +97,14 @@ func (f *fakeMailClient) GetMessageBodies(_ context.Context, _ string, uids []in
 	out := map[int]imapadapter.MessageContent{}
 	for _, uid := range uids {
 		if b, ok := f.bodies[uid]; ok {
-			out[uid] = imapadapter.MessageContent{Body: b, HasAttachments: f.bodyHasAttachments[uid], PGPEncrypted: f.bodyPGPEncrypted[uid]}
+			out[uid] = imapadapter.MessageContent{
+				Body:                b,
+				HasAttachments:      f.bodyHasAttachments[uid],
+				PGPEncrypted:        f.bodyPGPEncrypted[uid],
+				Sender:              f.bodySender[uid],
+				PGPEncryptedPayload: f.bodyPGPEncryptedPayload[uid],
+				PGPSignaturePayload: f.bodyPGPSignaturePayload[uid],
+			}
 		}
 	}
 	return out, nil
