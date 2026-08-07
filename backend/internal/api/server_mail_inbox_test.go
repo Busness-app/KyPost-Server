@@ -11,8 +11,10 @@ import (
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/config"
+	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/mailcache"
 	"kypost-server/backend/internal/mailmsg"
+	"kypost-server/backend/internal/pgpmail"
 )
 
 // fakeMailClient is a configurable imapadapter.Client for exercising
@@ -376,6 +378,86 @@ func TestServeInbox_DeltaFirstCallAllNew(t *testing.T) {
 	emails := allEmails(resp)
 	if len(emails) != 1 || emails[0].ChangeType != "new" || emails[0].Body != "body-1" {
 		t.Fatalf("expected one new entry with body populated, got %+v", emails)
+	}
+}
+
+// TestServeInboxDeltaUsesSenderBindingAddressForVerification is the delta
+// path's counterpart of TestUnreadMessageVerificationUsesSenderBindingAddress
+// (pgp_receive_test.go). serveInbox's delta branch does not read
+// UnreadMessage.SenderBindingAddress at all: it rebuilds its own UID->sender
+// lookup (senderByUID in server_inbox.go) straight from the freshly-fetched
+// []imapadapter.Overview this call's ListOverviews returns, then pairs it
+// with GetMessageBodies' MessageContent before calling
+// decryptPGPMessageContent/verifySignedOnlyMessageContent. That lookup has
+// its own, independent chance to read the wrong field — Overview.Sender
+// instead of Overview.SenderBindingAddress — so it needs its own test.
+//
+// As in the UnreadMessage test, Sender here is a single clean address, not a
+// realistic multi-address rendering: a realistic "Name <a>, Name2 <b>"
+// string already fails closed inside senderAddrSpec on its own (see
+// TestSenderAddrSpecMultiAddressFailsClosed), so it wouldn't distinguish
+// "senderByUID reads SenderBindingAddress" from "senderByUID reads Sender".
+func TestServeInboxDeltaUsesSenderBindingAddressForVerification(t *testing.T) {
+	userID, recipient, contactsStore, srv := pgpVictimWithIdentity(t)
+
+	const attackerAddress = "attacker@evil.example"
+	attacker, err := pgpmail.GenerateIdentity("Attacker", attackerAddress)
+	if err != nil {
+		t.Fatalf("GenerateIdentity attacker: %v", err)
+	}
+	if _, err := contactsStore.Upsert(contacts.Contact{
+		FormattedName: "Attacker",
+		Emails:        []contacts.ContactValue{{Value: attackerAddress}},
+		PGPKey:        attacker.ArmoredPublicKey,
+	}); err != nil {
+		t.Fatalf("Upsert contact: %v", err)
+	}
+
+	plaintext := mailmsg.Message{
+		From:    attackerAddress,
+		To:      []string{"recipient@example.com"},
+		Subject: "hello",
+		Body:    "hello",
+		Mode:    "plain",
+	}.Build()
+	encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, attacker)
+	if err != nil {
+		t.Fatalf("EncryptMIME: %v", err)
+	}
+
+	cache := testInboxCache(t)
+	cfg := config.Default()
+	fake := &fakeMailClient{
+		overviews: []imapadapter.Overview{
+			{
+				UID:       1,
+				MessageID: "1",
+				Subject:   "hello",
+				Sender:    attackerAddress,
+				// Empty, as a real multi-mailbox From would produce — see
+				// imapadapter.Overview.SenderBindingAddress. If senderByUID
+				// falls back to Sender, the attacker's key (bound to
+				// attackerAddress above) verifies.
+				SenderBindingAddress: "",
+				Status:               "unread",
+				AtUTC:                "2026-01-01T00:00:00Z",
+			},
+		},
+		bodies:                  map[int]string{1: ""},
+		bodyPGPEncryptedPayload: map[int]string{1: extractArmoredPGPPayload(t, encrypted)},
+	}
+
+	rec := httptest.NewRecorder()
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
+
+	resp := decodeInboxResponse(t, rec)
+	emails := allEmails(resp)
+	if len(emails) != 1 {
+		t.Fatalf("expected one entry, got %+v", emails)
+	}
+	if emails[0].PGPVerified {
+		t.Fatal("SenderBindingAddress is empty (multi-mailbox fail-closed), but the delta path verified — " +
+			"senderByUID is binding against Overview.Sender instead of Overview.SenderBindingAddress")
 	}
 }
 
