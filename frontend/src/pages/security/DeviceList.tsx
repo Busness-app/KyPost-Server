@@ -83,8 +83,12 @@ export function DeviceList({
                   </span>
                 ) : null}
               </span>
+              {/* Collapsed: four devices' worth of version, timestamp, token
+                  and user agent is what pushed everything below it off the
+                  screen, and none of it is read on the way to a decision. */}
               {row.device ? (
-                <>
+                <details className="sec-details sec-device-details">
+                  <summary>Details</summary>
                   {version ? <span className="sec-device-detail">{version}</span> : null}
                   <span className="sec-device-detail">
                     Updated: {formatDeviceTime(row.device.updatedAt || row.device.registeredAt)}
@@ -93,7 +97,7 @@ export function DeviceList({
                   {row.device.userAgent?.trim() ? (
                     <span className="sec-device-detail">UA: {row.device.userAgent.trim()}</span>
                   ) : null}
-                </>
+                </details>
               ) : null}
               {row.missingFromInventory ? (
                 <p className="sec-verdict sec-verdict-risk">
