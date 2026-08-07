@@ -181,6 +181,55 @@ describe("recovery backup with a drifted identity response", () => {
   });
 });
 
+describe("the device list and the identity change", () => {
+  // Replacing the identity clears every non-password envelope slot on the
+  // server, so a list cached across that change would keep showing devices as
+  // able to read mail they can no longer open. Observed here through the
+  // null -> identity transition every page load already makes, rather than
+  // through the generate flow: "Generate new identity" renders only in
+  // MailKeys' NO-identity branch, and storeClientPGPIdentity goes through
+  // deriveCredential, which this file does not mock.
+  // Rendered on Sign-in deliberately: SecurityPage fetches the device list
+  // whatever tab is showing, and Sign-in mounts nothing else that fetches it,
+  // so the count below is SecurityPage's own effect and nothing else.
+  it("re-reads the devices once the identity's fingerprint arrives", async () => {
+    renderPage("signin");
+
+    await waitFor(() => {
+      const calls = getJSON.mock.calls.filter((c) =>
+        String(c[0]).startsWith("/api/notifications/native/devices")
+      );
+      expect(calls.length).toBeGreaterThan(1);
+    });
+  });
+
+  it("reads them once when there is no identity to change", async () => {
+    getJSON.mockImplementation((url: string) => {
+      if (url === "/api/mfa/status") {
+        return Promise.resolve({
+          totpEnabled: true,
+          recoveryCodesRemaining: 8,
+          pushMfaEnabled: false,
+          approverDevices: []
+        });
+      }
+      if (url === "/api/pgp/identity") return Promise.reject(new Error("none"));
+      if (url.startsWith("/api/notifications/native/devices")) {
+        return Promise.resolve({ devices: [], deliveryMode: "push" });
+      }
+      return Promise.resolve({});
+    });
+
+    renderPage("signin");
+    await waitFor(() => expect(getJSON).toHaveBeenCalledWith("/api/pgp/identity"));
+
+    const calls = getJSON.mock.calls.filter((c) =>
+      String(c[0]).startsWith("/api/notifications/native/devices")
+    );
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe("SIBLING: recovery codes survive a tab switch", () => {
   it("keeps just-issued recovery codes across Sign-in -> Devices -> Sign-in", async () => {
     const user = userEvent.setup();

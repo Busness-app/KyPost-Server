@@ -147,9 +147,19 @@ export function SecurityPage() {
     }
   }, []);
 
+  // `pgpIdentity?.fingerprint` is in the deps deliberately. Replacing the
+  // identity clears every non-password envelope slot on the server, so every
+  // device's enrollment marker becomes false — and a list cached across that
+  // change would keep showing devices as able to read mail they can no longer
+  // open. This is the guarantee DeviceEnrollmentCard's own fingerprint-keyed
+  // refetch used to provide; it lives here now that the rows render enrollment.
+  //
+  // The cost is one extra GET per page load, because the identity arrives after
+  // the first run. That is cheaper than any scheme for suppressing it, all of
+  // which can go stale in the direction that matters.
   useEffect(() => {
     void refreshDevices();
-  }, [refreshDevices]);
+  }, [refreshDevices, pgpIdentity?.fingerprint]);
 
   const showRecoveryPanel = recoveryCodes.length > 0;
   const totpOn = showRecoveryPanel || Boolean(status?.totpEnabled);
