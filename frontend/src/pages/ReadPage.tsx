@@ -1563,7 +1563,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                   </div>
                 </div>
               ) : null}
-              <div>
+              <div className="email-reader-body-wrap">
                 {showRawEmail ? (
                   <pre
                     key="raw"

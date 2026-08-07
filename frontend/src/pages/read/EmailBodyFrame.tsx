@@ -210,7 +210,7 @@ export function EmailBodyFrame({ html, className, title = "Message body" }: Prop
       title={title}
       sandbox={FRAME_SANDBOX}
       srcDoc={`<!doctype html><html><head>${FRAME_HEAD}<style>${frameStyle(ink, bg)}</style></head><body>${html}</body></html>`}
-      style={{ width: "100%", height, border: 0, display: "block" }}
+      style={{ width: "100%", height: "auto", minHeight: height, flex: "1 1 auto", border: 0, display: "block" }}
     />
   );
 }
