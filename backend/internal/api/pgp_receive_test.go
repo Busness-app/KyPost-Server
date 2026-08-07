@@ -351,6 +351,211 @@ func TestServerCustodyVerificationIsBoundToSender(t *testing.T) {
 	}
 }
 
+// TestUnreadMessageVerificationUsesSenderBindingAddress is the
+// UnreadMessage/server-protected-account counterpart of
+// TestOverviewFromEmailSenderBindingAddress (internal/adapters/imap):
+// decryptPGPUnreadMessage and verifySignedOnlyUnreadMessage must resolve
+// signerKeysForSender from UnreadMessage.SenderBindingAddress, not
+// UnreadMessage.Sender. Sender is the (possibly multi-mailbox, possibly
+// nondeterministically-rendered) display string; SenderBindingAddress is the
+// deterministic, fail-closed twin imapadapter.overviewFromEmail computes via
+// singleMailboxSender, and is "" for exactly the multi-mailbox From this test
+// simulates.
+//
+// Sender below is deliberately set to a single, cleanly-parseable address —
+// NOT a realistic "Name <a>, Name2 <b>" multi-mailbox rendering. A realistic
+// rendering already fails closed inside senderAddrSpec regardless of which
+// field a caller reads (see TestSenderAddrSpecMultiAddressFailsClosed: a
+// syntactically well-formed multi-address string returns "" on its own), so
+// it would pass this test whether or not the fix here regressed. Only a
+// single clean address in Sender can distinguish "the call site reads
+// SenderBindingAddress" from "the call site still reads Sender" — which is
+// the exact thing this fix changed.
+func TestUnreadMessageVerificationUsesSenderBindingAddress(t *testing.T) {
+	const attackerAddress = "attacker@evil.example"
+
+	setUpAttackerContact := func(t *testing.T, store *contacts.Store) *pgpmail.Identity {
+		t.Helper()
+		attacker, err := pgpmail.GenerateIdentity("Attacker", attackerAddress)
+		if err != nil {
+			t.Fatalf("GenerateIdentity: %v", err)
+		}
+		if _, err := store.Upsert(contacts.Contact{
+			FormattedName: "Attacker",
+			Emails:        []contacts.ContactValue{{Value: attackerAddress}},
+			PGPKey:        attacker.ArmoredPublicKey,
+		}); err != nil {
+			t.Fatalf("Upsert contact: %v", err)
+		}
+		return attacker
+	}
+
+	t.Run("decryptPGPUnreadMessage", func(t *testing.T) {
+		userID, recipient, contactsStore, srv := pgpVictimWithIdentity(t)
+		attacker := setUpAttackerContact(t, contactsStore)
+
+		plaintext := mailmsg.Message{
+			From:    attackerAddress,
+			To:      []string{"recipient@example.com"},
+			Subject: "hello",
+			Body:    "hello",
+			Mode:    "plain",
+		}.Build()
+		encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, attacker)
+		if err != nil {
+			t.Fatalf("EncryptMIME: %v", err)
+		}
+
+		msg := imapadapter.UnreadMessage{
+			// Same address the attacker's key is bound under — if
+			// decryptPGPUnreadMessage reads Sender instead of
+			// SenderBindingAddress, it verifies.
+			Sender:               attackerAddress,
+			SenderBindingAddress: "",
+			PGPEncryptedPayload:  extractArmoredPGPPayload(t, encrypted),
+		}
+		result := srv.decryptPGPUnreadMessage(userID, msg)
+		if result.PGPDecryptError != "" {
+			t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
+		}
+		if result.PGPVerified {
+			t.Fatal("SenderBindingAddress is empty (multi-mailbox fail-closed), but the message verified — " +
+				"decryptPGPUnreadMessage is binding against Sender instead of SenderBindingAddress")
+		}
+	})
+
+	// TestUnreadMessageVerificationUsesSenderBindingAddress's other subtests
+	// are all negative (SenderBindingAddress == "" must not verify). None of
+	// them notice an implementation that never binds anything at all — e.g.
+	// decryptPGPUnreadMessage hardcoding "" instead of reading
+	// SenderBindingAddress would pass every one of them. This proves the
+	// positive direction: a real SenderBindingAddress must still let a
+	// legitimately signed/encrypted message verify.
+	t.Run("decryptPGPUnreadMessage verifies when SenderBindingAddress is populated", func(t *testing.T) {
+		userID, recipient, contactsStore, srv := pgpVictimWithIdentity(t)
+		const senderAddress = "sender@example.com"
+		sender, err := pgpmail.GenerateIdentity("Sender", senderAddress)
+		if err != nil {
+			t.Fatalf("GenerateIdentity: %v", err)
+		}
+		if _, err := contactsStore.Upsert(contacts.Contact{
+			FormattedName: "Sender",
+			Emails:        []contacts.ContactValue{{Value: senderAddress}},
+			PGPKey:        sender.ArmoredPublicKey,
+		}); err != nil {
+			t.Fatalf("Upsert contact: %v", err)
+		}
+
+		plaintext := mailmsg.Message{
+			From:    senderAddress,
+			To:      []string{"recipient@example.com"},
+			Subject: "hello",
+			Body:    "hello",
+			Mode:    "plain",
+		}.Build()
+		encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, sender)
+		if err != nil {
+			t.Fatalf("EncryptMIME: %v", err)
+		}
+
+		msg := imapadapter.UnreadMessage{
+			Sender:               "Sender <sender@example.com>",
+			SenderBindingAddress: "Sender <sender@example.com>",
+			PGPEncryptedPayload:  extractArmoredPGPPayload(t, encrypted),
+		}
+		result := srv.decryptPGPUnreadMessage(userID, msg)
+		if result.PGPDecryptError != "" {
+			t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
+		}
+		if !result.PGPSigned || !result.PGPVerified {
+			t.Fatalf("expected a legitimately signed message with a populated SenderBindingAddress to verify, got PGPSigned=%v PGPVerified=%v",
+				result.PGPSigned, result.PGPVerified)
+		}
+	})
+
+	t.Run("verifySignedOnlyUnreadMessage", func(t *testing.T) {
+		userID, _, contactsStore, srv := pgpVictimWithIdentity(t)
+		attacker := setUpAttackerContact(t, contactsStore)
+
+		plaintext := mailmsg.Message{
+			From:    attackerAddress,
+			To:      []string{"recipient@example.com"},
+			Subject: "Signed only",
+			Body:    "trust me",
+			Mode:    "plain",
+		}.Build()
+		signed, err := pgpmail.SignMIME(plaintext, attacker)
+		if err != nil {
+			t.Fatalf("SignMIME: %v", err)
+		}
+		armoredSig := extractArmoredDetachedSignature(t, signed)
+		// Same exact-bytes requirement TestVerifySignedOnlyMessageContentRoundTrip
+		// documents — the signed MIME part as SignMIME produced it.
+		exactSignedContent := "Content-Type: text/plain; charset=UTF-8\r\n" +
+			"Content-Transfer-Encoding: base64\r\n\r\n" +
+			base64.StdEncoding.EncodeToString([]byte("trust me")) + "\r\n"
+
+		msg := imapadapter.UnreadMessage{
+			Body:                 exactSignedContent,
+			PGPSignaturePayload:  armoredSig,
+			Sender:               attackerAddress,
+			SenderBindingAddress: "",
+		}
+		result := srv.verifySignedOnlyUnreadMessage(userID, msg)
+		if result.PGPVerified {
+			t.Fatal("SenderBindingAddress is empty (multi-mailbox fail-closed), but the signature verified — " +
+				"verifySignedOnlyUnreadMessage is binding against Sender instead of SenderBindingAddress")
+		}
+	})
+
+	// Positive counterpart of the subtest above — see the comment on
+	// "decryptPGPUnreadMessage verifies when SenderBindingAddress is
+	// populated" for why a purely negative assertion isn't enough here.
+	t.Run("verifySignedOnlyUnreadMessage verifies when SenderBindingAddress is populated", func(t *testing.T) {
+		userID, _, contactsStore, srv := pgpVictimWithIdentity(t)
+		const senderAddress = "sender@example.com"
+		sender, err := pgpmail.GenerateIdentity("Sender", senderAddress)
+		if err != nil {
+			t.Fatalf("GenerateIdentity: %v", err)
+		}
+		if _, err := contactsStore.Upsert(contacts.Contact{
+			FormattedName: "Sender",
+			Emails:        []contacts.ContactValue{{Value: senderAddress}},
+			PGPKey:        sender.ArmoredPublicKey,
+		}); err != nil {
+			t.Fatalf("Upsert contact: %v", err)
+		}
+
+		plaintext := mailmsg.Message{
+			From:    senderAddress,
+			To:      []string{"recipient@example.com"},
+			Subject: "Signed only",
+			Body:    "trust me",
+			Mode:    "plain",
+		}.Build()
+		signed, err := pgpmail.SignMIME(plaintext, sender)
+		if err != nil {
+			t.Fatalf("SignMIME: %v", err)
+		}
+		armoredSig := extractArmoredDetachedSignature(t, signed)
+		exactSignedContent := "Content-Type: text/plain; charset=UTF-8\r\n" +
+			"Content-Transfer-Encoding: base64\r\n\r\n" +
+			base64.StdEncoding.EncodeToString([]byte("trust me")) + "\r\n"
+
+		msg := imapadapter.UnreadMessage{
+			Body:                 exactSignedContent,
+			PGPSignaturePayload:  armoredSig,
+			Sender:               "Sender <sender@example.com>",
+			SenderBindingAddress: "Sender <sender@example.com>",
+		}
+		result := srv.verifySignedOnlyUnreadMessage(userID, msg)
+		if !result.PGPSigned || !result.PGPVerified {
+			t.Fatalf("expected a legitimately signed message with a populated SenderBindingAddress to verify, got PGPSigned=%v PGPVerified=%v",
+				result.PGPSigned, result.PGPVerified)
+		}
+	})
+}
+
 // pgpVictimWithIdentity sets up a test user holding a server-readable identity
 // and returns the user id, the identity, and the user's contacts store — the
 // four-step preamble every binding test below needs.

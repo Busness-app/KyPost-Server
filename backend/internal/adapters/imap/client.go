@@ -75,12 +75,17 @@ type UnreadMessage struct {
 	MessageID string
 	Subject   string
 	Sender    string
-	SentTo    string
-	CC        string
-	BCC       string
-	Keywords  []string
-	AtUTC     string
-	Body      string
+	// SenderBindingAddress mirrors Overview.SenderBindingAddress — see that
+	// field's doc comment for why it exists and why "" means fail closed.
+	// decryptPGPUnreadMessage and verifySignedOnlyUnreadMessage must read
+	// this, not Sender, when resolving signerKeysForSender.
+	SenderBindingAddress string
+	SentTo               string
+	CC                   string
+	BCC                  string
+	Keywords             []string
+	AtUTC                string
+	Body                 string
 	// BodyMode is BodyModeHTML or BodyModePlain — which MIME part Body was
 	// taken from. See clientBody for why the client must not re-derive this.
 	BodyMode string
@@ -368,13 +373,36 @@ type Overview struct {
 	MessageID string
 	Subject   string
 	Sender    string
-	SentTo    string
-	CC        string
-	BCC       string
-	Keywords  []string
-	AtUTC     string
-	Status    string
-	UID       int
+	// SenderBindingAddress is Sender's deterministic twin, singleMailboxSender(e)
+	// rather than strings.TrimSpace(e.From.String()).
+	//
+	// Sender exists to be displayed in the inbox row and must keep rendering
+	// something for a legitimate multi-mailbox From. But e.From is a
+	// map[address]displayName, and String() ranges over that map with no
+	// fixed iteration order — measured 175/25 across 200 renders of the SAME
+	// two-mailbox message. This Overview reaches signerKeysForSender — the
+	// server-side signature binding for server-protected accounts — by two
+	// separate routes: Overview.Sender flows into UnreadMessage.Sender and
+	// from there into decryptPGPUnreadMessage/verifySignedOnlyUnreadMessage
+	// (the classic inbox path); and this Overview is also read directly,
+	// without ever passing through UnreadMessage, by the inbox handler's
+	// delta-path sender lookup (server_inbox.go's senderByUID). A binding
+	// that coin-flips is not a binding, on either route.
+	//
+	// SenderBindingAddress is "" whenever e.From names more than one mailbox
+	// (see singleMailboxSender) — which also has no single-signer semantics to
+	// bind a signature to in the first place — so signerKeysForSender resolves
+	// to no keys rather than a randomly-chosen one: fail closed, exactly like
+	// MessageContent.Sender on the client-protected read path. Consumed only by
+	// the binding call sites; never shown to a user.
+	SenderBindingAddress string
+	SentTo               string
+	CC                   string
+	BCC                  string
+	Keywords             []string
+	AtUTC                string
+	Status               string
+	UID                  int
 }
 
 type DraftMessage struct {
@@ -626,16 +654,17 @@ func overviewFromEmail(uid int, e *goimap.Email) Overview {
 	}
 
 	return Overview{
-		MessageID: strconv.Itoa(uid),
-		Subject:   strings.TrimSpace(e.Subject),
-		Sender:    strings.TrimSpace(e.From.String()),
-		SentTo:    strings.TrimSpace(e.To.String()),
-		CC:        strings.TrimSpace(e.CC.String()),
-		BCC:       strings.TrimSpace(e.BCC.String()),
-		Keywords:  keywords,
-		AtUTC:     atUTC,
-		Status:    status,
-		UID:       uid,
+		MessageID:            strconv.Itoa(uid),
+		Subject:              strings.TrimSpace(e.Subject),
+		Sender:               strings.TrimSpace(e.From.String()),
+		SenderBindingAddress: singleMailboxSender(e),
+		SentTo:               strings.TrimSpace(e.To.String()),
+		CC:                   strings.TrimSpace(e.CC.String()),
+		BCC:                  strings.TrimSpace(e.BCC.String()),
+		Keywords:             keywords,
+		AtUTC:                atUTC,
+		Status:               status,
+		UID:                  uid,
 	}
 }
 
@@ -1013,18 +1042,19 @@ func (c *APIClient) ListUnreadMessages(ctx context.Context, mailbox string, limi
 		body, bodyMode := clientBody(e)
 
 		msg := UnreadMessage{
-			BodyMode:       bodyMode,
-			MessageID:      ov.MessageID,
-			Subject:        ov.Subject,
-			Sender:         ov.Sender,
-			SentTo:         ov.SentTo,
-			CC:             ov.CC,
-			BCC:            ov.BCC,
-			Keywords:       ov.Keywords,
-			AtUTC:          ov.AtUTC,
-			Body:           body,
-			Status:         ov.Status,
-			HasAttachments: len(e.Attachments) > 0,
+			BodyMode:             bodyMode,
+			MessageID:            ov.MessageID,
+			Subject:              ov.Subject,
+			Sender:               ov.Sender,
+			SenderBindingAddress: ov.SenderBindingAddress,
+			SentTo:               ov.SentTo,
+			CC:                   ov.CC,
+			BCC:                  ov.BCC,
+			Keywords:             ov.Keywords,
+			AtUTC:                ov.AtUTC,
+			Body:                 body,
+			Status:               ov.Status,
+			HasAttachments:       len(e.Attachments) > 0,
 		}
 		if body == "" {
 			if payload := envelopes[uid].Payload; payload != "" {

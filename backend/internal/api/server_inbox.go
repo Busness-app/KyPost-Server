@@ -487,11 +487,17 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			return
 		}
 		// The signature verdict is bound to the claimed sender, so the body fetched
-		// by UID has to be paired back up with the From address the same UID's
-		// metadata carries — see signerKeysForSender.
-		senderByUID := make(map[int]string, len(result.New))
-		for _, e := range result.New {
-			senderByUID[e.UID] = e.Sender
+		// by UID has to be paired back up with the deterministic binding address
+		// the same UID's overview carries — see signerKeysForSender.
+		//
+		// Sourced from `overviews` (this call's live imapadapter.Overview slice),
+		// not from result.New/mailcache.Overview: SenderBindingAddress is not part
+		// of mailcache's persisted Entry shape, and a window entry carried forward
+		// unchanged since before this field existed would silently resolve to "".
+		// The live overview fetched above is always current.
+		senderByUID := make(map[int]string, len(overviews))
+		for _, ov := range overviews {
+			senderByUID[ov.UID] = ov.SenderBindingAddress
 		}
 		for uid, c := range contents {
 			if c.PGPEncryptedPayload != "" {
