@@ -510,7 +510,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			// classified correctly AND bodyless, so the body cannot be the
 			// only sentinel. A failed decrypt stays uncached.
 			c, ok := contents[e.UID]
-			if ok && c.Body == "" && !(c.PGPEncrypted && c.PGPDecryptError == "") {
+			if ok && c.Body == "" && (!c.PGPEncrypted || c.PGPDecryptError != "") {
 				ok = false
 			}
 			if ok {
