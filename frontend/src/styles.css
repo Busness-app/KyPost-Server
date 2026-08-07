@@ -734,6 +734,7 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .email-reader-actions {
@@ -751,8 +752,10 @@ body {
 
 .email-reader-content {
   margin-top: 2px;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
+  flex: 1;
   min-height: 0;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
@@ -763,6 +766,8 @@ body {
 .email-reader-body-block {
   margin: 0;
   max-height: none;
+  min-height: 240px;
+  flex: 1;
   overflow: visible;
   /* Containment, independent of the sanitizer: this makes the block a
      containing block for fixed-position descendants and clips painting to it,
@@ -791,6 +796,8 @@ body {
   margin: 0;
   display: block;
   width: 100%;
+  min-height: 240px;
+  flex: 1;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bg);
