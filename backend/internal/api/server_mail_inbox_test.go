@@ -768,11 +768,7 @@ func TestServeInbox_BodylessPGPWarmPreservesFlags(t *testing.T) {
 	// strings.TrimSpace(Body)=="" && (TrimSpace(Payload)=="" || DecryptError!="") → not warm
 	// strings.TrimSpace(Body)=="" && TrimSpace(Payload)!="" && DecryptError=="" → warm
 	shouldWarm := func(body, payload, decryptErr string) bool {
-		// mirrors server_inbox.go:513
-		if body == "" {
-			// placeholder — real code uses TrimSpace
-		}
-		// ponytail: exact condition from server_inbox.go
+		// ponytail: exact condition from server_inbox.go:513
 		if strings.TrimSpace(body) == "" && (strings.TrimSpace(payload) == "" || decryptErr != "") {
 			return false
 		}
