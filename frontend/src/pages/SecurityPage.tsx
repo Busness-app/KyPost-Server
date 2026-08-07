@@ -216,7 +216,7 @@ export function SecurityPage() {
           </p>
         </li>
         <li>
-          <p className="sec-eyebrow">Mail</p>
+          <p className="sec-eyebrow">Encryption</p>
           <span className="sec-custody-state">
             <span
               className={`sec-pip ${

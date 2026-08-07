@@ -357,15 +357,23 @@ export function MailKeys({
     setPgpStatus("");
     try {
       const bootstrap = pgpSession?.bootstrap;
-      if (!bootstrap || bootstrap.protection !== "client" || !pgpIdentity) {
+      // The fingerprint is checked, not assumed. It is the one field here that
+      // comes from a different response than the public key beside it, and a
+      // missing one used to surface as a TypeError inside the download rather
+      // than as an error about the identity — after the backup had already been
+      // built, so the user was told the backup failed while its one-time secret
+      // was silently discarded. Falling back to the bootstrap keeps a browser
+      // talking to an older server working rather than dead.
+      const fingerprint = pgpIdentity?.fingerprint || bootstrap?.fingerprint || "";
+      if (!bootstrap || bootstrap.protection !== "client" || !fingerprint) {
         throw new Error("A client-protected identity is required.");
       }
       const { backup, secret } = await createRecoveryBackup(
         requireUnlockedKey(),
-        pgpIdentity.fingerprint,
+        fingerprint,
         bootstrap.publicKey
       );
-      saveRecoveryBackup(backup, pgpIdentity.fingerprint, secret);
+      saveRecoveryBackup(backup, fingerprint, secret);
     } catch (e) {
       setPgpStatus(`Backup failed: ${toErrorMessage(e, "unlock your key first")}`);
     } finally {
@@ -438,7 +446,10 @@ export function MailKeys({
     try {
       const restored = await restoreRecoveryBackup(await restoreFile.text(), restoreSecret);
       const imported = await importIdentity(restored.privateKey, "");
-      const expected = pgpIdentity?.fingerprint.toUpperCase();
+      // Optional-chained through the fingerprint too, not just the identity:
+      // the check below already treats a missing one as "cannot match", which
+      // is the safe answer, and this is the same crash the recovery backup hit.
+      const expected = pgpIdentity?.fingerprint?.toUpperCase();
       if (!expected || imported.fingerprint !== expected || restored.fingerprint.toUpperCase() !== expected) {
         throw new Error("This backup belongs to a different PGP identity.");
       }
@@ -540,7 +551,7 @@ export function MailKeys({
         }`}
       >
         <div className="sec-card-head">
-          <p className="sec-eyebrow">Mail</p>
+          <p className="sec-eyebrow">Encryption</p>
           <h3>Email encryption (PGP)</h3>
         </div>
         {pgpLoading ? (

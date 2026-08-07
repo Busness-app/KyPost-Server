@@ -21,4 +21,12 @@ describe("resolveSecurityTab", () => {
       expect(SECURITY_TAB_LABELS[tab]).toBeTruthy();
     }
   });
+
+  // The slug and the label are deliberately different here, and neither is
+  // free to follow the other: `mail` is in ?tab= links that already exist, and
+  // "Encryption" is what the tab actually holds.
+  it("shows the PGP tab as Encryption while keeping its mail slug", () => {
+    expect(SECURITY_TAB_LABELS.mail).toBe("Encryption");
+    expect(resolveSecurityTab("mail")).toBe("mail");
+  });
 });

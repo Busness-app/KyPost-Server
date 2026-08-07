@@ -131,7 +131,21 @@ func (s *Server) handlePGPIdentityClient(w http.ResponseWriter, r *http.Request)
 	s.clearDeviceEnrollmentsFor(u.ID, "client-protected identity "+source)
 	s.logger.Info("pgp identity stored with client-side protection",
 		"user_id", u.ID, "fingerprint", u.PGPFingerprint, "source", source)
-	writeJSON(w, http.StatusOK, u.Public())
+	// The identity shape, not users.Public: this endpoint returns the identity
+	// it just stored, and the browser keeps that response as the page's current
+	// one. Public names the same fields differently (pgpFingerprint) and carries
+	// no public key, so answering with it handed the client an identity whose
+	// fingerprint was undefined — which is only noticed later, by whatever first
+	// reads it (see handleDownloadRecoveryBackup).
+	writeJSON(w, http.StatusOK, pgpIdentityResponse{
+		Fingerprint: u.PGPFingerprint,
+		KeyID:       u.PGPKeyID,
+		PublicKey:   u.PGPPublicKey,
+		Source:      source,
+		CreatedAt:   u.PGPKeyCreatedAt,
+		// Both false by construction: the guard above refuses a key that is
+		// already revoked or expired, so a stored one never is.
+	})
 }
 
 // handlePGPRewrapKey replaces the wrapped envelope without touching the
