@@ -1496,7 +1496,6 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
               <p style={{ margin: 0 }}><strong>Subject:</strong> {selected.subject || "(no subject)"}</p>
               <p style={{ margin: 0 }}><strong>Sender:</strong> {selected.sender || "-"}</p>
               <p style={{ margin: 0 }}><strong>Sent To:</strong> {selected.sentTo || "-"}</p>
-              <p style={{ margin: 0 }}><strong>Keyword:</strong> {selected.label || "Uncategorized"}</p>
               <div className="email-keyword-editor">
                 <strong>Keywords:</strong>
                 <div className="compose-token-field-wrap">
@@ -1564,7 +1563,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                   </div>
                 </div>
               ) : null}
-              <div>
+              <div className="email-reader-body-wrap">
                 {showRawEmail ? (
                   <pre
                     key="raw"

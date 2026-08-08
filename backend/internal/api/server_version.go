@@ -26,7 +26,7 @@ import (
 // binary tagged v1.0.0 while this still said 0.1.0 would compare itself
 // against every published release, conclude it was out of date forever, and
 // email the admin of every install about an upgrade they had already applied.
-const serverVersion = "0.2.0"
+const serverVersion = "0.3.0"
 
 // serverReleasesURL is the LIST endpoint for this project's own releases. A
 // var, not a const, only so tests can point it at an httptest server.

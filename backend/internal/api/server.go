@@ -1033,6 +1033,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		checkpoint = ""
 	}
 	resp := map[string]any{
+		"version":                 serverVersion,
 		"scanIntervalSeconds":     cfg.Scan.IntervalSeconds,
 		"rateLimits":              cfg.RateLimits,
 		"checkpoint":              checkpoint,

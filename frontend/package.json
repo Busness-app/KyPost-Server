@@ -1,6 +1,6 @@
 {
   "name": "kypost-frontend",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "test": "vitest"
   },
   "dependencies": {
-    "dompurify": "^3.4.12",
+    "dompurify": "3.4.13",
     "openpgp": "^6.3.1",
     "qrcode": "^1.5.4",
     "quill": "2.0.2",

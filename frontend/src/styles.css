@@ -708,7 +708,7 @@ body {
   background: var(--modal-overlay);
   display: grid;
   place-items: center;
-  padding: 16px;
+  padding: 12px;
   z-index: 2000;
 }
 
@@ -717,8 +717,9 @@ body {
 }
 
 .email-reader-window {
-  width: min(1100px, 92vw);
-  max-height: 92vh;
+  width: min(1200px, 96vw);
+  height: 94vh;
+  max-height: 96vh;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -766,8 +767,8 @@ body {
 .email-reader-body-block {
   margin: 0;
   max-height: none;
-  min-height: 240px;
-  flex: 1;
+  min-height: 320px;
+  flex: 1 1 auto;
   overflow: visible;
   /* Containment, independent of the sanitizer: this makes the block a
      containing block for fixed-position descendants and clips painting to it,
@@ -796,13 +797,20 @@ body {
   margin: 0;
   display: block;
   width: 100%;
-  min-height: 240px;
-  flex: 1;
+  min-height: 320px;
+  flex: 1 1 auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bg);
   /* No `contain` here: a frame is already its own layout and paint boundary,
      and nothing inside it can reach the parent document. */
+}
+
+.email-reader-body-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 h1, h2, h3, h4 {

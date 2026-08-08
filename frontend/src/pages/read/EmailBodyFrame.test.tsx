@@ -120,7 +120,7 @@ describe("EmailBodyFrame sizing", () => {
     // Measuring the initial about:blank document set the height to 0 and made
     // every message flash on open.
     render(<EmailBodyFrame html="<p>hi</p>" />);
-    const height = frame().style.height;
+    const height = frame().style.minHeight || frame().style.height;
     expect(height).not.toBe("0px");
     expect(parseInt(height, 10)).toBeGreaterThan(0);
   });
@@ -159,7 +159,7 @@ describe("EmailBodyFrame sizing", () => {
       el.dispatchEvent(new Event("load"));
       observerCallback?.([], {} as ResizeObserver);
 
-      const height = parseInt(el.style.height, 10);
+      const height = parseInt(el.style.minHeight || el.style.height, 10);
       expect(height).toBeLessThanOrEqual(20000);
     } finally {
       (globalThis as { ResizeObserver?: unknown }).ResizeObserver = original;

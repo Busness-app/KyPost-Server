@@ -3,10 +3,12 @@ package api
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/mail"
+	"os"
 	"strings"
 	"testing"
 
@@ -764,5 +766,53 @@ func TestBoundSignerKeysForSenderStillReportsAConflict(t *testing.T) {
 	}
 	if got[0].PublicKey != "" {
 		t.Fatal("a conflicted key must ship no key material")
+	}
+}
+
+func TestSenderAddrSpecCorpus(t *testing.T) {
+	// corpus lives at repo root testdata/from-corpus.json
+	data, err := os.ReadFile("../../../testdata/from-corpus.json")
+	if err != nil {
+		data, err = os.ReadFile("../../testdata/from-corpus.json")
+		if err != nil {
+			data, err = os.ReadFile("testdata/from-corpus.json")
+			if err != nil {
+				t.Fatalf("read from-corpus.json: %v", err)
+			}
+		}
+	}
+	// parse the corpus directly to avoid adding a dependency on the corpus shape
+	type corpusCase struct {
+		Name   string `json:"name"`
+		From   string `json:"from"`
+		Expect string `json:"expect"`
+	}
+	var corpus struct {
+		Cases []corpusCase `json:"cases"`
+	}
+	// raw JSON has $comment first — unmarshal with a map to skip it
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal corpus raw: %v", err)
+	}
+	if err := json.Unmarshal(raw["cases"], &corpus.Cases); err != nil {
+		t.Fatalf("unmarshal cases: %v", err)
+	}
+	for _, c := range corpus.Cases {
+		t.Run(c.Name, func(t *testing.T) {
+			got := senderAddrSpec(c.From)
+			if got != c.Expect {
+				t.Fatalf("senderAddrSpec(%q) = %q, want %q", c.From, got, c.Expect)
+			}
+		})
+	}
+}
+
+func TestSenderAddrSpecMultiAddressFailsClosed(t *testing.T) {
+	if got := senderAddrSpec("eve@evil.example, bob@example.com"); got != "" {
+		t.Fatalf("multi-address From must fail closed, got %q", got)
+	}
+	if got := senderAddrSpec("Bob <bob@example.com>, Eve <eve@evil.example>"); got != "" {
+		t.Fatalf("multi-address From with display names must fail closed, got %q", got)
 	}
 }

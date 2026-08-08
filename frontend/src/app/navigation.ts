@@ -1,9 +1,10 @@
-// The settings sidebar's groups and the build version shown in the license
-// overlay. Data, not behaviour — kept out of App.tsx so adding a panel is a
-// one-line edit in an obvious place.
-
-// Bump this when releasing a new build. Shown in the license overlay.
-export const APP_VERSION = 1;
+// The settings sidebar's groups. Data, not behaviour — kept out of App.tsx so
+// adding a panel is a one-line edit in an obvious place.
+//
+// ponytail: version is no longer a frontend constant — About and Admin > Server
+// both read backend serverVersion (via GET /api/status `version`), the same LHS
+// the self-update check uses. One bump (server_version.go / package.json) updates
+// both badges; see release-image.yml gate.
 
 export type SettingsNavItem = { to: string; label: string };
 
