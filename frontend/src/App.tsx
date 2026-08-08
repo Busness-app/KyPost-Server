@@ -30,7 +30,7 @@ import { SecurityPage } from "./pages/SecurityPage";
 import { ReauthGate, clearReauth } from "./components/ReauthGate";
 import agplLicenseText from "./agpl-3.0.txt?raw";
 
-import { APP_VERSION, visibleSettingsGroups } from "./app/navigation";
+import { visibleSettingsGroups } from "./app/navigation";
 import { LEGACY_SETTINGS_PATHS, legacySettingsRedirect } from "./app/routes";
 import { subscribeSecretHold } from "./lib/secretHold";
 import type {
@@ -121,6 +121,7 @@ export function App() {
   const composeNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [licenseOpen, setLicenseOpen] = useState(false);
   const licenseDialogRef = useRef<HTMLDialogElement | null>(null);
+  const [appVersion, setAppVersion] = useState("");
   const currentMailbox = new URLSearchParams(location.search).get("mailbox")?.trim() ?? "";
   const onReadPage = location.pathname === "/read";
 
@@ -188,6 +189,24 @@ export function App() {
     if (auth?.authenticated) {
       void loadPGPSession();
     }
+  }, [auth?.authenticated]);
+
+  // ponytail: single backend source for the displayed version (serverVersion)
+  // — both the About overlay and Admin > Server read the same const via API.
+  useEffect(() => {
+    if (!auth?.authenticated) {
+      setAppVersion("");
+      return;
+    }
+    let cancelled = false;
+    getJSON<{ version: string }>("/api/status")
+      .then((data) => {
+        if (!cancelled && data.version) setAppVersion(data.version);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [auth?.authenticated]);
 
   useEffect(() => {
@@ -1357,7 +1376,7 @@ export function App() {
             <div className="license-window-title">
               <div className="license-title-main">
                 <span className="license-app-name">KyPost</span>
-                <span className="license-version-badge">v{APP_VERSION}</span>
+                {appVersion ? <span className="license-version-badge">v{appVersion}</span> : null}
               </div>
               <p className="license-title-sub">Developed by Busnes Games</p>
               <p className="license-title-sub">

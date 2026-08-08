@@ -1,0 +1,18 @@
+[
+  {
+    "verdict": "rejected",
+    "reason": "MIME filename-detection differential and JS boundary anchoring were confirmed in run-10 but are fixed on HEAD b4350c2 (fix/client-protected-pgp-flags) by commit 73831ec fix(pgp): make the two MIME parsers agree on the display body. HEAD contains backend/internal/pgpmail/mime.go:515 partFileName() checking both Content-Disposition filename= and Content-Type name= and frontend/src/lib/mimeContent.ts:119 splitParts anchoring to \\r?\\n--boundary, with shared corpus testdata/mime-corpus.json executed by both suites. Verified by reading both files on this HEAD — not a finding on this branch. This delta's bodyless PGP handling (server_inbox.go:513) and sender binding (pgp_client_read.go) do not reintroduce the class."
+  },
+  {
+    "verdict": "rejected",
+    "reason": "Session-authorized re-registration hijacking an existing paired device was confirmed in run-10 (reserveDeviceID existing != ownerID check + upsertNativeDeviceTx merge) but is fixed on HEAD b4350c2 by commit aa61c58 fix(devices): stop device credentials outliving what authorized them (2026-08-05). HEAD b4350c2 contains backend/internal/api/server_notifications.go:488-496 requiring X-Kypost-Device-Secret verification of the existing device's SecretHash via users.VerifyDeviceSecret before re-binding an already-registered deviceId (409 if missing/wrong), and reserveDeviceID still blocks cross-owner. Verified by reading server_notifications.go:488-496 on HEAD b4350c2 and confirming git merge-base --is-ancestor aa61c58 b4350c2. The same commit also rotates subscriber ID on password reset, closing the pairing-token survival path."
+  },
+  {
+    "verdict": "rejected",
+    "reason": "Pairing token minted before password reset surviving to mint a device afterward was confirmed in run-10 but is fixed on HEAD b4350c2 by the same aa61c58. revokeAllUserCredentialsExcept now rotates subscriber ID (store.RotateSubscriberID) and deletes the old subIndex entry, so the HMAC's Sub no longer resolves; consumeNativePairingNonce still enforces single-use. Verified on HEAD b4350c2 at backend/internal/api/server_userscope.go:776-800. The flow now requires a fresh pairing token after any password reset/deactivate/clear-mfa."
+  },
+  {
+    "verdict": "rejected",
+    "reason": "Per-account write meter not applied to pure withDeviceAuth routes was confirmed in run-10 (meterAccountWrite only in withAuth/withMailAuth/withDAVBasicAuth) but is fixed on HEAD b4350c2 by commit 50692d9 fix(api): meter the device-authenticated mutating routes (also ancestor of HEAD). HEAD contains backend/internal/api/device_auth.go:186 meterDeviceWrite() wrapping meterAccountWrite and explicit calls in backend/internal/api/pgp_device_enrollment.go:46 (handlePGPPublishEnrollmentKey), backend/internal/api/contacts_handlers.go:478 (handleContactsSync), backend/internal/api/server_notifications.go:765 (handleNotificationNativeDeregister), etc. Verified by grep meterDeviceWrite on HEAD b4350c2 and merge-base --is-ancestor 50692d9 b4350c2. No unbounded device-authenticated mutating path remains."
+  }
+]
