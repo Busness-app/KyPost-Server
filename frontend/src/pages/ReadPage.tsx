@@ -240,12 +240,15 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     return direction * Math.min(resisted, maxOffset);
   }
 
+  const loadIdRef = useRef(0);
   async function loadInbox() {
+    const loadId = ++loadIdRef.current;
     setLoading(true);
     setError("");
     try {
       const mailboxQuery = mailbox ? `&mailbox=${encodeURIComponent(mailbox)}` : "";
       const data = await getJSON<InboxResponse>(`/api/inbox?limit=500${mailboxQuery}`);
+      if (loadId !== loadIdRef.current) return;
       setLastLoadedAt(new Date());
       const nextTabs = data.tabs ?? [];
       const nextByTab = data.byTab ?? {};
@@ -266,6 +269,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         return current.filter((id) => nextIDSet.has(id));
       });
     } catch (e) {
+      if (loadId !== loadIdRef.current) return;
       const message = toErrorMessage(e, "failed to load inbox");
       setError(message);
       setTabs([]);
@@ -273,15 +277,25 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       setActiveTab("");
       setSelectedMessageIds([]);
     } finally {
-      setLoading(false);
+      if (loadId === loadIdRef.current) setLoading(false);
     }
   }
 
   useEffect(() => {
+    // ponytail: clear stale mailbox data synchronously so switching between
+    // Inbox and Trash does not show the previous mailbox for several seconds
+    // while the new fetch is in flight. Generation guard also drops late
+    // arrivals from a slow previous-mailbox request.
     setSelected(null);
     setSelectedMessageIds([]);
-    loadInbox();
-    const timer = setInterval(loadInbox, 15_000);
+    setTabs([]);
+    setByTab({});
+    setActiveTab("");
+    setSwipeRows({});
+    setSwipeRemovedIds([]);
+    setError("");
+    void loadInbox();
+    const timer = setInterval(() => void loadInbox(), 15_000);
     return () => clearInterval(timer);
   }, [mailbox]);
 
