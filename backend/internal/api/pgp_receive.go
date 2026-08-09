@@ -129,7 +129,7 @@ func (s *Server) decryptPGPMessageContent(userID, senderAddress string, c imapad
 // (non-delta) inbox path.
 func (s *Server) decryptPGPUnreadMessage(userID string, msg imapadapter.UnreadMessage) imapadapter.UnreadMessage {
 	msg.PGPEncrypted = true
-	r := s.decryptPGPPayload(userID, msg.PGPEncryptedPayload, msg.Sender)
+	r := s.decryptPGPPayload(userID, msg.PGPEncryptedPayload, msg.SenderBindingAddress)
 	if r.KeepPayload {
 		return msg
 	}
@@ -182,7 +182,7 @@ func (s *Server) verifySignedOnlyUnreadMessage(userID string, msg imapadapter.Un
 	msg.PGPSigned = true
 	sig := msg.PGPSignaturePayload
 	msg.PGPSignaturePayload = ""
-	verified, fingerprint := s.verifyDetachedForUser(userID, msg.Body, sig, msg.Sender)
+	verified, fingerprint := s.verifyDetachedForUser(userID, msg.Body, sig, msg.SenderBindingAddress)
 	msg.PGPVerified = verified
 	msg.PGPSignerFingerprint = fingerprint
 	return msg

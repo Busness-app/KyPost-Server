@@ -428,3 +428,53 @@ func TestSingleMailboxSender(t *testing.T) {
 		}
 	})
 }
+
+// TestOverviewFromEmailSenderBindingAddress is the Overview sibling of
+// TestSingleMailboxSender: singleMailboxSender's fix was applied to
+// MessageContent.Sender (client-protected read path) but not to
+// Overview.Sender, which flows into UnreadMessage.Sender and from there into
+// the server-side signerKeysForSender binding for server-protected accounts.
+// Overview.Sender itself must keep doing double duty as the displayed inbox
+// sender — including for a legitimate multi-mailbox From — so this checks
+// Sender is untouched while the new SenderBindingAddress field carries the
+// deterministic, fail-closed value instead.
+func TestOverviewFromEmailSenderBindingAddress(t *testing.T) {
+	t.Run("single mailbox: display and binding agree", func(t *testing.T) {
+		e := &goimap.Email{From: goimap.EmailAddresses{"bob@example.com": "Bob"}}
+		ov := overviewFromEmail(1, e)
+		if ov.Sender != "Bob <bob@example.com>" {
+			t.Fatalf("Sender = %q, want %q", ov.Sender, "Bob <bob@example.com>")
+		}
+		if ov.SenderBindingAddress != "Bob <bob@example.com>" {
+			t.Fatalf("SenderBindingAddress = %q, want %q", ov.SenderBindingAddress, "Bob <bob@example.com>")
+		}
+	})
+
+	t.Run("multi-mailbox: display survives, binding fails closed", func(t *testing.T) {
+		e := &goimap.Email{From: goimap.EmailAddresses{
+			"bob@example.com":  "Bob",
+			"eve@evil.example": "Eve",
+		}}
+		// The inbox row must still show a sender for this legitimate, if
+		// unusual, header — Overview.Sender is unchanged from before this
+		// fix: still e.From.String(), TrimSpace'd. Run it repeatedly since
+		// the map-ordering nondeterminism this guards against is exactly
+		// what would make a naive assertion here flaky.
+		for i := 0; i < 50; i++ {
+			ov := overviewFromEmail(1, e)
+			if ov.Sender == "" {
+				t.Fatal("Sender is empty for a multi-mailbox From — the inbox row would show no sender")
+			}
+			// e.From.String() itself is the nondeterministic renderer under
+			// test (map iteration order), so re-calling it here for a direct
+			// comparison would just race the same coin flip — assert on its
+			// content instead: both mailboxes must still be present.
+			if !strings.Contains(ov.Sender, "bob@example.com") || !strings.Contains(ov.Sender, "eve@evil.example") {
+				t.Fatalf("Sender = %q, want both mailboxes present", ov.Sender)
+			}
+			if ov.SenderBindingAddress != "" {
+				t.Fatalf("SenderBindingAddress = %q, want empty for a multi-mailbox From (fail closed)", ov.SenderBindingAddress)
+			}
+		}
+	})
+}
