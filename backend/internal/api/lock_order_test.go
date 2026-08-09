@@ -24,11 +24,12 @@ import (
 // Adding a mutex to Server means adding it here. A lock absent from this map is
 // invisible to the check.
 var lockRank = map[string]int{
-	"cfgMu":    1,
-	"sessMu":   2,
-	"userMu":   3,
-	"ollamaMu": 4,
-	"serverMu": 5,
+	"cfgMu":     1,
+	"sessMu":    2,
+	"pairingMu": 3,
+	"userMu":    4,
+	"ollamaMu":  5,
+	"serverMu":  6,
 }
 
 // TestLockOrderIsRespected enforces lockRank across the package, including
