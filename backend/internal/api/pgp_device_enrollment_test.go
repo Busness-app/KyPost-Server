@@ -447,6 +447,49 @@ func TestRevocationInvalidatesAnAlreadyMintedPairingToken(t *testing.T) {
 	}
 }
 
+// Registration may have resolved the subscriber index before revocation
+// rotates the subscriber ID. The final generation check must reject that stale
+// owner rather than minting a device after the purge.
+func TestNativeRegisterRejectsStaleSubscriberIndex(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user: %v", err)
+	}
+	u := all[0]
+	store, err := srv.userStore(u.ID)
+	if err != nil {
+		t.Fatalf("userStore: %v", err)
+	}
+	subscriberID, err := store.GetOrCreateSubscriberID()
+	if err != nil {
+		t.Fatalf("GetOrCreateSubscriberID: %v", err)
+	}
+	if _, ok := srv.lookupUserBySubscriber(subscriberID); !ok {
+		t.Fatal("subscriber index did not resolve before rotation")
+	}
+	token, _, err := srv.createPairingToken(subscriberID, pairingPurposeNativeDevice, time.Minute)
+	if err != nil {
+		t.Fatalf("createPairingToken: %v", err)
+	}
+	if _, err := store.RotateSubscriberID(); err != nil {
+		t.Fatalf("RotateSubscriberID: %v", err)
+	}
+
+	body := fmt.Sprintf(
+		`{"subscriberId":%q,"pairingToken":%q,"deviceToken":"stale","deviceId":"stale-device","platform":"android"}`,
+		subscriberID, token)
+	req := httptest.NewRequest(http.MethodPost, "/api/notifications/native/register", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.handleNotificationNativeRegister(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("stale subscriber registration: status %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := len(store.ListNativeDevices()); got != 0 {
+		t.Fatalf("stale subscriber registration created %d device(s)", got)
+	}
+}
+
 // MustChangePassword confines a SESSION to the password-change and logout
 // routes. A device credential was exempt entirely, so one minted around an
 // admin reset kept full mail and contacts access on an account the admin had

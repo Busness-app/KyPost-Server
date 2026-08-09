@@ -38,7 +38,7 @@ import (
 
 // Server holds the HTTP surface and its process-wide state.
 //
-// LOCK ORDER: cfgMu before sessMu before userMu before ollamaMu before serverMu. Never the
+// LOCK ORDER: cfgMu before sessMu before pairingMu before userMu before ollamaMu before serverMu. Never the
 // reverse. Enforced by TestLockOrderIsRespected, which reads this package's
 // source and fails on a function that takes one while holding a higher-ranked
 // one — directly, or through any call chain inside this package. Adding a mutex
@@ -66,6 +66,10 @@ type Server struct {
 
 	// sessMu guards sessions only.
 	sessMu sync.RWMutex
+	// pairingMu serializes native registration with credential revocation. A
+	// pairing token resolves its owner before it writes a device; revocation must
+	// not delete devices and rotate the subscriber between those two operations.
+	pairingMu sync.Mutex
 
 	logger              *logging.Logger
 	health              *health.Service

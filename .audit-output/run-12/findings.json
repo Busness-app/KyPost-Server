@@ -1,0 +1,40 @@
+[
+  {
+    "verdict": "confirmed",
+    "title": "Pre-revocation native pairing token can recreate a device during credential purge",
+    "description": "An unexpired native pairing token remains authorized across the credential-purge sequence. Native registration validates the signed token and resolves ownerID from the old subscriber index, then later consumes the nonce and persists a new device. Admin password reset, MFA clear, and deactivation delete existing devices first and rotate the subscriber ID only afterward. A concurrent registration can therefore resolve the owner before rotation, continue after device deletion, and persist a fresh device using a new attacker-chosen device ID. MFA clear leaves the account active, so the new device immediately authenticates to withMailAuth routes; deactivation leaves the device stored for later reactivation.",
+    "root_cause": "handleNotificationNativeRegister in backend/internal/api/server_notifications.go does not revalidate the subscriber generation or account state before committing the device, allowing a pairing token that raced credential revocation to recreate access after the purge.",
+    "intended_behavior": "Admin password reset, MFA clear, and deactivation are account-recovery/offboarding controls intended to revoke every existing and outstanding native-device authorization, including pairing tokens issued before the action.",
+    "trace": [
+      {"kind":"entrypoint","file":"backend/internal/api/server_notifications.go","line":431,"scope":"handleNotificationNativeRegister","description":"Accepts the native-registration request and verifies the signed native pairing token, including purpose and expiry."},
+      {"kind":"propagation","file":"backend/internal/api/server_notifications.go","line":460,"scope":"handleNotificationNativeRegister","description":"Looks up and retains ownerID from the submitted old subscriberID before revocation can rotate that subscriber ID; no generation is captured for a later commit check."},
+      {"kind":"propagation","file":"backend/internal/api/server_userscope.go","line":764,"scope":"revokeAllUserCredentialsExcept","description":"The concurrent admin recovery path deletes the account's native devices before rotating the subscriber ID at lines 791-800, leaving registration and revocation as separate operations."},
+      {"kind":"sink","file":"backend/internal/api/server_notifications.go","line":556,"scope":"handleNotificationNativeRegister","description":"After the old owner was resolved, consumes the token nonce and upserts a new native device with a newly minted secret without rechecking subscriber generation or account liveness."}
+    ],
+    "conditions": [
+      {"kind":"authentication_level","description":"The attacker possesses an unexpired native pairing token and its subscriber ID, normally obtained from a QR/deep-link pairing flow."},
+      {"kind":"timing_dependency","description":"Registration must resolve the old owner concurrently with an admin password reset, MFA clear, or deactivation before or during subscriber rotation."},
+      {"kind":"data_state","description":"For immediate access the account is active after MFA clear; after deactivation the persisted device becomes relevant if the account is later reactivated."}
+    ],
+    "execution": {
+      "attacker_perspective":"A holder of a captured native pairing token whose account administrator is attempting to revoke devices or recover the account.",
+      "payloads":["POST /api/notifications/native/register\nContent-Type: application/json\n\n{\"subscriberId\":\"<old-subscriber-id>\",\"pairingToken\":\"<old-valid-token>\",\"deviceToken\":\"<attacker-token>\",\"deviceId\":\"attacker-device\",\"platform\":\"android\",\"transport\":\"fcm\"}"],
+      "instructions":["Obtain an unexpired native pairing token and subscriber ID before the administrator performs the recovery/revocation action.","Send native registration concurrently with the administrator's password reset, MFA clear, or deactivation request; arrange for registration to complete owner lookup before subscriber rotation.","Use a new valid device ID so registration does not require an existing-device secret.","Use the returned device secret to call a withMailAuth endpoint such as GET /api/inbox after MFA clear, or after reactivation if the account was deactivated."],
+      "expected_result":"The registration returns a device credential and a new native-device row remains after the administrator's purge. In the MFA-clear case the device can immediately access the account's mailbox."
+    },
+    "remediation":{
+      "strategy":"Serialize subscriber-generation invalidation with native registration and credential deletion. Make registration conditional on the subscriber ID/generation still matching the value authorized at the start, and rotate/invalidate that generation before or within the same transaction as device deletion. Refuse registration when the generation changed or the account is no longer active.",
+      "code_changes":[{"file_name":"backend/internal/api/server_notifications.go","fixed_code":"Re-read the current subscriber ID/generation under the same per-user/store lock immediately before UpsertNativeDevice and reject if it differs from the token's authorized generation."},{"file_name":"backend/internal/api/server_userscope.go","fixed_code":"Perform subscriber rotation and native-device deletion as one serialized revocation operation, so no registration can commit between the two steps."}]
+    },
+    "severity":{
+      "likelihood":{"score":"medium","reason":"The attacker needs a captured, still-valid pairing token and a narrow concurrent interleaving with an administrator's revocation action."},
+      "impact":{"score":"high","reason":"It defeats an explicit account-recovery revocation boundary and recreates a full paired-device mailbox credential; MFA clear leaves the recreated device immediately active."},
+      "overall_severity":"high"
+    },
+    "confidence":{"score":"high","reason":"The registration and revocation order are directly visible in current source, the operations use separate lookup/store steps, and no subscriber-generation check or shared transaction exists before the new device is persisted."}
+  },
+  {
+    "verdict":"rejected",
+    "reason":"Mutable action tags in .github/workflows/release-image.yml violate the repository pinning contract and are documented as hardening, but no source-controlled attacker path was confirmed; exploitation requires compromise or retagging of an upstream action. This is not elevated to a confirmed vulnerability in this run."
+  }
+]

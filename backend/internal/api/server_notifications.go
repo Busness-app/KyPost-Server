@@ -462,9 +462,19 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		http.Error(w, "unknown subscriber", http.StatusUnauthorized)
 		return
 	}
+	// The subscriber lookup above is only a hint: revocation can rotate it after
+	// lookup. Hold the same lock as credential purge through the generation check
+	// and device commit so an old token cannot recreate access after the purge.
+	s.pairingMu.Lock()
+	defer s.pairingMu.Unlock()
 	store, err := s.userStore(ownerID)
 	if err != nil {
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
+		return
+	}
+	u, err := s.users.Get(ownerID)
+	if err != nil || !u.Active || store.SubscriberID() != subscriberID {
+		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
 		return
 	}
 

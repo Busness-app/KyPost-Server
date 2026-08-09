@@ -760,6 +760,11 @@ func (s *Server) revokeAllUserCredentials(u users.User) error {
 // "I secured my account".
 func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken string) error {
 	s.revokeUserSessions(u.ID, keepSessionToken)
+	// Native registration holds this lock from its final subscriber-generation
+	// check through device commit. Keep deletion and subscriber rotation in the
+	// same critical section so the two credential paths cannot interleave.
+	s.pairingMu.Lock()
+	defer s.pairingMu.Unlock()
 	var errs []error
 	if err := s.revokeUserDevices(u.ID); err != nil {
 		errs = append(errs, err)

@@ -77,27 +77,62 @@ function modeFor(contentType: string): BodyMode {
 }
 
 /** Reverses Content-Transfer-Encoding so the body is readable text. */
-function decodePart(body: string, encoding: string): string {
-  switch (encoding.trim().toLowerCase()) {
+function decodePart(body: string, encoding: string, charset?: string): string {
+  const enc = encoding.trim().toLowerCase();
+  // ponytail: respect charset when available — base64/quoted-printable bytes are
+  // in that charset, and ignoring it produces mojibake (e.g. =C3=A9 → Â). Fall
+  // back to utf-8; if that charset is unsupported, try utf-8 before giving up.
+  const tryDecode = (bytes: Uint8Array, cs?: string) => {
+    const label = (cs || "utf-8").trim().toLowerCase() || "utf-8";
+    try {
+      return new TextDecoder(label).decode(bytes);
+    } catch {
+      try {
+        return new TextDecoder("utf-8").decode(bytes);
+      } catch {
+        return null;
+      }
+    }
+  };
+  switch (enc) {
     case "base64":
       try {
         // atob yields one byte per char; run it back through TextDecoder so
         // multi-byte UTF-8 does not come out as mojibake.
         const binary = atob(body.replace(/\s+/g, ""));
         const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-        return new TextDecoder("utf-8").decode(bytes);
+        return tryDecode(bytes, charset) ?? body;
       } catch {
         // Malformed base64 from a hostile or truncated message: show the raw
         // text rather than throwing away the part.
         return body;
       }
-    case "quoted-printable":
-      return body
-        .replace(/=\r?\n/g, "")
-        .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    case "quoted-printable": {
+      const qp = body.replace(/=\r?\n/g, "");
+      const bytes: number[] = [];
+      for (let i = 0; i < qp.length; ) {
+        if (
+          qp[i] === "=" &&
+          i + 2 < qp.length &&
+          /^[0-9A-Fa-f]{2}$/.test(qp.slice(i + 1, i + 3))
+        ) {
+          bytes.push(parseInt(qp.slice(i + 1, i + 3), 16));
+          i += 3;
+        } else {
+          bytes.push(qp.charCodeAt(i) & 0xff);
+          i += 1;
+        }
+      }
+      const decoded = tryDecode(Uint8Array.from(bytes), charset);
+      return decoded ?? body;
+    }
     default:
       return body;
   }
+}
+
+function charsetFromContentType(value: string): string | undefined {
+  return contentTypeParam(value, "charset") || undefined;
 }
 
 /**
@@ -160,7 +195,11 @@ function walkMultipart(body: string, boundary: string, depth: number): MimeConte
 
     if (type === "text/plain" || type === "text/html" || type === "") {
       return {
-        body: decodePart(partBody, headers.get("content-transfer-encoding") ?? ""),
+        body: decodePart(
+          partBody,
+          headers.get("content-transfer-encoding") ?? "",
+          charsetFromContentType(contentType)
+        ),
         mode: modeFor(contentType)
       };
     }
@@ -196,7 +235,11 @@ export function parseMimeContent(raw: string): MimeContent | null {
   }
 
   return {
-    body: decodePart(body, headers.get("content-transfer-encoding") ?? ""),
+    body: decodePart(
+      body,
+      headers.get("content-transfer-encoding") ?? "",
+      charsetFromContentType(contentType)
+    ),
     mode: modeFor(contentType)
   };
 }
