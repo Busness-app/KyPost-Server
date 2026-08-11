@@ -413,7 +413,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			if msg.PGPEncryptedPayload != "" {
 				unread[i] = s.decryptPGPUnreadMessage(userID, msg)
 			} else if msg.PGPSignaturePayload != "" {
-				unread[i] = s.verifySignedOnlyUnreadMessage(userID, msg)
+				unread[i] = s.markSignedOnlyUnreadMessage(msg)
 			}
 		}
 
@@ -503,7 +503,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 			if c.PGPEncryptedPayload != "" {
 				contents[uid] = s.decryptPGPMessageContent(userID, senderByUID[uid], c)
 			} else if c.PGPSignaturePayload != "" {
-				contents[uid] = s.verifySignedOnlyMessageContent(userID, senderByUID[uid], c)
+				contents[uid] = s.markSignedOnlyMessageContent(c)
 			}
 		}
 		// Attach the freshly fetched bodies back onto the cache (metadata

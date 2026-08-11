@@ -154,54 +154,40 @@ func applyPGPDecryptResult(body *string, mode *string, hasAttachments *bool, sig
 	}
 }
 
-// verifySignedOnlyMessageContent verifies c's PGPSignaturePayload — a
-// detached signature from an RFC 3156 multipart/signed (signed but not
-// encrypted) message — against the contact keys bound to the claimed sender,
-// the same signer lookup decryptPGPPayload uses. This needs only public keys, so it
-// works identically under both protection modes. Verification is
-// best-effort per pgpmail.VerifyDetached's doc comment: third-party MIME
-// canonicalization can differ from what was actually signed, so a
-// verification failure just leaves PGPVerified false rather than erroring
-// the whole inbox fetch.
+// markSignedOnlyMessageContent records that c carries a detached signature —
+// an RFC 3156 multipart/signed (signed but not encrypted) message — and
+// deliberately says nothing about whether that signature is good.
 //
-// Keep verifySignedOnlyMessageContent and verifySignedOnlyUnreadMessage in sync.
-func (s *Server) verifySignedOnlyMessageContent(userID, senderAddress string, c imapadapter.MessageContent) imapadapter.MessageContent {
+// The server used to verify here and could not possibly succeed. A detached
+// signature covers the signed MIME part's TRANSMITTED bytes: its Content-Type
+// and Content-Transfer-Encoding headers, the CRLF ending them, and content
+// still base64- or quoted-printable-encoded. What it was handed was c.Body —
+// clientBody(e), go-imap's decoded render. Those never match, so every signed
+// message in the mailbox resolved to PGPVerified=false, and the tests passed
+// only because they hand-built the correct bytes into Body, which no caller
+// does. Fixing the input here would mean a raw BODY.PEEK[] fetch for every
+// message on the inbox path, per poll, for a verdict the browser can compute
+// better.
+//
+// So verification moved to the browser, for BOTH protection modes: it fetches
+// the raw signed part on open (handlePGPPayload), verifies with openpgp.js,
+// and renders the body it parsed out of the part it verified. PGPSigned is
+// what tells it there is something to fetch.
+//
+// Keep markSignedOnlyMessageContent and markSignedOnlyUnreadMessage in sync.
+func (s *Server) markSignedOnlyMessageContent(c imapadapter.MessageContent) imapadapter.MessageContent {
 	c.PGPSigned = true
-	sig := c.PGPSignaturePayload
 	c.PGPSignaturePayload = ""
-	verified, fingerprint := s.verifyDetachedForUser(userID, c.Body, sig, senderAddress)
-	c.PGPVerified = verified
-	c.PGPSignerFingerprint = fingerprint
 	return c
 }
 
-// verifySignedOnlyUnreadMessage mirrors verifySignedOnlyMessageContent for
-// the imapadapter.UnreadMessage shape used by ListUnreadMessages's classic
+// markSignedOnlyUnreadMessage mirrors markSignedOnlyMessageContent for the
+// imapadapter.UnreadMessage shape used by ListUnreadMessages's classic
 // (non-delta) inbox path.
-func (s *Server) verifySignedOnlyUnreadMessage(userID string, msg imapadapter.UnreadMessage) imapadapter.UnreadMessage {
+func (s *Server) markSignedOnlyUnreadMessage(msg imapadapter.UnreadMessage) imapadapter.UnreadMessage {
 	msg.PGPSigned = true
-	sig := msg.PGPSignaturePayload
 	msg.PGPSignaturePayload = ""
-	verified, fingerprint := s.verifyDetachedForUser(userID, msg.Body, sig, msg.SenderBindingAddress)
-	msg.PGPVerified = verified
-	msg.PGPSignerFingerprint = fingerprint
 	return msg
-}
-
-func (s *Server) verifyDetachedForUser(userID, body, sig, senderAddress string) (verified bool, fingerprint string) {
-	contactsStore, err := s.userContactsStore(userID)
-	if err != nil {
-		return false, ""
-	}
-	signerKeys := signerKeysForSender(contactsStore, senderAddress)
-	if len(signerKeys) == 0 {
-		return false, ""
-	}
-	result, err := pgpmail.VerifyDetached([]byte(body), sig, signerKeys)
-	if err != nil {
-		return false, ""
-	}
-	return result.Verified, result.SignerFingerprint
 }
 
 // boundSignerKey is one address-bound contact key as the client sees it.

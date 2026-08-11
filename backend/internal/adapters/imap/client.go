@@ -77,8 +77,8 @@ type UnreadMessage struct {
 	Sender    string
 	// SenderBindingAddress mirrors Overview.SenderBindingAddress — see that
 	// field's doc comment for why it exists and why "" means fail closed.
-	// decryptPGPUnreadMessage and verifySignedOnlyUnreadMessage must read
-	// this, not Sender, when resolving signerKeysForSender.
+	// decryptPGPUnreadMessage must read this, not Sender, when resolving
+	// signerKeysForSender.
 	SenderBindingAddress string
 	SentTo               string
 	CC                   string
@@ -383,8 +383,8 @@ type Overview struct {
 	// two-mailbox message. This Overview reaches signerKeysForSender — the
 	// server-side signature binding for server-protected accounts — by two
 	// separate routes: Overview.Sender flows into UnreadMessage.Sender and
-	// from there into decryptPGPUnreadMessage/verifySignedOnlyUnreadMessage
-	// (the classic inbox path); and this Overview is also read directly,
+	// from there into decryptPGPUnreadMessage (the classic inbox path); and
+	// this Overview is also read directly,
 	// without ever passing through UnreadMessage, by the inbox handler's
 	// delta-path sender lookup (server_inbox.go's senderByUID). A binding
 	// that coin-flips is not a binding, on either route.

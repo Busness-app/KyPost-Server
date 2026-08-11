@@ -388,7 +388,7 @@ func TestServeInbox_DeltaFirstCallAllNew(t *testing.T) {
 // lookup (senderByUID in server_inbox.go) straight from the freshly-fetched
 // []imapadapter.Overview this call's ListOverviews returns, then pairs it
 // with GetMessageBodies' MessageContent before calling
-// decryptPGPMessageContent/verifySignedOnlyMessageContent. That lookup has
+// decryptPGPMessageContent. That lookup has
 // its own, independent chance to read the wrong field — Overview.Sender
 // instead of Overview.SenderBindingAddress — so it needs its own test.
 //

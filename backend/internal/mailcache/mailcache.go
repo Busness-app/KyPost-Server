@@ -47,7 +47,12 @@ import (
 // addresses its CONTACT carries, checked against that contact's TOFU pin. 1
 // was the any-User-ID binding, forgeable with a second self-asserted User ID.
 // 0 is "written before this field existed", i.e. also 1 or earlier.
-const PGPVerdictSchema = 3
+// 4 retires server-side verdicts on signed-only mail entirely. Entries written
+// under 3 can carry a PGPSignerFingerprint from a verification that compared a
+// detached signature against go-imap's decoded body — bytes the signature never
+// covered. The rules that produced them no longer exist, so they are cleared
+// rather than served.
+const PGPVerdictSchema = 4
 
 type Entry struct {
 	UID int `json:"uid"`

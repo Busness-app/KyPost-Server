@@ -172,7 +172,45 @@ func TestEncryptDecryptMIMEWithAttachment(t *testing.T) {
 	}
 }
 
-func TestSignMIMEAndVerifyDetached(t *testing.T) {
+// verifyDetachedForTest is the inverse of SignMIME, kept in the test file
+// rather than exported from the package. Production no longer verifies
+// detached signatures anywhere — the browser does, over bytes it fetches raw
+// — and an exported helper that nothing calls is how a caller ends up feeding
+// it the wrong bytes again. The round-trip assertion it supports is still
+// worth having: it is the only thing proving SignMIME emits a signature that
+// verifies against the content it claims to cover.
+func verifyDetachedForTest(t *testing.T, data []byte, armoredSignature, armoredPubKey string) string {
+	t.Helper()
+
+	key, err := crypto.NewKeyFromArmored(armoredPubKey)
+	if err != nil {
+		t.Fatalf("parse signer key: %v", err)
+	}
+	verifyKeys, err := crypto.NewKeyRing(key)
+	if err != nil {
+		t.Fatalf("build verification keyring: %v", err)
+	}
+	handle, err := crypto.PGP().Verify().VerificationKeys(verifyKeys).New()
+	if err != nil {
+		t.Fatalf("build verify handle: %v", err)
+	}
+	result, err := handle.VerifyDetached(data, []byte(armoredSignature), crypto.Auto)
+	if err != nil {
+		t.Fatalf("verify detached: %v", err)
+	}
+	if err := result.SignatureError(); err != nil {
+		t.Fatalf("expected signature to verify: %v", err)
+	}
+	if signedBy := result.SignedByKey(); signedBy != nil {
+		return signedBy.GetFingerprint()
+	}
+	return ""
+}
+
+// SignMIME's output must verify when read back the way a receiver reads it:
+// raw bytes in, ExtractSignedParts to recover the signed part and signature,
+// then verification over exactly those bytes.
+func TestSignMIMERoundTripsThroughExtractSignedParts(t *testing.T) {
 	alice, err := GenerateIdentity("Alice", "alice@example.com")
 	if err != nil {
 		t.Fatalf("GenerateIdentity alice: %v", err)
@@ -194,26 +232,14 @@ func TestSignMIMEAndVerifyDetached(t *testing.T) {
 		t.Fatal("expected multipart/signed content type in output")
 	}
 
-	_, content, err := splitMessage(plaintext)
+	signedPart, armoredSig, err := ExtractSignedParts(signed)
 	if err != nil {
-		t.Fatalf("splitMessage: %v", err)
+		t.Fatalf("ExtractSignedParts: %v", err)
 	}
-	sigStart := strings.Index(string(signed), "-----BEGIN PGP SIGNATURE-----")
-	if sigStart == -1 {
-		t.Fatal("expected an armored signature block in the output")
-	}
-	sigEnd := strings.Index(string(signed)[sigStart:], "-----END PGP SIGNATURE-----") + len("-----END PGP SIGNATURE-----")
-	armoredSig := string(signed)[sigStart : sigStart+sigEnd]
 
-	result, err := VerifyDetached(content, armoredSig, []string{alice.ArmoredPublicKey})
-	if err != nil {
-		t.Fatalf("VerifyDetached: %v", err)
-	}
-	if !result.Verified {
-		t.Fatal("expected signature to verify")
-	}
-	if result.SignerFingerprint != alice.Fingerprint {
-		t.Fatalf("signer fingerprint mismatch: got %s want %s", result.SignerFingerprint, alice.Fingerprint)
+	fingerprint := verifyDetachedForTest(t, signedPart, armoredSig, alice.ArmoredPublicKey)
+	if fingerprint != alice.Fingerprint {
+		t.Fatalf("signer fingerprint mismatch: got %s want %s", fingerprint, alice.Fingerprint)
 	}
 }
 
@@ -227,7 +253,7 @@ func TestSignMIMEAndVerifyDetached(t *testing.T) {
 // CRLF as the delimiter separator, not two). That corruption doesn't show up
 // by inspecting the produced bytes directly; it only appears once the
 // envelope is parsed back through a real mime/multipart.Reader, so this test
-// does exactly that instead of just calling VerifyDetached in-process.
+// does exactly that instead of just verifying the signature in-process.
 func TestSignMIMEWithAttachmentPreservesTrailingCRLF(t *testing.T) {
 	alice, err := GenerateIdentity("Alice", "alice@example.com")
 	if err != nil {
