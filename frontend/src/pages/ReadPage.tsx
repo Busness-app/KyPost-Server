@@ -153,7 +153,9 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             signed: result.signed,
             verified: result.verified,
             signerFingerprint: result.signerFingerprint,
-            error: ""
+            error: "",
+            // This body came out of the ciphertext this browser opened.
+            bodyFromVerifiedPart: true
           }
         }));
       } catch (e) {
@@ -165,7 +167,8 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             signed: false,
             verified: false,
             signerFingerprint: "",
-            error: toErrorMessage(e, "could not decrypt this message")
+            error: toErrorMessage(e, "could not decrypt this message"),
+            bodyFromVerifiedPart: false
           }
         }));
       } finally {
@@ -227,14 +230,21 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             signed: result.signed,
             verified: result.verified,
             signerFingerprint: result.signerFingerprint,
-            error: ""
+            error: "",
+            // This body was parsed out of the bytes openpgp.js just checked, so
+            // it is the body the badge above it describes — even when it is
+            // empty, which is what an attachment-only signed part yields.
+            bodyFromVerifiedPart: true
           }
         }));
       } catch {
         if (cancelled) return;
         // No body here on purpose: an unverifiable signature must not cost the
-        // reader the message. displayBody falls through to the server's copy on
-        // an empty body, which is what the pane was already showing.
+        // reader the message. bodyFromVerifiedPart:false is what lets
+        // displayBody fall through to the server's copy, which is what the pane
+        // was already showing — and it is why that fallback cannot be keyed on
+        // the body being empty, since a SUCCESSFUL check can produce an empty
+        // body too.
         setDecrypted((prev) => ({
           ...prev,
           [message.messageId]: {
@@ -242,7 +252,8 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             signed: true,
             verified: false,
             signerFingerprint: "",
-            error: ""
+            error: "",
+            bodyFromVerifiedPart: false
           }
         }));
       } finally {

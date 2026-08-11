@@ -83,7 +83,18 @@ describe("escapeHtml", () => {
 // the ciphertext, and an HTML one was paired with the envelope's "plain".
 describe("quoting a locally decrypted message", () => {
   function decryptedView(over: Partial<DecryptedView> = {}): DecryptedView {
-    return { body: "", signed: false, verified: false, signerFingerprint: "", error: "", ...over };
+    // bodyFromVerifiedPart defaults true here: every case in this describe is a
+    // message this browser actually opened, which is what makes displayBody
+    // prefer the local body over the envelope.
+    return {
+      body: "",
+      signed: false,
+      verified: false,
+      signerFingerprint: "",
+      error: "",
+      bodyFromVerifiedPart: true,
+      ...over
+    };
   }
 
   it("quotes the decrypted body rather than the envelope", () => {

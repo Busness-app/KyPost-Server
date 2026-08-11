@@ -8,7 +8,15 @@ function email(over: Partial<InboxEmail> = {}): InboxEmail {
 }
 
 function view(over: Partial<DecryptedView> = {}): DecryptedView {
-  return { body: "", signed: false, verified: false, signerFingerprint: "", error: "", ...over };
+  return {
+    body: "",
+    signed: false,
+    verified: false,
+    signerFingerprint: "",
+    error: "",
+    bodyFromVerifiedPart: false,
+    ...over
+  };
 }
 
 describe("signatureState", () => {

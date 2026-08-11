@@ -82,23 +82,46 @@ func ExtractSignedParts(raw []byte) (signedPart []byte, armoredSignature string,
 	search := append([]byte("\r\n"), body...)
 	delim := []byte("\r\n--" + boundary)
 
-	openIdx := bytes.Index(search, delim)
-	if openIdx < 0 {
+	// RFC 1847 2.1: multipart/signed contains EXACTLY two body parts. Anything
+	// else is refused outright rather than parsed leniently.
+	//
+	// This is CVE-2021-4126's shape. A third part is not covered by the
+	// signature, and the parsers disagree about it: enmime's DepthMatchFirst
+	// picks it as the display body while this function returns part 1. A reader
+	// that shows enmime's body under this function's verdict then displays
+	// content nobody signed beneath a "signature verified" badge.
+	//
+	// The check counts delimiters rather than looking for content after the
+	// signature part, because the armor is located by scanning everything after
+	// the opening delimiter (below) — so ordering the parts as
+	// [signed][attacker][signature] would walk straight past a positional test.
+	// A conforming message has exactly three delimiter lines: open, separator,
+	// and close.
+	opens := delimiterOffsets(search, delim)
+	if len(opens) != 3 {
 		return nil, "", ErrNotSignedMessage
 	}
-	// Skip the rest of the delimiter line (it may carry trailing whitespace)
-	// to land on the first byte of the part itself.
-	lineEnd := bytes.Index(search[openIdx+len(delim):], []byte("\r\n"))
+
+	openIdx := opens[0]
+	// RFC 2046 5.1.1 allows only transport padding between the boundary and the
+	// line ending. Skipping to the next CRLF regardless would accept
+	// "--boundaryJUNK" as a delimiter for "boundary", which no conforming
+	// parser does — and since boundary= lives in the UNSIGNED outer header, an
+	// attacker picks it freely.
+	lineEnd := delimiterLineEnd(search[openIdx+len(delim):])
 	if lineEnd < 0 {
 		return nil, "", ErrNotSignedMessage
 	}
-	partStart := openIdx + len(delim) + lineEnd + len("\r\n")
+	partStart := openIdx + len(delim) + lineEnd
 
-	nextIdx := bytes.Index(search[partStart:], delim)
-	if nextIdx < 0 {
+	nextIdx := opens[1]
+	if nextIdx <= partStart {
 		return nil, "", ErrNotSignedMessage
 	}
-	signedPart = search[partStart : partStart+nextIdx]
+	signedPart = search[partStart:nextIdx]
+	// Re-anchor the armor scan to just past the separator delimiter, so the
+	// offsets below read the same as before this check existed.
+	nextIdx -= partStart
 
 	// The signature lives in whatever follows. Read it out of the armor markers
 	// rather than by parsing the second part: RFC 3156 requires the signature
@@ -117,4 +140,47 @@ func ExtractSignedParts(raw []byte) (signedPart []byte, armoredSignature string,
 	armoredSignature = string(rest[begin : begin+end+len(armorSignatureEnd)])
 
 	return signedPart, armoredSignature, nil
+}
+
+// delimiterOffsets returns the offset of every CONFORMING boundary delimiter
+// line in search — one whose boundary token is followed only by transport
+// padding and a line ending, or by "--" for the close delimiter.
+//
+// A prefix match alone is not enough: "--boundaryJUNK" starts with
+// "--boundary", and treating it as a delimiter is what let a rewritten
+// (unsigned) boundary parameter re-cut the message into different parts.
+func delimiterOffsets(search, delim []byte) []int {
+	var out []int
+	for off := 0; ; {
+		i := bytes.Index(search[off:], delim)
+		if i < 0 {
+			return out
+		}
+		abs := off + i
+		tail := search[abs+len(delim):]
+		if delimiterLineEnd(tail) >= 0 || isCloseDelimiter(tail) {
+			out = append(out, abs)
+		}
+		off = abs + len(delim)
+	}
+}
+
+// delimiterLineEnd returns the offset just past the CRLF of a conforming
+// delimiter line starting at b (i.e. immediately after the boundary token), or
+// -1 if what follows is not transport padding plus a line ending.
+func delimiterLineEnd(b []byte) int {
+	i := 0
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t') {
+		i++
+	}
+	if !bytes.HasPrefix(b[i:], []byte("\r\n")) {
+		return -1
+	}
+	return i + len("\r\n")
+}
+
+// isCloseDelimiter reports whether b, the bytes just after a boundary token,
+// begins the "--" that terminates a multipart body.
+func isCloseDelimiter(b []byte) bool {
+	return bytes.HasPrefix(b, []byte("--"))
 }
