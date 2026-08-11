@@ -47,6 +47,10 @@ type fakeMailClient struct {
 	bodySender              map[int]string
 	bodyPGPEncryptedPayload map[int]string
 	bodyPGPSignaturePayload map[int]string
+	// rawMessages feeds FetchRawMessage — the signed-only read path fetches the
+	// message raw, because a detached signature covers bytes no MIME-parsed copy
+	// preserves. See handlePGPPayload.
+	rawMessages map[int][]byte
 	bodiesErr               error
 	bodiesCalls             int
 	lastBodyUIDs            []int
@@ -141,7 +145,12 @@ func (f *fakeMailClient) SaveSent(_ context.Context, _ imapadapter.DraftMessage)
 func (f *fakeMailClient) FetchHeaderFields(context.Context, []int, ...string) (map[int][]string, error) {
 	return nil, nil
 }
-func (f *fakeMailClient) FetchRawMessage(context.Context, string, int) ([]byte, error) { return nil, nil }
+func (f *fakeMailClient) FetchRawMessage(_ context.Context, _ string, uid int) ([]byte, error) {
+	if raw, ok := f.rawMessages[uid]; ok {
+		return raw, nil
+	}
+	return nil, nil
+}
 
 // Attachment fixtures for the /api/mail/attachment(s) handler tests.
 func (f *fakeMailClient) ListAttachments(_ context.Context, _ string, uid int) ([]imapadapter.AttachmentInfo, error) {

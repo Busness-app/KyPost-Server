@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
+	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/users"
 )
 
@@ -40,16 +43,9 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return
 	}
-	// Only client-protected accounts have any business fetching ciphertext:
-	// for a server-protected account the server already decrypted the body
-	// into the inbox response, so handing the raw payload back as well would
-	// widen exposure for no functional gain.
-	if u.PGPProtection() != users.PGPProtectionClient {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": "this account's PGP key is not client-protected; the server already decrypts these messages",
-		})
-		return
-	}
+	// The protection gate is applied further down, once this UID's shape is
+	// known: it refuses ciphertext, and whether that is what was asked for
+	// cannot be decided before the message has been looked at.
 
 	mailbox, uid, err := attachmentRequestParams(r)
 	if err != nil {
@@ -86,9 +82,26 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	encrypted := strings.TrimSpace(content.PGPEncryptedPayload)
-	signature := strings.TrimSpace(content.PGPSignaturePayload)
-	if encrypted == "" && signature == "" {
+	hasSignature := strings.TrimSpace(content.PGPSignaturePayload) != ""
+	if encrypted == "" && !hasSignature {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "message carries no OpenPGP payload"})
+		return
+	}
+
+	// Only client-protected accounts have any business fetching CIPHERTEXT:
+	// for a server-protected account the server already decrypted the body
+	// into the inbox response, so handing the raw payload back as well would
+	// widen exposure for no functional gain.
+	//
+	// That reasoning does not reach a signed-only message, which is why the
+	// gate is narrowed to the encrypted case. There is no ciphertext to widen
+	// exposure of, the body is already in the inbox response this same account
+	// just fetched, and the signed bytes are the only way to check a signature
+	// now that the server does not — under either protection mode.
+	if encrypted != "" && u.PGPProtection() != users.PGPProtectionClient {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "this account's PGP key is not client-protected; the server already decrypts these messages",
+		})
 		return
 	}
 
@@ -124,24 +137,60 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 		signerKeys = boundSignerKeysForSender(contactsStore, resolvedSender)
 	}
 
+	var signedPartBase64, signaturePayload string
+	if encrypted == "" && hasSignature {
+		signedPart, armoredSignature := s.signedOnlyParts(r.Context(), mailClient, mailbox, uid)
+		if len(signedPart) > 0 && armoredSignature != "" {
+			signedPartBase64 = base64.StdEncoding.EncodeToString(signedPart)
+			signaturePayload = armoredSignature
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"messageId":        uid,
 		"mailbox":          mailbox,
 		"encryptedPayload": encrypted,
-		"signaturePayload": signature,
-		"body":             signedOnlyBody(content, encrypted),
-		"signerKeys":       signerKeys,
-		"sender":           sender,
-		"resolvedSender":   resolvedSender,
+		// The signature and the bytes it covers both come out of the SAME raw
+		// fetch. Reading the signature from go-imap's decoded attachment while
+		// reading the data from raw bytes would pair two different parses of
+		// one message, and a mismatch between them reads to the user as a
+		// forged signature.
+		"signaturePayload": signaturePayload,
+		"signedPartBase64": signedPartBase64,
+		// The server's own decoded render. Native clients read this and do not
+		// verify. The web client ignores it for a signed message and renders
+		// the part it verified instead — a body shown under a verdict must be
+		// the body that verdict describes.
+		"body":           content.Body,
+		"signerKeys":     signerKeys,
+		"sender":         sender,
+		"resolvedSender": resolvedSender,
 	})
 }
 
-// signedOnlyBody returns the readable body for a signed-but-not-encrypted
-// message, which the client needs alongside the detached signature in order
-// to verify it. Encrypted messages have no readable body to return.
-func signedOnlyBody(content imapadapter.MessageContent, encryptedPayload string) string {
-	if encryptedPayload != "" {
-		return ""
+// signedOnlyParts returns the verbatim signed MIME part and the armored
+// detached signature for a signed-but-not-encrypted message, by re-fetching
+// the message raw.
+//
+// The raw fetch is the point. Everything else in the read path holds go-imap's
+// MIME-parsed, transfer-decoded copy, and a detached signature covers the
+// part's transmitted bytes — so a verdict computed from the parsed copy is
+// meaningless, which is precisely the bug this replaced. A second IMAP round
+// trip buys a signature check that can actually succeed, and it only happens
+// when a reader opens a message already known to carry a signature.
+//
+// Both values empty with no error means "nothing here to verify": the caller
+// ships an empty signedPartBase64 and the client shows its could-not-check
+// state rather than a failure.
+func (s *Server) signedOnlyParts(ctx context.Context, mailClient imapadapter.Client, mailbox string, uid int) (signedPart []byte, armoredSignature string) {
+	raw, err := mailClient.FetchRawMessage(ctx, mailbox, uid)
+	if err != nil || len(raw) == 0 {
+		s.logger.Info("signed-only raw fetch failed", "mailbox", mailbox, "uid", strconv.Itoa(uid))
+		return nil, ""
 	}
-	return content.Body
+	part, sig, err := pgpmail.ExtractSignedParts(raw)
+	if err != nil {
+		return nil, ""
+	}
+	return part, sig
 }
