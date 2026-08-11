@@ -277,6 +277,19 @@ export type PGPMessagePayload = {
   mailbox: string;
   encryptedPayload: string;
   signaturePayload: string;
+  /**
+   * The verbatim signed MIME part, base64-encoded — headers, CRLFs and
+   * transfer encoding exactly as transmitted, which is what the detached
+   * signature covers. Base64 because JSON is UTF-8 and any re-encoding of
+   * these bytes breaks the hash. Empty when the message is encrypted, or when
+   * the server could not pull a usable signed part out of the raw message.
+   */
+  signedPartBase64: string;
+  /**
+   * The server's own decoded render. Not what a signature verdict may be shown
+   * against — verifySignedMessage returns the body it parsed out of the bytes
+   * it verified, and that is what the reader displays for a signed message.
+   */
   body: string;
   signerKeys: BoundSignerKey[];
 };

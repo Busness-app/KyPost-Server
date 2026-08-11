@@ -239,6 +239,110 @@ export async function decryptMessage(
   };
 }
 
+/**
+ * Verifies a detached signature over an RFC 3156 signed part, and returns the
+ * body parsed out of the part it just verified.
+ *
+ * That pairing is the contract, not a convenience. The caller renders this
+ * `body` in place of the server's, so the badge describes the bytes on screen.
+ * Returning a verdict while the reader looks at a separately-parsed copy from
+ * the inbox response would make "signature verified" a decoration: the two
+ * copies come from different parsers and, against a hostile server, from
+ * different content entirely.
+ *
+ * signedPartBase64 is base64 because these are the exact bytes the sender
+ * hashed — headers, CRLFs and transfer encoding intact. Anything that
+ * re-encodes them on the way here (JSON's UTF-8, a MIME re-serialization)
+ * breaks the hash and turns every signed message into a warning.
+ *
+ * `verified` is true only when the key that actually produced the signature is
+ * one the ADDRESS BOOK binds to senderAddress — see readBoundSignerKeys. A
+ * valid signature from any other key the reader happens to hold sets
+ * signerFingerprint and leaves verified false, which the badge renders as
+ * "does not match sender" rather than as a pass.
+ *
+ * No private key, so no vault unlock: this works while the vault is locked.
+ */
+export async function verifySignedMessage(
+  signedPartBase64: string,
+  armoredSignature: string,
+  signerKeys: BoundSignerKey[],
+  senderAddress: string
+): Promise<DecryptedMessage> {
+  const pgp = await openpgp();
+
+  const raw = atob(signedPartBase64);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) {
+    bytes[i] = raw.charCodeAt(i);
+  }
+
+  // Decoded as text only to READ it. Verification below uses the bytes.
+  const partText = new TextDecoder("utf-8").decode(bytes);
+  const parsed = parseMimeContent(partText);
+  const body = parsed ? parsed.body : partText;
+  const bodyMode = parsed?.mode;
+
+  const { keys: verificationKeys, addressesByFingerprint } = await readBoundSignerKeys(
+    pgp,
+    signerKeys
+  );
+
+  let verified = false;
+  let signerFingerprint = "";
+  try {
+    // No bound key means nothing to check the signature against. Short-circuit
+    // rather than calling verify with an empty key list: the outcome is the
+    // same "could not be checked" state, but it is stated here instead of
+    // arriving as an exception from inside openpgp.js.
+    if (verificationKeys.length === 0) {
+      throw new Error("no key is bound to this sender");
+    }
+    const result = await pgp.verify({
+      // binary, not text: the part's bytes are already in canonical CRLF form
+      // and must reach the hash untouched. Handing openpgp.js a string invites
+      // it to re-canonicalize content that is already exactly right.
+      message: await pgp.createMessage({ binary: bytes }),
+      signature: await pgp.readSignature({ armoredSignature }),
+      verificationKeys,
+      expectSigned: false
+    });
+    const wanted = senderAddress.trim().toLowerCase();
+    for (const signature of result.signatures ?? []) {
+      try {
+        // `verified` rejects rather than returning false on a bad signature.
+        await signature.verified;
+        const keyID = signature.keyID.toHex().toUpperCase();
+        const match = verificationKeys.find((k) =>
+          k.getKeys().some((sub) => sub.getKeyID().toHex().toUpperCase() === keyID)
+        );
+        signerFingerprint = match ? match.getFingerprint().toUpperCase() : keyID;
+        const boundAddresses = match
+          ? addressesByFingerprint.get(match.getFingerprint().toUpperCase())
+          : undefined;
+        verified = Boolean(wanted && boundAddresses?.includes(wanted));
+        break;
+      } catch {
+        // Try the next signature; an unverifiable one is not fatal.
+      }
+    }
+  } catch {
+    // An unreadable signature, or no key to check it with. The message stays
+    // readable and the badge says it could not be checked — never that it
+    // failed, which would accuse a sender on the strength of our own gap.
+  }
+
+  return {
+    body,
+    bodyMode,
+    // The caller only reaches this function for a message the server flagged as
+    // carrying a detached signature, so `signed` is what got us here.
+    signed: true,
+    verified,
+    signerFingerprint
+  };
+}
+
 /** One encrypted delivery: a full PGP/MIME message plus its recipients. */
 export type EncryptedDelivery = {
   recipients: string[];
