@@ -3,10 +3,11 @@ import { useSearchParams } from "react-router";
 import { escapeHtmlText, processEmailHtml } from "../lib/emailHtml";
 import { EmailBodyFrame } from "./read/EmailBodyFrame";
 import { EncryptionCell } from "./read/EncryptionCell";
+import { SignatureBadge } from "./read/SignatureBadge";
 import { displayBody } from "./read/body";
 import { firstAddressFromText, listAddressesFromText } from "../lib/addressText";
 import { isFlaggedPhishing } from "../lib/phishing";
-import { decryptMessage } from "../lib/pgpClient";
+import { decryptMessage, verifySignedMessage } from "../lib/pgpClient";
 import { getPGPMessagePayload } from "../api/pgp";
 import { isClientProtected, needsUnlock, subscribePGPSession, type PGPSessionState } from "../lib/pgpSession";
 import { PgpUnlockDialog } from "../components/PgpUnlockDialog";
@@ -59,6 +60,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   // nothing decrypted here is ever sent back to it.
   const [decrypted, setDecrypted] = useState<Record<string, DecryptedView>>({});
   const [decryptingId, setDecryptingId] = useState("");
+  const [verifyingId, setVerifyingId] = useState("");
   const [pgpUnlockOpen, setPgpUnlockOpen] = useState(false);
   const [, setPgpSession] = useState<PGPSessionState | null>(null);
   const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
@@ -178,6 +180,83 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     // reads the latest value through the closure on each selection change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, sourceMailbox, pgpUnlockOpen]);
+
+  // Verify a signed-but-not-encrypted message when it is opened.
+  //
+  // The sibling of the decrypt effect above, and deliberately separate: this
+  // one runs under BOTH protection modes, needs no unlocked vault (a signature
+  // check uses public keys only), and fetches the signed part rather than
+  // ciphertext. The server no longer verifies these at all — it cannot, since a
+  // detached signature covers the part's transmitted bytes and every
+  // server-side path holds a decoded copy — so this is the only thing standing
+  // between a signed message and no verdict.
+  useEffect(() => {
+    const message = selected;
+    if (!message || !message.pgpSigned || message.pgpEncrypted) {
+      return;
+    }
+    if (decrypted[message.messageId]) {
+      return;
+    }
+
+    let cancelled = false;
+    setVerifyingId(message.messageId);
+    (async () => {
+      try {
+        const payload = await getPGPMessagePayload(sourceMailbox, message.messageId);
+        if (cancelled) return;
+        if (!payload.signedPartBase64 || !payload.signaturePayload) {
+          // Nothing usable came back: the raw fetch failed, or the message is
+          // not the RFC 3156 shape the extractor handles. Signed with no
+          // verdict — which the badge reads as "could not be checked", never as
+          // a failure.
+          throw new Error("no signed content available");
+        }
+        const result = await verifySignedMessage(
+          payload.signedPartBase64,
+          payload.signaturePayload,
+          payload.signerKeys ?? [],
+          firstAddressFromText(message.sender || "")
+        );
+        if (cancelled) return;
+        setDecrypted((prev) => ({
+          ...prev,
+          [message.messageId]: {
+            body: result.body,
+            bodyMode: result.bodyMode,
+            signed: result.signed,
+            verified: result.verified,
+            signerFingerprint: result.signerFingerprint,
+            error: ""
+          }
+        }));
+      } catch {
+        if (cancelled) return;
+        // No body here on purpose: an unverifiable signature must not cost the
+        // reader the message. displayBody falls through to the server's copy on
+        // an empty body, which is what the pane was already showing.
+        setDecrypted((prev) => ({
+          ...prev,
+          [message.messageId]: {
+            body: "",
+            signed: true,
+            verified: false,
+            signerFingerprint: "",
+            error: ""
+          }
+        }));
+      } finally {
+        if (!cancelled) setVerifyingId("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // decrypted is intentionally not a dependency, for the same reason as the
+    // decrypt effect above: including it would re-run on every success, and the
+    // guard reads the latest value through the closure on each selection change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, sourceMailbox]);
 
   const swipeSessionRef = useRef<{
     messageId: string;
@@ -1458,19 +1537,21 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                   a pairing request by email — never approve one you did not start yourself, on this device.
                 </p>
               ) : null}
-              {selected.pgpEncrypted ? (
-                (() => {
-                  // For client-protected accounts the signature verdict comes
-                  // from the local decrypt, not from the server (which never
-                  // saw the plaintext). Fall back to the server's fields for
-                  // legacy accounts.
-                  const local = decrypted[selected.messageId];
-                  const decryptFailed = Boolean(selected.pgpDecryptError || local?.error);
-                  const decryptingNow = decryptingId === selected.messageId;
-                  const signed = local ? local.signed : Boolean(selected.pgpSigned);
-                  const verified = local ? local.verified : Boolean(selected.pgpVerified);
-                  return (
-                    <p style={{ margin: 0 }}>
+              {(() => {
+                // For client-protected accounts the verdict comes from the
+                // local decrypt or the local signature check, not from the
+                // server. Fall back to the server's fields for legacy accounts'
+                // encrypted mail — the one case where the server still has one.
+                const local = decrypted[selected.messageId];
+                const decryptFailed = Boolean(selected.pgpDecryptError || local?.error);
+                const decryptingNow = decryptingId === selected.messageId;
+                const verifyingNow = verifyingId === selected.messageId;
+                if (!selected.pgpEncrypted && !selected.pgpSigned) {
+                  return null;
+                }
+                return (
+                  <p style={{ margin: 0 }}>
+                    {selected.pgpEncrypted ? (
                       <span className={`security-badge ${decryptFailed ? "security-badge-off" : "security-badge-on"}`}>
                         <span className="security-dot" aria-hidden="true" />
                         {decryptingNow
@@ -1479,34 +1560,37 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                             ? "PGP: could not decrypt"
                             : "PGP: encrypted"}
                       </span>
-                      {!decryptFailed && !decryptingNow && signed ? (
-                        <span className={`security-badge ${verified ? "security-badge-on" : "security-badge-off"}`} style={{ marginLeft: 6 }}>
-                          <span className="security-dot" aria-hidden="true" />
-                          {verified ? "signature verified" : "signature does not match sender"}
-                        </span>
-                      ) : null}
-                      {signed && !verified && local?.signerFingerprint ? (
-                        <span className="contacts-muted" style={{ marginLeft: 6 }}>
-                          signed by {local.signerFingerprint.slice(-16)}
-                        </span>
-                      ) : null}
-                      {local?.error ? (
-                        <span className="contacts-muted" style={{ marginLeft: 6 }}>{local.error}</span>
-                      ) : null}
-                      {!local && !decryptingNow && !selected.pgpDecryptError && needsUnlock() ? (
-                        <button
-                          type="button"
-                          className="contacts-action"
-                          style={{ marginLeft: 6 }}
-                          onClick={() => setPgpUnlockOpen(true)}
-                        >
-                          Unlock to read
-                        </button>
-                      ) : null}
-                    </p>
-                  );
-                })()
-              ) : null}
+                    ) : null}
+                    {/*
+                      Suppressed while an encrypted message is still closed:
+                      until it decrypts there is no signature to describe, and a
+                      badge next to "could not decrypt" would be describing
+                      nothing. A signed-only message has no such gate — its
+                      content was readable all along.
+                    */}
+                    {selected.pgpEncrypted && (decryptFailed || decryptingNow) ? null : (
+                      <SignatureBadge email={selected} local={local} checking={verifyingNow} />
+                    )}
+                    {local?.error ? (
+                      <span className="contacts-muted" style={{ marginLeft: 6 }}>{local.error}</span>
+                    ) : null}
+                    {selected.pgpEncrypted &&
+                    !local &&
+                    !decryptingNow &&
+                    !selected.pgpDecryptError &&
+                    needsUnlock() ? (
+                      <button
+                        type="button"
+                        className="contacts-action"
+                        style={{ marginLeft: 6 }}
+                        onClick={() => setPgpUnlockOpen(true)}
+                      >
+                        Unlock to read
+                      </button>
+                    ) : null}
+                  </p>
+                );
+              })()}
               <p style={{ margin: 0 }}><strong>Subject:</strong> {selected.subject || "(no subject)"}</p>
               <p style={{ margin: 0 }}><strong>Sender:</strong> {selected.sender || "-"}</p>
               <p style={{ margin: 0 }}><strong>Sent To:</strong> {selected.sentTo || "-"}</p>
