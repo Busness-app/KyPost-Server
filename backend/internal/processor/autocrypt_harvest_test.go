@@ -192,7 +192,7 @@ func (c *harvestStubClient) FetchHeaderFields(_ context.Context, uids []int, _ .
 	return out, nil
 }
 
-func (c *harvestStubClient) FetchRawMessage(_ context.Context, uid int) ([]byte, error) {
+func (c *harvestStubClient) FetchRawMessage(_ context.Context, _ string, uid int) ([]byte, error) {
 	return c.raw[uid], nil
 }
 

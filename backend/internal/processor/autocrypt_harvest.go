@@ -277,7 +277,7 @@ func (p *Poller) harvestAutocrypt(ctx context.Context, uc userCtx, msg imapadapt
 	if suppressed[normAddr] {
 		return
 	}
-	raw, err := uc.mail.FetchRawMessage(ctx, uid)
+	raw, err := uc.mail.FetchRawMessage(ctx, "INBOX", uid)
 	if err != nil || len(raw) == 0 {
 		return
 	}

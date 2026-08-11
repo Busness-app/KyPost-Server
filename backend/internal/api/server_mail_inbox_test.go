@@ -141,7 +141,7 @@ func (f *fakeMailClient) SaveSent(_ context.Context, _ imapadapter.DraftMessage)
 func (f *fakeMailClient) FetchHeaderFields(context.Context, []int, ...string) (map[int][]string, error) {
 	return nil, nil
 }
-func (f *fakeMailClient) FetchRawMessage(context.Context, int) ([]byte, error) { return nil, nil }
+func (f *fakeMailClient) FetchRawMessage(context.Context, string, int) ([]byte, error) { return nil, nil }
 
 // Attachment fixtures for the /api/mail/attachment(s) handler tests.
 func (f *fakeMailClient) ListAttachments(_ context.Context, _ string, uid int) ([]imapadapter.AttachmentInfo, error) {

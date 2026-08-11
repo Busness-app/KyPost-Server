@@ -475,9 +475,9 @@ type Client interface {
 	// — see auth_results.go for the full contract.
 	FetchHeaderFields(ctx context.Context, uids []int, fields ...string) (map[int][]string, error)
 	// FetchRawMessage fetches the complete raw RFC 5322 message (headers +
-	// body, exactly as stored) for one UID — see raw_message.go for the full
-	// contract.
-	FetchRawMessage(ctx context.Context, uid int) ([]byte, error)
+	// body, exactly as stored) for one UID in mailbox — see raw_message.go for
+	// the full contract.
+	FetchRawMessage(ctx context.Context, mailbox string, uid int) ([]byte, error)
 }
 
 type APIClient struct {

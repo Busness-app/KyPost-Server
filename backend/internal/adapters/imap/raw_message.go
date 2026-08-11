@@ -31,7 +31,12 @@ import (
 // in parseRawMessageRecord, which is kept below as defense-in-depth but
 // can't undo buffering the underlying library already did by the time it
 // runs).
-func (c *APIClient) FetchRawMessage(ctx context.Context, uid int) ([]byte, error) {
+// mailbox is explicit rather than "whatever is currently selected" because
+// handlePGPPayload calls this with a mailbox taken from the request. An
+// implicit selection there would fetch the requested UID out of whichever
+// folder the connection last touched — a different message, returned as
+// though it were the right one.
+func (c *APIClient) FetchRawMessage(ctx context.Context, mailbox string, uid int) ([]byte, error) {
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
 
@@ -41,6 +46,10 @@ func (c *APIClient) FetchRawMessage(ctx context.Context, uid int) ([]byte, error
 
 	d, err := c.ensureConnectedLocked()
 	if err != nil {
+		return nil, err
+	}
+
+	if err := c.selectMailboxLocked(d, mailbox); err != nil {
 		return nil, err
 	}
 
