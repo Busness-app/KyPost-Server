@@ -92,6 +92,7 @@ function Harness({
   fingerprint = "AAAA1111BBBB2222",
   unlocked = true,
   onRequestUnlock = () => {},
+  onRefresh = () => {},
   onChanged = () => {},
   // Confirmed by default: the tests below are about the ceremony, not about
   // the wait, and an unset one would fall through to the real poller and keep
@@ -104,6 +105,7 @@ function Harness({
   fingerprint?: string;
   unlocked?: boolean;
   onRequestUnlock?: () => void;
+  onRefresh?: () => void;
   onChanged?: () => void;
   awaitEnrollment?: (deviceId: string) => Promise<boolean>;
 }) {
@@ -115,6 +117,7 @@ function Harness({
         clientProtected={clientProtected}
         fingerprint={fingerprint}
         onOpenPanel={setPanel}
+        onRefresh={onRefresh}
       />
       <DeviceMailPanel
         device={dev}
@@ -152,12 +155,27 @@ describe("the status cell", () => {
     expect(screen.getByRole("button", { name: "Enroll" })).toBeTruthy();
   });
 
-  // Self-gating: until the mobile half ships, every device looks like this, so
-  // the row offers nothing rather than a button leading nowhere.
-  it("offers nothing for a device that has published no key", () => {
+  // A device publishes its key when the ceremony starts ON THE DEVICE, so this
+  // is the state every phone is in between pairing and starting setup — not
+  // only the state of an app too old to have the feature. The copy used to name
+  // the second reading only, sending a user with a current app off to pair
+  // again, and the row it appears in is the one place they would look.
+  it("points a device that has published no key at its own setup", () => {
     render(<Harness mailAccess="unsupported" />);
-    expect(screen.getByText(/too old to be enrolled/i)).toBeTruthy();
+    expect(screen.getByText(/start encryption setup on the device itself/i)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Enroll" })).toBeNull();
+  });
+
+  // The list is fetched on mount, and the event that ends this state happens on
+  // the OTHER device. Without a way to re-read it, a browser opened before the
+  // phone published its key can never reach the ceremony at all.
+  it("re-reads the device list on request", async () => {
+    const onRefresh = vi.fn();
+    render(<Harness mailAccess="unsupported" onRefresh={onRefresh} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Check again" }));
+
+    expect(onRefresh).toHaveBeenCalled();
   });
 
   it("shows an enrolled device as able to read encrypted mail", () => {
@@ -175,6 +193,7 @@ describe("the status cell", () => {
         clientProtected={false}
         fingerprint="AAAA"
         onOpenPanel={() => {}}
+        onRefresh={() => {}}
       />
     );
     expect(container.firstChild).toBeNull();
@@ -189,6 +208,7 @@ describe("the status cell", () => {
         clientProtected
         fingerprint="AAAA"
         onOpenPanel={() => {}}
+        onRefresh={() => {}}
       />
     );
     expect(container.firstChild).toBeNull();
@@ -497,6 +517,23 @@ describe("revocation", () => {
 
     expect(await screen.findByText(/does not erase the copy that device already has/i)).toBeTruthy();
     expect(await screen.findByText(/replace your key/i)).toBeTruthy();
+  });
+
+  // The row's answer comes from `encryptionEnrolled`, which only the DEVICE
+  // writes — so a successful removal changes nothing the user can see, and the
+  // panel closing on its own was indistinguishable from a button that did
+  // nothing. Say what happened instead.
+  it("reports what a removal changed rather than closing silently", async () => {
+    render(<Harness mailAccess="enrolled" dev={enrolledDevice()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Remove sealing" }));
+
+    await userEvent.type(screen.getByLabelText("Account password"), "hunter2");
+    await userEvent.click(screen.getByRole("button", { name: "Remove it" }));
+
+    expect(await screen.findByText(/server's copy is gone/i)).toBeTruthy();
+    // And why the row above it still says the device can read the mail.
+    expect(screen.getByText(/only that device can report/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Done" })).toBeTruthy();
   });
 
   it("removes the server's copy with the account credential", async () => {

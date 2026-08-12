@@ -249,6 +249,7 @@ export function Devices({
                   clientProtected={pgpClientProtected}
                   fingerprint={pgpFingerprint}
                   onOpenPanel={(panel) => setOpenPanel({ deviceId: row.deviceId, panel })}
+                  onRefresh={() => void refreshDevices()}
                 />
               )}
               renderMailPanel={(row) =>
