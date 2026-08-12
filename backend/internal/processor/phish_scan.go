@@ -268,7 +268,10 @@ func (p *Poller) flagAppImpersonation(ctx context.Context, uc userCtx, msg imapa
 	// — but the assertion the code makes should be the one it checks.
 	if ownDomain := domainOf(ownAddress); ownDomain != "" && sameAddress(msg.Sender, ownAddress) {
 		if uid, err := strconv.Atoi(strings.TrimSpace(msg.ID)); err == nil {
-			if raw, err := uc.mail.FetchRawMessage(ctx, "INBOX", uid); err == nil && len(raw) > 0 {
+			// "" is the account's configured folder, which is where msg came
+			// from. A literal "INBOX" decided this exemption on a different
+			// message at the same UID for any account polling another folder.
+			if raw, err := uc.mail.FetchRawMessage(ctx, "", uid); err == nil && len(raw) > 0 {
 				if verifyDKIMCoversHeader(raw, ownDomain, "From") {
 					p.log.Info(
 						"app-impersonation scan: message is DKIM-authenticated and from the account's own address, not flagging",

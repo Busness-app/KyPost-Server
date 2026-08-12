@@ -354,6 +354,16 @@ func isPGPVersionPart(a goimap.Attachment) bool {
 // callers check for this alongside the body rather than only when it is empty.
 func pgpDetectSignature(attachments []goimap.Attachment) string {
 	for _, a := range attachments {
+		// The media type is checked FIRST, and not only for tidiness. The armor
+		// prefix alone is not evidence of anything: any sender can attach a text
+		// file whose first line is the armor header, and matching on that put a
+		// signature badge on ordinary mail — and, worse, made that message
+		// reachable on the signed-only read path, which forces a raw fetch and
+		// satisfies the pgpSigned precondition other bugs need. RFC 3156
+		// requires the signature part to declare application/pgp-signature.
+		if !isPGPSignatureMediaType(a.MimeType) {
+			continue
+		}
 		// Byte-wise: this runs on every attachment of every message with a
 		// readable body, and string(a.Content) copies the whole part to look at
 		// its first 29 bytes.
@@ -362,6 +372,16 @@ func pgpDetectSignature(attachments []goimap.Attachment) string {
 		}
 	}
 	return ""
+}
+
+// isPGPSignatureMediaType reports whether a Content-Type value names
+// application/pgp-signature, ignoring parameters and case as RFC 2045 requires.
+func isPGPSignatureMediaType(value string) bool {
+	mediaType := value
+	if i := strings.IndexByte(mediaType, ';'); i >= 0 {
+		mediaType = mediaType[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(mediaType), "application/pgp-signature")
 }
 
 // Overview is UID + envelope + flags for one message, without body content

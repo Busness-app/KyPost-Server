@@ -180,6 +180,12 @@ type harvestStubClient struct {
 	imapadapter.Client
 	headerFields map[int][]string
 	raw          map[int][]byte
+	// rawMailbox is the folder this fake will serve raw bytes for. Zero value
+	// "" is the account's configured folder, which is what FetchHeaderFields
+	// reads and therefore the only folder the harvest may authenticate against.
+	rawMailbox string
+	// rawMailboxes records every mailbox FetchRawMessage was asked for.
+	rawMailboxes []string
 }
 
 func (c *harvestStubClient) FetchHeaderFields(_ context.Context, uids []int, _ ...string) (map[int][]string, error) {
@@ -192,7 +198,20 @@ func (c *harvestStubClient) FetchHeaderFields(_ context.Context, uids []int, _ .
 	return out, nil
 }
 
-func (c *harvestStubClient) FetchRawMessage(_ context.Context, _ string, uid int) ([]byte, error) {
+// FetchRawMessage records the mailbox it was asked for, and serves raw bytes
+// only for the folder the rest of this fake reads from.
+//
+// Every fake in the repo used to discard the mailbox argument, which is why a
+// caller passing a literal "INBOX" while its sibling call read the account's
+// configured folder could not be caught by any test. rawMailbox is "" here for
+// the same reason the production callers pass "": that means "the configured
+// folder", and the header fetch this is paired with has no mailbox argument at
+// all.
+func (c *harvestStubClient) FetchRawMessage(_ context.Context, mailbox string, uid int) ([]byte, error) {
+	c.rawMailboxes = append(c.rawMailboxes, mailbox)
+	if mailbox != c.rawMailbox {
+		return nil, nil
+	}
 	return c.raw[uid], nil
 }
 
@@ -258,6 +277,46 @@ func TestHarvestAutocryptPinsOnDKIMPass(t *testing.T) {
 	c, ok := findContactByEmail(store, "faythe@example.com")
 	if !ok || c.PGPKeySource != contacts.PGPSourceAutocrypt || !c.DiscoveryCreated {
 		t.Fatalf("expected a harvested autocrypt contact, got ok=%v %+v", ok, c)
+	}
+}
+
+// The bytes the DKIM gate authenticates must come from the SAME message the
+// Autocrypt header was read from. FetchHeaderFields takes no mailbox and so
+// reads the account's configured folder; passing a literal "INBOX" to the raw
+// fetch authenticated a different message at the same UID for any account
+// polling another folder, and usually found no such UID at all — killing
+// harvesting silently.
+func TestHarvestAutocryptAuthenticatesTheFolderItReadHeadersFrom(t *testing.T) {
+	prev := verifyAutocryptDKIM
+	verifyAutocryptDKIM = func(_ []byte, _ string) bool { return true }
+	defer func() { verifyAutocryptDKIM = prev }()
+
+	p := newTestPollerForHarvest(t)
+	header := autocryptHeaderFor(t, "Heidi", "heidi@example.com")
+	client := &harvestStubClient{
+		headerFields: map[int][]string{7: {
+			"Autocrypt: " + header,
+			"From: Heidi <heidi@example.com>",
+		}},
+		raw: map[int][]byte{7: []byte("raw message bytes")},
+		// Serve raw bytes only for the configured folder.
+		rawMailbox: "",
+	}
+	uc := userCtx{id: "u1", mail: client}
+
+	p.harvestAutocrypt(context.Background(), uc, imapadapter.Message{ID: "7", Sender: "heidi@example.com"}, nil)
+
+	for _, got := range client.rawMailboxes {
+		if got != "" {
+			t.Fatalf("raw fetch asked for %q; it must read the same folder as the header fetch, which is the configured one (\"\")", got)
+		}
+	}
+	store, err := p.userContactsStore("u1")
+	if err != nil {
+		t.Fatalf("userContactsStore: %v", err)
+	}
+	if _, ok := findContactByEmail(store, "heidi@example.com"); !ok {
+		t.Fatal("expected the key to be harvested; a mismatched folder makes the raw fetch return nothing and the harvest die silently")
 	}
 }
 

@@ -47,6 +47,31 @@ func TestPgpDetectSignature(t *testing.T) {
 			t.Fatalf("expected %q, got %q", armored, got)
 		}
 	})
+
+	// The armor prefix is not evidence on its own. Any sender can attach a text
+	// file whose first line is the armor header, and matching it put a signature
+	// badge on ordinary mail — which also made that message reachable on the
+	// signed-only read path, satisfying the pgpSigned precondition another bug
+	// needed. RFC 3156 requires the signature part to declare this media type.
+	t.Run("armor prefix on a part that is not a pgp signature", func(t *testing.T) {
+		armored := "-----BEGIN PGP SIGNATURE-----\n\nfakebase64data\n-----END PGP SIGNATURE-----\n"
+		attachments := []goimap.Attachment{
+			{Name: "notes.txt", MimeType: "text/plain", Content: []byte(armored)},
+		}
+		if got := pgpDetectSignature(attachments); got != "" {
+			t.Fatalf("a text/plain attachment must not be taken for a signature, got %q", got)
+		}
+	})
+
+	t.Run("media type parameters and casing are tolerated", func(t *testing.T) {
+		armored := "-----BEGIN PGP SIGNATURE-----\n\nfakebase64data\n-----END PGP SIGNATURE-----\n"
+		attachments := []goimap.Attachment{
+			{Name: "signature.asc", MimeType: "Application/PGP-Signature; name=\"signature.asc\"", Content: []byte(armored)},
+		}
+		if got := pgpDetectSignature(attachments); got != armored {
+			t.Fatalf("expected the signature to be detected, got %q", got)
+		}
+	})
 }
 
 // TestEmailContentSize exercises the size-accounting GetMessageBodies and
