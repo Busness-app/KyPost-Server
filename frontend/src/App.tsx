@@ -1378,7 +1378,7 @@ export function App() {
                 <span className="license-app-name">KyPost</span>
                 {appVersion ? <span className="license-version-badge">v{appVersion}</span> : null}
               </div>
-              <p className="license-title-sub">Developed by Busnes Games</p>
+              <p className="license-title-sub">Developed by Busnes.app</p>
               <p className="license-title-sub">
                 &copy; {new Date().getFullYear()} &middot; Licensed under AGPL&nbsp;v3
               </p>
