@@ -2,7 +2,6 @@ import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router";
 import { toErrorMessage } from "../../../api/client";
 import {
-  generatePGPIdentity,
   deletePGPIdentity,
   storeClientPGPIdentity,
   rewrapPGPPrivateKey,
@@ -67,9 +66,6 @@ export function MailKeys({
   const [pgpBusy, setPgpBusy] = useState(false);
   const [pgpStatus, setPgpStatus] = useState("");
   const [pgpImportOpen, setPgpImportOpen] = useState(false);
-  // Which side of the "can my phone read this" question the user picked; false keeps the key
-  // in the browser, which is the mode nothing should downgrade away from by accident.
-  const [pgpReadOnMobile, setPgpReadOnMobile] = useState(false);
   const [pgpImportKey, setPgpImportKey] = useState("");
   const [pgpImportPassphrase, setPgpImportPassphrase] = useState("");
   const [migratePassword, setMigratePassword] = useState("");
@@ -209,52 +205,6 @@ export function MailKeys({
       setPgpIdentity(id);
       await loadPGPSession();
       setPgpStatus("New PGP identity generated. Back up your key: an admin password reset makes it unrecoverable.");
-    } catch (e) {
-      setPgpStatus(`Failed to generate identity: ${toErrorMessage(e, "unknown error")}`);
-    } finally {
-      setPgpBusy(false);
-    }
-  }
-
-  /**
-   * The other branch of the mobile question: the server generates and keeps the
-   * key, so it can decrypt for paired devices.
-   *
-   * This is a real reduction in protection, not a convenience toggle, so it is
-   * never the default and never described as end-to-end. Claiming end-to-end
-   * while holding the key is the exact defect this whole mode split exists to
-   * close — see docs/E2E_PGP.md.
-   */
-  async function handleGenerateServerPGPIdentity() {
-    if (
-      !window.confirm(
-        "Generate a key this server holds?\n\n" +
-          "This server will be able to read every message encrypted to you, and so will anyone " +
-          "who gains access to it or its backups. Choose this only if reading encrypted mail on " +
-          "your phone matters more than keeping it from the server."
-      )
-    ) {
-      return;
-    }
-    // Creating a published identity is gated on the account credential, first
-    // one or not: a session alone used to be enough, and an attacker holding a
-    // stolen cookie could install their own key as this account's published
-    // identity — WKD serves it and Autocrypt advertises it, both on by default,
-    // so the substitution outlives the session that made it.
-    const password = window.prompt(
-      "Enter your account password to confirm.\n\nThis publishes a new key for your address: " +
-        "WKD serves it and your outgoing mail advertises it."
-    );
-    if (!password) {
-      return;
-    }
-    setPgpBusy(true);
-    setPgpStatus("");
-    try {
-      const id = await generatePGPIdentity(password);
-      setPgpIdentity(id);
-      await loadPGPSession();
-      setPgpStatus("PGP identity generated. This server holds the key and can read your encrypted mail.");
     } catch (e) {
       setPgpStatus(`Failed to generate identity: ${toErrorMessage(e, "unknown error")}`);
     } finally {
@@ -858,49 +808,16 @@ export function MailKeys({
         ) : (
           <>
             {/*
-              The choice is framed as the question a user can actually answer, not as a
-              protection mode. "Client vs server key custody" is not something most people
-              can weigh; "can my phone read this" is. The mode follows from the answer.
-
-              Defaults to no, so nothing downgrades by inattention.
+              The mobile question used to be asked here, and "yes" minted a key this
+              server held. Server custody is retired, so there is no longer a choice to
+              present: the key is generated in this browser and the server never sees it.
+              Reading on other devices is served by per-device envelope slots, which seal
+              the key to that device rather than to this server.
             */}
-            <fieldset className="sec-choice">
-              <legend>Read encrypted mail on your phone?</legend>
-              <label>
-                <input
-                  type="radio"
-                  name="pgp-mobile-readable"
-                  checked={!pgpReadOnMobile}
-                  onChange={() => setPgpReadOnMobile(false)}
-                  disabled={pgpBusy}
-                />
-                <span>
-                  <strong>No</strong> (recommended) — only this browser can decrypt. Nobody with
-                  access to the server can read your encrypted mail, and the mobile app will show
-                  these messages as unreadable with a link to open them here.
-                </span>
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="pgp-mobile-readable"
-                  checked={pgpReadOnMobile}
-                  onChange={() => setPgpReadOnMobile(true)}
-                  disabled={pgpBusy}
-                />
-                <span>
-                  <strong>Yes</strong> — this server stores your key so it can decrypt for your
-                  devices. Anyone with access to the server, its disk, or its backups can read your
-                  encrypted mail.
-                </span>
-              </label>
-            </fieldset>
             <div className="sec-actions">
               <button
                 type="button"
-                onClick={() =>
-                  void (pgpReadOnMobile ? handleGenerateServerPGPIdentity() : handleGeneratePGPIdentity())
-                }
+                onClick={() => void handleGeneratePGPIdentity()}
                 disabled={pgpBusy}
               >
                 Generate new identity

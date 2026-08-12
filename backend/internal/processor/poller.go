@@ -83,11 +83,6 @@ type Poller struct {
 	stateDir    string
 	configDir   string
 	imapKeyPath string
-	// pgpKeyPath is the master key sealing users' PGP private keys — the
-	// same PGP_PRIVATE_KEY_FILE the api server resolves — needed here so a
-	// send-as verification can add the newly proven address to the user's
-	// existing key (see addAliasUserIDToPGPKey).
-	pgpKeyPath string
 
 	// newMailClient builds one user's IMAP client from their sealed credential
 	// file. A field rather than a direct call to
@@ -156,7 +151,6 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		stateDir:             stateDir,
 		configDir:            configDir,
 		imapKeyPath:          config.SecretFile("IMAP_CONFIG_KEY_FILE", "imap-config.key"),
-		pgpKeyPath:           config.SecretFile("PGP_PRIVATE_KEY_FILE", "pgp-private-key.key"),
 		stores:               map[string]*state.Store{},
 		mailClients:          map[string]*mailClientEntry{},
 		mailCaches:           map[string]*mailcache.Store{},
@@ -971,9 +965,18 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	// Must follow the check above, so it sees the freshest verdict for the
 	// account's own address and doesn't probe an address just proven.
 	p.ensureOwnAddressProven(u.ID)
-	// Must follow the check above, so an alias verified in this very tick
-	// gets its PGP User ID without waiting for the next one.
-	p.reconcilePGPUserIDs(u.ID)
+	// A verified alias used to get self-signed onto the key as a User ID here.
+	// That needed the private half, so it only ever worked for server-custody
+	// keys, and server custody is retired.
+	//
+	// NOTHING REPLACES IT. The browser sets User IDs only at key generation
+	// (suggestedUserIDs -> generateIdentity), and no path adds one to an
+	// existing key, so an alias verified after the key was made is never
+	// carried onto it. Client-custody accounts have always had this gap; it is
+	// now universal. WKD still SERVES the key for such an alias while the
+	// recipient's validateDiscoveredKey rejects it for missing the address —
+	// see pgpmail.ArmoredKeyCertifiesAddress, which exists for this and has no
+	// callers yet.
 
 	p.log.Info(
 		"user poll tick summary",

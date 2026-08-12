@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"kypost-server/backend/internal/pgpdiscovery"
+	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
 
@@ -520,15 +520,18 @@ func TestWKDServedAliasKeyIsAcceptedByDiscovery(t *testing.T) {
 		t.Fatalf("MarkVerified: %v", err)
 	}
 
-	// Generate the key only now, with the alias already verified.
-	genBody, _ := json.Marshal(map[string]string{"password": stepUpPassword(t, srv, userID)})
-	genReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/generate", bytes.NewReader(genBody))
-	authRequest(srv, genReq)
-	genRec := httptest.NewRecorder()
-	srv.withAuth(srv.handlePGPIdentityGenerate)(genRec, genReq)
-	if genRec.Code != http.StatusOK {
-		t.Fatalf("generate: expected 200, got %d: %s", genRec.Code, genRec.Body.String())
+	// Generate the key only now, with the alias already verified. The browser
+	// generates it and the server stores the public half; the User ID list is
+	// the one the server suggests, which is what makes the alias servable.
+	userIDs := srv.suggestedKeyUserIDs(userID)
+	if len(userIDs) < 2 {
+		t.Fatalf("expected the verified alias in the suggested user IDs, got %v", userIDs)
 	}
+	id, err := pgpmail.GenerateIdentity("Alice", userIDs[0], userIDs[1:]...)
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	seedClientIdentity(t, srv, userID, id.ArmoredPublicKey)
 
 	wkdStore, err := srv.wkdPublishStore()
 	if err != nil {

@@ -109,18 +109,25 @@ export function Users() {
   }
 
   function resetPassword(user: ManagedUser) {
-    // The admin has to be told what this can destroy. A client-protected PGP
-    // key is wrapped under the account password and the server cannot open it,
-    // so a reset makes it permanently unrecoverable — the user is warned about
-    // this on their own security page, and the administrator doing it was told
-    // nothing, before or after.
+    // The admin has to be told what this does, and — just as important — what it
+    // does NOT do. A client-protected PGP key is wrapped under the account
+    // password and the server cannot rewrap it, so a reset leaves the key
+    // INACCESSIBLE UNDER THE NEW PASSWORD. It is not destroyed: SetPassword
+    // touches no envelope field, the wrapping salt lives inside the envelope
+    // rather than in LoginSalt, and the old password still opens it through
+    // "Key won't unlock?" on the user's security page.
+    //
+    // Saying "permanently unrecoverable" here was worse than imprecise: it sent
+    // users to generate a new identity, which overwrites the envelope and nulls
+    // the recovery slots, turning a recoverable state into real data loss.
     if (
       !window.confirm(
         `Reset ${user.username}'s password?\n\n` +
           "If their PGP key is end-to-end protected, it is wrapped under the password they " +
-          "chose and this server cannot rewrap it. Resetting makes that key — and every " +
-          "message encrypted to it, including their own Sent copies — permanently " +
-          "unreadable unless they hold a recovery backup.\n\n" +
+          "chose and this server cannot rewrap it. After the reset they will not be able to " +
+          "read encrypted mail until they restore the key with their PREVIOUS password, from " +
+          "Security → Mail Keys → \"Key won't unlock?\".\n\n" +
+          "If they no longer know that password and hold no recovery backup, the key is lost.\n\n" +
           "Prefer having them change it themselves if they still can."
       )
     ) {
@@ -133,9 +140,11 @@ export function Users() {
     void withRowBusy(user, async () => {
       const result = await resetUserPassword(user.id, password);
       setStatus(
-        result.pgpKeyDestroyed
-          ? `Password reset for ${user.username}. Their end-to-end PGP key is now unrecoverable — ` +
-            "tell them to restore from their recovery backup or generate a new identity."
+        result.pgpKeyInaccessible
+          ? `Password reset for ${user.username}. Their end-to-end PGP key is now inaccessible ` +
+            "under the new password. Tell them to restore it with their PREVIOUS password from " +
+            "Security → Mail Keys → \"Key won't unlock?\", or from a recovery backup. " +
+            "Generating a new identity is the last resort — it permanently discards the old key."
           : `Password reset for ${user.username}. They must change it on next login.`
       );
     });

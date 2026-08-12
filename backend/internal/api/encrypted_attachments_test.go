@@ -14,17 +14,13 @@ import (
 
 // A PGP/MIME message carries exactly one MIME attachment — the armored
 // ciphertext — and the user's real files are inside it. The attachment
-// endpoints fetched the outer parts and served them as-is, so an encrypted
-// message with a 3 MB report attached offered the reader "encrypted.asc"
-// instead, and downloading it produced armor rather than the report.
+// endpoints once opened server-custody messages to list and serve the files
+// within; with server custody retired they serve the outer parts untouched for
+// every account, and the browser unwraps.
 //
-// This was reachable for inbound encrypted mail before the Sent copy was
-// wrapped; wrapping it puts every encrypted send's own attachments behind the
-// same path, which is what makes it worth fixing here rather than noting.
-//
-// Nothing changes for a client-protected account: the server has no key, so it
-// serves the outer parts exactly as before and the browser does its own
-// unwrapping.
+// These tests pin that pass-through. The interesting case is a message this
+// server still HOLDS the key for: every ingredient for opening it is present,
+// so only the refusal keeps it shut.
 
 // encryptedMessageFake returns a mail client whose message uid=7 is a PGP/MIME
 // message encrypted to recipient, wrapping body plus one attachment.
@@ -87,7 +83,13 @@ func ordinaryMessageWithEncryptedFileFake(t *testing.T, recipient *pgpmail.Ident
 	}
 }
 
-func TestServeAttachmentListLooksInsideAnEncryptedMessage(t *testing.T) {
+// Looking inside required opening the user's key, so it went away with server
+// custody. What must NOT change is the fallback: the outer parts are served
+// untouched, exactly as for a client-protected account, so the browser can do
+// the unwrapping. Serving armor the reader has to open themselves is a
+// usability cost; serving it only because this server declined to read their
+// mail is the point.
+func TestServeAttachmentListPassesCiphertextThroughForServerCustody(t *testing.T) {
 	srv := newTestServer(t)
 	userID, identity := testUserWithServerKey(t, srv)
 	fake := encryptedMessageFake(t, identity)
@@ -106,16 +108,14 @@ func TestServeAttachmentListLooksInsideAnEncryptedMessage(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
 	}
-	if len(resp.Attachments) != 1 {
-		t.Fatalf("attachments = %+v, want the one file inside the ciphertext", resp.Attachments)
-	}
-	got := resp.Attachments[0]
-	if got.Name != "report.pdf" || got.MimeType != "application/pdf" || got.Size != len("pdf-bytes") {
-		t.Fatalf("attachment = %+v, want the decrypted report", got)
+	for _, a := range resp.Attachments {
+		if a.Name == "report.pdf" {
+			t.Fatalf("the server opened a server-custody message to list its attachments: %+v", resp.Attachments)
+		}
 	}
 }
 
-func TestServeAttachmentDownloadServesTheDecryptedFile(t *testing.T) {
+func TestServeAttachmentDownloadPassesCiphertextThroughForServerCustody(t *testing.T) {
 	srv := newTestServer(t)
 	userID, identity := testUserWithServerKey(t, srv)
 	fake := encryptedMessageFake(t, identity)
@@ -128,31 +128,11 @@ func TestServeAttachmentDownloadServesTheDecryptedFile(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	if rec.Body.String() != "pdf-bytes" {
-		t.Fatalf("body = %q, want the decrypted file", rec.Body.String())
+	if rec.Body.String() == "pdf-bytes" {
+		t.Fatal("the server decrypted a server-custody attachment; retiring the mode means it must not")
 	}
-	if got := rec.Header().Get("Content-Type"); got != "application/pdf" {
-		t.Fatalf("Content-Type = %q", got)
-	}
-	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(got, "filename=report.pdf") {
-		t.Fatalf("Content-Disposition = %q", got)
-	}
-}
-
-// An index past the end of the DECRYPTED list is a 404, not a fall-through to
-// the one outer part that happens to exist at index 0.
-func TestServeAttachmentDownloadRejectsAnIndexPastTheDecryptedList(t *testing.T) {
-	srv := newTestServer(t)
-	userID, identity := testUserWithServerKey(t, srv)
-	fake := encryptedMessageFake(t, identity)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/mail/attachment?mailbox=Sent&messageId=7&index=1", nil)
-	req = req.WithContext(context.WithValue(req.Context(), authContextKey{}, AuthContext{UserID: userID}))
-	srv.serveAttachmentDownload(rec, req, fake)
-
-	if rec.Code != 404 {
-		t.Fatalf("status = %d, want 404", rec.Code)
+	if !strings.Contains(rec.Body.String(), "BEGIN PGP MESSAGE") {
+		t.Fatalf("expected the untouched ciphertext part, got %q", rec.Body.String())
 	}
 }
 

@@ -88,19 +88,22 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only client-protected accounts have any business fetching CIPHERTEXT:
-	// for a server-protected account the server already decrypted the body
-	// into the inbox response, so handing the raw payload back as well would
-	// widen exposure for no functional gain.
+	// Only client-protected accounts fetch CIPHERTEXT here. A server-custody
+	// account is refused because it has not migrated yet, NOT because the body
+	// is available elsewhere: retiring server custody means decryptPGPPayload
+	// no longer decrypts for it either, so such an account currently gets
+	// neither plaintext nor ciphertext until it completes the migration. Say so
+	// and name the way out, rather than asserting a decryption that no longer
+	// happens.
 	//
-	// That reasoning does not reach a signed-only message, which is why the
-	// gate is narrowed to the encrypted case. There is no ciphertext to widen
-	// exposure of, the body is already in the inbox response this same account
-	// just fetched, and the signed bytes are the only way to check a signature
-	// now that the server does not — under either protection mode.
+	// The gate is narrowed to the encrypted case because it does not reach a
+	// signed-only message: there is no ciphertext to widen exposure of, and the
+	// signed bytes are the only way to check a signature now that the server
+	// does not — under either protection mode.
 	if encrypted != "" && u.PGPProtection() != users.PGPProtectionClient {
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": "this account's PGP key is not client-protected; the server already decrypts these messages",
+			"error":           serverCustodyMigrationMessage,
+			"migrationNeeded": true,
 		})
 		return
 	}

@@ -37,6 +37,100 @@ func clientProtectedUser(t *testing.T, srv *Server) users.User {
 	return updated
 }
 
+// TestLegacyKeyMigrationRoundTrip is the escape hatch, end to end.
+//
+// Retiring server custody made every other path refuse: the account cannot
+// send, read, sign, or regenerate. This endpoint is the ONLY way the key comes
+// back, so if it breaks, a server-custody user's mail becomes permanently
+// unreadable — the one outcome this whole change must not produce. It had no
+// test of its own before; the paths that used to make it merely convenient are
+// exactly the paths now gone.
+//
+// The round trip is the assertion: export the key, hand it back wrapped, and
+// the account ends up client-protected with nothing server-readable left.
+func TestLegacyKeyMigrationRoundTrip(t *testing.T) {
+	srv := newTestServer(t)
+	userID := srv.mustBootstrapUserID(t)
+	password := stepUpPassword(t, srv, userID)
+
+	identity, err := pgpmail.GenerateIdentity("Alice", "alice@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	sealed, err := identity.SealPrivateKey(srv.pgpPrivateKeyPath)
+	if err != nil {
+		t.Fatalf("SealPrivateKey: %v", err)
+	}
+	if _, err := srv.users.SetPGPIdentity(userID, identity.Fingerprint, identity.KeyID,
+		identity.ArmoredPublicKey, sealed, "generated", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentity: %v", err)
+	}
+
+	exportBody, _ := json.Marshal(map[string]string{"password": password})
+	exportReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/export-legacy", bytes.NewReader(exportBody))
+	authRequest(srv, exportReq)
+	exportRec := httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPExportLegacyKey)(exportRec, exportReq)
+	if exportRec.Code != http.StatusOK {
+		t.Fatalf("export-legacy: expected 200, got %d: %s", exportRec.Code, exportRec.Body.String())
+	}
+	var exported struct {
+		PrivateKey string `json:"privateKey"`
+		PublicKey  string `json:"publicKey"`
+	}
+	if err := json.NewDecoder(exportRec.Body).Decode(&exported); err != nil {
+		t.Fatalf("decode export response: %v", err)
+	}
+	// The key must come back usable, not merely non-empty: a truncated or
+	// re-armored blob would satisfy a length check and still be unopenable.
+	reopened, err := pgpmail.ImportIdentity(exported.PrivateKey, "")
+	if err != nil {
+		t.Fatalf("the exported key does not import: %v", err)
+	}
+	if reopened.Fingerprint != identity.Fingerprint {
+		t.Fatalf("exported key fingerprint = %s, want %s", reopened.Fingerprint, identity.Fingerprint)
+	}
+
+	// The browser wraps it and hands back the opaque envelope.
+	clientBody, _ := json.Marshal(map[string]string{
+		"publicKey": exported.PublicKey,
+		"wrapped":   `{"v":2,"kdf":"PBKDF2-SHA256","iterations":600000,"salt":"c2FsdA==","iv":"aXY=","ciphertext":"Y3Q="}`,
+		"source":    "imported",
+		"password":  password,
+	})
+	clientReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/client", bytes.NewReader(clientBody))
+	authRequest(srv, clientReq)
+	clientRec := httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPIdentityClient)(clientRec, clientReq)
+	if clientRec.Code != http.StatusOK {
+		t.Fatalf("identity/client: expected 200, got %d: %s", clientRec.Code, clientRec.Body.String())
+	}
+
+	u, err := srv.users.Get(userID)
+	if err != nil {
+		t.Fatalf("users.Get: %v", err)
+	}
+	if u.PGPPrivateKeyEnc != "" || u.HasServerReadableKey() {
+		t.Fatal("the server-readable copy survived the migration")
+	}
+	if u.PGPProtection() != users.PGPProtectionClient {
+		t.Fatalf("protection = %q, want %q", u.PGPProtection(), users.PGPProtectionClient)
+	}
+	if u.PGPFingerprint != identity.Fingerprint {
+		t.Fatalf("migration changed the key: fingerprint = %s, want %s", u.PGPFingerprint, identity.Fingerprint)
+	}
+
+	// Migrating again is refused, so the endpoint cannot be used to walk an
+	// account back into server custody.
+	againReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/export-legacy", bytes.NewReader(exportBody))
+	authRequest(srv, againReq)
+	againRec := httptest.NewRecorder()
+	srv.withAuth(srv.handlePGPExportLegacyKey)(againRec, againReq)
+	if againRec.Code != http.StatusConflict {
+		t.Fatalf("second export: expected 409, got %d: %s", againRec.Code, againRec.Body.String())
+	}
+}
+
 // The whole point of client protection is that the server holds nothing it
 // can decrypt with. Pin that the stored record has no server-readable key.
 func TestClientProtectedIdentityLeavesNoServerReadableKey(t *testing.T) {

@@ -33,17 +33,21 @@ export function setUserRole(id: string, role: Role): Promise<ManagedUser> {
 /**
  * Resets an account's password to a temporary one.
  *
- * `pgpKeyDestroyed` reports whether this reset made a client-protected PGP key
- * permanently unrecoverable. The key is wrapped under the account password and
- * the server cannot open it, so an admin cannot rewrap what they cannot read —
- * documented behaviour the USER is warned about, and which the admin doing it
- * previously had no way to know about, before or after.
+ * `pgpKeyInaccessible` reports whether this reset left a client-protected PGP
+ * key unreadable under the NEW password. The key is wrapped under the password
+ * the user chose and the server cannot rewrap what it cannot read.
+ *
+ * It is NOT destroyed, and the name matters: the server writes no envelope
+ * field on a reset, and the wrapping salt is stored inside the envelope rather
+ * than in the account's login salt, so the PREVIOUS password still opens it via
+ * "Key won't unlock?". The field was once called `pgpKeyDestroyed`, which sent
+ * users to generate a new identity — the one action that really is irreversible.
  */
 export function resetUserPassword(
   id: string,
   password: string
-): Promise<{ user: ManagedUser; pgpKeyDestroyed: boolean }> {
-  return postJSON<{ user: ManagedUser; pgpKeyDestroyed: boolean }>(
+): Promise<{ user: ManagedUser; pgpKeyInaccessible: boolean }> {
+  return postJSON<{ user: ManagedUser; pgpKeyInaccessible: boolean }>(
     `/api/users/${encodeURIComponent(id)}/reset-password`,
     { password }
   );

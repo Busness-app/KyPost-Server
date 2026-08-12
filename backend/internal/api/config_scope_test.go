@@ -100,16 +100,16 @@ func TestAdminResetReportsDestroyingAClientKey(t *testing.T) {
 	}
 
 	// Server-custody (or no key): nothing is destroyed, so nothing is claimed.
-	if got := reset(victim.ID, "a-temporary-password-1"); got["pgpKeyDestroyed"] != false {
-		t.Fatalf("pgpKeyDestroyed=%v for an account with no client-protected key", got["pgpKeyDestroyed"])
+	if got := reset(victim.ID, "a-temporary-password-1"); got["pgpKeyInaccessible"] != false {
+		t.Fatalf("pgpKeyInaccessible=%v for an account with no client-protected key", got["pgpKeyInaccessible"])
 	}
 
 	if _, err := srv.users.SetPGPIdentityClientProtected(victim.ID, "FPR", "KID", "PUB",
 		`{"v":2,"ciphertext":"VICTIM"}`, "generated", "2026-08-04T00:00:00Z"); err != nil {
 		t.Fatalf("SetPGPIdentityClientProtected: %v", err)
 	}
-	if got := reset(victim.ID, "a-temporary-password-2"); got["pgpKeyDestroyed"] != true {
+	if got := reset(victim.ID, "a-temporary-password-2"); got["pgpKeyInaccessible"] != true {
 		t.Fatalf("an admin reset destroyed a client-protected key and reported nothing (%v); "+
-			"the admin has no way to know, before or after", got["pgpKeyDestroyed"])
+			"the admin has no way to know, before or after", got["pgpKeyInaccessible"])
 	}
 }

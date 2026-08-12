@@ -40,15 +40,17 @@ type pgpDecryptResult struct {
 	KeepPayload bool
 }
 
-// decryptPGPPayload decrypts payload with userID's private key, when the
-// server still holds one it can open.
+// decryptPGPPayload never decrypts on the server. It reports which of the two
+// reasons applies, so the caller can tell a healthy account from one that still
+// needs migrating.
 //
-// Under client-side key protection it does NOT decrypt, because there is
-// nothing here to decrypt with — that is the entire point of the mode. It
-// returns KeepPayload so the ciphertext travels to the browser untouched,
-// and the browser unwraps its own key and decrypts there. A server that
-// could still read this would not be end-to-end encrypted, whatever the
-// README said.
+// Under client-side key protection there is nothing here to decrypt with — that
+// is the entire point of the mode. It returns KeepPayload so the ciphertext
+// travels to the browser untouched and the browser decrypts there.
+//
+// Under the retired server-custody mode the server COULD still open the key, and
+// deliberately does not: doing so is what made this server able to read the
+// user's mail. The ciphertext is left alone and the error names the migration.
 func (s *Server) decryptPGPPayload(userID, payload, senderAddress string) pgpDecryptResult {
 	u, err := s.users.Get(userID)
 	if err != nil || u.PGPFingerprint == "" {
@@ -64,38 +66,7 @@ func (s *Server) decryptPGPPayload(userID, payload, senderAddress string) pgpDec
 		return pgpDecryptResult{DecryptError: "no pgp private key available for this account"}
 	}
 
-	identity, err := pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, s.pgpPrivateKeyPath)
-	if err != nil {
-		return pgpDecryptResult{DecryptError: "failed to load pgp identity"}
-	}
-
-	var signerKeys []string
-	if contactsStore, cerr := s.userContactsStore(userID); cerr == nil {
-		signerKeys = signerKeysForSender(contactsStore, senderAddress)
-	}
-
-	result, err := pgpmail.DecryptMIME(payload, identity, signerKeys)
-	if err != nil {
-		return pgpDecryptResult{DecryptError: "failed to decrypt message"}
-	}
-	body, mode, attachments, err := pgpmail.ParseContent(result.Content)
-	if err != nil {
-		return pgpDecryptResult{DecryptError: "failed to parse decrypted message"}
-	}
-
-	out := pgpDecryptResult{
-		Body:              body,
-		BodyMode:          mode,
-		Attachments:       attachments,
-		HasAttachments:    len(attachments) > 0,
-		Signed:            result.Signed,
-		Verified:          result.Verified,
-		SignerFingerprint: result.SignerFingerprint,
-	}
-	if subject, ok := pgpmail.ExtractProtectedSubject(result.Content); ok {
-		out.ProtectedSubject = subject
-	}
-	return out
+	return pgpDecryptResult{DecryptError: serverCustodyMigrationMessage}
 }
 
 // decryptPGPMessageContent decrypts c's PGPEncryptedPayload where the server
@@ -291,55 +262,21 @@ func keyMatchesPin(c contacts.Contact) bool {
 	return strings.EqualFold(info.Fingerprint, c.PGPKeyFingerprint)
 }
 
-// signerKeysForSender returns the candidate signer keys for a message claiming
-// to come from senderAddress: the keys of those CONTACTS whose own address list
-// contains that address.
+// signerKeysForSender lived here and returned the candidate signer keys for a
+// message claiming to come from a given address. Its last caller was the
+// server-side decrypt in decryptPGPPayload, which retiring server custody
+// removed, so it is gone. The binding rule it carried is unchanged and now
+// lives entirely in boundSignerKeysForSender below: the ADDRESS BOOK is the
+// anchor, never the key's own User IDs.
 //
-// This is what binds "signature verified" to the sender. Getting the anchor
-// right has taken three attempts, so it is worth stating what each one assumed.
-//
-// Offering the whole address book (allKnownPGPKeys) made Verified mean "some
-// contact of yours signed this": DecryptMIME reports success against whichever
-// offered key produced the signature and has no address to compare it to.
-//
-// Narrowing to keys that carry the address as the parsed email of one of their
-// User IDs was the second attempt, and it is still forgeable, because a User ID
-// is self-asserted and a key may carry arbitrarily many. Mallory generates ONE
-// key with the User IDs `Mallory <mallory@evil.example>` and
-// `Bob <bob@example.com>` — the repo's own GenerateIdentity does it in one
-// variadic call, no packet crafting. The Autocrypt harvest validates the key
-// against her From, matches on the FIRST User ID, and pins it under her own
-// contact. She then signs a message with `From: bob@example.com`, the second
-// User ID satisfies the binding, and the badge goes green — even when the
-// reader holds and has manually verified Bob's real key. No code path anywhere
-// in the backend inspects a key's full User ID set, so every any-UID check
-// inherits this.
-//
-// The address book is the anchor because it is the only assertion here the USER
-// made. `c.Emails` says who a contact is; a User ID says only what its owner
-// typed. The fingerprint pin is checked alongside it so a key swapped under an
-// existing contact without updating its pin cannot inherit that contact's
-// binding.
-//
-// Narrowing the candidate set rather than post-checking the fingerprint means
-// there is no window where a wrong-key signature is ever considered valid.
-//
-// An empty result means nothing can verify, so Verified stays false — which is
-// the correct answer for a sender whose key we do not hold.
-func signerKeysForSender(store *contacts.Store, senderAddress string) []string {
-	address := senderAddrSpec(senderAddress)
-	if address == "" {
-		return nil
-	}
-	var keys []string
-	for _, c := range store.List() {
-		if c.PGPKey == "" || !contactBindsAddress(c, address) || !keyMatchesPin(c) {
-			continue
-		}
-		keys = append(keys, c.PGPKey)
-	}
-	return keys
-}
+// That anchor is worth restating because it took three attempts. Offering the
+// whole address book made "verified" mean "some contact of yours signed this".
+// Narrowing to keys carrying the address as a User-ID email was still
+// forgeable, because a User ID is self-asserted and one key may carry many —
+// GenerateIdentity mints `Mallory <mallory@evil.example>` plus
+// `Bob <bob@example.com>` in one variadic call, and the harvest pins it under
+// Mallory while the second User ID satisfies any UID-based check. `c.Emails` is
+// the only assertion here the USER made, so it is the one to bind on.
 
 // boundSignerKeys returns every contact key the client may verify with, each
 // labelled with the addresses the address book binds it to.
