@@ -119,6 +119,19 @@ type Entry struct {
 	// recomputes rather than showing nothing — dropped when the file is
 	// loaded. See PGPVerdictSchema (the constant).
 	PGPVerdictSchemaVersion int `json:"pgpVerdictSchema,omitempty"`
+	// PGPClassified records that the writer actually LOOKED for PGP content.
+	//
+	// Two processes write this cache. The API classifies — it calls
+	// pgpDetectSignature and the envelope sniffer. The daemon poller cannot:
+	// fetchUnreadPage never calls either, and imapadapter.Message carries no
+	// signature field to copy. Without this flag a poller write, which always
+	// has a body for signed-only mail, was indistinguishable from the API
+	// saying "no signature here" — so it erased the marker on a 90-second tick.
+	//
+	// That is worse than a dropped badge. PGPSigned is the sole trigger for the
+	// browser's signature verification, so erasing it turns the check off
+	// silently and makes a signed message look identical to an unsigned one.
+	PGPClassified bool `json:"pgpClassified,omitempty"`
 	// ContactKeyGen is the contacts store's PGP key generation at the moment
 	// this verdict was computed.
 	//

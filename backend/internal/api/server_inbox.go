@@ -214,6 +214,12 @@ func mailCacheEntryFromUnreadMessage(msg imapadapter.UnreadMessage, status strin
 		PGPVerified:          msg.PGPVerified,
 		PGPSignerFingerprint: msg.PGPSignerFingerprint,
 		PGPProtectedSubject:  msg.PGPProtectedSubject,
+		// This path came from ListUnreadMessages, which runs the envelope
+		// sniffer and pgpDetectSignature — so these fields are an answer, not
+		// an absence, and may overwrite what is cached. The daemon poller sets
+		// no such flag and therefore cannot erase this. See
+		// mailcache.Entry.PGPClassified.
+		PGPClassified: true,
 		// The classic (non-delta) path feeds this straight into
 		// mailcache.Upsert's guard (see mailcache.Entry.PGPDecryptError):
 		// without it, a failed decrypt would look like a clean
@@ -475,7 +481,13 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 
 	needBodies := make([]int, 0, len(result.New))
 	for _, e := range result.New {
-		if e.Body == "" {
+		// !PGPClassified as well as an empty body: the daemon poller writes a
+		// body but never looks for PGP content, so filtering on the body alone
+		// left its entries permanently unclassified on this path — the delta
+		// response then reported "not signed" for a message nobody examined,
+		// and the client's signature verification never ran. See
+		// mailcache.Entry.PGPClassified.
+		if e.Body == "" || !e.PGPClassified {
 			needBodies = append(needBodies, e.UID)
 		}
 	}
@@ -532,6 +544,9 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 				e.PGPSignerFingerprint = c.PGPSignerFingerprint
 				e.PGPProtectedSubject = c.PGPProtectedSubject
 				e.PGPDecryptError = c.PGPDecryptError
+				// GetMessageBodies classified this UID, so the flags above are
+				// authoritative. See mailcache.Entry.PGPClassified.
+				e.PGPClassified = true
 				result.New[i] = e
 				warmEntries = append(warmEntries, e)
 			}

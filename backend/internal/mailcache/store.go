@@ -181,6 +181,15 @@ func (s *Store) Snapshot(mailboxKey string, limit int) ([]Entry, bool) {
 		if e.Body == "" {
 			return out, false
 		}
+		// A body is not enough. The daemon poller writes a body but never looks
+		// for PGP content, so serving its entry as warm reported "not signed"
+		// for a message nobody had examined — and since PGPSigned is the sole
+		// trigger for the browser's signature verification, that silently
+		// turned the check off rather than merely dropping a badge. Report the
+		// window cold so the caller does a live fetch and classifies.
+		if !e.PGPClassified {
+			return out, false
+		}
 	}
 	return out, true
 }
@@ -485,18 +494,31 @@ func (s *Store) Upsert(mailboxKey string, entries []Entry) error {
 				updated.Body = warmBody(mailboxKey, in)
 				updated.BodyMode = in.BodyMode
 			}
-			updated.PGPEncrypted = in.PGPEncrypted
-			updated.PGPSigned = in.PGPSigned
-			updated.PGPVerified = in.PGPVerified
-			updated.PGPSignerFingerprint = in.PGPSignerFingerprint
-			updated.PGPProtectedSubject = in.PGPProtectedSubject
-			// The stamp travels with the verdict it describes. Without this the
-			// existing-UID branch kept a zero version alongside a fresh verdict,
-			// and dropStaleVerdicts then discarded both on the very next load —
-			// which is the production ordering, since the poller creates the
-			// entry before the API warms the verdict into it.
-			updated.PGPVerdictSchemaVersion = in.PGPVerdictSchemaVersion
-			updated.ContactKeyGen = in.ContactKeyGen
+			// Only a writer that actually classified may overwrite the PGP
+			// fields. The poller has a body for every signed-only message but
+			// never looks for a signature, so adopting its zeroes erased the
+			// API's marker on every tick — and PGPSigned is the sole trigger
+			// for the browser's verification, so that silently turned the
+			// check off rather than merely dropping a badge.
+			if in.PGPClassified || !updated.PGPClassified {
+				updated.PGPEncrypted = in.PGPEncrypted
+				updated.PGPSigned = in.PGPSigned
+				updated.PGPVerified = in.PGPVerified
+				updated.PGPSignerFingerprint = in.PGPSignerFingerprint
+				updated.PGPProtectedSubject = in.PGPProtectedSubject
+				updated.PGPClassified = in.PGPClassified
+				// The stamp travels with the verdict it describes, INSIDE the
+				// same guard. Without this the existing-UID branch kept a zero
+				// version alongside a fresh verdict, and dropStaleVerdicts
+				// discarded both on the very next load — which is the
+				// production ordering, since the poller creates the entry
+				// before the API warms the verdict into it. Leaving the stamp
+				// outside the guard reintroduced exactly that: the poller wrote
+				// version 0 over a preserved marker and the next load cleared
+				// it anyway.
+				updated.PGPVerdictSchemaVersion = in.PGPVerdictSchemaVersion
+				updated.ContactKeyGen = in.ContactKeyGen
+			}
 		}
 		// Only the warm path (poller) calls Upsert, and it always carries an
 		// authoritative attachment flag from the same GetEmails parse — so

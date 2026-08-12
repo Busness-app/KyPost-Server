@@ -10,8 +10,15 @@ func ov(uid int, subject, status string) Overview {
 	return Overview{UID: uid, Subject: subject, Sender: "a@example.com", Status: status, AtUTC: "2026-01-01T00:00:00Z"}
 }
 
+// entry models an API write: something that both fetched a body AND classified
+// the message. PGPClassified is part of "warm" now, because a body alone is
+// what the daemon poller produces and it never looks for PGP content. A fixture
+// without it is a poller write, and Snapshot deliberately reports those cold.
 func entry(uid int, subject, status string, body string) Entry {
-	return Entry{UID: uid, MessageID: itoaTest(uid), Subject: subject, Sender: "a@example.com", Status: status, AtUTC: "2026-01-01T00:00:00Z", Body: body}
+	return Entry{
+		UID: uid, MessageID: itoaTest(uid), Subject: subject, Sender: "a@example.com",
+		Status: status, AtUTC: "2026-01-01T00:00:00Z", Body: body, PGPClassified: true,
+	}
 }
 
 func itoaTest(uid int) string {

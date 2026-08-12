@@ -226,8 +226,8 @@ func TestServeInbox_ClassicServedFromWarmCache(t *testing.T) {
 	cfg := config.Default()
 
 	if err := cache.Upsert("INBOX", []mailcache.Entry{
-		{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "body-1"},
-		{UID: 2, MessageID: "2", Subject: "b", Sender: "b@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "body-2"},
+		{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "body-1", PGPClassified: true},
+		{UID: 2, MessageID: "2", Subject: "b", Sender: "b@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "body-2", PGPClassified: true},
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -638,10 +638,13 @@ func TestServeInbox_DeltaSkipsBodyFetchWhenAlreadyWarmed(t *testing.T) {
 	cache := testInboxCache(t)
 	cfg := config.Default()
 
-	// Simulate the daemon having already warmed uid 1's body before any
-	// client ever polls.
+	// A body AND a classification. Both are required to skip the fetch: the
+	// daemon poller produces a body without ever looking for PGP content, and
+	// skipping on the body alone left its entries permanently unclassified —
+	// the response then reported "not signed" for a message nobody examined,
+	// and the client's signature verification never ran.
 	if err := cache.Upsert("INBOX", []mailcache.Entry{
-		{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "warmed-body"},
+		{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "warmed-body", PGPClassified: true},
 	}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -655,12 +658,58 @@ func TestServeInbox_DeltaSkipsBodyFetchWhenAlreadyWarmed(t *testing.T) {
 	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
 
 	if fake.bodiesCalls != 0 {
-		t.Fatalf("expected no body fetch when the daemon already warmed the body, got %d calls, uids=%v", fake.bodiesCalls, fake.lastBodyUIDs)
+		t.Fatalf("expected no body fetch when the body is warm AND classified, got %d calls, uids=%v", fake.bodiesCalls, fake.lastBodyUIDs)
 	}
 	resp := decodeInboxResponse(t, rec)
 	emails := allEmails(resp)
 	if len(emails) != 1 || emails[0].ChangeType != "new" || emails[0].Body != "warmed-body" {
 		t.Fatalf("expected the warmed body to be served for the new entry, got %+v", emails)
+	}
+}
+
+// The counterpart, and the reason PGPClassified exists. The daemon poller is
+// the first thing to see new INBOX mail and writes a body with no PGP fields at
+// all, because fetchUnreadPage never calls pgpDetectSignature. Serving that as
+// authoritative reported every signed message as unsigned — and since
+// PGPSigned is the sole trigger for the browser's signature verification, that
+// silently turned the check off rather than merely dropping a badge.
+func TestServeInbox_DeltaFetchesBodiesForPollerWarmedEntries(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
+	cache := testInboxCache(t)
+	cfg := config.Default()
+
+	// Exactly what processor.mailCacheEntriesFromMessages writes: envelope,
+	// body, and no PGP field of any kind.
+	if err := cache.Upsert("INBOX", []mailcache.Entry{
+		{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "poller-warmed"},
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	fake := &fakeMailClient{
+		overviews: []imapadapter.Overview{
+			{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z"},
+		},
+		bodies:                  map[int]string{1: "signed message text"},
+		bodyPGPSignaturePayload: map[int]string{1: "-----BEGIN PGP SIGNATURE-----\nx\n-----END PGP SIGNATURE-----"},
+	}
+	rec := httptest.NewRecorder()
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
+
+	if fake.bodiesCalls == 0 {
+		t.Fatal("an unclassified entry must be fetched, or its signature is never detected")
+	}
+	emails := allEmails(decodeInboxResponse(t, rec))
+	if len(emails) != 1 {
+		t.Fatalf("expected one email, got %d", len(emails))
+	}
+	if !emails[0].PGPSigned {
+		t.Fatal("the signature went undetected: the client will not verify, and signed mail is indistinguishable from unsigned")
 	}
 }
 
@@ -766,7 +815,7 @@ func TestServeInbox_KeywordsPopulatedOnAllPaths(t *testing.T) {
 	t.Run("cache-warm", func(t *testing.T) {
 		cache := testInboxCache(t)
 		if err := cache.Upsert("INBOX", []mailcache.Entry{
-			{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "b1", Keywords: []string{"Work"}},
+			{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z", Body: "b1", Keywords: []string{"Work"}, PGPClassified: true},
 		}); err != nil {
 			t.Fatalf("Upsert: %v", err)
 		}
