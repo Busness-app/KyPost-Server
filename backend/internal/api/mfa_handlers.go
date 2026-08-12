@@ -204,7 +204,14 @@ func (s *Server) handleMFAConfirm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to generate recovery codes", http.StatusInternalServerError)
 		return
 	}
-	if _, err := s.users.EnableTOTP(u.ID, time.Now().UTC().Format(time.RFC3339), hashes); err != nil {
+	// u.TOTPSecretEnc is the secret the code above was validated against. Passing
+	// it back makes the commit conditional on nothing having re-staged the
+	// enrolment in the meantime — see EnableTOTP.
+	if _, err := s.users.EnableTOTP(u.ID, u.TOTPSecretEnc, time.Now().UTC().Format(time.RFC3339), hashes); err != nil {
+		if errors.Is(err, users.ErrTOTPEnrollmentRestarted) {
+			http.Error(w, "two-factor enrolment was restarted; start setup again", http.StatusConflict)
+			return
+		}
 		http.Error(w, "failed to enable two-factor auth", http.StatusInternalServerError)
 		return
 	}

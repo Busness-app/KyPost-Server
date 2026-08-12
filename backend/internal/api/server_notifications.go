@@ -116,7 +116,12 @@ func (s *Server) handleNotificationSubscriptions(w http.ResponseWriter, r *http.
 		// security check with two homes gets fixed in one of them; this was the
 		// third home.
 		if err := processor.ValidateUnifiedPushEndpointURL(payload.Endpoint); err != nil {
-			http.Error(w, "invalid push endpoint: "+err.Error(), http.StatusBadRequest)
+			// Constant, for the reason the native-register path already gives:
+			// the detail distinguished a nonexistent host from one that resolved
+			// into RFC1918, named that address, and (via net.DNSError) named the
+			// resolver too. The full error goes to the log.
+			s.logger.Info("push endpoint refused", "error", err.Error())
+			http.Error(w, "invalid push endpoint", http.StatusBadRequest)
 			return
 		}
 

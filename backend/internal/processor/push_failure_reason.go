@@ -59,10 +59,25 @@ var nativePushFailureReasons = map[string]bool{
 // seen yet — by which a URL or a remote response body reaches the caller. The
 // caller records this on the public health status; the full error belongs in
 // the log.
+// maxPlatformLabelLen bounds the one half of this string that is not drawn from
+// a closed vocabulary. The reason above is; the platform is whatever the device
+// sent at registration, where normalizeNativePlatform deliberately passes any
+// name through unchanged and no clampField is applied. Unbounded, it put up to
+// a megabyte of caller-chosen text onto the anonymous /api/health response and
+// into a state.db write every 30 seconds — the exact arbitrary-text write this
+// file's closed vocabulary exists to prevent, arriving through the other operand.
+//
+// Clamped here rather than at registration so the bound covers every caller,
+// including devices already stored by an older build.
+const maxPlatformLabelLen = 16
+
 func classifyNativePushFailure(platform string, err error) string {
 	platform = strings.ToLower(strings.TrimSpace(platform))
 	if platform == "" {
 		platform = "unknown"
+	}
+	if len(platform) > maxPlatformLabelLen {
+		platform = platform[:maxPlatformLabelLen]
 	}
 	return "[" + platform + "] " + nativePushFailureReason(err)
 }

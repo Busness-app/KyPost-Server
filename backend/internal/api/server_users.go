@@ -165,7 +165,13 @@ func (s *Server) handleUsersResetPassword(w http.ResponseWriter, r *http.Request
 		// So the admin UI can say what just happened, and warn before the next
 		// one. Public() cannot carry it: it describes the account, and this
 		// describes the effect of this request.
-		"pgpKeyDestroyed": destroysClientKey,
+		//
+		// Named for what actually happened. SetPassword writes no envelope
+		// field, and the wrapping salt lives inside the envelope rather than in
+		// LoginSalt, so the key is unreadable under the NEW password and fully
+		// recoverable with the old one. Calling it "destroyed" sent users to
+		// regenerate, which is the one action that really does destroy it.
+		"pgpKeyInaccessible": destroysClientKey,
 	})
 }
 

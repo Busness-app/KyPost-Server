@@ -58,21 +58,11 @@ async function stepUp(password: string): Promise<Record<string, string>> {
   return credentialFields(await deriveCredential("", password));
 }
 
-export async function generatePGPIdentity(password = ""): Promise<PGPIdentity> {
-  return postJSON<PGPIdentity>("/api/pgp/identity/generate", await stepUp(password));
-}
-
-export async function importPGPIdentity(
-  armoredPrivateKey: string,
-  passphrase: string,
-  password = ""
-): Promise<PGPIdentity> {
-  return postJSON<PGPIdentity>("/api/pgp/identity/import", {
-    armoredPrivateKey,
-    passphrase,
-    ...(await stepUp(password))
-  });
-}
+// generatePGPIdentity and importPGPIdentity used to POST to
+// /api/pgp/identity/generate and /import, which minted a key this server could
+// read. Both endpoints now refuse. The browser generates or imports the key and
+// wraps it itself — see generateIdentity/importIdentity in lib/pgpClient and
+// storeClientPGPIdentity below.
 
 export async function deletePGPIdentity(password = ""): Promise<{ ok: boolean }> {
   return deleteJSON<{ ok: boolean }>("/api/pgp/identity", await stepUp(password));

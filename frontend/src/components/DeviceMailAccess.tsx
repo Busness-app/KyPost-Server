@@ -45,12 +45,15 @@ export function DeviceMailAccessStatus({
   mailAccess,
   clientProtected,
   fingerprint,
-  onOpenPanel
+  onOpenPanel,
+  onRefresh
 }: {
   mailAccess: MailAccess;
   clientProtected: boolean;
   fingerprint: string;
   onOpenPanel: (panel: Exclude<MailPanel, "none">) => void;
+  /** Re-reads the device list — see the "unsupported" branch for why. */
+  onRefresh: () => void;
 }) {
   // Nothing to seal, so nothing to say. The Encryption tab is where an account
   // without a client-held key gets told about it, and a row the inventory does
@@ -58,10 +61,26 @@ export function DeviceMailAccessStatus({
   if (!clientProtected || !fingerprint || mailAccess === "unknown") return null;
 
   if (mailAccess === "unsupported") {
+    // TWO situations, indistinguishable here: a device publishes its key when
+    // the ceremony starts ON THE DEVICE, so every phone looks like this between
+    // pairing and starting setup — not only one whose app predates the feature.
+    // Naming the second reading alone sent users with a current app off to pair
+    // again, from the one row they would think to look at.
+    //
+    // "Check again" because the event that ends this state happens on the other
+    // device, and this list is fetched on mount. Without it a browser opened
+    // before the phone published cannot reach the ceremony at all, however long
+    // the user waits.
     return (
-      <p className="sec-muted">
-        This device's app is too old to be enrolled. Update it and pair again.
-      </p>
+      <>
+        <p className="sec-muted">
+          Not set up for encrypted mail. Start encryption setup on the device itself, then check
+          again here. If it offers no such option, its app is too old to be enrolled.
+        </p>
+        <button type="button" onClick={onRefresh}>
+          Check again
+        </button>
+      </>
     );
   }
   if (mailAccess === "enrolled") {
@@ -383,6 +402,7 @@ function RemovePanel({
   const [removePassword, setRemovePassword] = useState("");
   const [removeError, setRemoveError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [removed, setRemoved] = useState(false);
 
   async function removeSealing() {
     if (busy) return;
@@ -390,7 +410,7 @@ function RemovePanel({
     try {
       await deleteDeviceEnvelope(device.deviceId, removePassword);
       onChanged();
-      onClose();
+      setRemoved(true);
     } catch (e) {
       // Scoped to this panel, never to anything that gates the device list:
       // a wrong password on ONE device's removal must not hide every OTHER
@@ -400,6 +420,30 @@ function RemovePanel({
     } finally {
       setBusy(false);
     }
+  }
+
+  // Downstream of a stored deletion, so this stops being a form — and it has to
+  // say something. The row above reads `encryptionEnrolled`, which ONLY the
+  // device writes, so a successful removal leaves the row saying the device can
+  // still read the mail. Closing silently made that indistinguishable from a
+  // button that did nothing, and for a device enrolled longer than the seven-day
+  // transport TTL there was genuinely nothing left on the server to delete.
+  if (removed) {
+    return (
+      <div className="sec-inline-form">
+        <h4>Remove {deviceLabel(device)}'s sealing</h4>
+        <p className="sec-muted">
+          The server's copy is gone. {deviceLabel(device)} keeps the copy it already took, so this
+          row still shows it as able to read your mail — only that device can report otherwise. To
+          cut it off, replace your key on the Encryption tab.
+        </p>
+        <div className="sec-actions">
+          <button type="button" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (

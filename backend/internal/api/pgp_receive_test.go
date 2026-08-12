@@ -56,75 +56,6 @@ func extractArmoredPGPPayload(t *testing.T, raw []byte) string {
 	return ""
 }
 
-func TestDecryptPGPMessageContentRoundTrip(t *testing.T) {
-	srv := newTestServer(t)
-	all, err := srv.users.List()
-	if err != nil || len(all) == 0 {
-		t.Fatalf("no test user available: %v", err)
-	}
-	userID := all[0].ID
-
-	recipient, err := pgpmail.GenerateIdentity("Recipient", "recipient@example.com")
-	if err != nil {
-		t.Fatalf("GenerateIdentity: %v", err)
-	}
-	sealed, err := recipient.SealPrivateKey(srv.pgpPrivateKeyPath)
-	if err != nil {
-		t.Fatalf("SealPrivateKey: %v", err)
-	}
-	if _, err := srv.users.SetPGPIdentity(userID, recipient.Fingerprint, recipient.KeyID, recipient.ArmoredPublicKey, sealed, "generated", "2026-07-14T00:00:00Z"); err != nil {
-		t.Fatalf("SetPGPIdentity: %v", err)
-	}
-
-	sender, err := pgpmail.GenerateIdentity("Sender", "sender@example.com")
-	if err != nil {
-		t.Fatalf("GenerateIdentity sender: %v", err)
-	}
-	contactsStore, err := srv.userContactsStore(userID)
-	if err != nil {
-		t.Fatalf("userContactsStore: %v", err)
-	}
-	if _, err := contactsStore.Upsert(contacts.Contact{
-		FormattedName: "Sender",
-		Emails:        []contacts.ContactValue{{Value: "sender@example.com"}},
-		PGPKey:        sender.ArmoredPublicKey,
-	}); err != nil {
-		t.Fatalf("Upsert contact: %v", err)
-	}
-
-	plaintext := mailmsg.Message{
-		From:    "sender@example.com",
-		To:      []string{"recipient@example.com"},
-		Subject: "Secret",
-		Body:    "meet at dawn",
-		Mode:    "plain",
-	}.Build()
-	encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, sender)
-	if err != nil {
-		t.Fatalf("EncryptMIME: %v", err)
-	}
-
-	payload := extractArmoredPGPPayload(t, encrypted)
-	content := imapadapter.MessageContent{PGPEncryptedPayload: payload}
-	result := srv.decryptPGPMessageContent(userID, "sender@example.com", content)
-
-	if result.PGPDecryptError != "" {
-		t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
-	}
-	if result.Body != "meet at dawn" {
-		t.Fatalf("body mismatch: got %q", result.Body)
-	}
-	if result.PGPProtectedSubject != "Secret" {
-		t.Fatalf("expected the real subject restored from protected headers, got %q", result.PGPProtectedSubject)
-	}
-	if !result.PGPVerified {
-		t.Fatal("expected signature to verify against the known contact key")
-	}
-	if result.PGPSignerFingerprint != sender.Fingerprint {
-		t.Fatalf("signer fingerprint mismatch: got %s want %s", result.PGPSignerFingerprint, sender.Fingerprint)
-	}
-}
-
 func TestDecryptPGPMessageContentNoIdentityConfigured(t *testing.T) {
 	srv := newTestServer(t)
 	all, err := srv.users.List()
@@ -140,15 +71,16 @@ func TestDecryptPGPMessageContentNoIdentityConfigured(t *testing.T) {
 	}
 }
 
-// TestServerCustodyVerificationIsBoundToSender is run-7 finding F3, the
-// server-side remainder of run-4's "signature verified with no key↔sender
-// binding".
+// TestServerCustodyCiphertextIsNotDecrypted is the property the whole retirement
+// is for: an account whose key this server CAN open is nonetheless not read by
+// it. The distinction matters — unlike a client-protected account, every
+// ingredient for decryption is present here, so nothing but the refusal itself
+// stops it.
 //
-// The run-4 fix was applied to the browser only. This path kept offering
-// allKnownPGPKeys — every contact key in the book — to DecryptMIME, which takes
-// no address and so reports "some offered key signed this". Any contact key
-// therefore verified any From, and PGPVerified drove the same green badge.
-func TestServerCustodyVerificationIsBoundToSender(t *testing.T) {
+// The message is genuinely encrypted to the account's own key and would have
+// decrypted cleanly before. The plaintext must not appear in the result, and the
+// error must name the migration rather than reading like breakage.
+func TestServerCustodyCiphertextIsNotDecrypted(t *testing.T) {
 	srv := newTestServer(t)
 	all, err := srv.users.List()
 	if err != nil || len(all) == 0 {
@@ -164,37 +96,17 @@ func TestServerCustodyVerificationIsBoundToSender(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SealPrivateKey: %v", err)
 	}
-	if _, err := srv.users.SetPGPIdentity(userID, recipient.Fingerprint, recipient.KeyID, recipient.ArmoredPublicKey, sealed, "generated", "2026-07-14T00:00:00Z"); err != nil {
+	if _, err := srv.users.SetPGPIdentity(userID, recipient.Fingerprint, recipient.KeyID,
+		recipient.ArmoredPublicKey, sealed, "generated", "2026-07-14T00:00:00Z"); err != nil {
 		t.Fatalf("SetPGPIdentity: %v", err)
 	}
 
-	attacker, aerr := pgpmail.GenerateIdentity("Mallory", "mallory@evil.example")
-	if err := aerr; err != nil {
-		t.Fatalf("GenerateIdentity attacker: %v", err)
-	}
-	contactsStore, err := srv.userContactsStore(userID)
-	if err != nil {
-		t.Fatalf("userContactsStore: %v", err)
-	}
-	// The attacker's key is in the address book under the attacker's OWN address,
-	// which is exactly what the Autocrypt harvest does automatically.
-	if _, err := contactsStore.Upsert(contacts.Contact{
-		FormattedName: "Mallory",
-		Emails:        []contacts.ContactValue{{Value: "mallory@evil.example"}},
-		PGPKey:        attacker.ArmoredPublicKey,
-	}); err != nil {
-		t.Fatalf("Upsert contact: %v", err)
-	}
-
-	// Signed by Mallory, encrypted to the victim, claiming to be from Bob.
+	const secret = "the quarterly numbers are attached"
 	plaintext := mailmsg.Message{
-		From:    "bob@example.com",
-		To:      []string{"recipient@example.com"},
-		Subject: "Wire the money",
-		Body:    "account details attached",
-		Mode:    "plain",
+		From: "bob@example.com", To: []string{"recipient@example.com"},
+		Subject: "Numbers", Body: secret, Mode: "plain",
 	}.Build()
-	encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, attacker)
+	encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, nil)
 	if err != nil {
 		t.Fatalf("EncryptMIME: %v", err)
 	}
@@ -202,194 +114,15 @@ func TestServerCustodyVerificationIsBoundToSender(t *testing.T) {
 	content := imapadapter.MessageContent{PGPEncryptedPayload: extractArmoredPGPPayload(t, encrypted)}
 	result := srv.decryptPGPMessageContent(userID, "bob@example.com", content)
 
-	if result.PGPDecryptError != "" {
-		t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
+	if strings.Contains(result.Body, secret) {
+		t.Fatal("the server decrypted a server-custody message; retiring the mode means it must not")
 	}
-	if result.PGPVerified {
-		t.Fatal("a key held for mallory@evil.example verified a message claiming to be from " +
-			"bob@example.com; the badge would read 'signature verified' under a spoofed sender")
+	if result.PGPDecryptError == "" {
+		t.Fatal("expected the refusal to be reported, not a silent empty body")
 	}
-}
-
-// TestUnreadMessageVerificationUsesSenderBindingAddress is the
-// UnreadMessage/server-protected-account counterpart of
-// TestOverviewFromEmailSenderBindingAddress (internal/adapters/imap):
-// decryptPGPUnreadMessage must resolve
-// signerKeysForSender from UnreadMessage.SenderBindingAddress, not
-// UnreadMessage.Sender. Sender is the (possibly multi-mailbox, possibly
-// nondeterministically-rendered) display string; SenderBindingAddress is the
-// deterministic, fail-closed twin imapadapter.overviewFromEmail computes via
-// singleMailboxSender, and is "" for exactly the multi-mailbox From this test
-// simulates.
-//
-// Sender below is deliberately set to a single, cleanly-parseable address —
-// NOT a realistic "Name <a>, Name2 <b>" multi-mailbox rendering. A realistic
-// rendering already fails closed inside senderAddrSpec regardless of which
-// field a caller reads (see TestSenderAddrSpecMultiAddressFailsClosed: a
-// syntactically well-formed multi-address string returns "" on its own), so
-// it would pass this test whether or not the fix here regressed. Only a
-// single clean address in Sender can distinguish "the call site reads
-// SenderBindingAddress" from "the call site still reads Sender" — which is
-// the exact thing this fix changed.
-func TestUnreadMessageVerificationUsesSenderBindingAddress(t *testing.T) {
-	const attackerAddress = "attacker@evil.example"
-
-	setUpAttackerContact := func(t *testing.T, store *contacts.Store) *pgpmail.Identity {
-		t.Helper()
-		attacker, err := pgpmail.GenerateIdentity("Attacker", attackerAddress)
-		if err != nil {
-			t.Fatalf("GenerateIdentity: %v", err)
-		}
-		if _, err := store.Upsert(contacts.Contact{
-			FormattedName: "Attacker",
-			Emails:        []contacts.ContactValue{{Value: attackerAddress}},
-			PGPKey:        attacker.ArmoredPublicKey,
-		}); err != nil {
-			t.Fatalf("Upsert contact: %v", err)
-		}
-		return attacker
+	if !strings.Contains(result.PGPDecryptError, "export-legacy") {
+		t.Fatalf("the refusal must tell the user how to recover the key, got %q", result.PGPDecryptError)
 	}
-
-	t.Run("decryptPGPUnreadMessage", func(t *testing.T) {
-		userID, recipient, contactsStore, srv := pgpVictimWithIdentity(t)
-		attacker := setUpAttackerContact(t, contactsStore)
-
-		plaintext := mailmsg.Message{
-			From:    attackerAddress,
-			To:      []string{"recipient@example.com"},
-			Subject: "hello",
-			Body:    "hello",
-			Mode:    "plain",
-		}.Build()
-		encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, attacker)
-		if err != nil {
-			t.Fatalf("EncryptMIME: %v", err)
-		}
-
-		msg := imapadapter.UnreadMessage{
-			// Same address the attacker's key is bound under — if
-			// decryptPGPUnreadMessage reads Sender instead of
-			// SenderBindingAddress, it verifies.
-			Sender:               attackerAddress,
-			SenderBindingAddress: "",
-			PGPEncryptedPayload:  extractArmoredPGPPayload(t, encrypted),
-		}
-		result := srv.decryptPGPUnreadMessage(userID, msg)
-		if result.PGPDecryptError != "" {
-			t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
-		}
-		if result.PGPVerified {
-			t.Fatal("SenderBindingAddress is empty (multi-mailbox fail-closed), but the message verified — " +
-				"decryptPGPUnreadMessage is binding against Sender instead of SenderBindingAddress")
-		}
-	})
-
-	// TestUnreadMessageVerificationUsesSenderBindingAddress's other subtests
-	// are all negative (SenderBindingAddress == "" must not verify). None of
-	// them notice an implementation that never binds anything at all — e.g.
-	// decryptPGPUnreadMessage hardcoding "" instead of reading
-	// SenderBindingAddress would pass every one of them. This proves the
-	// positive direction: a real SenderBindingAddress must still let a
-	// legitimately signed/encrypted message verify.
-	t.Run("decryptPGPUnreadMessage verifies when SenderBindingAddress is populated", func(t *testing.T) {
-		userID, recipient, contactsStore, srv := pgpVictimWithIdentity(t)
-		const senderAddress = "sender@example.com"
-		sender, err := pgpmail.GenerateIdentity("Sender", senderAddress)
-		if err != nil {
-			t.Fatalf("GenerateIdentity: %v", err)
-		}
-		if _, err := contactsStore.Upsert(contacts.Contact{
-			FormattedName: "Sender",
-			Emails:        []contacts.ContactValue{{Value: senderAddress}},
-			PGPKey:        sender.ArmoredPublicKey,
-		}); err != nil {
-			t.Fatalf("Upsert contact: %v", err)
-		}
-
-		plaintext := mailmsg.Message{
-			From:    senderAddress,
-			To:      []string{"recipient@example.com"},
-			Subject: "hello",
-			Body:    "hello",
-			Mode:    "plain",
-		}.Build()
-		encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, sender)
-		if err != nil {
-			t.Fatalf("EncryptMIME: %v", err)
-		}
-
-		msg := imapadapter.UnreadMessage{
-			Sender:               "Sender <sender@example.com>",
-			SenderBindingAddress: "Sender <sender@example.com>",
-			PGPEncryptedPayload:  extractArmoredPGPPayload(t, encrypted),
-		}
-		result := srv.decryptPGPUnreadMessage(userID, msg)
-		if result.PGPDecryptError != "" {
-			t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
-		}
-		if !result.PGPSigned || !result.PGPVerified {
-			t.Fatalf("expected a legitimately signed message with a populated SenderBindingAddress to verify, got PGPSigned=%v PGPVerified=%v",
-				result.PGPSigned, result.PGPVerified)
-		}
-	})
-
-	// The server no longer issues a verdict on signed-only mail: it cannot,
-	// because the bytes a detached signature covers are the signed MIME part's
-	// transmitted form and every server-side path here holds go-imap's decoded
-	// render instead. It marks the message as carrying a signature and stops.
-	// The browser verifies, over bytes it fetches raw. See
-	// pgpmail.ExtractSignedParts and handlePGPPayload.
-	t.Run("markSignedOnlyUnreadMessage detects without judging", func(t *testing.T) {
-		_, _, _, srv := pgpVictimWithIdentity(t)
-
-		msg := imapadapter.UnreadMessage{
-			Body:                 "trust me",
-			PGPSignaturePayload:  "-----BEGIN PGP SIGNATURE-----\r\nx\r\n-----END PGP SIGNATURE-----",
-			Sender:               "Sender <sender@example.com>",
-			SenderBindingAddress: "sender@example.com",
-		}
-		result := srv.markSignedOnlyUnreadMessage(msg)
-
-		if !result.PGPSigned {
-			t.Fatal("expected PGPSigned to mark that a detached signature is present")
-		}
-		if result.PGPVerified {
-			t.Fatal("the server must never claim a signed-only message is verified")
-		}
-		if result.PGPSignerFingerprint != "" {
-			t.Fatalf("expected no signer fingerprint from a server that did not verify, got %q", result.PGPSignerFingerprint)
-		}
-		if result.PGPSignaturePayload != "" {
-			t.Fatal("expected the signature payload to be cleared once it has served its purpose")
-		}
-		if result.Body != "trust me" {
-			t.Fatalf("a signed-only message must stay readable, got body %q", result.Body)
-		}
-	})
-
-	t.Run("markSignedOnlyMessageContent detects without judging", func(t *testing.T) {
-		_, _, _, srv := pgpVictimWithIdentity(t)
-
-		c := imapadapter.MessageContent{
-			Body:                "trust me",
-			PGPSignaturePayload: "-----BEGIN PGP SIGNATURE-----\r\nx\r\n-----END PGP SIGNATURE-----",
-			Sender:              "Sender <sender@example.com>",
-		}
-		result := srv.markSignedOnlyMessageContent(c)
-
-		if !result.PGPSigned {
-			t.Fatal("expected PGPSigned to mark that a detached signature is present")
-		}
-		if result.PGPVerified {
-			t.Fatal("the server must never claim a signed-only message is verified")
-		}
-		if result.PGPSignerFingerprint != "" {
-			t.Fatalf("expected no signer fingerprint from a server that did not verify, got %q", result.PGPSignerFingerprint)
-		}
-		if result.PGPSignaturePayload != "" {
-			t.Fatal("expected the signature payload to be cleared once it has served its purpose")
-		}
-	})
 }
 
 // pgpVictimWithIdentity sets up a test user holding a server-readable identity
@@ -422,142 +155,6 @@ func pgpVictimWithIdentity(t *testing.T) (string, *pgpmail.Identity, *contacts.S
 	return userID, recipient, store, srv
 }
 
-// TestSecondUserIDDoesNotVerify is run-8 finding F1: the THIRD bypass of the
-// same badge, by a third mechanism.
-//
-// run-7's fix replaced a raw-substring User-ID test with a parsed-email one. It
-// changed the comparison and not the trust decision, which still asked "does any
-// User ID on any key in the book carry the sender's address". A User ID is
-// self-asserted and a key may carry arbitrarily many, so one key with two of
-// them defeats it — and this needs no crafted string or packet surgery, just
-// GenerateIdentity's own variadic additionalEmails.
-//
-// The reader here holds Bob's genuine key as well, which is the case that makes
-// this more than a nuisance: the attacker's signature won anyway, and the UI
-// suppresses the signer fingerprint on exactly the verified path.
-func TestSecondUserIDDoesNotVerify(t *testing.T) {
-	userID, recipient, contactsStore, srv := pgpVictimWithIdentity(t)
-
-	// One key, two User IDs. The harvest validates it against Mallory's From,
-	// matches on the first, and pins it under her own contact.
-	attacker, err := pgpmail.GenerateIdentity("Mallory", "mallory@evil.example", "bob@example.com")
-	if err != nil {
-		t.Fatalf("GenerateIdentity attacker: %v", err)
-	}
-	if _, err := contactsStore.Upsert(contacts.Contact{
-		FormattedName: "Mallory",
-		Emails:        []contacts.ContactValue{{Value: "mallory@evil.example"}},
-		PGPKey:        attacker.ArmoredPublicKey,
-	}); err != nil {
-		t.Fatalf("Upsert attacker contact: %v", err)
-	}
-
-	bob, err := pgpmail.GenerateIdentity("Bob", "bob@example.com")
-	if err != nil {
-		t.Fatalf("GenerateIdentity bob: %v", err)
-	}
-	if _, err := contactsStore.Upsert(contacts.Contact{
-		FormattedName:  "Bob",
-		Emails:         []contacts.ContactValue{{Value: "bob@example.com"}},
-		PGPKey:         bob.ArmoredPublicKey,
-		PGPKeyVerified: true,
-	}); err != nil {
-		t.Fatalf("Upsert bob contact: %v", err)
-	}
-
-	// Sanity check on the premise: the attacker's key really does carry Bob's
-	// address as a User ID, so the old any-UID binding would have offered it.
-	if !pgpmail.ArmoredKeyCertifiesAddress(attacker.ArmoredPublicKey, "bob@example.com") {
-		t.Fatal("premise broken: the attacker key does not carry bob@example.com as a User ID")
-	}
-
-	plaintext := mailmsg.Message{
-		From:    "bob@example.com",
-		To:      []string{"recipient@example.com"},
-		Subject: "Wire the money",
-		Body:    "account details attached",
-		Mode:    "plain",
-	}.Build()
-	encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, attacker)
-	if err != nil {
-		t.Fatalf("EncryptMIME: %v", err)
-	}
-
-	content := imapadapter.MessageContent{PGPEncryptedPayload: extractArmoredPGPPayload(t, encrypted)}
-	result := srv.decryptPGPMessageContent(userID, "bob@example.com", content)
-
-	if result.PGPDecryptError != "" {
-		t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
-	}
-	if result.PGPVerified {
-		t.Fatalf("a key filed under mallory@evil.example verified a message claiming to be from "+
-			"bob@example.com, on the strength of a User ID it wrote for itself (signer %s, real Bob %s)",
-			result.PGPSignerFingerprint, bob.Fingerprint)
-	}
-}
-
-// TestSenderBindingAcceptsADisplayNameFrom is run-8 finding F3: run-7's binding
-// was fed imap.Overview.Sender, which is e.From.String() — `Name <addr>`
-// whenever a display name is present. Compared against a parsed User-ID email
-// that matched nothing, so the candidate set came back empty, DecryptMIME left
-// Signed as well as Verified false, and the signature indicator DISAPPEARED for
-// legitimately signed mail from any named correspondent.
-//
-// The bare-From form an attacker chooses was the only one that still went green.
-func TestSenderBindingAcceptsADisplayNameFrom(t *testing.T) {
-	userID, recipient, contactsStore, srv := pgpVictimWithIdentity(t)
-
-	sender, err := pgpmail.GenerateIdentity("Sender", "sender@example.com")
-	if err != nil {
-		t.Fatalf("GenerateIdentity sender: %v", err)
-	}
-	if _, err := contactsStore.Upsert(contacts.Contact{
-		FormattedName: "Sender",
-		Emails:        []contacts.ContactValue{{Value: "sender@example.com"}},
-		PGPKey:        sender.ArmoredPublicKey,
-	}); err != nil {
-		t.Fatalf("Upsert contact: %v", err)
-	}
-
-	plaintext := mailmsg.Message{
-		From:    "sender@example.com",
-		To:      []string{"recipient@example.com"},
-		Subject: "Secret",
-		Body:    "meet at dawn",
-		Mode:    "plain",
-	}.Build()
-	encrypted, err := pgpmail.EncryptMIME(plaintext, []string{recipient.ArmoredPublicKey}, sender)
-	if err != nil {
-		t.Fatalf("EncryptMIME: %v", err)
-	}
-	payload := extractArmoredPGPPayload(t, encrypted)
-
-	// Every form go-imap actually emits, including the quoted one a comma in
-	// the display name forces.
-	for _, from := range []string{
-		"sender@example.com",
-		"<sender@example.com>",
-		"Sender <sender@example.com>",
-		"Sender Person <sender@example.com>",
-		`"Person, Sender" <sender@example.com>`,
-	} {
-		t.Run(from, func(t *testing.T) {
-			content := imapadapter.MessageContent{PGPEncryptedPayload: payload}
-			result := srv.decryptPGPMessageContent(userID, from, content)
-			if result.PGPDecryptError != "" {
-				t.Fatalf("unexpected decrypt error: %s", result.PGPDecryptError)
-			}
-			if !result.PGPSigned {
-				t.Fatalf("From %q: PGPSigned false — no signer key was offered, so the "+
-					"indicator vanishes for legitimately signed mail", from)
-			}
-			if !result.PGPVerified {
-				t.Fatalf("From %q: PGPVerified false for the sender's own key", from)
-			}
-		})
-	}
-}
-
 // TestSignerKeysRequireTheContactPin covers the other half of the F1 anchor: a
 // key swapped under an existing contact without updating its TOFU pin must not
 // inherit that contact's binding. An absent pin is a legacy contact, not a
@@ -582,17 +179,35 @@ func TestSignerKeysRequireTheContactPin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if got := signerKeysForSender(contactsStore, "bob@example.com"); len(got) != 1 {
-		t.Fatalf("pinned key should be offered, got %d keys", len(got))
+	got := boundSignerKeysForSender(contactsStore, "bob@example.com")
+	if len(got) != 1 || got[0].PublicKey != real.ArmoredPublicKey {
+		t.Fatalf("pinned key should be offered with its material, got %+v", got)
+	}
+	if got[0].Conflict {
+		t.Fatal("a key matching its own pin must not be reported as a conflict")
 	}
 
-	// The stored key changes; the pin still names the old one.
+	// The stored key changes while the record still carries the OLD pin, which
+	// is the only shape this guard catches: applyUpsertLocked re-derives the pin
+	// from the incoming key whenever the record arrives without one, so a writer
+	// that simply omits the fingerprint self-certifies its substitution. See the
+	// run-12 finding on contact key substitution.
 	created.PGPKey = swapped.ArmoredPublicKey
 	if _, err := contactsStore.Upsert(created); err != nil {
 		t.Fatalf("Upsert swapped: %v", err)
 	}
-	if got := signerKeysForSender(contactsStore, "bob@example.com"); len(got) != 0 {
-		t.Fatalf("a key that does not match the contact's pin was offered as a signer (%d keys)", len(got))
+	// Unlike the retired signerKeysForSender, which dropped the contact
+	// entirely, boundSignerKeys REPORTS the mismatch so the client can say
+	// "the key for this sender changed" rather than "no key" — but strips the
+	// key material, so nothing can verify against it. Both halves matter: the
+	// absent PublicKey is the security property, the Conflict flag is the
+	// honest badge.
+	got = boundSignerKeysForSender(contactsStore, "bob@example.com")
+	if len(got) != 1 || !got[0].Conflict {
+		t.Fatalf("a pin mismatch must be reported as a conflict, got %+v", got)
+	}
+	if got[0].PublicKey != "" {
+		t.Fatal("a key that does not match the contact's pin was handed out as verifiable material")
 	}
 }
 

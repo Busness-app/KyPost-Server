@@ -63,14 +63,17 @@ func TestFindContactPGPKey(t *testing.T) {
 	}
 }
 
-// TestMailSendBlocksSigningWithRevokedIdentity proves the own-identity
-// enforcement added in this task: Sign=true must be rejected before any
-// network I/O when the sender's own PGP identity is revoked. IMAP/SMTP
-// config is written directly (bypassing the network) so the handler gets
-// past its precondition checks and reaches the signer-status check; a 400
-// response (rather than a 502 from a real send attempt) proves the request
-// never reached the network.
-func TestMailSendBlocksSigningWithRevokedIdentity(t *testing.T) {
+// TestMailSendRefusesToSignForServerCustody replaces the revoked-identity test
+// that stood here. That test proved the server checked its own key's status
+// before signing with it; the server no longer signs with a user's key at all,
+// so the check it guarded is gone and the browser makes it instead.
+//
+// What remains worth pinning is the refusal, and specifically that it happens
+// before any network I/O: IMAP/SMTP config is written directly so the handler
+// reaches the custody check, and a non-502 answer proves the request never went
+// to the network. The account here holds a server-readable key, so the send
+// would have succeeded before.
+func TestMailSendRefusesToSignForServerCustody(t *testing.T) {
 	srv := newTestServer(t)
 	srv.imapConfigKeyPath = filepath.Join(t.TempDir(), "imap-config.key")
 	all, _ := srv.users.List()
@@ -88,27 +91,17 @@ func TestMailSendBlocksSigningWithRevokedIdentity(t *testing.T) {
 		t.Fatalf("writeIMAPConfigPayload: %v", err)
 	}
 
-	key, err := crypto.PGP().KeyGeneration().AddUserId("Alice", "alice@example.com").New().GenerateKey()
+	identity, err := pgpmail.GenerateIdentity("Alice", "alice@example.com")
 	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
+		t.Fatalf("GenerateIdentity: %v", err)
 	}
-	if err := key.GetEntity().Revoke(packet.NoReason, "test revocation", &packet.Config{}); err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
-	armored, err := key.Armor()
+	sealed, err := identity.SealPrivateKey(srv.pgpPrivateKeyPath)
 	if err != nil {
-		t.Fatalf("Armor: %v", err)
+		t.Fatalf("SealPrivateKey: %v", err)
 	}
-	importBody, _ := json.Marshal(map[string]string{
-		"armoredPrivateKey": armored,
-		"password":          stepUpPassword(t, srv, srv.mustBootstrapUserID(t)),
-	})
-	importReq := httptest.NewRequest(http.MethodPost, "/api/pgp/identity/import", bytes.NewReader(importBody))
-	authRequest(srv, importReq)
-	importRec := httptest.NewRecorder()
-	srv.withAuth(srv.handlePGPIdentityImport)(importRec, importReq)
-	if importRec.Code != http.StatusOK {
-		t.Fatalf("import: expected 200, got %d: %s", importRec.Code, importRec.Body.String())
+	if _, err := srv.users.SetPGPIdentity(userID, identity.Fingerprint, identity.KeyID,
+		identity.ArmoredPublicKey, sealed, "generated", "2026-07-14T00:00:00Z"); err != nil {
+		t.Fatalf("SetPGPIdentity: %v", err)
 	}
 
 	sendBody, _ := json.Marshal(map[string]any{
@@ -122,35 +115,12 @@ func TestMailSendBlocksSigningWithRevokedIdentity(t *testing.T) {
 	sendRec := httptest.NewRecorder()
 	srv.withAuth(srv.handleMailSend)(sendRec, sendReq)
 
-	if sendRec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for signing with a revoked identity, got %d: %s", sendRec.Code, sendRec.Body.String())
+	if sendRec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 refusing to sign with a server-held key, got %d: %s",
+			sendRec.Code, sendRec.Body.String())
 	}
-}
-
-// TestEncryptSignerOnlyPassesIdentityWhenSignRequested guards against the
-// encrypt-implicitly-signs regression: handleMailSend eagerly loads a signer
-// identity whenever req.Sign || req.Encrypt is true (so it can also cover
-// the sign-only branch and the "signing requires an identity" 400 check),
-// but that eagerly loaded identity must never leak into EncryptMIME's signer
-// argument unless the caller explicitly asked to sign. Encrypt and Sign are
-// independent per-email toggles.
-func TestEncryptSignerOnlyPassesIdentityWhenSignRequested(t *testing.T) {
-	identity, err := pgpmail.GenerateIdentity("Alice", "alice@example.com")
-	if err != nil {
-		t.Fatalf("GenerateIdentity: %v", err)
-	}
-
-	if got := encryptSigner(identity, false); got != nil {
-		t.Fatalf("Encrypt=true,Sign=false: expected nil signer even though an identity exists, got %+v", got)
-	}
-	if got := encryptSigner(identity, true); got != identity {
-		t.Fatalf("Encrypt=true,Sign=true: expected the loaded identity to be passed through")
-	}
-	if got := encryptSigner(nil, true); got != nil {
-		t.Fatalf("expected nil to stay nil when no identity was loaded, got %+v", got)
-	}
-	if got := encryptSigner(nil, false); got != nil {
-		t.Fatalf("expected nil to stay nil when no identity was loaded, got %+v", got)
+	if !strings.Contains(sendRec.Body.String(), "export-legacy") {
+		t.Fatalf("the refusal must tell the user how to recover the key, got %s", sendRec.Body.String())
 	}
 }
 

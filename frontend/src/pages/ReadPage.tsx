@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type TouchEvent } from "react";
-import { useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { escapeHtmlText, processEmailHtml } from "../lib/emailHtml";
 import { EmailBodyFrame } from "./read/EmailBodyFrame";
 import { EncryptionCell } from "./read/EncryptionCell";
@@ -1619,6 +1619,20 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                     )}
                     {local?.error ? (
                       <span className="contacts-muted" style={{ marginLeft: 6 }}>{local.error}</span>
+                    ) : null}
+                    {/*
+                      The server's own reason for refusing, rendered rather than
+                      swallowed. For a legacy server-custody account this is the
+                      migration instruction, and it is the difference between
+                      "my mail is gone" and "click here to get your key back" —
+                      it previously existed only as a tooltip on the padlock,
+                      where nobody reads it.
+                    */}
+                    {decryptFailed && selected.pgpDecryptError ? (
+                      <span className="contacts-muted" style={{ marginLeft: 6, display: "block" }}>
+                        {selected.pgpDecryptError}{" "}
+                        <Link to="/security">Open Mail Keys</Link>
+                      </span>
                     ) : null}
                     {selected.pgpEncrypted &&
                     !local &&

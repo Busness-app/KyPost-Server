@@ -83,11 +83,6 @@ type Poller struct {
 	stateDir    string
 	configDir   string
 	imapKeyPath string
-	// pgpKeyPath is the master key sealing users' PGP private keys — the
-	// same PGP_PRIVATE_KEY_FILE the api server resolves — needed here so a
-	// send-as verification can add the newly proven address to the user's
-	// existing key (see addAliasUserIDToPGPKey).
-	pgpKeyPath string
 
 	// newMailClient builds one user's IMAP client from their sealed credential
 	// file. A field rather than a direct call to
@@ -156,7 +151,6 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		stateDir:             stateDir,
 		configDir:            configDir,
 		imapKeyPath:          config.SecretFile("IMAP_CONFIG_KEY_FILE", "imap-config.key"),
-		pgpKeyPath:           config.SecretFile("PGP_PRIVATE_KEY_FILE", "pgp-private-key.key"),
 		stores:               map[string]*state.Store{},
 		mailClients:          map[string]*mailClientEntry{},
 		mailCaches:           map[string]*mailcache.Store{},
@@ -971,9 +965,18 @@ func (p *Poller) tickUser(u users.User, imapConfigModTime time.Time) error {
 	// Must follow the check above, so it sees the freshest verdict for the
 	// account's own address and doesn't probe an address just proven.
 	p.ensureOwnAddressProven(u.ID)
-	// Must follow the check above, so an alias verified in this very tick
-	// gets its PGP User ID without waiting for the next one.
-	p.reconcilePGPUserIDs(u.ID)
+	// A verified alias used to get self-signed onto the key as a User ID here.
+	// That needed the private half, so it only ever worked for server-custody
+	// keys, and server custody is retired.
+	//
+	// NOTHING REPLACES IT. The browser sets User IDs only at key generation
+	// (suggestedUserIDs -> generateIdentity), and no path adds one to an
+	// existing key, so an alias verified after the key was made is never
+	// carried onto it. Client-custody accounts have always had this gap; it is
+	// now universal. WKD still SERVES the key for such an alias while the
+	// recipient's validateDiscoveredKey rejects it for missing the address —
+	// see pgpmail.ArmoredKeyCertifiesAddress, which exists for this and has no
+	// callers yet.
 
 	p.log.Info(
 		"user poll tick summary",
@@ -1422,19 +1425,30 @@ func (p *Poller) handleMessage(ctx context.Context, uc userCtx, msg imapadapter.
 		return p.tagWithFallbackLabel(ctx, uc, cfg, msg, "message is encrypted; no readable content to classify")
 	}
 
-	body := strings.TrimSpace(msg.Body)
-	if len(body) > 2000 {
-		body = body[:2000]
-	}
-	redacted := p.currentRedaction().Apply(body)
+	// One redaction engine, applied to everything that reaches the model.
+	//
+	// It used to run on the body alone, so the shipped default pattern set —
+	// which leads with an email pattern — masked every address INSIDE the body
+	// while the From line above it carried the real one, and an SSN or card
+	// number in a Subject went through untouched. AGENTS.md and README.md both
+	// describe masking "sender, subject, and body"; this is the third of it that
+	// was missing, and it matters most where the classifier endpoint is remote,
+	// since ValidateBaseURL accepts any https host and the request carries a
+	// bearer key.
+	//
+	// Redact BEFORE truncating: cutting first leaves a pattern that straddles
+	// the boundary unmatched, so its surviving prefix is sent in the clear.
+	// Rune-wise for the body too, so a multi-byte character is never split.
+	red := p.currentRedaction()
+	redacted := truncateRunes(red.Apply(strings.TrimSpace(msg.Body)), maxClassifyBodyRunes)
 
 	// Clamp the headers too. The prompt builder puts the instruction block, the
 	// nonced fence and the tuning document BEFORE the email text and Ollama
 	// truncates from the front, so an unbounded Subject pushes the fence out of
 	// num_ctx and the model sees attacker text with no instructions. Rune-wise so a
 	// multi-byte character is never split.
-	sender := truncateRunes(strings.TrimSpace(msg.Sender), maxClassifySenderRunes)
-	subject := truncateRunes(strings.TrimSpace(msg.Subject), maxClassifySubjectRunes)
+	sender := truncateRunes(red.Apply(strings.TrimSpace(msg.Sender)), maxClassifySenderRunes)
+	subject := truncateRunes(red.Apply(strings.TrimSpace(msg.Subject)), maxClassifySubjectRunes)
 
 	label, err := classifyWithRetry(ctx, p.classifier, uc.allowlist, sender, subject, redacted, uc.tuning)
 	// The model answering with something that isn't an allowed label is a
@@ -1897,9 +1911,14 @@ func applyKeywordsWithRetry(ctx context.Context, c imapadapter.Client, messageID
 // that reach the classification prompt. Generous for real headers, and small
 // enough that neither can push the instruction block out of the model's
 // context window.
+//
+// maxClassifyBodyRunes is the same bound for the body, previously a raw
+// byte slice. Runes so a multi-byte character is never split, and applied
+// after redaction so a pattern straddling the cut is still matched.
 const (
 	maxClassifySenderRunes  = 256
 	maxClassifySubjectRunes = 512
+	maxClassifyBodyRunes    = 2000
 )
 
 // truncateRunes clips s to at most n runes, never splitting a character.

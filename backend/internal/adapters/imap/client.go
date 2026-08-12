@@ -1562,6 +1562,18 @@ func (c *APIClient) ensureConnectedLocked() (*goimap.Dialer, error) {
 		c.dialer = d
 	}
 
+	// The CONNECTION DEFAULT needs the same guard every other select path has.
+	// selectMailboxLocked exists so a per-request mailbox cannot be forgotten,
+	// but c.mailbox arrives from the stored IMAP config, which POST
+	// /api/imap/config accepted unvalidated — and go-imap's AddSlashes escapes
+	// only the double quote, so CRLF here emits standalone tagged commands on
+	// an authenticated session (UID STORE 1:* +FLAGS (\Deleted), EXPUNGE).
+	//
+	// Checked here rather than only at the write, so a config persisted by an
+	// older build or edited by hand fails closed instead of executing.
+	if err := ValidateMailboxName(c.mailbox); err != nil {
+		return nil, fmt.Errorf("imap select folder: %w", err)
+	}
 	if err := c.dialer.SelectFolder(c.mailbox); err != nil {
 		if recErr := c.dialer.Reconnect(); recErr != nil {
 			return nil, fmt.Errorf("imap select folder %q: %w", c.mailbox, err)

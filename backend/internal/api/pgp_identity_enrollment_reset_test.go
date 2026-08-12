@@ -58,24 +58,11 @@ func assertEnrollmentCleared(t *testing.T, srv *Server, userID, deviceID string)
 	}
 }
 
-// Call site 1: storePGPIdentity, reached by generate and import.
-func TestGeneratingAnIdentityClearsDeviceEnrollment(t *testing.T) {
-	srv := newTestServer(t)
-	userID := srv.mustBootstrapUserID(t)
-	password := stepUpPassword(t, srv, userID)
-	configureMailFor(t, srv, userID)
-	enrollDeviceFor(t, srv, userID, "dev-1")
+// storePGPIdentity used to be a third call site, reached by generate and
+// import. Both endpoints now refuse (server custody is retired), so the only
+// ways an identity can change are the two below.
 
-	rec := pgpRequest(t, srv, http.MethodPost, "/api/pgp/identity/generate",
-		map[string]string{"password": password}, srv.handlePGPIdentityGenerate)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("generate: status %d; body=%s", rec.Code, rec.Body.String())
-	}
-
-	assertEnrollmentCleared(t, srv, userID, "dev-1")
-}
-
-// Call site 2: handlePGPIdentityClient. This is the one that matters most —
+// Call site 1: handlePGPIdentityClient. This is the one that matters most —
 // device enrollment exists only for client-protected accounts.
 func TestStoringAClientProtectedIdentityClearsDeviceEnrollment(t *testing.T) {
 	srv := newTestServer(t)
@@ -100,7 +87,7 @@ func TestStoringAClientProtectedIdentityClearsDeviceEnrollment(t *testing.T) {
 	assertEnrollmentCleared(t, srv, userID, "dev-1")
 }
 
-// Call site 3: DELETE /api/pgp/identity.
+// Call site 2: DELETE /api/pgp/identity.
 func TestClearingTheIdentityClearsDeviceEnrollment(t *testing.T) {
 	srv := newTestServer(t)
 	userID := srv.mustBootstrapUserID(t)
@@ -127,10 +114,18 @@ func TestIdentityChangeKeepsDevicesPaired(t *testing.T) {
 	configureMailFor(t, srv, userID)
 	enrollDeviceFor(t, srv, userID, "dev-1")
 
-	rec := pgpRequest(t, srv, http.MethodPost, "/api/pgp/identity/generate",
-		map[string]string{"password": password}, srv.handlePGPIdentityGenerate)
+	id, err := pgpmail.GenerateIdentity("Alice", "alice@example.com")
+	if err != nil {
+		t.Fatalf("GenerateIdentity: %v", err)
+	}
+	rec := pgpRequest(t, srv, http.MethodPost, "/api/pgp/identity/client", map[string]string{
+		"publicKey": id.ArmoredPublicKey,
+		"wrapped":   `{"v":2,"kdf":"PBKDF2-SHA256","iterations":600000,"salt":"c2FsdA==","iv":"aXY=","ciphertext":"Y3Q="}`,
+		"source":    "generated",
+		"password":  password,
+	}, srv.handlePGPIdentityClient)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("generate: status %d; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("client identity: status %d; body=%s", rec.Code, rec.Body.String())
 	}
 
 	store, err := srv.userStore(userID)

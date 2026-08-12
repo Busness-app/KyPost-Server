@@ -3,16 +3,13 @@ package processor
 import (
 	"bytes"
 	"context"
-	"errors"
 	"net/mail"
 	"strconv"
 	"strings"
 	"time"
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/pgpmail"
 	"kypost-server/backend/internal/sendas"
-	"kypost-server/backend/internal/users"
 )
 
 // verifyDKIMForDomain indirects imapadapter.VerifyDKIMForDomain so tests in
@@ -191,149 +188,6 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 	}
 }
 
-// reconcilePGPUserIDs self-signs a User ID onto the user's existing PGP key
-// for every verified send-as address the key does not already carry. It runs
-// once per user per tick (right after checkPendingSendAsAliases, see
-// runUserTick), which makes it serve two purposes with one code path:
-//
-//   - an alias verified during this very tick gets its User ID immediately;
-//   - an alias verified at any point in the past — including before keys
-//     carried alias User IDs at all — is repaired without the user having to
-//     regenerate their key or re-verify the address.
-//
-// It matters because a key that does not carry an address as a User ID is
-// unusable for it: WKD import (validateDiscoveredKey), Autocrypt
-// (buildAutocryptHeader) and GnuPG's own WKD User ID filtering all discard
-// such a key, so serving it under that address would ship bytes nobody
-// accepts. The opposite ordering — key generated after the aliases exist —
-// is handled in handlePGPIdentityGenerate.
-//
-// Only *verified* aliases are considered: a User ID is what makes the key
-// usable for an address, so an unproven address must never get one.
-//
-// Like every other late-tick step, it is skipped for a user whose inbox
-// fetch failed this tick (tickUser returns early), so an account with broken
-// IMAP is repaired on the first tick its mail works again — which is also
-// the first tick at which anything else about that account is current.
-//
-// The steady-state cost is deliberately low: the check reads only the stored
-// public key's User IDs, and nothing unseals, re-signs or persists the
-// private key unless an address is actually missing. Every failure is logged
-// and swallowed — alias verification is never rolled back over a key-update
-// problem, and the next tick simply retries. A user with no PGP identity is
-// a no-op, not an error.
-func (p *Poller) reconcilePGPUserIDs(userID string) {
-	store, err := p.userSendAsStore(userID)
-	if err != nil {
-		p.log.Error("failed to open send-as store for pgp user id reconcile",
-			"user_id", userID, "error", err.Error())
-		return
-	}
-	verifiedAliases := store.ListVerified()
-	if len(verifiedAliases) == 0 {
-		return
-	}
-
-	u, err := p.users.Get(userID)
-	if err != nil {
-		p.log.Error("failed to load user for pgp user id reconcile",
-			"user_id", userID, "error", err.Error())
-		return
-	}
-	if u.PGPPublicKey == "" {
-		return
-	}
-	// An end-to-end key cannot be edited here: adding a User ID re-signs the
-	// key, which needs the private half, and under client protection this
-	// process has no way to obtain it. The browser does this instead, when
-	// the user's vault is unlocked. Skipping quietly is correct — this is a
-	// background convenience, not something to fail a verification over.
-	if !u.HasServerReadableKey() {
-		p.log.Info("skipping pgp user id reconcile for client-protected key; the browser will add verified aliases",
-			"user_id", userID)
-		return
-	}
-
-	present, err := pgpmail.UserIDEmails(u.PGPPublicKey)
-	if err != nil {
-		p.log.Error("failed to read pgp key user ids",
-			"user_id", userID, "error", err.Error())
-		return
-	}
-	covered := make(map[string]bool, len(present))
-	for _, addr := range present {
-		covered[addr] = true
-	}
-	var missing []string
-	for _, alias := range verifiedAliases {
-		addr := strings.ToLower(strings.TrimSpace(alias.Email))
-		if addr == "" || covered[addr] {
-			continue
-		}
-		covered[addr] = true
-		missing = append(missing, addr)
-	}
-	if len(missing) == 0 {
-		return
-	}
-
-	identity, err := pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, p.pgpKeyPath)
-	if err != nil {
-		p.log.Error("failed to open pgp private key for user id reconcile",
-			"user_id", userID, "error", err.Error())
-		return
-	}
-	changed := false
-	for _, addr := range missing {
-		added, err := identity.AddUserID(u.Username, addr)
-		if err != nil {
-			// One bad address must not cost the others their User ID.
-			p.log.Error("failed to add send-as address as pgp user id",
-				"user_id", userID, "error", err.Error())
-			continue
-		}
-		changed = changed || added
-	}
-	if !changed {
-		return
-	}
-
-	sealed, err := identity.SealPrivateKey(p.pgpKeyPath)
-	if err != nil {
-		p.log.Error("failed to re-seal pgp private key after user id reconcile",
-			"user_id", userID, "error", err.Error())
-		return
-	}
-	// Fingerprint, key ID, source and creation time are all unchanged — the
-	// primary key is the same key, only its User ID set grew — so this writes
-	// key material only, under the fingerprint it read at the top of the
-	// function.
-	//
-	// That expectation is the point. Everything between the read and here
-	// (opening the private key, re-signing each missing User ID, re-sealing)
-	// takes hundreds of microseconds, and the user may replace or migrate their
-	// key in that window. This used to call SetPGPIdentity, which rewrote the
-	// whole identity unconditionally: a key generated during the window was
-	// reverted to the stale copy, and a migration to client custody had its
-	// browser envelope destroyed and a server-readable key put back.
-	//
-	// A refusal here is not a failure worth retrying differently — the next
-	// tick re-reads whatever key is current and reconciles that one instead.
-	if _, err := p.users.UpdatePGPKeyMaterial(userID, identity.Fingerprint,
-		identity.ArmoredPublicKey, sealed); err != nil {
-		if errors.Is(err, users.ErrPGPFingerprintChanged) || errors.Is(err, users.ErrWouldDowngradeCustody) {
-			p.log.Info("pgp key changed while reconciling user ids; leaving the newer key alone",
-				"user_id", userID, "reason", err.Error())
-			return
-		}
-		p.log.Error("failed to store pgp identity after user id reconcile",
-			"user_id", userID, "error", err.Error())
-		return
-	}
-	p.log.Info("added verified send-as addresses to pgp key",
-		"user_id", userID, "count", strconv.Itoa(len(missing)))
-}
-
 // domainOf returns the portion of email after '@', lowercased, or "" if
 // email has no '@' — used to scope the Authentication-Results check to the
 // candidate address's own domain, never the account's own.
@@ -404,5 +258,27 @@ func rawIsAutoReply(raw []byte) bool {
 			return true
 		}
 	}
-	return strings.EqualFold(strings.TrimSpace(msg.Header.Get("Precedence")), "auto_reply")
+	// A mailing list is an unattended REDISTRIBUTOR, which fails this function's
+	// premise the same way an auto-responder does: a machine at the alias domain
+	// emitting a signed message is not a person proving control of the mailbox.
+	//
+	// It is the sharper case, because no forgery is involved. A list applying
+	// DMARC From-munging (Mailman's dmarc_moderation_action = Munge From, and
+	// Google Groups' equivalent) rewrites From to the list address precisely so
+	// alignment holds against its own domain — which means it DKIM-signs that
+	// rewritten From and the echoed Subject with d=<list domain>. Post a message
+	// carrying the challenge code, and the redistributed copy satisfies every
+	// other gate here genuinely: real signature, real domain, real From. The
+	// code is readable from GET /api/mail/send-as, so the attacker does not even
+	// need the server's own probe to reach the list.
+	for _, h := range []string{"List-Id", "List-Post", "List-Unsubscribe", "List-Help"} {
+		if strings.TrimSpace(msg.Header.Get(h)) != "" {
+			return true
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(msg.Header.Get("Precedence"))) {
+	case "auto_reply", "list", "bulk":
+		return true
+	}
+	return false
 }

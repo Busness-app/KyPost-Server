@@ -6,13 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
-	"sort"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/ProtonMail/gopenpgp/v3/crypto"
 
 	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/logging"
@@ -334,7 +329,6 @@ func newTestPollerWithUsers(t *testing.T) (*Poller, string) {
 		t.Fatalf("users.LoadOrMigrate: %v", err)
 	}
 	p.users = usersStore
-	p.pgpKeyPath = filepath.Join(configDir, "pgp-private-key.key")
 
 	all, err := usersStore.List()
 	if err != nil || len(all) == 0 {
@@ -364,13 +358,16 @@ func stubVerifiedDKIM(t *testing.T) {
 
 // seedPollerPGPIdentity generates a key for email and stores it on userID,
 // returning the identity so tests can compare fingerprints.
+//
+// The sealing path is the helper's own: the poller no longer holds the PGP
+// master key, because nothing in it opens a user's private key any more.
 func seedPollerPGPIdentity(t *testing.T, p *Poller, userID, name, email string) *pgpmail.Identity {
 	t.Helper()
 	id, err := pgpmail.GenerateIdentity(name, email)
 	if err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
 	}
-	sealed, err := id.SealPrivateKey(p.pgpKeyPath)
+	sealed, err := id.SealPrivateKey(filepath.Join(t.TempDir(), "pgp-private-key.key"))
 	if err != nil {
 		t.Fatalf("SealPrivateKey: %v", err)
 	}
@@ -378,22 +375,6 @@ func seedPollerPGPIdentity(t *testing.T, p *Poller, userID, name, email string) 
 		t.Fatalf("SetPGPIdentity: %v", err)
 	}
 	return id
-}
-
-// pollerKeyUserIDEmails returns the sorted, lowercased User ID emails of an
-// armored key.
-func pollerKeyUserIDEmails(t *testing.T, armored string) []string {
-	t.Helper()
-	key, err := crypto.NewKeyFromArmored(armored)
-	if err != nil {
-		t.Fatalf("parse armored key: %v", err)
-	}
-	var out []string
-	for _, uid := range key.GetEntity().Identities {
-		out = append(out, strings.ToLower(uid.UserId.Email))
-	}
-	sort.Strings(out)
-	return out
 }
 
 // markVerifiedPendingAlias drives one pending alias all the way through
@@ -421,9 +402,7 @@ func verifyAliasViaPoller(t *testing.T, p *Poller, userID, email string) sendas.
 		rawResults: map[int][]byte{1: []byte(
 			"From: " + email + "\r\nSubject: Re: Verify send-as: " + alias.VerificationCode + "\r\n\r\nbody\r\n")},
 	}
-	// Both calls, in the order poller.go's per-user tick makes them.
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
-	p.reconcilePGPUserIDs(userID)
 
 	got, ok := store.Get(alias.ID)
 	if !ok {
@@ -433,43 +412,6 @@ func verifyAliasViaPoller(t *testing.T, p *Poller, userID, email string) sendas.
 		t.Fatalf("Status = %q, want verified", got.Status)
 	}
 	return got
-}
-
-// TestSendAsTickAddsUserIDToKeyOnVerification is the ordering the
-// key-generation path can't cover: the alias is proven AFTER the key already
-// exists. Without a User ID for the newly verified address the key is
-// unusable for it — WKD consumers and Autocrypt both reject a key that
-// doesn't carry the address — so the tick must self-sign one onto the
-// existing key, keeping the same fingerprint.
-func TestSendAsTickAddsUserIDToKeyOnVerification(t *testing.T) {
-	stubVerifiedDKIM(t)
-	p, userID := newTestPollerWithUsers(t)
-	original := seedPollerPGPIdentity(t, p, userID, "Alice", "alice@example.com")
-
-	verifyAliasViaPoller(t, p, userID, "alice@other.example")
-
-	u, err := p.users.Get(userID)
-	if err != nil {
-		t.Fatalf("users.Get: %v", err)
-	}
-	got := pollerKeyUserIDEmails(t, u.PGPPublicKey)
-	want := []string{"alice@example.com", "alice@other.example"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("stored public key user IDs: got %v want %v", got, want)
-	}
-	if u.PGPFingerprint != original.Fingerprint {
-		t.Fatalf("fingerprint changed: got %s want %s", u.PGPFingerprint, original.Fingerprint)
-	}
-
-	// The re-sealed private key must still open and carry the new User ID —
-	// otherwise the next verification would work from a stale key.
-	reopened, err := pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, p.pgpKeyPath)
-	if err != nil {
-		t.Fatalf("OpenPrivateKey: %v", err)
-	}
-	if got := pollerKeyUserIDEmails(t, reopened.ArmoredPublicKey); !slices.Equal(got, want) {
-		t.Fatalf("re-sealed private key user IDs: got %v want %v", got, want)
-	}
 }
 
 // TestSendAsTickVerifiesWithoutPGPKey confirms the User-ID step is strictly
@@ -487,143 +429,6 @@ func TestSendAsTickVerifiesWithoutPGPKey(t *testing.T) {
 	}
 	if u.PGPPublicKey != "" {
 		t.Fatalf("expected no PGP key to be created, got %q", u.PGPPublicKey)
-	}
-}
-
-// markAliasVerified records an already-verified alias without going through
-// the poller — this is the state an account is left in by a verification
-// that happened before keys carried alias User IDs at all, which is exactly
-// what the backfill exists to repair.
-func markAliasVerified(t *testing.T, p *Poller, userID, email string) {
-	t.Helper()
-	store, err := p.userSendAsStore(userID)
-	if err != nil {
-		t.Fatalf("userSendAsStore: %v", err)
-	}
-	alias, err := store.Create(userID, email, "")
-	if err != nil {
-		t.Fatalf("Create %s: %v", email, err)
-	}
-	if err := store.MarkVerified(alias.ID); err != nil {
-		t.Fatalf("MarkVerified %s: %v", email, err)
-	}
-}
-
-// TestReconcilePGPUserIDsBackfillsAlreadyVerifiedAliases is the backfill
-// proper: aliases verified before the key learned to carry them (or before
-// this feature existed) leave the key unusable for addresses the account has
-// genuinely proven. A tick must repair that without the user regenerating
-// their key or re-verifying the alias.
-func TestReconcilePGPUserIDsBackfillsAlreadyVerifiedAliases(t *testing.T) {
-	p, userID := newTestPollerWithUsers(t)
-	original := seedPollerPGPIdentity(t, p, userID, "Alice", "alice@example.com")
-	markAliasVerified(t, p, userID, "alice@other.example")
-	markAliasVerified(t, p, userID, "sales@third.example")
-
-	p.reconcilePGPUserIDs(userID)
-
-	u, err := p.users.Get(userID)
-	if err != nil {
-		t.Fatalf("users.Get: %v", err)
-	}
-	got := pollerKeyUserIDEmails(t, u.PGPPublicKey)
-	want := []string{"alice@example.com", "alice@other.example", "sales@third.example"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("stored public key user IDs: got %v want %v", got, want)
-	}
-	if u.PGPFingerprint != original.Fingerprint {
-		t.Fatalf("fingerprint changed: got %s want %s", u.PGPFingerprint, original.Fingerprint)
-	}
-	reopened, err := pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, p.pgpKeyPath)
-	if err != nil {
-		t.Fatalf("OpenPrivateKey: %v", err)
-	}
-	if got := pollerKeyUserIDEmails(t, reopened.ArmoredPublicKey); !slices.Equal(got, want) {
-		t.Fatalf("re-sealed private key user IDs: got %v want %v", got, want)
-	}
-}
-
-// TestReconcilePGPUserIDsIsIdempotent guards the cost and the correctness of
-// running this on every tick: once the key is in sync, a further pass must
-// neither rewrite the stored key nor append a second User ID for an address
-// the key already carries.
-func TestReconcilePGPUserIDsIsIdempotent(t *testing.T) {
-	p, userID := newTestPollerWithUsers(t)
-	seedPollerPGPIdentity(t, p, userID, "Alice", "alice@example.com")
-	markAliasVerified(t, p, userID, "alice@other.example")
-
-	p.reconcilePGPUserIDs(userID)
-	first, err := p.users.Get(userID)
-	if err != nil {
-		t.Fatalf("users.Get: %v", err)
-	}
-
-	p.reconcilePGPUserIDs(userID)
-	second, err := p.users.Get(userID)
-	if err != nil {
-		t.Fatalf("users.Get: %v", err)
-	}
-
-	if second.PGPPublicKey != first.PGPPublicKey {
-		t.Fatal("second reconcile rewrote an already-in-sync key")
-	}
-	got := pollerKeyUserIDEmails(t, second.PGPPublicKey)
-	want := []string{"alice@example.com", "alice@other.example"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("stored public key user IDs: got %v want %v", got, want)
-	}
-}
-
-// TestReconcilePGPUserIDsIgnoresUnverifiedAliases pins the security boundary
-// the WKD serve path depends on: only addresses the account has actually
-// proven may become User IDs, since a User ID is what makes the key usable
-// for that address.
-func TestReconcilePGPUserIDsIgnoresUnverifiedAliases(t *testing.T) {
-	p, userID := newTestPollerWithUsers(t)
-	seedPollerPGPIdentity(t, p, userID, "Alice", "alice@example.com")
-
-	store, err := p.userSendAsStore(userID)
-	if err != nil {
-		t.Fatalf("userSendAsStore: %v", err)
-	}
-	if _, err := store.Create(userID, "alice@pending.example", ""); err != nil {
-		t.Fatalf("Create pending: %v", err)
-	}
-	failed, err := store.Create(userID, "alice@failed.example", "")
-	if err != nil {
-		t.Fatalf("Create failed: %v", err)
-	}
-	if err := store.MarkFailed(failed.ID); err != nil {
-		t.Fatalf("MarkFailed: %v", err)
-	}
-
-	p.reconcilePGPUserIDs(userID)
-
-	u, err := p.users.Get(userID)
-	if err != nil {
-		t.Fatalf("users.Get: %v", err)
-	}
-	got := pollerKeyUserIDEmails(t, u.PGPPublicKey)
-	want := []string{"alice@example.com"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("stored public key user IDs: got %v want %v", got, want)
-	}
-}
-
-// TestReconcilePGPUserIDsWithoutPGPKeyIsANoOp confirms a user who has aliases
-// but no PGP identity is left alone rather than having one created.
-func TestReconcilePGPUserIDsWithoutPGPKeyIsANoOp(t *testing.T) {
-	p, userID := newTestPollerWithUsers(t)
-	markAliasVerified(t, p, userID, "alice@other.example")
-
-	p.reconcilePGPUserIDs(userID)
-
-	u, err := p.users.Get(userID)
-	if err != nil {
-		t.Fatalf("users.Get: %v", err)
-	}
-	if u.PGPPublicKey != "" || u.PGPPrivateKeyEnc != "" {
-		t.Fatalf("expected no PGP identity to be created, got public key %q", u.PGPPublicKey)
 	}
 }
 
@@ -705,5 +510,51 @@ func TestCheckPendingSendAsAliasesRejectsAMessagePredatingTheChallenge(t *testin
 	}
 	if got.Status == "verified" {
 		t.Fatal("alias verified by a message sent 72h before the challenge existed")
+	}
+}
+
+// TestRawIsAutoReplyRejectsMailingListRedistribution pins the send-as gate
+// against a proving message that is entirely genuine.
+//
+// A list applying DMARC From-munging rewrites From to the list address so
+// alignment holds against its own domain, which means it DKIM-signs that
+// rewritten From and the echoed Subject itself. Every other gate in
+// checkPendingSendAsAliases then passes on real crypto: real signature, real
+// domain, real From, and a Subject that still contains the challenge code
+// because the check is a substring match and a "[Tag]" prefix does not disturb
+// it. The attacker does not even need the server's probe to reach the list —
+// GET /api/mail/send-as returns the code, so they post their own message.
+//
+// rawIsAutoReply is the only gate that can see this, for the reason it already
+// rejects auto-responders: a machine at the alias domain emitting a signed
+// message is not a person proving control of the mailbox.
+func TestRawIsAutoReplyRejectsMailingListRedistribution(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+	}{
+		{"List-Id", "List-Id: Announce <announce.lists.example.org>\r\n"},
+		{"List-Post", "List-Post: <mailto:announce@lists.example.org>\r\n"},
+		{"List-Unsubscribe", "List-Unsubscribe: <mailto:announce-leave@lists.example.org>\r\n"},
+		{"List-Help", "List-Help: <mailto:announce-help@lists.example.org>\r\n"},
+		{"Precedence list", "Precedence: list\r\n"},
+		{"Precedence bulk", "Precedence: bulk\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte("From: Attacker via Announce <announce@lists.example.org>\r\n" +
+				"Subject: [Announce] Verify send-as: kp-deadbeef\r\n" +
+				tc.header + "\r\nbody\r\n")
+			if !rawIsAutoReply(raw) {
+				t.Fatal("a mailing-list redistribution was accepted as proof of mailbox control")
+			}
+		})
+	}
+
+	// An ordinary human reply must still verify, or the gate has eaten the
+	// feature it guards.
+	ordinary := []byte("From: Alice <alice@other.example>\r\n" +
+		"Subject: Re: Verify send-as: kp-deadbeef\r\n\r\nhere you go\r\n")
+	if rawIsAutoReply(ordinary) {
+		t.Fatal("an ordinary reply was rejected as automated")
 	}
 }

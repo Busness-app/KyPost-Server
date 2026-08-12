@@ -542,14 +542,22 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		Autocrypt:   autocryptHeader,
 	}.Build()
 
-	var signer *pgpmail.Identity
+	// Signing on the user's behalf needs a private key this server can open, and
+	// no account has one any more: client custody keeps it in the browser, and
+	// server custody is retired. Every req.Sign path below therefore RETURNS,
+	// which is why nothing downstream carries a signer — the Sent copy and the
+	// per-recipient ciphertexts are built unsigned, and pgpmail.SignMIME has no
+	// caller here at all.
+	//
+	// Refusing loudly rather than falling through matters: sending the message
+	// unsigned and unencrypted is the one outcome a user who ticked those boxes
+	// must never silently get.
+	//
+	// Encrypting TO RECIPIENTS deliberately falls through, because it needs only
+	// their public keys — an account with no key of its own can still send
+	// encrypted mail, and always could.
 	if req.Sign || req.Encrypt {
 		u, uerr := s.users.Get(ac.UserID)
-		// An end-to-end key cannot be used here: the server has no way to
-		// open it, by design. Refuse loudly and point at the browser path
-		// rather than falling through to sending the message unsigned and
-		// unencrypted, which is the one outcome a user who ticked those
-		// boxes must never silently get.
 		if uerr == nil && u.PGPProtection() == users.PGPProtectionClient {
 			writeJSON(w, http.StatusConflict, map[string]any{
 				"error":            "this account's PGP key is end-to-end protected, so the server cannot sign or encrypt on your behalf",
@@ -557,33 +565,25 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		// Server custody is retired. The key is still openable here — the master
+		// key has to stay until every account has migrated — but using it is what
+		// made this server able to read the user's mail, so it refuses instead.
+		// The key is not lost: migrationMessage names the one endpoint that hands
+		// it back.
 		if uerr == nil && u.HasServerReadableKey() {
-			signer, err = pgpmail.OpenPrivateKey(u.PGPPrivateKeyEnc, s.pgpPrivateKeyPath)
-			if err != nil {
-				http.Error(w, "failed to load pgp identity", http.StatusInternalServerError)
-				return
-			}
-		} else if req.Sign {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":            serverCustodyMigrationMessage,
+				"migrationNeeded":  true,
+				"clientSideNeeded": true,
+			})
+			return
+		}
+		if req.Sign {
 			http.Error(w, "signing requires a pgp identity — generate or import one first", http.StatusBadRequest)
 			return
 		}
 	}
-	if req.Sign && signer != nil {
-		if status := signer.Status(); !status.Usable() {
-			http.Error(w, "cannot sign — your pgp identity is revoked or expired, generate or import a new one", http.StatusBadRequest)
-			return
-		}
-	}
-
 	if !req.Encrypt {
-		if req.Sign {
-			signed, serr := pgpmail.SignMIME(msg, signer)
-			if serr != nil {
-				http.Error(w, "failed to sign message", http.StatusInternalServerError)
-				return
-			}
-			msg = signed
-		}
 		recipients := append(append(append([]string{}, toList...), ccList...), bccList...)
 		// Nothing was encrypted, so the Sent copy stays readable.
 		s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, recipients, msg, req, nil, "", nil)
@@ -676,14 +676,14 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		// how many recipients turned out to be keyless. Leaving this one case
 		// readable would make the Sent folder's meaning depend on the
 		// recipients' key coverage, which the sender cannot see from there.
-		sentCopy, copyWarning := s.sentCopyForSend(ac.UserID, sentCopySource, req, encryptSigner(signer, req.Sign))
+		sentCopy, copyWarning := s.sentCopyForSend(ac.UserID, sentCopySource, req, nil)
 		if !s.finishMailSend(w, r, ac.UserID, smtpHost, smtpPort, addr, payload.Username, payload.Password, envelopeFrom, toList, ccList, bccList, nil, nil, req, sentCopy, joinWarnings(extraWarning, copyWarning), nil) {
 			return
 		}
 		return
 	}
 
-	deliveries, eerr := buildPGPDeliveries(msg, plan, encryptSigner(signer, req.Sign))
+	deliveries, eerr := buildPGPDeliveries(msg, plan, nil)
 	if eerr != nil {
 		http.Error(w, "failed to encrypt message", http.StatusInternalServerError)
 		return
@@ -711,7 +711,7 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	// msg is still the cleartext build here — buildPGPDeliveries encrypted per
 	// recipient without touching it — so this wraps the same content the
 	// recipients got, to the sender's own key.
-	sentCopy, copyWarning := s.sentCopyForSend(ac.UserID, sentCopySource, req, encryptSigner(signer, req.Sign))
+	sentCopy, copyWarning := s.sentCopyForSend(ac.UserID, sentCopySource, req, nil)
 
 	// copyWarning rides in as extraWarning; finishMailSend appends whatever the
 	// follow-on deliveries report, so the sender gets both.
@@ -769,6 +769,12 @@ func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients
 	return failed
 }
 
+// encryptSigner is retired along with server-side signing: handleMailSend
+// returns on every req.Sign path, so there is no identity left to pass and the
+// call sites pass nil outright. The invariant it enforced — Encrypt=true with
+// Sign=false must never produce a signed message, costing the sender
+// deniability they did not give up — is now structural rather than checked.
+//
 // encryptSigner decides which signer identity (if any) should be embedded
 // into an encrypted message. Encrypt and Sign are independent per-email
 // toggles: an identity being loaded (because Encrypt requires checking
@@ -778,12 +784,6 @@ func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients
 // would silently produce a signed-and-encrypted message whenever the sender
 // happens to have a PGP identity configured, costing them deniability they
 // never asked to give up.
-func encryptSigner(signer *pgpmail.Identity, sign bool) *pgpmail.Identity {
-	if !sign {
-		return nil
-	}
-	return signer
-}
 
 // finishMailSend sends msg over SMTP to recipients and best-effort saves it
 // to the Sent folder, writing the JSON response. Returns false if the send

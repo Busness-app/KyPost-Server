@@ -52,7 +52,7 @@ func enableTOTPForTest(t *testing.T, store *users.Store, userID string) {
 	if _, err := store.SetPendingTOTPSecret(userID, "sealed-secret"); err != nil {
 		t.Fatalf("SetPendingTOTPSecret: %v", err)
 	}
-	if _, err := store.EnableTOTP(userID, "2026-01-01T00:00:00Z", []string{"hash1", "hash2"}); err != nil {
+	if _, err := store.EnableTOTP(userID, "sealed-secret", "2026-01-01T00:00:00Z", []string{"hash1", "hash2"}); err != nil {
 		t.Fatalf("EnableTOTP: %v", err)
 	}
 }
