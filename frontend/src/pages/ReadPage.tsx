@@ -108,7 +108,25 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   });
   const [refillAnimationTick, setRefillAnimationTick] = useState(0);
   const isDraftMailbox = mailbox.toLowerCase().includes("drafts");
+  // The mailbox the inbox listing actually used. loadInbox omits the parameter
+  // entirely when this is empty and lets the server resolve the account's
+  // configured folder, so anything that must describe the SAME message has to
+  // send the same value. Substituting a literal "INBOX" made
+  // /api/mail/pgp-payload read INBOX's UID N while the pane showed the
+  // configured folder's UID N — a different message.
+  const listedMailbox = mailbox;
+
+  // A concrete label, only for the drag payload: App.tsx's same-mailbox guard
+  // compares these strings and cannot resolve "" to a folder itself.
   const sourceMailbox = mailbox || "INBOX";
+
+  // An IMAP UID is unique within ONE mailbox, and `messageId` is a bare UID
+  // (adapters/imap/client.go:657). Keying the local-verdict map on it alone let
+  // a verdict computed for one mailbox's UID 7 be served for a DIFFERENT
+  // message at UID 7 in another — including its green "signature verified"
+  // badge. Qualify with `mailbox`, not `sourceMailbox`: the latter maps "" and
+  // "INBOX" onto one key while they select different folders.
+  const decryptedKey = (messageId: string) => `${mailbox}\u0000${messageId}`;
 
   useEffect(() => subscribePGPSession(setPgpSession), []);
 
@@ -123,7 +141,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     if (!message || !message.pgpEncrypted || message.pgpDecryptError) {
       return;
     }
-    if (!isClientProtected() || decrypted[message.messageId]) {
+    if (!isClientProtected() || decrypted[decryptedKey(message.messageId)]) {
       return;
     }
     if (needsUnlock()) {
@@ -135,7 +153,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     setDecryptingId(message.messageId);
     (async () => {
       try {
-        const payload = await getPGPMessagePayload(sourceMailbox, message.messageId);
+        const payload = await getPGPMessagePayload(listedMailbox, message.messageId);
         const result = await decryptMessage(
           payload.encryptedPayload,
           payload.signerKeys ?? [],
@@ -144,7 +162,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         if (cancelled) return;
         setDecrypted((prev) => ({
           ...prev,
-          [message.messageId]: {
+          [decryptedKey(message.messageId)]: {
             body: result.body,
             // Read off the decrypted entity's own Content-Type by pgpClient.
             // The server's bodyMode describes the outer envelope and must not
@@ -162,7 +180,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         if (cancelled) return;
         setDecrypted((prev) => ({
           ...prev,
-          [message.messageId]: {
+          [decryptedKey(message.messageId)]: {
             body: "",
             signed: false,
             verified: false,
@@ -182,7 +200,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     // this effect on every successful decrypt, and the guard above already
     // reads the latest value through the closure on each selection change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, sourceMailbox, pgpUnlockOpen]);
+  }, [selected, listedMailbox, pgpUnlockOpen]);
 
   // Verify a signed-but-not-encrypted message when it is opened.
   //
@@ -198,7 +216,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     if (!message || !message.pgpSigned || message.pgpEncrypted) {
       return;
     }
-    if (decrypted[message.messageId]) {
+    if (decrypted[decryptedKey(message.messageId)]) {
       return;
     }
 
@@ -206,7 +224,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     setVerifyingId(message.messageId);
     (async () => {
       try {
-        const payload = await getPGPMessagePayload(sourceMailbox, message.messageId);
+        const payload = await getPGPMessagePayload(listedMailbox, message.messageId);
         if (cancelled) return;
         if (!payload.signedPartBase64 || !payload.signaturePayload) {
           // Nothing usable came back: the raw fetch failed, or the message is
@@ -224,7 +242,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         if (cancelled) return;
         setDecrypted((prev) => ({
           ...prev,
-          [message.messageId]: {
+          [decryptedKey(message.messageId)]: {
             body: result.body,
             bodyMode: result.bodyMode,
             signed: result.signed,
@@ -247,7 +265,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         // body too.
         setDecrypted((prev) => ({
           ...prev,
-          [message.messageId]: {
+          [decryptedKey(message.messageId)]: {
             body: "",
             signed: true,
             verified: false,
@@ -267,7 +285,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     // decrypt effect above: including it would re-run on every success, and the
     // guard reads the latest value through the closure on each selection change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, sourceMailbox]);
+  }, [selected, listedMailbox]);
 
   const swipeSessionRef = useRef<{
     messageId: string;
@@ -384,6 +402,13 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     setSwipeRows({});
     setSwipeRemovedIds([]);
     setError("");
+    // Belt alongside the mailbox-qualified key: nothing cached for the folder
+    // we are leaving can describe a message in the one we are entering. The
+    // composite key is the load-bearing fix — this keeps the map from growing
+    // for the whole life of the component as well.
+    // Belt alongside the mailbox-qualified key: nothing cached for the folder
+    // we are leaving can describe a message in the one we are entering.
+    setDecrypted({});
     void loadInbox();
     const timer = setInterval(() => void loadInbox(), 15_000);
     return () => clearInterval(timer);
@@ -906,7 +931,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
 
   async function openEmailDetails(item: InboxEmail) {
     if (isDraftMailbox && onOpenDraft) {
-      const draft = displayBody(item, decrypted[item.messageId]);
+      const draft = displayBody(item, decrypted[decryptedKey(item.messageId)]);
       onOpenDraft({
         sentTo: item.sentTo,
         cc: item.cc,
@@ -974,7 +999,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     onOpenDraft({
       sentTo: firstAddressFromText(selected.sender || ""),
       subject: ensureSubjectPrefix(selected.subject, "Re:"),
-      body: buildReplyBody(selected, decrypted[selected.messageId])
+      body: buildReplyBody(selected, decrypted[decryptedKey(selected.messageId)])
     });
     setSelected(null);
   }
@@ -984,7 +1009,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     onOpenDraft({
       sentTo: "",
       subject: ensureSubjectPrefix(selected.subject, "Fwd:"),
-      body: buildForwardBody(selected, decrypted[selected.messageId])
+      body: buildForwardBody(selected, decrypted[decryptedKey(selected.messageId)])
     });
     setSelected(null);
   }
@@ -996,7 +1021,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       sentTo: recipients.to,
       cc: recipients.cc,
       subject: ensureSubjectPrefix(selected.subject, "Re:"),
-      body: buildReplyBody(selected, decrypted[selected.messageId])
+      body: buildReplyBody(selected, decrypted[decryptedKey(selected.messageId)])
     });
     setSelected(null);
   }
@@ -1007,7 +1032,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       .map((item) => {
         // displayBody, so printing a client-protected account's mail prints the
         // decrypted text at its own render mode rather than the envelope's.
-        const resolved = displayBody(item, decrypted[item.messageId]);
+        const resolved = displayBody(item, decrypted[decryptedKey(item.messageId)]);
         const body = resolved.body || "No message body available.";
         const isHtml = resolved.mode === "html" && Boolean(resolved.body);
         // Sender-controlled HTML must pass through the sanitizer here just like
@@ -1192,7 +1217,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           onClick={() => void openEmailDetails(item)}
                           style={{ cursor: "pointer" }}
                         >
-                          <EncryptionCell email={item} local={decrypted[item.messageId]} clientProtected={isClientProtected()} />
+                          <EncryptionCell email={item} local={decrypted[decryptedKey(item.messageId)]} clientProtected={isClientProtected()} />
                           <td className="inbox-cell">
                             <button
                               type="button"
@@ -1388,7 +1413,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           />
                         </label>
                       </td>
-                      <EncryptionCell email={item} local={decrypted[item.messageId]} clientProtected={isClientProtected()} />
+                      <EncryptionCell email={item} local={decrypted[decryptedKey(item.messageId)]} clientProtected={isClientProtected()} />
                       <td className="inbox-cell">
                         {swipeState?.showHint ? (
                           <span
@@ -1553,7 +1578,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                 // local decrypt or the local signature check, not from the
                 // server. Fall back to the server's fields for legacy accounts'
                 // encrypted mail — the one case where the server still has one.
-                const local = decrypted[selected.messageId];
+                const local = decrypted[decryptedKey(selected.messageId)];
                 const decryptFailed = Boolean(selected.pgpDecryptError || local?.error);
                 const decryptingNow = decryptingId === selected.messageId;
                 const verifyingNow = verifyingId === selected.messageId;
@@ -1678,13 +1703,13 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                     key="raw"
                     className="email-reader-body-block"
                   >
-                    {displayBody(selected, decrypted[selected.messageId]).body || "No message body available."}
+                    {displayBody(selected, decrypted[decryptedKey(selected.messageId)]).body || "No message body available."}
                   </pre>
                 ) : null}
                 {!showRawEmail ? (() => {
                   // Body and mode come from one place, together. See
                   // read/body.ts for why picking them separately is the bug.
-                  const { body, mode } = displayBody(selected, decrypted[selected.messageId]);
+                  const { body, mode } = displayBody(selected, decrypted[decryptedKey(selected.messageId)]);
                   const shown = body || "No message body available.";
 
                   if (mode === "html" && body) {
