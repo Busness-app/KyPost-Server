@@ -22,9 +22,20 @@ export function displayBody(email: InboxEmail, decrypted?: DecryptedView): {
   body: string;
   mode: "html" | "plain";
 } {
-  // A locally decrypted body wins: for a client-protected account the server
-  // sends no usable body at all for encrypted mail.
-  if (decrypted?.body) {
+  // A locally decrypted or verified body wins: for a client-protected account
+  // the server sends no usable body at all for encrypted mail.
+  //
+  // The test is bodyFromVerifiedPart, NOT decrypted.body's truthiness. An empty
+  // body from a check that succeeded means "the bytes we verified contain
+  // nothing displayable" — an attachment-only signed message — and it must
+  // render as nothing. Falling through to email.body there showed the server's
+  // parse of the whole message, including parts outside the signature, under a
+  // green badge. See CVE-2021-4126 for the same defect in Thunderbird.
+  // `!error` is belt alongside the flag, not the test itself: the signed-only
+  // failure path deliberately stores an EMPTY error so nothing is shown to the
+  // reader, so an error check on its own would not catch it. The flag is what
+  // does the work; this just keeps an errored view from ever winning.
+  if (decrypted?.bodyFromVerifiedPart && !decrypted.error) {
     return {
       body: decrypted.body,
       // pgpClient read this off the decrypted entity's Content-Type. It is

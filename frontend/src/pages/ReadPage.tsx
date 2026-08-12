@@ -3,10 +3,11 @@ import { useSearchParams } from "react-router";
 import { escapeHtmlText, processEmailHtml } from "../lib/emailHtml";
 import { EmailBodyFrame } from "./read/EmailBodyFrame";
 import { EncryptionCell } from "./read/EncryptionCell";
+import { SignatureBadge } from "./read/SignatureBadge";
 import { displayBody } from "./read/body";
 import { firstAddressFromText, listAddressesFromText } from "../lib/addressText";
 import { isFlaggedPhishing } from "../lib/phishing";
-import { decryptMessage } from "../lib/pgpClient";
+import { decryptMessage, verifySignedMessage } from "../lib/pgpClient";
 import { getPGPMessagePayload } from "../api/pgp";
 import { isClientProtected, needsUnlock, subscribePGPSession, type PGPSessionState } from "../lib/pgpSession";
 import { PgpUnlockDialog } from "../components/PgpUnlockDialog";
@@ -59,6 +60,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   // nothing decrypted here is ever sent back to it.
   const [decrypted, setDecrypted] = useState<Record<string, DecryptedView>>({});
   const [decryptingId, setDecryptingId] = useState("");
+  const [verifyingId, setVerifyingId] = useState("");
   const [pgpUnlockOpen, setPgpUnlockOpen] = useState(false);
   const [, setPgpSession] = useState<PGPSessionState | null>(null);
   const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
@@ -106,7 +108,25 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   });
   const [refillAnimationTick, setRefillAnimationTick] = useState(0);
   const isDraftMailbox = mailbox.toLowerCase().includes("drafts");
+  // The mailbox the inbox listing actually used. loadInbox omits the parameter
+  // entirely when this is empty and lets the server resolve the account's
+  // configured folder, so anything that must describe the SAME message has to
+  // send the same value. Substituting a literal "INBOX" made
+  // /api/mail/pgp-payload read INBOX's UID N while the pane showed the
+  // configured folder's UID N — a different message.
+  const listedMailbox = mailbox;
+
+  // A concrete label, only for the drag payload: App.tsx's same-mailbox guard
+  // compares these strings and cannot resolve "" to a folder itself.
   const sourceMailbox = mailbox || "INBOX";
+
+  // An IMAP UID is unique within ONE mailbox, and `messageId` is a bare UID
+  // (adapters/imap/client.go:657). Keying the local-verdict map on it alone let
+  // a verdict computed for one mailbox's UID 7 be served for a DIFFERENT
+  // message at UID 7 in another — including its green "signature verified"
+  // badge. Qualify with `mailbox`, not `sourceMailbox`: the latter maps "" and
+  // "INBOX" onto one key while they select different folders.
+  const decryptedKey = (messageId: string) => `${mailbox}\u0000${messageId}`;
 
   useEffect(() => subscribePGPSession(setPgpSession), []);
 
@@ -121,7 +141,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     if (!message || !message.pgpEncrypted || message.pgpDecryptError) {
       return;
     }
-    if (!isClientProtected() || decrypted[message.messageId]) {
+    if (!isClientProtected() || decrypted[decryptedKey(message.messageId)]) {
       return;
     }
     if (needsUnlock()) {
@@ -133,7 +153,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     setDecryptingId(message.messageId);
     (async () => {
       try {
-        const payload = await getPGPMessagePayload(sourceMailbox, message.messageId);
+        const payload = await getPGPMessagePayload(listedMailbox, message.messageId);
         const result = await decryptMessage(
           payload.encryptedPayload,
           payload.signerKeys ?? [],
@@ -142,7 +162,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         if (cancelled) return;
         setDecrypted((prev) => ({
           ...prev,
-          [message.messageId]: {
+          [decryptedKey(message.messageId)]: {
             body: result.body,
             // Read off the decrypted entity's own Content-Type by pgpClient.
             // The server's bodyMode describes the outer envelope and must not
@@ -151,19 +171,24 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             signed: result.signed,
             verified: result.verified,
             signerFingerprint: result.signerFingerprint,
-            error: ""
+            error: "",
+            // This body came out of the ciphertext this browser opened.
+            bodyFromVerifiedPart: true,
+            signerConflict: result.signerConflict
           }
         }));
       } catch (e) {
         if (cancelled) return;
         setDecrypted((prev) => ({
           ...prev,
-          [message.messageId]: {
+          [decryptedKey(message.messageId)]: {
             body: "",
             signed: false,
             verified: false,
             signerFingerprint: "",
-            error: toErrorMessage(e, "could not decrypt this message")
+            error: toErrorMessage(e, "could not decrypt this message"),
+            bodyFromVerifiedPart: false,
+            signerConflict: false
           }
         }));
       } finally {
@@ -177,7 +202,100 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     // this effect on every successful decrypt, and the guard above already
     // reads the latest value through the closure on each selection change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, sourceMailbox, pgpUnlockOpen]);
+  }, [selected, listedMailbox, pgpUnlockOpen]);
+
+  // Verify a signed-but-not-encrypted message when it is opened.
+  //
+  // The sibling of the decrypt effect above, and deliberately separate: this
+  // one runs under BOTH protection modes, needs no unlocked vault (a signature
+  // check uses public keys only), and fetches the signed part rather than
+  // ciphertext. The server no longer verifies these at all — it cannot, since a
+  // detached signature covers the part's transmitted bytes and every
+  // server-side path holds a decoded copy — so this is the only thing standing
+  // between a signed message and no verdict.
+  useEffect(() => {
+    const message = selected;
+    if (!message || !message.pgpSigned || message.pgpEncrypted) {
+      return;
+    }
+    if (decrypted[decryptedKey(message.messageId)]) {
+      return;
+    }
+
+    let cancelled = false;
+    setVerifyingId(message.messageId);
+    // Survives into the catch below. A conflicted contact is knowable the
+    // moment the key list arrives, even when there is nothing to verify against
+    // it — and "this sender's key has changed" is a better thing to tell the
+    // reader than the generic shrug.
+    let conflictHint = false;
+    (async () => {
+      try {
+        const payload = await getPGPMessagePayload(listedMailbox, message.messageId);
+        if (cancelled) return;
+        conflictHint = (payload.signerKeys ?? []).some((k) => k?.conflict === true);
+        if (!payload.signedPartBase64 || !payload.signaturePayload) {
+          // Nothing usable came back: the raw fetch failed, or the message is
+          // not the RFC 3156 shape the extractor handles. Signed with no
+          // verdict — which the badge reads as "could not be checked", never as
+          // a failure.
+          throw new Error("no signed content available");
+        }
+        const result = await verifySignedMessage(
+          payload.signedPartBase64,
+          payload.signaturePayload,
+          payload.signerKeys ?? [],
+          firstAddressFromText(message.sender || "")
+        );
+        if (cancelled) return;
+        setDecrypted((prev) => ({
+          ...prev,
+          [decryptedKey(message.messageId)]: {
+            body: result.body,
+            bodyMode: result.bodyMode,
+            signed: result.signed,
+            verified: result.verified,
+            signerFingerprint: result.signerFingerprint,
+            error: "",
+            // This body was parsed out of the bytes openpgp.js just checked, so
+            // it is the body the badge above it describes — even when it is
+            // empty, which is what an attachment-only signed part yields.
+            bodyFromVerifiedPart: true,
+            signerConflict: result.signerConflict
+          }
+        }));
+      } catch {
+        if (cancelled) return;
+        // No body here on purpose: an unverifiable signature must not cost the
+        // reader the message. bodyFromVerifiedPart:false is what lets
+        // displayBody fall through to the server's copy, which is what the pane
+        // was already showing — and it is why that fallback cannot be keyed on
+        // the body being empty, since a SUCCESSFUL check can produce an empty
+        // body too.
+        setDecrypted((prev) => ({
+          ...prev,
+          [decryptedKey(message.messageId)]: {
+            body: "",
+            signed: true,
+            verified: false,
+            signerFingerprint: "",
+            error: "",
+            bodyFromVerifiedPart: false,
+            signerConflict: conflictHint
+          }
+        }));
+      } finally {
+        if (!cancelled) setVerifyingId("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // decrypted is intentionally not a dependency, for the same reason as the
+    // decrypt effect above: including it would re-run on every success, and the
+    // guard reads the latest value through the closure on each selection change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, listedMailbox]);
 
   const swipeSessionRef = useRef<{
     messageId: string;
@@ -294,6 +412,13 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     setSwipeRows({});
     setSwipeRemovedIds([]);
     setError("");
+    // Belt alongside the mailbox-qualified key: nothing cached for the folder
+    // we are leaving can describe a message in the one we are entering. The
+    // composite key is the load-bearing fix — this keeps the map from growing
+    // for the whole life of the component as well.
+    // Belt alongside the mailbox-qualified key: nothing cached for the folder
+    // we are leaving can describe a message in the one we are entering.
+    setDecrypted({});
     void loadInbox();
     const timer = setInterval(() => void loadInbox(), 15_000);
     return () => clearInterval(timer);
@@ -816,7 +941,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
 
   async function openEmailDetails(item: InboxEmail) {
     if (isDraftMailbox && onOpenDraft) {
-      const draft = displayBody(item, decrypted[item.messageId]);
+      const draft = displayBody(item, decrypted[decryptedKey(item.messageId)]);
       onOpenDraft({
         sentTo: item.sentTo,
         cc: item.cc,
@@ -884,7 +1009,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     onOpenDraft({
       sentTo: firstAddressFromText(selected.sender || ""),
       subject: ensureSubjectPrefix(selected.subject, "Re:"),
-      body: buildReplyBody(selected, decrypted[selected.messageId])
+      body: buildReplyBody(selected, decrypted[decryptedKey(selected.messageId)])
     });
     setSelected(null);
   }
@@ -894,7 +1019,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     onOpenDraft({
       sentTo: "",
       subject: ensureSubjectPrefix(selected.subject, "Fwd:"),
-      body: buildForwardBody(selected, decrypted[selected.messageId])
+      body: buildForwardBody(selected, decrypted[decryptedKey(selected.messageId)])
     });
     setSelected(null);
   }
@@ -906,7 +1031,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       sentTo: recipients.to,
       cc: recipients.cc,
       subject: ensureSubjectPrefix(selected.subject, "Re:"),
-      body: buildReplyBody(selected, decrypted[selected.messageId])
+      body: buildReplyBody(selected, decrypted[decryptedKey(selected.messageId)])
     });
     setSelected(null);
   }
@@ -917,7 +1042,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       .map((item) => {
         // displayBody, so printing a client-protected account's mail prints the
         // decrypted text at its own render mode rather than the envelope's.
-        const resolved = displayBody(item, decrypted[item.messageId]);
+        const resolved = displayBody(item, decrypted[decryptedKey(item.messageId)]);
         const body = resolved.body || "No message body available.";
         const isHtml = resolved.mode === "html" && Boolean(resolved.body);
         // Sender-controlled HTML must pass through the sanitizer here just like
@@ -1102,7 +1227,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           onClick={() => void openEmailDetails(item)}
                           style={{ cursor: "pointer" }}
                         >
-                          <EncryptionCell email={item} local={decrypted[item.messageId]} clientProtected={isClientProtected()} />
+                          <EncryptionCell email={item} local={decrypted[decryptedKey(item.messageId)]} clientProtected={isClientProtected()} />
                           <td className="inbox-cell">
                             <button
                               type="button"
@@ -1298,7 +1423,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                           />
                         </label>
                       </td>
-                      <EncryptionCell email={item} local={decrypted[item.messageId]} clientProtected={isClientProtected()} />
+                      <EncryptionCell email={item} local={decrypted[decryptedKey(item.messageId)]} clientProtected={isClientProtected()} />
                       <td className="inbox-cell">
                         {swipeState?.showHint ? (
                           <span
@@ -1458,19 +1583,21 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                   a pairing request by email — never approve one you did not start yourself, on this device.
                 </p>
               ) : null}
-              {selected.pgpEncrypted ? (
-                (() => {
-                  // For client-protected accounts the signature verdict comes
-                  // from the local decrypt, not from the server (which never
-                  // saw the plaintext). Fall back to the server's fields for
-                  // legacy accounts.
-                  const local = decrypted[selected.messageId];
-                  const decryptFailed = Boolean(selected.pgpDecryptError || local?.error);
-                  const decryptingNow = decryptingId === selected.messageId;
-                  const signed = local ? local.signed : Boolean(selected.pgpSigned);
-                  const verified = local ? local.verified : Boolean(selected.pgpVerified);
-                  return (
-                    <p style={{ margin: 0 }}>
+              {(() => {
+                // For client-protected accounts the verdict comes from the
+                // local decrypt or the local signature check, not from the
+                // server. Fall back to the server's fields for legacy accounts'
+                // encrypted mail — the one case where the server still has one.
+                const local = decrypted[decryptedKey(selected.messageId)];
+                const decryptFailed = Boolean(selected.pgpDecryptError || local?.error);
+                const decryptingNow = decryptingId === selected.messageId;
+                const verifyingNow = verifyingId === selected.messageId;
+                if (!selected.pgpEncrypted && !selected.pgpSigned) {
+                  return null;
+                }
+                return (
+                  <p style={{ margin: 0 }}>
+                    {selected.pgpEncrypted ? (
                       <span className={`security-badge ${decryptFailed ? "security-badge-off" : "security-badge-on"}`}>
                         <span className="security-dot" aria-hidden="true" />
                         {decryptingNow
@@ -1479,34 +1606,37 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                             ? "PGP: could not decrypt"
                             : "PGP: encrypted"}
                       </span>
-                      {!decryptFailed && !decryptingNow && signed ? (
-                        <span className={`security-badge ${verified ? "security-badge-on" : "security-badge-off"}`} style={{ marginLeft: 6 }}>
-                          <span className="security-dot" aria-hidden="true" />
-                          {verified ? "signature verified" : "signature does not match sender"}
-                        </span>
-                      ) : null}
-                      {signed && !verified && local?.signerFingerprint ? (
-                        <span className="contacts-muted" style={{ marginLeft: 6 }}>
-                          signed by {local.signerFingerprint.slice(-16)}
-                        </span>
-                      ) : null}
-                      {local?.error ? (
-                        <span className="contacts-muted" style={{ marginLeft: 6 }}>{local.error}</span>
-                      ) : null}
-                      {!local && !decryptingNow && !selected.pgpDecryptError && needsUnlock() ? (
-                        <button
-                          type="button"
-                          className="contacts-action"
-                          style={{ marginLeft: 6 }}
-                          onClick={() => setPgpUnlockOpen(true)}
-                        >
-                          Unlock to read
-                        </button>
-                      ) : null}
-                    </p>
-                  );
-                })()
-              ) : null}
+                    ) : null}
+                    {/*
+                      Suppressed while an encrypted message is still closed:
+                      until it decrypts there is no signature to describe, and a
+                      badge next to "could not decrypt" would be describing
+                      nothing. A signed-only message has no such gate — its
+                      content was readable all along.
+                    */}
+                    {selected.pgpEncrypted && (decryptFailed || decryptingNow) ? null : (
+                      <SignatureBadge email={selected} local={local} checking={verifyingNow} />
+                    )}
+                    {local?.error ? (
+                      <span className="contacts-muted" style={{ marginLeft: 6 }}>{local.error}</span>
+                    ) : null}
+                    {selected.pgpEncrypted &&
+                    !local &&
+                    !decryptingNow &&
+                    !selected.pgpDecryptError &&
+                    needsUnlock() ? (
+                      <button
+                        type="button"
+                        className="contacts-action"
+                        style={{ marginLeft: 6 }}
+                        onClick={() => setPgpUnlockOpen(true)}
+                      >
+                        Unlock to read
+                      </button>
+                    ) : null}
+                  </p>
+                );
+              })()}
               <p style={{ margin: 0 }}><strong>Subject:</strong> {selected.subject || "(no subject)"}</p>
               <p style={{ margin: 0 }}><strong>Sender:</strong> {selected.sender || "-"}</p>
               <p style={{ margin: 0 }}><strong>Sent To:</strong> {selected.sentTo || "-"}</p>
@@ -1583,13 +1713,13 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                     key="raw"
                     className="email-reader-body-block"
                   >
-                    {displayBody(selected, decrypted[selected.messageId]).body || "No message body available."}
+                    {displayBody(selected, decrypted[decryptedKey(selected.messageId)]).body || "No message body available."}
                   </pre>
                 ) : null}
                 {!showRawEmail ? (() => {
                   // Body and mode come from one place, together. See
                   // read/body.ts for why picking them separately is the bug.
-                  const { body, mode } = displayBody(selected, decrypted[selected.messageId]);
+                  const { body, mode } = displayBody(selected, decrypted[decryptedKey(selected.messageId)]);
                   const shown = body || "No message body available.";
 
                   if (mode === "html" && body) {

@@ -254,7 +254,7 @@ func (f *fakeClient) SaveSent(context.Context, imapadapter.DraftMessage) error  
 func (f *fakeClient) FetchHeaderFields(context.Context, []int, ...string) (map[int][]string, error) {
 	return nil, nil
 }
-func (f *fakeClient) FetchRawMessage(context.Context, int) ([]byte, error) { return nil, nil }
+func (f *fakeClient) FetchRawMessage(context.Context, string, int) ([]byte, error) { return nil, nil }
 
 func TestApplyOutcome_MapsEachActionTypeToTheRightCall(t *testing.T) {
 	outcome := Outcome{Applied: []Action{

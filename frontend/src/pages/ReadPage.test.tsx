@@ -24,8 +24,20 @@ vi.mock("../api/client", () => ({
   toErrorMessage: (_e: unknown, fallback: string) => fallback
 }));
 
+const getPGPMessagePayload = vi.fn();
+const verifySignedMessage = vi.fn();
+
 vi.mock("../api/pgp", () => ({
-  getPGPMessagePayload: vi.fn().mockResolvedValue({ ciphertext: "" })
+  getPGPMessagePayload: (mailbox: string, id: string) => getPGPMessagePayload(mailbox, id)
+}));
+
+// The crypto itself is pgpClient.test.ts's business; these tests are about the
+// wiring — that a signed message triggers a check at all, and that what the
+// check returns is what the reader renders.
+vi.mock("../lib/pgpClient", () => ({
+  decryptMessage: vi.fn(),
+  verifySignedMessage: (part: string, sig: string, keys: unknown[], sender: string) =>
+    verifySignedMessage(part, sig, keys, sender)
 }));
 
 vi.mock("../lib/pgpSession", () => ({
@@ -266,5 +278,118 @@ describe("search scope", () => {
       expect(searchCall).toBeDefined();
       expect(searchCall).toContain("mailbox=");
     });
+  });
+});
+
+// A signed message that is NOT encrypted. This population — mail that is
+// authenticated without being secret — is what showed no indicator at all,
+// because the whole badge block was nested inside `selected.pgpEncrypted ?`.
+const signedMail = {
+  messageId: "msg-signed",
+  sender: "Sender <sender@example.com>",
+  subject: "Signed Notice",
+  body: "<p>server copy</p>",
+  status: "unread",
+  atUtc: "2026-08-11T10:00:00Z",
+  pgpSigned: true,
+  pgpEncrypted: false
+};
+
+describe("signature status on unencrypted signed mail", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getJSON.mockImplementation((url: string) => {
+      if (url.startsWith("/api/inbox")) {
+        return Promise.resolve({ tabs: ["Primary"], byTab: { Primary: [signedMail] } });
+      }
+      if (url.startsWith("/api/labels")) return Promise.resolve({ configured: [], imap: [] });
+      if (url.startsWith("/api/mail/attachments")) return Promise.resolve({ ok: true, attachments: [] });
+      return Promise.resolve({});
+    });
+    postJSON.mockResolvedValue({ ok: true, results: [] });
+    getPGPMessagePayload.mockResolvedValue({
+      messageId: 1,
+      mailbox: "INBOX",
+      encryptedPayload: "",
+      signaturePayload: "-----BEGIN PGP SIGNATURE-----\nx\n-----END PGP SIGNATURE-----",
+      signedPartBase64: "cGFydA==",
+      body: "server copy",
+      signerKeys: []
+    });
+  });
+
+  it("shows a signature badge, with no encryption badge", async () => {
+    verifySignedMessage.mockResolvedValue({
+      body: "signed copy",
+      bodyMode: "plain",
+      signed: true,
+      verified: true,
+      signerFingerprint: "ABCDEF0123456789",
+      signerConflict: false
+    });
+    const user = userEvent.setup();
+    renderReadPage();
+
+    await user.click(await screen.findByText("Signed Notice"));
+
+    expect(await screen.findByText("signature verified")).toBeDefined();
+    expect(screen.queryByText("PGP: encrypted")).toBeNull();
+  });
+
+  // The badge must describe the bytes on screen. Rendering the server's copy
+  // under a verdict computed over a different copy is what makes a signature
+  // indicator meaningless.
+  it("renders the body parsed out of the verified part, not the server's", async () => {
+    verifySignedMessage.mockResolvedValue({
+      body: "signed copy",
+      bodyMode: "plain",
+      signed: true,
+      verified: true,
+      signerFingerprint: "ABCDEF0123456789",
+      signerConflict: false
+    });
+    const user = userEvent.setup();
+    renderReadPage();
+
+    await user.click(await screen.findByText("Signed Notice"));
+
+    await waitFor(() => expect(readerBodyHtml()).toContain("signed copy"));
+    expect(readerBodyHtml()).not.toContain("server copy");
+  });
+
+  // No key for this sender is the ordinary case for a first-time
+  // correspondent, not evidence of forgery — so the copy admits a gap rather
+  // than accusing anyone.
+  it("distinguishes an unverifiable signature from a mismatched one", async () => {
+    verifySignedMessage.mockResolvedValue({
+      body: "signed copy",
+      bodyMode: "plain",
+      signed: true,
+      verified: false,
+      signerFingerprint: "",
+      signerConflict: false
+    });
+    const user = userEvent.setup();
+    renderReadPage();
+
+    await user.click(await screen.findByText("Signed Notice"));
+
+    expect(
+      await screen.findByText("signature could not be checked")
+    ).toBeDefined();
+    expect(screen.queryByText("signature does not match sender")).toBeNull();
+  });
+
+  it("keeps the message readable when the payload fetch fails", async () => {
+    getPGPMessagePayload.mockRejectedValue(new Error("network"));
+    const user = userEvent.setup();
+    renderReadPage();
+
+    await user.click(await screen.findByText("Signed Notice"));
+
+    await waitFor(() => expect(readerBodyHtml()).toContain("server copy"));
+    expect(
+      await screen.findByText("signature could not be checked")
+    ).toBeDefined();
   });
 });

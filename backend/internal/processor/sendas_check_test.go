@@ -47,7 +47,7 @@ func (c *stubSendAsMailClient) SearchMessages(_ context.Context, _, _, query str
 	return c.searchResults[query], nil
 }
 
-func (c *stubSendAsMailClient) FetchRawMessage(_ context.Context, uid int) ([]byte, error) {
+func (c *stubSendAsMailClient) FetchRawMessage(_ context.Context, _ string, uid int) ([]byte, error) {
 	c.rawCalls = append(c.rawCalls, uid)
 	if c.rawErr != nil {
 		return nil, c.rawErr

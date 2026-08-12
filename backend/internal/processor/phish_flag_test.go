@@ -25,7 +25,7 @@ type phishStubClient struct {
 	applyErr      error
 }
 
-func (c *phishStubClient) FetchRawMessage(_ context.Context, uid int) ([]byte, error) {
+func (c *phishStubClient) FetchRawMessage(_ context.Context, _ string, uid int) ([]byte, error) {
 	c.rawFetches++
 	return c.raw[uid], nil
 }

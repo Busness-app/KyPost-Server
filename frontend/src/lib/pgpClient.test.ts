@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import * as openpgp from "openpgp";
 
-import { buildEncryptedSentCopy, decryptMessage } from "./pgpClient";
+import { buildEncryptedSentCopy, decryptMessage, verifySignedMessage } from "./pgpClient";
 import { unlockWithArmoredKey, lock } from "./keyVault";
 
 // run-4 finding H7: decryptMessage offered every contact public key as a
@@ -260,5 +260,110 @@ describe("signature binding is anchored in the address book, not the key's User 
     } finally {
       lock();
     }
+  }, 30000);
+});
+
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/** Builds an RFC 3156 signed part plus its detached signature, as a sender would. */
+async function signedPartWith(signerPrivateKey: string, partText: string) {
+  const privateKey = await openpgp.readPrivateKey({ armoredKey: signerPrivateKey });
+  const binary = new TextEncoder().encode(partText);
+  const signature = await openpgp.sign({
+    message: await openpgp.createMessage({ binary }),
+    signingKeys: privateKey,
+    detached: true,
+    format: "armored"
+  });
+  return { signedPartBase64: toBase64(binary), armoredSignature: signature as string };
+}
+
+const SIGNED_PART =
+  "Content-Type: text/plain; charset=UTF-8\r\n" +
+  "Content-Transfer-Encoding: 7bit\r\n" +
+  "\r\n" +
+  "trust me\r\n";
+
+describe("verifySignedMessage", () => {
+  it("verifies a signature from a key the address book binds to the sender", async () => {
+    const sender = await generateTestKey("Sender", "sender@example.com");
+    const { signedPartBase64, armoredSignature } = await signedPartWith(sender.privateKey, SIGNED_PART);
+
+    const result = await verifySignedMessage(
+      signedPartBase64,
+      armoredSignature,
+      [bound(sender, "sender@example.com")],
+      "sender@example.com"
+    );
+
+    expect(result.signed).toBe(true);
+    expect(result.verified).toBe(true);
+    // The part's own trailing CRLF survives: this body is the verified bytes
+    // decoded, not a re-serialization that tidied them.
+    expect(result.body).toBe("trust me\r\n");
+    expect(result.bodyMode).toBe("plain");
+  }, 30000);
+
+  // The H7 attack, on the signed-only path: an attacker whose key the reader
+  // auto-pinned (Autocrypt harvest, WKD auto-trust) signs a message and puts
+  // someone else in the From header. The signature is cryptographically
+  // perfect. It is not the sender's.
+  it("refuses a valid signature from a key not bound to the sender", async () => {
+    const mallory = await generateTestKey("Mallory", "mallory@evil.example");
+    const { signedPartBase64, armoredSignature } = await signedPartWith(mallory.privateKey, SIGNED_PART);
+
+    const result = await verifySignedMessage(
+      signedPartBase64,
+      armoredSignature,
+      [bound(mallory, "mallory@evil.example")],
+      "bob@example.com"
+    );
+
+    expect(result.signed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.signerFingerprint).not.toBe("");
+  }, 30000);
+
+  it("reports signed-but-uncheckable when no key is bound to the sender", async () => {
+    const sender = await generateTestKey("Sender", "sender@example.com");
+    const { signedPartBase64, armoredSignature } = await signedPartWith(sender.privateKey, SIGNED_PART);
+
+    const result = await verifySignedMessage(signedPartBase64, armoredSignature, [], "sender@example.com");
+
+    expect(result.signed).toBe(true);
+    expect(result.verified).toBe(false);
+    expect(result.signerFingerprint).toBe("");
+  }, 30000);
+
+  // One flipped byte in the part must not verify. This is the assertion that
+  // would have caught the server-side bug: it compared a signature against a
+  // decoded body, which is a much bigger difference than one byte.
+  it("refuses a tampered signed part", async () => {
+    const sender = await generateTestKey("Sender", "sender@example.com");
+    const { armoredSignature } = await signedPartWith(sender.privateKey, SIGNED_PART);
+    const tampered = SIGNED_PART.replace("trust me", "trust me!");
+
+    const result = await verifySignedMessage(
+      toBase64(new TextEncoder().encode(tampered)),
+      armoredSignature,
+      [bound(sender, "sender@example.com")],
+      "sender@example.com"
+    );
+
+    expect(result.verified).toBe(false);
+  }, 30000);
+
+  it("still renders the body when the part cannot be verified", async () => {
+    const sender = await generateTestKey("Sender", "sender@example.com");
+    const { signedPartBase64 } = await signedPartWith(sender.privateKey, SIGNED_PART);
+
+    const result = await verifySignedMessage(signedPartBase64, "not a signature", [], "sender@example.com");
+
+    expect(result.verified).toBe(false);
+    expect(result.body).toBe("trust me\r\n");
   }, 30000);
 });

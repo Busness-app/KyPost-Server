@@ -27,6 +27,14 @@ type mimeCorpusCase struct {
 	MIME       string `json:"mime"`
 	ExpectBody string `json:"expectBody"`
 	ExpectMode string `json:"expectMode"`
+	// ExpectGoParseError marks a case where the message is malformed enough
+	// that Go's multipart.Reader refuses it outright. The TypeScript parser has
+	// no error channel and expresses the same refusal as an empty body, so both
+	// sides still agree on what the reader is shown: nothing. Agreement on
+	// "no body" is as much a wire-level requirement as agreement on a body —
+	// it is the difference between one signature authenticating one reading and
+	// authenticating two.
+	ExpectGoParseError bool `json:"expectGoParseError,omitempty"`
 }
 
 type mimeCorpus struct {
@@ -54,6 +62,15 @@ func TestSharedMIMECorpus(t *testing.T) {
 	for _, tc := range loadMIMECorpus(t).Cases {
 		t.Run(tc.Name, func(t *testing.T) {
 			body, mode, _, err := ParseContent([]byte(tc.MIME))
+			if tc.ExpectGoParseError {
+				if err == nil {
+					t.Fatalf("expected Go to refuse this message, got body %q\n  why: %s", body, tc.Why)
+				}
+				if body != "" {
+					t.Fatalf("a refused message must yield no body, got %q", body)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("ParseContent: %v", err)
 			}

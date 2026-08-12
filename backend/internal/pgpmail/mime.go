@@ -393,48 +393,13 @@ func randomBoundary() string {
 	return fmt.Sprintf("pgpmail-%x", buf)
 }
 
-// VerifyResult is the outcome of verifying a standalone detached signature.
-type VerifyResult struct {
-	Verified          bool
-	SignerFingerprint string
-}
-
-// VerifyDetached verifies an armored detached signature over data using the
-// given signer public keys. Used for best-effort verification of standalone
-// (non-encrypted) signed mail fetched via IMAP — see the receive-path task
-// and the plan's Global Constraints for why this is best-effort rather than
-// exact for third-party mail.
-func VerifyDetached(data []byte, armoredSignature string, signerArmoredPubKeys []string) (*VerifyResult, error) {
-	if len(signerArmoredPubKeys) == 0 {
-		return nil, errors.New("pgpmail: at least one signer key required")
-	}
-	verifyKeys, err := crypto.NewKeyRing(nil)
-	if err != nil {
-		return nil, fmt.Errorf("pgpmail: build verification keyring: %w", err)
-	}
-	for _, armored := range signerArmoredPubKeys {
-		key, err := crypto.NewKeyFromArmored(armored)
-		if err != nil {
-			return nil, fmt.Errorf("pgpmail: parse signer key: %w", err)
-		}
-		if err := verifyKeys.AddKey(key); err != nil {
-			return nil, fmt.Errorf("pgpmail: add signer key: %w", err)
-		}
-	}
-	verifyHandle, err := crypto.PGP().Verify().VerificationKeys(verifyKeys).New()
-	if err != nil {
-		return nil, fmt.Errorf("pgpmail: build verify handle: %w", err)
-	}
-	result, err := verifyHandle.VerifyDetached(data, []byte(armoredSignature), crypto.Auto)
-	if err != nil {
-		return nil, fmt.Errorf("pgpmail: verify detached: %w", err)
-	}
-	out := &VerifyResult{Verified: result.SignatureError() == nil}
-	if key := result.SignedByKey(); key != nil {
-		out.SignerFingerprint = key.GetFingerprint()
-	}
-	return out, nil
-}
+// Detached-signature verification lives in the BROWSER, not here — see
+// api.markSignedOnlyMessageContent. An exported VerifyDetached used to sit at
+// this spot and its only caller fed it go-imap's decoded body, which is not
+// what a detached signature covers, so it reported every signed message as
+// unverified. Recovering the bytes it would have needed is
+// ExtractSignedParts's job (signed_parts.go), and by the time you have them
+// the verification belongs on the client that fetched them.
 
 // maxContentDepth bounds recursion into nested multipart structures so a
 // maliciously deep message can't exhaust the stack. Legitimate mail (including

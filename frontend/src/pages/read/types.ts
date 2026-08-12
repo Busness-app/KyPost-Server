@@ -47,6 +47,26 @@ export type DecryptedView = {
   verified: boolean;
   signerFingerprint: string;
   error: string;
+  /**
+   * True when `body` was parsed out of bytes this browser cryptographically
+   * checked — the decrypted plaintext, or the verified signed part.
+   *
+   * displayBody must branch on this and not on `body`'s truthiness. A signed
+   * part can legitimately parse to nothing (an attachment-only signed message),
+   * and the failure path deliberately stores an empty body with an empty error
+   * so the reader keeps the message when a payload fetch fails. Those two look
+   * identical without this flag, and treating the first like the second is what
+   * let the server's render of an UNSIGNED third part appear under a
+   * "signature verified" badge.
+   */
+  bodyFromVerifiedPart: boolean;
+  /**
+   * The address book holds a key for this sender whose fingerprint no longer
+   * matches its TOFU pin. The server sends such an entry with no key material,
+   * so verification cannot run — but the reason is a changed key, not a missing
+   * one, and the badge says so.
+   */
+  signerConflict: boolean;
 };
 
 // AttachmentInfo mirrors the /api/mail/attachments wire shape.

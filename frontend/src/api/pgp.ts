@@ -185,7 +185,19 @@ export function wkdDomainRecord(claim: Pick<WKDDomainClaim, "domain" | "token">)
  */
 export type BoundSignerKey = {
   addresses: string[];
+  /** Empty on a conflicted entry: a key that fails its TOFU pin is never sent. */
   publicKey: string;
+  /** True when a human confirmed this key, false for a machine-harvested one. */
+  verified?: boolean;
+  /** manual | qr | wkd | keyserver | autocrypt. */
+  source?: string;
+  /**
+   * The contact's stored key no longer matches its TOFU pin — the one event
+   * TOFU exists to announce. The server deliberately withholds the key
+   * material, so this entry cannot verify anything; without modelling the flag
+   * the reader could not tell a changed key from an unknown correspondent.
+   */
+  conflict?: boolean;
 };
 
 /** The cold-start snapshot — see docs/E2E_PGP.md "Cold start". */
@@ -277,6 +289,19 @@ export type PGPMessagePayload = {
   mailbox: string;
   encryptedPayload: string;
   signaturePayload: string;
+  /**
+   * The verbatim signed MIME part, base64-encoded — headers, CRLFs and
+   * transfer encoding exactly as transmitted, which is what the detached
+   * signature covers. Base64 because JSON is UTF-8 and any re-encoding of
+   * these bytes breaks the hash. Empty when the message is encrypted, or when
+   * the server could not pull a usable signed part out of the raw message.
+   */
+  signedPartBase64: string;
+  /**
+   * The server's own decoded render. Not what a signature verdict may be shown
+   * against — verifySignedMessage returns the body it parsed out of the bytes
+   * it verified, and that is what the reader displays for a signed message.
+   */
   body: string;
   signerKeys: BoundSignerKey[];
 };

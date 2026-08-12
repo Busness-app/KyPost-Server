@@ -165,24 +165,16 @@ func TestPGPBootstrapWithNoIdentity(t *testing.T) {
 // The ciphertext endpoint refuses server-protected accounts: the server
 // already decrypted those into the inbox response, so handing back the raw
 // payload as well widens exposure for nothing.
-func TestPGPPayloadRefusesServerProtectedAccount(t *testing.T) {
-	srv := newTestServer(t)
-	u, err := srv.users.Create(context.Background(), "legacy-payload", "legacy-payload-testpassword", users.RoleUser)
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if _, err := srv.users.SetPGPIdentity(u.ID, "FPR", "KID", "pub", "sealed", "generated", "2026-01-01T00:00:00Z"); err != nil {
-		t.Fatalf("SetPGPIdentity: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/mail/pgp-payload?mailbox=INBOX&messageId=5", nil)
-	authRequestAs(srv, req, u.ID)
-	rec := httptest.NewRecorder()
-	srv.withMailAuth(srv.handlePGPPayload)(rec, req)
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-}
+// The server-protected 409 is now asserted against a real encrypted message,
+// in TestPGPPayloadStillRefusesEncryptedForServerProtectedAccount
+// (pgp_client_read_test.go).
+//
+// This test used to live here and assert the refusal with no message present
+// at all, which worked only because the protection gate ran before the handler
+// had looked at anything. The gate now runs after the fetch — it has to, since
+// whether the refusal applies depends on whether this UID is encrypted or
+// merely signed — so "no message" no longer reaches it, and the replacement
+// drives the real case instead of a shortcut.
 
 // TestHandlePGPPayloadNarrowsSignerKeysToTheResolvedSender is review round 1
 // finding #4: every existing test of the sender-narrowing logic calls

@@ -277,7 +277,14 @@ func (p *Poller) harvestAutocrypt(ctx context.Context, uc userCtx, msg imapadapt
 	if suppressed[normAddr] {
 		return
 	}
-	raw, err := uc.mail.FetchRawMessage(ctx, uid)
+	// "" means the account's CONFIGURED folder — the same one FetchHeaderFields
+	// above read the Autocrypt and From headers from, since it takes no mailbox
+	// and inherits the connection's selection. A literal "INBOX" here fetched a
+	// different message at the same UID whenever the account polls another
+	// folder, so the DKIM gate below authenticated bytes that had nothing to do
+	// with the key being pinned — and, in the common case, found no such UID at
+	// all and killed harvesting silently.
+	raw, err := uc.mail.FetchRawMessage(ctx, "", uid)
 	if err != nil || len(raw) == 0 {
 		return
 	}

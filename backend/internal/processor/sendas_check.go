@@ -110,7 +110,7 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 		domain := domainOf(alias.Email)
 		verified := false
 		for _, m := range matches {
-			raw, err := mail.FetchRawMessage(ctx, m.UID)
+			raw, err := mail.FetchRawMessage(ctx, "INBOX", m.UID)
 			if err != nil {
 				p.log.Error("send-as verification raw fetch failed",
 					"user_id", userID, "alias_id", alias.ID, "uid", strconv.Itoa(m.UID), "error", err.Error())
