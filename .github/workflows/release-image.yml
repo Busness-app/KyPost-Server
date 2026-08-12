@@ -59,10 +59,10 @@ jobs:
           OWNER_LC="${OWNER,,}"
           echo "IMAGE_NAME=ghcr.io/${OWNER_LC}/kypost-server" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # Refuse to publish a tag the code does not agree with.
       #
@@ -174,7 +174,7 @@ jobs:
 
       # FIX: Completed the missing implementation block for the registry login step
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
