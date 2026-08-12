@@ -17,7 +17,8 @@ const decrypted: DecryptedView = {
   verified: false,
   signerFingerprint: "",
   error: "",
-  bodyFromVerifiedPart: true
+  bodyFromVerifiedPart: true,
+  signerConflict: false
 };
 
 describe("encryptionState", () => {

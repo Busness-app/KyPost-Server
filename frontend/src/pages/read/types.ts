@@ -60,6 +60,13 @@ export type DecryptedView = {
    * "signature verified" badge.
    */
   bodyFromVerifiedPart: boolean;
+  /**
+   * The address book holds a key for this sender whose fingerprint no longer
+   * matches its TOFU pin. The server sends such an entry with no key material,
+   * so verification cannot run — but the reason is a changed key, not a missing
+   * one, and the badge says so.
+   */
+  signerConflict: boolean;
 };
 
 // AttachmentInfo mirrors the /api/mail/attachments wire shape.

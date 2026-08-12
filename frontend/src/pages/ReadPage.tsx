@@ -173,7 +173,8 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             signerFingerprint: result.signerFingerprint,
             error: "",
             // This body came out of the ciphertext this browser opened.
-            bodyFromVerifiedPart: true
+            bodyFromVerifiedPart: true,
+            signerConflict: result.signerConflict
           }
         }));
       } catch (e) {
@@ -186,7 +187,8 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             verified: false,
             signerFingerprint: "",
             error: toErrorMessage(e, "could not decrypt this message"),
-            bodyFromVerifiedPart: false
+            bodyFromVerifiedPart: false,
+            signerConflict: false
           }
         }));
       } finally {
@@ -222,10 +224,16 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
 
     let cancelled = false;
     setVerifyingId(message.messageId);
+    // Survives into the catch below. A conflicted contact is knowable the
+    // moment the key list arrives, even when there is nothing to verify against
+    // it — and "this sender's key has changed" is a better thing to tell the
+    // reader than the generic shrug.
+    let conflictHint = false;
     (async () => {
       try {
         const payload = await getPGPMessagePayload(listedMailbox, message.messageId);
         if (cancelled) return;
+        conflictHint = (payload.signerKeys ?? []).some((k) => k?.conflict === true);
         if (!payload.signedPartBase64 || !payload.signaturePayload) {
           // Nothing usable came back: the raw fetch failed, or the message is
           // not the RFC 3156 shape the extractor handles. Signed with no
@@ -252,7 +260,8 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             // This body was parsed out of the bytes openpgp.js just checked, so
             // it is the body the badge above it describes — even when it is
             // empty, which is what an attachment-only signed part yields.
-            bodyFromVerifiedPart: true
+            bodyFromVerifiedPart: true,
+            signerConflict: result.signerConflict
           }
         }));
       } catch {
@@ -271,7 +280,8 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
             verified: false,
             signerFingerprint: "",
             error: "",
-            bodyFromVerifiedPart: false
+            bodyFromVerifiedPart: false,
+            signerConflict: conflictHint
           }
         }));
       } finally {

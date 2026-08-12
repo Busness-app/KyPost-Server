@@ -19,7 +19,13 @@ import type { DecryptedView, InboxEmail } from "./types";
  * both — puts a warning on every first message from every new correspondent who
  * signs, and readers who learn to ignore it will ignore the real one too.
  */
-export type SignatureState = "none" | "checking" | "verified" | "mismatched" | "unchecked";
+export type SignatureState =
+  | "none"
+  | "checking"
+  | "verified"
+  | "mismatched"
+  | "conflicted"
+  | "unchecked";
 
 /**
  * Derives the state from the message and this browser's verification of it.
@@ -48,7 +54,14 @@ export function signatureState(
     return "verified";
   }
   const fingerprint = local ? local.signerFingerprint : email.pgpSignerFingerprint;
-  return fingerprint ? "mismatched" : "unchecked";
+  if (fingerprint) {
+    return "mismatched";
+  }
+  // A changed key ranks above the generic admission. The server withholds the
+  // key material for a contact that fails its TOFU pin, so the check cannot
+  // run — and reporting that as "could not be checked" made the one event TOFU
+  // exists to announce look identical to an unknown correspondent.
+  return local?.signerConflict ? "conflicted" : "unchecked";
 }
 
 /** The badge text. Each string claims exactly what was established, no more. */
@@ -58,8 +71,15 @@ export function signatureLabel(state: SignatureState): string {
       return "signature verified";
     case "mismatched":
       return "signature does not match sender";
+    case "conflicted":
+      return "this sender's key has changed";
     case "unchecked":
-      return "signature could not be checked — no key for this sender";
+      // Deliberately does not say WHY. The client cannot distinguish "no bound
+      // key" from "a bound key exists and did not sign this", because the
+      // server ships a key list already filtered to the sender — so the old
+      // "— no key for this sender" was false in exactly the impersonation case
+      // the badge matters for.
+      return "signature could not be checked";
     case "checking":
       return "checking signature…";
     default:

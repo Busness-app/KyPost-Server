@@ -15,6 +15,7 @@ function view(over: Partial<DecryptedView> = {}): DecryptedView {
     signerFingerprint: "",
     error: "",
     bodyFromVerifiedPart: false,
+    signerConflict: false,
     ...over
   };
 }
@@ -71,8 +72,40 @@ describe("signatureLabel", () => {
   it("uses copy that claims no more than was established", () => {
     expect(signatureLabel("verified")).toBe("signature verified");
     expect(signatureLabel("mismatched")).toBe("signature does not match sender");
-    expect(signatureLabel("unchecked")).toBe("signature could not be checked — no key for this sender");
     expect(signatureLabel("checking")).toBe("checking signature…");
     expect(signatureLabel("none")).toBe("");
+  });
+
+  // The old copy read "…— no key for this sender", which is false in the case
+  // that matters most: an impostor signs with their own key, the server offers
+  // only the real sender's key, and the check fails. A key for that sender
+  // exists and is precisely why it failed.
+  it("does not claim why the check failed", () => {
+    expect(signatureLabel("unchecked")).toBe("signature could not be checked");
+  });
+
+  it("names a changed key rather than calling it unchecked", () => {
+    expect(signatureLabel("conflicted")).toBe("this sender's key has changed");
+  });
+});
+
+// A contact whose stored key no longer matches its TOFU pin is the one event
+// TOFU exists to announce. The server withholds the key material, so the check
+// cannot run — and rendering that as the generic "could not be checked" made a
+// changed key indistinguishable from an unknown correspondent.
+describe("a TOFU pin conflict is its own state", () => {
+  it("outranks the generic unchecked state", () => {
+    const local = view({ signed: true, verified: false, signerFingerprint: "", signerConflict: true });
+    expect(signatureState(email({ pgpSigned: true }), local, false)).toBe("conflicted");
+  });
+
+  it("does not fire when the check simply had no bound key", () => {
+    const local = view({ signed: true, verified: false, signerFingerprint: "", signerConflict: false });
+    expect(signatureState(email({ pgpSigned: true }), local, false)).toBe("unchecked");
+  });
+
+  it("never overrides a successful verification", () => {
+    const local = view({ signed: true, verified: true, signerFingerprint: "ABC", signerConflict: true });
+    expect(signatureState(email({ pgpSigned: true }), local, false)).toBe("verified");
   });
 });

@@ -185,7 +185,19 @@ export function wkdDomainRecord(claim: Pick<WKDDomainClaim, "domain" | "token">)
  */
 export type BoundSignerKey = {
   addresses: string[];
+  /** Empty on a conflicted entry: a key that fails its TOFU pin is never sent. */
   publicKey: string;
+  /** True when a human confirmed this key, false for a machine-harvested one. */
+  verified?: boolean;
+  /** manual | qr | wkd | keyserver | autocrypt. */
+  source?: string;
+  /**
+   * The contact's stored key no longer matches its TOFU pin — the one event
+   * TOFU exists to announce. The server deliberately withholds the key
+   * material, so this entry cannot verify anything; without modelling the flag
+   * the reader could not tell a changed key from an unknown correspondent.
+   */
+  conflict?: boolean;
 };
 
 /** The cold-start snapshot — see docs/E2E_PGP.md "Cold start". */

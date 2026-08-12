@@ -324,7 +324,8 @@ describe("signature status on unencrypted signed mail", () => {
       bodyMode: "plain",
       signed: true,
       verified: true,
-      signerFingerprint: "ABCDEF0123456789"
+      signerFingerprint: "ABCDEF0123456789",
+      signerConflict: false
     });
     const user = userEvent.setup();
     renderReadPage();
@@ -344,7 +345,8 @@ describe("signature status on unencrypted signed mail", () => {
       bodyMode: "plain",
       signed: true,
       verified: true,
-      signerFingerprint: "ABCDEF0123456789"
+      signerFingerprint: "ABCDEF0123456789",
+      signerConflict: false
     });
     const user = userEvent.setup();
     renderReadPage();
@@ -364,7 +366,8 @@ describe("signature status on unencrypted signed mail", () => {
       bodyMode: "plain",
       signed: true,
       verified: false,
-      signerFingerprint: ""
+      signerFingerprint: "",
+      signerConflict: false
     });
     const user = userEvent.setup();
     renderReadPage();
@@ -372,7 +375,7 @@ describe("signature status on unencrypted signed mail", () => {
     await user.click(await screen.findByText("Signed Notice"));
 
     expect(
-      await screen.findByText("signature could not be checked — no key for this sender")
+      await screen.findByText("signature could not be checked")
     ).toBeDefined();
     expect(screen.queryByText("signature does not match sender")).toBeNull();
   });
@@ -386,7 +389,7 @@ describe("signature status on unencrypted signed mail", () => {
 
     await waitFor(() => expect(readerBodyHtml()).toContain("server copy"));
     expect(
-      await screen.findByText("signature could not be checked — no key for this sender")
+      await screen.findByText("signature could not be checked")
     ).toBeDefined();
   });
 });

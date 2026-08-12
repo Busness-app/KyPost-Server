@@ -109,6 +109,12 @@ export type DecryptedMessage = {
   signed: boolean;
   verified: boolean;
   signerFingerprint: string;
+  /**
+   * The address book binds a key to this sender but it fails its TOFU pin, so
+   * the server withheld the key material and nothing could be checked. Distinct
+   * from having no key at all — see read/signature.ts.
+   */
+  signerConflict: boolean;
 };
 
 /**
@@ -235,7 +241,8 @@ export async function decryptMessage(
     bodyMode: parsed?.mode,
     signed,
     verified,
-    signerFingerprint
+    signerFingerprint,
+    signerConflict: hasSignerConflict(signerKeys)
   };
 }
 
@@ -339,8 +346,21 @@ export async function verifySignedMessage(
     // carrying a detached signature, so `signed` is what got us here.
     signed: true,
     verified,
-    signerFingerprint
+    signerFingerprint,
+    signerConflict: hasSignerConflict(signerKeys)
   };
+}
+
+/**
+ * Whether the address book binds a key to this sender that fails its TOFU pin.
+ *
+ * The server sends such an entry with its addresses but no key material, so it
+ * contributes nothing to verification — which is exactly why the reader needs
+ * to be told it exists. A changed key is the one event TOFU is for, and without
+ * this it rendered as the same shrug as an unknown correspondent.
+ */
+function hasSignerConflict(signerKeys: BoundSignerKey[]): boolean {
+  return signerKeys.some((k) => k?.conflict === true);
 }
 
 /** One encrypted delivery: a full PGP/MIME message plus its recipients. */

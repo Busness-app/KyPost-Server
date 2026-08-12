@@ -146,6 +146,11 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	responseBody := content.Body
+	if signedPartBase64 != "" {
+		responseBody = ""
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"messageId":        uid,
 		"mailbox":          mailbox,
@@ -157,11 +162,16 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 		// forged signature.
 		"signaturePayload": signaturePayload,
 		"signedPartBase64": signedPartBase64,
-		// The server's own decoded render. Native clients read this and do not
-		// verify. The web client ignores it for a signed message and renders
-		// the part it verified instead — a body shown under a verdict must be
-		// the body that verdict describes.
-		"body":           content.Body,
+		// The server's own decoded render, and DELIBERATELY omitted whenever
+		// signedPartBase64 carries the same message. Sending both put a 24 MiB
+		// message on the wire as a 56 MiB response, on a GET that no rate
+		// limiter meters.
+		//
+		// No client reads it on this path: the web client renders the part it
+		// verified, and the only native consumer is an Android branch its own
+		// comment marks unreachable. It stays for the encrypted case, where
+		// there is no signed part and it is empty by construction anyway.
+		"body":           responseBody,
 		"signerKeys":     signerKeys,
 		"sender":         sender,
 		"resolvedSender": resolvedSender,

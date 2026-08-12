@@ -93,6 +93,7 @@ describe("quoting a locally decrypted message", () => {
       signerFingerprint: "",
       error: "",
       bodyFromVerifiedPart: true,
+    signerConflict: false,
       ...over
     };
   }

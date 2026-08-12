@@ -15,6 +15,7 @@ function view(over: Partial<DecryptedView> = {}): DecryptedView {
     signerFingerprint: "",
     error: "",
     bodyFromVerifiedPart: false,
+    signerConflict: false,
     ...over
   };
 }
