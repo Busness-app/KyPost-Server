@@ -79,6 +79,42 @@
       "mime": "Content-Type: multipart/mixed; boundary=\"F1\"\r\n\r\n--F1\r\nContent-Type: text/rfc822-headers\r\n\r\nSubject: Protected Subject\r\n--F1\r\nContent-Type: text/plain\r\n\r\nBODY-NOT-HEADERS\r\n--F1--\r\n",
       "expectBody": "BODY-NOT-HEADERS",
       "expectMode": "plain"
+    },
+    {
+      "name": "junk after the boundary is not a delimiter line",
+      "why": "run-11. RFC 2046 5.1.1 allows only transport padding after the boundary. The browser anchored the delimiter's start but not its end, so --B_X split there while Go's reader read it as ordinary content.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain; name=\"decoy.txt\"\r\n\r\nNAMED\r\n--B_X\r\nBROWSER-ONLY\r\n--B\r\nContent-Type: text/plain\r\n\r\nTHE-REAL-BODY\r\n--B--\r\n",
+      "expectBody": "THE-REAL-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "a duplicate Content-Type resolves to the first, not the last",
+      "why": "run-11. textproto.MIMEHeader.Get returns the FIRST occurrence; the browser used Map.set and took the last, so a part carrying two Content-Type headers classified differently in each parser.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain; name=\"decoy.txt\"\r\nContent-Type: text/plain\r\n\r\nLAST-HEADER-WINS\r\n--B\r\nContent-Type: text/plain\r\n\r\nTHE-REAL-BODY\r\n--B--\r\n",
+      "expectBody": "THE-REAL-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "RFC 2231 name*= names a part, so it is not a body candidate",
+      "why": "run-11. mime.ParseMediaType decodes name*=utf-8''decoy.txt into a filename so Go skipped the part; the browser's regex matched only a literal name= and treated it as an unnamed body candidate.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain; name*=utf-8''decoy.txt\r\n\r\nNAMED-VIA-RFC2231\r\n--B\r\nContent-Type: text/plain\r\n\r\nTHE-REAL-BODY\r\n--B--\r\n",
+      "expectBody": "THE-REAL-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "RFC 2231 filename*0/filename*1 continuations name a part",
+      "why": "run-11. Go reassembles the continuation pair into a filename and skips the part; the browser saw no filename= and used it as the display body.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename*0=\"de\"; filename*1=\"coy.txt\"\r\n\r\nNAMED-VIA-CONTINUATION\r\n--B\r\nContent-Type: text/plain\r\n\r\nTHE-REAL-BODY\r\n--B--\r\n",
+      "expectBody": "THE-REAL-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "a close-delimiter lookalike ends the multipart in both parsers",
+      "why": "run-11. Go's multipart.Reader errors on \"--B--junk\" and yields no body at all, while the browser skipped that segment and rendered a later part. Both must now yield nothing: the browser stops at the close delimiter instead of stepping over it.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain; name=\"d.txt\"\r\n\r\nNAMED\r\n--B--junk\r\n--B\r\nContent-Type: text/plain\r\n\r\nBROWSER-ONLY\r\n--B--\r\n",
+      "expectBody": "",
+      "expectMode": "plain",
+      "expectGoParseError": true
     }
   ]
 }

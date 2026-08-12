@@ -49,17 +49,59 @@ function splitHeaders(raw: string): { headers: Map<string, string>; body: string
   for (const line of unfolded.split(/\r?\n/)) {
     const colon = line.indexOf(":");
     if (colon <= 0) continue;
-    headers.set(line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim());
+    const name = line.slice(0, colon).trim().toLowerCase();
+    // FIRST occurrence wins, matching textproto.MIMEHeader.Get on the Go side.
+    // A Map.set here let the LAST duplicate win, so a part carrying two
+    // Content-Type headers classified differently in the two parsers — one
+    // signature, two readings.
+    if (headers.has(name)) continue;
+    headers.set(name, line.slice(colon + 1).trim());
   }
   return { headers, body };
 }
 
-/** Pulls a parameter (boundary, filename, charset) out of a Content-Type value. */
+/**
+ * Pulls a parameter (boundary, filename, charset) out of a Content-Type value.
+ *
+ * RFC 2231 forms are honoured because Go's mime.ParseMediaType decodes them: a
+ * part named only by `name*=utf-8''a.txt`, or by the `name*0`/`name*1`
+ * continuation pair, reads as an attachment server-side. Matching only the
+ * literal `name=` made those parts unnamed browser-side and therefore body
+ * candidates — the two parsers then picked different bodies for one signed
+ * message.
+ */
 function contentTypeParam(value: string, name: string): string {
   const quoted = new RegExp(`;\\s*${name}\\s*=\\s*"([^"]*)"`, "i").exec(value);
   if (quoted) return quoted[1];
   const bare = new RegExp(`;\\s*${name}\\s*=\\s*([^;\\s]+)`, "i").exec(value);
-  return bare ? bare[1] : "";
+  if (bare) return bare[1];
+
+  // RFC 2231 extended value: name*=charset'language'percent-encoded
+  const extended = new RegExp(`;\\s*${name}\\*\\s*=\\s*"?([^;"]*)"?`, "i").exec(value);
+  if (extended) return decodeRFC2231(extended[1]);
+
+  // RFC 2231 continuations: name*0=…; name*1=… (each optionally *-encoded).
+  let joined = "";
+  for (let i = 0; ; i += 1) {
+    const seg = new RegExp(`;\\s*${name}\\*${i}(\\*)?\\s*=\\s*(?:"([^"]*)"|([^;\\s]+))`, "i").exec(value);
+    if (!seg) break;
+    const raw = seg[2] ?? seg[3] ?? "";
+    joined += seg[1] ? decodeRFC2231(raw) : raw;
+  }
+  return joined;
+}
+
+/** Strips an RFC 2231 charset'language' prefix and percent-decodes the rest. */
+function decodeRFC2231(raw: string): string {
+  const parts = raw.split("'");
+  const encoded = parts.length >= 3 ? parts.slice(2).join("'") : raw;
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    // A malformed escape must not throw the whole parse away; the value is
+    // only ever used to decide whether a part is named.
+    return encoded;
+  }
 }
 
 /** The media type with parameters stripped, lowercased. */
@@ -155,10 +197,24 @@ function splitParts(body: string, boundary: string): string[] {
   const opening = `--${boundary}`;
   const escaped = opening.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const anchored = body.startsWith(opening) ? `\n${body}` : body;
-  const segments = anchored.split(new RegExp(`\\r?\\n${escaped}`));
-  // segments[0] is the preamble; the final segment starts with "--" (the close
-  // delimiter) or is the epilogue. Neither is a part.
-  return segments.slice(1).filter((segment) => !segment.startsWith("--"));
+  // The delimiter line must END after the boundary too: RFC 2046 5.1.1 allows
+  // only transport padding (LWSP) before the line break, or "--" for the close
+  // delimiter. Anchoring only the start matched "--boundary_X", which Go's
+  // reader treats as ordinary content — so a sender could split the browser's
+  // view of a signed message where the server saw none.
+  const segments = anchored.split(new RegExp(`\\r?\\n${escaped}[ \\t]*(?=\\r?\\n|--)`));
+  // segments[0] is the preamble. A segment beginning "--" is the close
+  // delimiter, and everything after it is the epilogue — so STOP there rather
+  // than skipping it and continuing. Merely filtering it out meant a
+  // lookalike close delimiter ("--B--junk") hid the parts before it from Go,
+  // which errors on the malformed line, while the browser carried on and
+  // rendered a later part. Truncating makes both yield no body.
+  const parts: string[] = [];
+  for (const segment of segments.slice(1)) {
+    if (segment.startsWith("--")) break;
+    parts.push(segment);
+  }
+  return parts;
 }
 
 /**
