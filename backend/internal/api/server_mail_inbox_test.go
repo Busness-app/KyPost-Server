@@ -50,10 +50,10 @@ type fakeMailClient struct {
 	// rawMessages feeds FetchRawMessage — the signed-only read path fetches the
 	// message raw, because a detached signature covers bytes no MIME-parsed copy
 	// preserves. See handlePGPPayload.
-	rawMessages map[int][]byte
-	bodiesErr               error
-	bodiesCalls             int
-	lastBodyUIDs            []int
+	rawMessages  map[int][]byte
+	bodiesErr    error
+	bodiesCalls  int
+	lastBodyUIDs []int
 
 	attachments    map[int][]mailmsg.Attachment
 	attachmentsErr error

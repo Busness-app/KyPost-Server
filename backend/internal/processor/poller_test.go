@@ -307,7 +307,9 @@ func (c *noopMailClient) SaveSent(context.Context, imapadapter.DraftMessage) err
 func (c *noopMailClient) FetchHeaderFields(context.Context, []int, ...string) (map[int][]string, error) {
 	return nil, nil
 }
-func (c *noopMailClient) FetchRawMessage(context.Context, string, int) ([]byte, error) { return nil, nil }
+func (c *noopMailClient) FetchRawMessage(context.Context, string, int) ([]byte, error) {
+	return nil, nil
+}
 
 // TestShouldMarkProcessedOnError_TransientClassifierErrorLeavesUnmarked
 // proves a transient classifier-outage error (the classifier service
