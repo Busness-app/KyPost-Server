@@ -258,6 +258,23 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 			e := entryFromOverview(ov)
 			e.Rev = win.Seq
 			e.FirstRev = prev.FirstRev
+			// This branch runs precisely BECAUSE the envelope differs, and it
+			// cannot distinguish "same message, flag flipped" from "this UID now
+			// names a DIFFERENT message". Nothing here tracks UIDVALIDITY — the
+			// IMAP value whose entire purpose is to announce that UIDs were
+			// renumbered — so after a mailbox is deleted and recreated, restored
+			// from backup, or migrated between providers, carrying the warm
+			// state forward grafted one message's body and signature verdict
+			// onto another message's envelope.
+			//
+			// A flag flip changes neither the sender nor the timestamp, so
+			// requiring both to match separates the two cases without plumbing
+			// UIDVALIDITY through the adapter. When they differ, treat the UID
+			// as a new message: no body, no verdict, re-fetched on next read.
+			if prev.Sender != ov.Sender || prev.AtUTC != ov.AtUTC {
+				next = append(next, e)
+				continue
+			}
 			e.Body = prev.Body
 			// Overviews carry no attachment info, so preserve the warmed
 			// flag across a metadata-only change (same rule as Body) — else
