@@ -232,17 +232,11 @@ func senderAddrSpec(sender string) string {
 	return strings.ToLower(raw)
 }
 
-// contactBindsAddress reports whether the address book itself says this
-// contact is senderAddress — i.e. the address appears among the contact's own
-// email addresses.
-func contactBindsAddress(c contacts.Contact, senderAddress string) bool {
-	for _, e := range c.Emails {
-		if strings.ToLower(strings.TrimSpace(e.Value)) == senderAddress {
-			return true
-		}
-	}
-	return false
-}
+// contactBindsAddress stood here and answered "does the address book itself
+// say this contact is senderAddress". Its only caller was signerKeysForSender.
+// boundSignerKeys makes the same judgement inline, by shipping each contact's
+// own address list to the client rather than a yes/no for one address — see
+// boundSignerKeysForSender for why the decision travels instead of the inputs.
 
 // keyMatchesPin reports whether a contact's stored key is the one its TOFU pin
 // names.

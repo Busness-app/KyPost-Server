@@ -173,7 +173,7 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 	// Confirm enables and stores recovery hashes.
 	h1, _ := HashPassword(context.Background(), "aaaa-bbbb-cccc")
 	h2, _ := HashPassword(context.Background(), "dddd-eeee-ffff")
-	if _, err := store.EnableTOTP(u.ID, "2026-07-09T00:00:00Z", []string{h1, h2}); err != nil {
+	if _, err := store.EnableTOTP(u.ID, "sealed-secret-json", "2026-07-09T00:00:00Z", []string{h1, h2}); err != nil {
 		t.Fatalf("EnableTOTP: %v", err)
 	}
 	got, _ = store.Get(u.ID)
@@ -216,7 +216,7 @@ func TestEnableTOTPRequiresPendingSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := store.EnableTOTP(u.ID, "2026-07-09T00:00:00Z", nil); err == nil {
+	if _, err := store.EnableTOTP(u.ID, "sealed-secret-json", "2026-07-09T00:00:00Z", nil); err == nil {
 		t.Fatalf("expected EnableTOTP without pending secret to error")
 	}
 }

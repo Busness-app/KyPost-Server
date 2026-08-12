@@ -2,6 +2,7 @@ package users
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -101,5 +102,58 @@ func TestSetPasswordPreservesTheWrappedKeyAndEnvelopes(t *testing.T) {
 	}
 	if !got.MustChangePassword {
 		t.Fatal("expected MustChangePassword after an admin reset")
+	}
+}
+
+// TestEnableTOTPRefusesASecretItDidNotValidate pins the compare-and-swap that
+// closes the enrollment TOCTOU.
+//
+// handleMFAConfirm validates a submitted code against a SNAPSHOT of the user,
+// then spends eleven scrypt derivations — one re-authentication plus ten
+// recovery-code hashes — before committing. POST /api/mfa/totp/setup is
+// session-only with no lockout and re-stages the secret freely, so a stolen
+// session firing setup inside that window used to get its own secret committed
+// by the victim's confirm: the victim was told enrolment succeeded and handed
+// ten working recovery codes while the live second factor belonged to the
+// attacker, and nothing clears TOTP state on a password change, so it survived
+// the owner's own remediation.
+func TestEnableTOTPRefusesASecretItDidNotValidate(t *testing.T) {
+	dir := t.TempDir()
+	store, err := LoadOrMigrate(context.Background(), dir, filepath.Join(dir, "admin.env"))
+	if err != nil {
+		t.Fatalf("LoadOrMigrate: %v", err)
+	}
+	u, err := store.Create(context.Background(), "grace", "pw-grace-testpassword", RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := store.SetPendingTOTPSecret(u.ID, "victim-secret"); err != nil {
+		t.Fatalf("SetPendingTOTPSecret: %v", err)
+	}
+	// The attacker re-stages inside the confirm window.
+	if _, err := store.SetPendingTOTPSecret(u.ID, "attacker-secret"); err != nil {
+		t.Fatalf("SetPendingTOTPSecret (restage): %v", err)
+	}
+
+	// The victim's confirm validated "victim-secret" and commits that
+	// expectation, not whatever happens to be stored now.
+	if _, err := store.EnableTOTP(u.ID, "victim-secret", "2026-08-12T00:00:00Z", []string{"h1"}); !errors.Is(err, ErrTOTPEnrollmentRestarted) {
+		t.Fatalf("err = %v, want ErrTOTPEnrollmentRestarted", err)
+	}
+	got, err := store.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.TOTPEnabled {
+		t.Fatal("a secret nobody proved possession of was enabled as the account's second factor")
+	}
+
+	// The uncontested path still works.
+	if _, err := store.EnableTOTP(u.ID, "attacker-secret", "2026-08-12T00:00:00Z", []string{"h1"}); err != nil {
+		t.Fatalf("EnableTOTP with the current secret: %v", err)
+	}
+	if got, _ = store.Get(u.ID); !got.TOTPEnabled {
+		t.Fatal("expected TOTP enabled when the validated secret is still the stored one")
 	}
 }

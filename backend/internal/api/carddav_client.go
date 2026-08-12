@@ -131,7 +131,11 @@ func (s *Server) handleContactsCardDAVClientConfig(w http.ResponseWriter, r *htt
 		// downgrade for the same reason; allowing the caller to simply start at
 		// http made that guard decorative.)
 		if err := validateOutboundURL(payload.ServerURL, outboundCardDAVSchemes...); err != nil {
-			http.Error(w, "serverUrl is not reachable: "+err.Error(), http.StatusBadRequest)
+			// Constant: the detail named the resolved private address and the
+			// resolver, turning this into an internal-network oracle for any
+			// authenticated user. Same treatment as the push-endpoint path.
+			s.logger.Info("carddav server url refused", "user_id", ac.UserID, "error", err.Error())
+			http.Error(w, "serverUrl is not reachable", http.StatusBadRequest)
 			return
 		}
 		payload.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -506,8 +510,12 @@ func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, stor
 	// catches a config written before that check existed, so an install that
 	// already stored an http:// URL stops syncing credentials in the clear
 	// rather than being grandfathered into it.
+	//
+	// The reason is not wrapped in: this error reaches the caller both in the
+	// sync response and persisted in LastSyncError, and validateOutboundURL's
+	// text names the resolved private address and the resolver.
 	if verr := validateOutboundURL(cfg.ServerURL, outboundCardDAVSchemes...); verr != nil {
-		return 0, 0, "", nil, fmt.Errorf("refusing to sync: %w", verr)
+		return 0, 0, "", nil, errors.New("refusing to sync: the configured server URL is not reachable")
 	}
 	httpClient := newSSRFSafeHTTPClient(30 * time.Second)
 	authed := webdav.HTTPClientWithBasicAuth(httpClient, cfg.Username, cfg.Password)

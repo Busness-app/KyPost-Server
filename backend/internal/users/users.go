@@ -359,8 +359,13 @@ var (
 	// back after a different key replaced it. The copy is stale, not wrong;
 	// retrying against the current key is the correct response.
 	ErrPGPFingerprintChanged = errors.New("the account's pgp key changed while this update was in flight")
-	ErrPasswordWeak          = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
-	ErrUsernameInvalid       = errors.New("username must start with a letter or digit and may otherwise contain only letters, digits, dot, underscore and hyphen (max 64 characters)")
+	// ErrTOTPEnrollmentRestarted is the same shape for TOTP: the secret staged
+	// when the caller validated a code is no longer the one stored, so the
+	// enrolment it was proving is gone. Committing anyway would enable a secret
+	// nobody proved possession of.
+	ErrTOTPEnrollmentRestarted = errors.New("two-factor enrolment was restarted; begin again")
+	ErrPasswordWeak            = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
+	ErrUsernameInvalid         = errors.New("username must start with a letter or digit and may otherwise contain only letters, digits, dot, underscore and hyphen (max 64 characters)")
 	// ErrInvalidEnvelopeSlot is returned for a slot name the slot API does not
 	// write — an unknown name, or "password", which is owned by
 	// RewrapPGPPrivateKey so that its ErrNotClientProtected guard cannot be
@@ -1265,10 +1270,29 @@ func (s *Store) SetPendingTOTPSecret(id, secretEnc string) (User, error) {
 
 // EnableTOTP marks TOTP confirmed and stores the scrypt-hashed recovery codes.
 // It errors if no pending secret has been staged.
-func (s *Store) EnableTOTP(id, confirmedAt string, recoveryHashes []string) (User, error) {
+// expectSecretEnc is the secret the caller actually VALIDATED a code against,
+// compared here inside mutate — the same compare-and-swap shape
+// UpdatePGPKeyMaterial uses for a fingerprint.
+//
+// Without it this was a TOCTOU with a window measured in seconds, not
+// instructions: handleMFAConfirm validates against a snapshot and then spends
+// eleven scrypt derivations (one re-auth plus ten recovery-code hashes) before
+// committing, while POST /api/mfa/totp/setup is session-only and re-stages the
+// secret with no lockout. A stolen session that fires setup inside that window
+// gets its own secret committed by the victim's confirm — the victim is told
+// enrolment succeeded and handed ten working recovery codes, while the live
+// second factor belongs to the attacker. Nothing clears TOTP state on a
+// password change, so it survives the owner's own remediation.
+func (s *Store) EnableTOTP(id, expectSecretEnc, confirmedAt string, recoveryHashes []string) (User, error) {
+	if expectSecretEnc == "" {
+		return User{}, errors.New("no validated totp secret to confirm")
+	}
 	return s.mutate(id, func(u *User) error {
 		if u.TOTPSecretEnc == "" {
 			return errors.New("no pending totp secret to confirm")
+		}
+		if u.TOTPSecretEnc != expectSecretEnc {
+			return ErrTOTPEnrollmentRestarted
 		}
 		u.TOTPEnabled = true
 		u.TOTPConfirmedAt = confirmedAt

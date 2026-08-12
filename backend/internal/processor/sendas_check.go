@@ -258,5 +258,27 @@ func rawIsAutoReply(raw []byte) bool {
 			return true
 		}
 	}
-	return strings.EqualFold(strings.TrimSpace(msg.Header.Get("Precedence")), "auto_reply")
+	// A mailing list is an unattended REDISTRIBUTOR, which fails this function's
+	// premise the same way an auto-responder does: a machine at the alias domain
+	// emitting a signed message is not a person proving control of the mailbox.
+	//
+	// It is the sharper case, because no forgery is involved. A list applying
+	// DMARC From-munging (Mailman's dmarc_moderation_action = Munge From, and
+	// Google Groups' equivalent) rewrites From to the list address precisely so
+	// alignment holds against its own domain — which means it DKIM-signs that
+	// rewritten From and the echoed Subject with d=<list domain>. Post a message
+	// carrying the challenge code, and the redistributed copy satisfies every
+	// other gate here genuinely: real signature, real domain, real From. The
+	// code is readable from GET /api/mail/send-as, so the attacker does not even
+	// need the server's own probe to reach the list.
+	for _, h := range []string{"List-Id", "List-Post", "List-Unsubscribe", "List-Help"} {
+		if strings.TrimSpace(msg.Header.Get(h)) != "" {
+			return true
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(msg.Header.Get("Precedence"))) {
+	case "auto_reply", "list", "bulk":
+		return true
+	}
+	return false
 }

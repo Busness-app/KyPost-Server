@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	imapadapter "kypost-server/backend/internal/adapters/imap"
 	"kypost-server/backend/internal/cryptutil"
 	"kypost-server/backend/internal/fsutil"
 	"kypost-server/backend/internal/mailmsg"
@@ -60,6 +61,14 @@ func (s *Server) handleIMAPConfig(w http.ResponseWriter, r *http.Request) {
 		payload = mailmsg.NormalizeIMAPPayload(payload)
 		if payload.Host == "" || payload.Username == "" || payload.Password == "" {
 			http.Error(w, "host, username, and password are required", http.StatusBadRequest)
+			return
+		}
+		// NormalizeIMAPPayload only trims and defaults. The mailbox is
+		// interpolated into a SELECT by go-imap, which escapes only the double
+		// quote, so an unvalidated value persisted here is re-executed on every
+		// connect by both the API and the unattended daemon.
+		if err := imapadapter.ValidateMailboxName(payload.Mailbox); err != nil {
+			http.Error(w, "invalid mailbox name", http.StatusBadRequest)
 			return
 		}
 		payload.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
@@ -142,6 +151,16 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req = mailmsg.NormalizeIMAPPayload(req)
+
+	// The comment above forbids pairing a caller-chosen DESTINATION with a
+	// server-held secret. The same rule applies to the caller-chosen COMMAND:
+	// on the all-blank branch every credential below is the stored one, so an
+	// unvalidated mailbox here is arbitrary IMAP executed under a password the
+	// caller does not know and the API never hands out.
+	if err := imapadapter.ValidateMailboxName(req.Mailbox); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid mailbox name"})
+		return
+	}
 
 	client, err := goimap.New(req.Username, req.Password, req.Host, req.Port)
 	if err != nil {

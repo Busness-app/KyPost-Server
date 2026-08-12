@@ -512,3 +512,49 @@ func TestCheckPendingSendAsAliasesRejectsAMessagePredatingTheChallenge(t *testin
 		t.Fatal("alias verified by a message sent 72h before the challenge existed")
 	}
 }
+
+// TestRawIsAutoReplyRejectsMailingListRedistribution pins the send-as gate
+// against a proving message that is entirely genuine.
+//
+// A list applying DMARC From-munging rewrites From to the list address so
+// alignment holds against its own domain, which means it DKIM-signs that
+// rewritten From and the echoed Subject itself. Every other gate in
+// checkPendingSendAsAliases then passes on real crypto: real signature, real
+// domain, real From, and a Subject that still contains the challenge code
+// because the check is a substring match and a "[Tag]" prefix does not disturb
+// it. The attacker does not even need the server's probe to reach the list —
+// GET /api/mail/send-as returns the code, so they post their own message.
+//
+// rawIsAutoReply is the only gate that can see this, for the reason it already
+// rejects auto-responders: a machine at the alias domain emitting a signed
+// message is not a person proving control of the mailbox.
+func TestRawIsAutoReplyRejectsMailingListRedistribution(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+	}{
+		{"List-Id", "List-Id: Announce <announce.lists.example.org>\r\n"},
+		{"List-Post", "List-Post: <mailto:announce@lists.example.org>\r\n"},
+		{"List-Unsubscribe", "List-Unsubscribe: <mailto:announce-leave@lists.example.org>\r\n"},
+		{"List-Help", "List-Help: <mailto:announce-help@lists.example.org>\r\n"},
+		{"Precedence list", "Precedence: list\r\n"},
+		{"Precedence bulk", "Precedence: bulk\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte("From: Attacker via Announce <announce@lists.example.org>\r\n" +
+				"Subject: [Announce] Verify send-as: kp-deadbeef\r\n" +
+				tc.header + "\r\nbody\r\n")
+			if !rawIsAutoReply(raw) {
+				t.Fatal("a mailing-list redistribution was accepted as proof of mailbox control")
+			}
+		})
+	}
+
+	// An ordinary human reply must still verify, or the gate has eaten the
+	// feature it guards.
+	ordinary := []byte("From: Alice <alice@other.example>\r\n" +
+		"Subject: Re: Verify send-as: kp-deadbeef\r\n\r\nhere you go\r\n")
+	if rawIsAutoReply(ordinary) {
+		t.Fatal("an ordinary reply was rejected as automated")
+	}
+}
