@@ -10,7 +10,7 @@ image. `:stable` is moved to that image only after its build attestation has
 been published *and* verified, and only when the release is the newest published
 non-prerelease version.
 
-## Unreleased — 0.2.0
+## Unreleased — 0.3.0
 
 ### Added
 
@@ -405,14 +405,14 @@ non-prerelease version.
 
 | From | To | Path | Rollback |
 |---|---|---|---|
-| 0.1.x | 0.2.0 | `./scripts/update-host.sh`, or `docker compose pull && docker compose up -d` | Automatic on failed health check; otherwise pin the previous digest |
+| 0.1.x | 0.3.0 | `./scripts/update-host.sh`, or `docker compose pull && docker compose up -d` | Automatic on failed health check; otherwise pin the previous digest |
 | Locally built | any published release | `git pull --ff-only && docker compose up --build -d` | Rebuild at the previous commit |
 | Any | older release | Set `KYPOST_VERSION=<older>` in `.env`, then `docker compose up -d` | — |
 
 Notes:
 
 - **Schema changes are additive and applied on open.** Every statement in
-  `backend/internal/state/schema.go` is `IF NOT EXISTS`, so starting 0.2.0
+  `backend/internal/state/schema.go` is `IF NOT EXISTS`, so starting 0.3.0
   against a 0.1.x `state.db` adds the `deferrals` table and changes nothing
   else. An older server started against a newer `state.db` ignores tables it
   does not know about.
