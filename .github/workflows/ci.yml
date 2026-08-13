@@ -251,6 +251,36 @@ jobs:
       - name: update-host self-check
         run: scripts/update-host.test.sh
 
+      # release-image.yml is the one workflow nothing exercises until a release
+      # is published, and its failure mode is silence: a refactor once deleted
+      # its build, attest, verify and promote steps, leaving a job that logged
+      # into the registry and went green without publishing anything. Assert
+      # the stages exist, and that the privileged workflows are pinned to
+      # commits rather than to tags anyone can move under them.
+      - name: release workflow shape
+        run: |
+          set -euo pipefail
+          for step in \
+            "Build and publish the immutable version tag" \
+            "Publish GitHub image attestation" \
+            "Verify the attestation before promoting" \
+            "Decide whether this release may move stable" \
+            "Promote the verified digest to stable"; do
+            grep -qF -e "- name: $step" .github/workflows/release-image.yml \
+              || { echo "::error::release-image.yml is missing step: $step" >&2; exit 1; }
+          done
+
+          # Anchored to the start of the line so this step does not read its
+          # own grep patterns as workflow references.
+          unpinned="$(grep -rhE '^[[:space:]]*(- )?uses:' .github/workflows/ \
+            | sed 's/.*uses:[[:space:]]*//; s/[[:space:]]*#.*//' \
+            | grep -vE '^(\./|[^ ]+@[0-9a-f]{40}$)' || true)"
+          if [ -n "$unpinned" ]; then
+            echo "::error::pin these to a full commit SHA:" >&2
+            printf '%s\n' "$unpinned" >&2
+            exit 1
+          fi
+
       # The model installer's failure paths, with ollama and sleep stubbed out.
       # Its previous version gave up and exited, which supervisord could not
       # distinguish from success — so the behaviour worth testing is that it
