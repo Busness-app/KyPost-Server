@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -38,6 +39,41 @@ var outboundIPGuard = isPrivateOrReservedIP
 // an http:// target is necessarily a public host reached in the clear.
 var outboundCardDAVSchemes = []string{"https"}
 
+// sandboxPrivateHosts names hosts that may resolve to private space anyway.
+//
+// A sandbox deployment runs its CardDAV server on a compose network, so its
+// address is private by definition and the guard below refuses it — which
+// leaves the CardDAV path untestable end to end. Empty unless an operator sets
+// SANDBOX_PRIVATE_HOSTS, so production is unchanged.
+//
+// Hostnames only, matched exactly. IP literals are never allowed: the entire
+// point of the guard is that a URL naming a private address is refused, and
+// accepting literals here would make one entry a general SSRF primitive.
+var sandboxPrivateHosts = parseSandboxPrivateHosts(os.Getenv("SANDBOX_PRIVATE_HOSTS"))
+
+func parseSandboxPrivateHosts(raw string) map[string]struct{} {
+	hosts := make(map[string]struct{})
+	for _, h := range strings.Split(raw, ",") {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" || net.ParseIP(h) != nil {
+			continue
+		}
+		hosts[h] = struct{}{}
+	}
+	return hosts
+}
+
+// sandboxHostAllowed reports whether host is listed. Exact match after case
+// folding — no suffix or wildcard matching, so a name an attacker controls
+// cannot swallow an entry by extending it.
+func sandboxHostAllowed(allowed map[string]struct{}, host string) bool {
+	if len(allowed) == 0 || host == "" || net.ParseIP(host) != nil {
+		return false
+	}
+	_, ok := allowed[strings.ToLower(host)]
+	return ok
+}
+
 // validateOutboundURL rejects URLs that are not safe for this server to make
 // requests to on a user's behalf: schemes outside allowedSchemes, and hosts
 // that (as an IP literal or via DNS) resolve to a private/loopback/link-local
@@ -45,6 +81,10 @@ var outboundCardDAVSchemes = []string{"https"}
 // ssrfSafeDialContext for the dial-time recheck that also covers DNS
 // rebinding and redirects.
 func validateOutboundURL(rawURL string, allowedSchemes ...string) error {
+	return validateOutboundURLWithSandbox(rawURL, sandboxPrivateHosts, allowedSchemes...)
+}
+
+func validateOutboundURLWithSandbox(rawURL string, allowed map[string]struct{}, allowedSchemes ...string) error {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -62,6 +102,13 @@ func validateOutboundURL(rawURL string, allowedSchemes ...string) error {
 	host := u.Hostname()
 	if host == "" {
 		return errors.New("URL missing host")
+	}
+	// After the scheme check, never before it: the allowlist relaxes where this
+	// server may connect, not whether the user's password crosses the wire in
+	// the clear. Resolution is skipped too, since a compose hostname does not
+	// resolve outside the network it belongs to.
+	if sandboxHostAllowed(allowed, host) {
+		return nil
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if outboundIPGuard(ip) {
@@ -89,26 +136,42 @@ func validateOutboundURL(rawURL string, allowedSchemes ...string) error {
 // redirects, which make Go's http.Client dial again, get the same check
 // applied to their target.
 func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
-	}
-	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
-	if err != nil {
-		return nil, err
-	}
-	var chosen net.IP
-	for _, ip := range ips {
-		if !outboundIPGuard(ip) {
-			chosen = ip
-			break
+	return sandboxAwareDialContext(sandboxPrivateHosts)(ctx, network, addr)
+}
+
+// sandboxAwareDialContext builds the dial-time guard around a given allowlist,
+// so tests can exercise it without touching the process environment.
+func sandboxAwareDialContext(allowed map[string]struct{}) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
 		}
+		// A listed host has no address check left to make, so hand the name
+		// straight to the dialer and let it try every address the way it normally
+		// would. Pinning one resolved IP here would break a host that answers on
+		// both families.
+		if sandboxHostAllowed(allowed, host) {
+			dialer := &net.Dialer{Timeout: 10 * time.Second}
+			return dialer.DialContext(ctx, network, addr)
+		}
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+		var chosen net.IP
+		for _, ip := range ips {
+			if !outboundIPGuard(ip) {
+				chosen = ip
+				break
+			}
+		}
+		if chosen == nil {
+			return nil, fmt.Errorf("refusing to dial %q: no public address available", host)
+		}
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(chosen.String(), port))
 	}
-	if chosen == nil {
-		return nil, fmt.Errorf("refusing to dial %q: no public address available", host)
-	}
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	return dialer.DialContext(ctx, network, net.JoinHostPort(chosen.String(), port))
 }
 
 // maxOutboundResponseBytes bounds how much of a response from a user-supplied
