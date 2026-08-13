@@ -2618,6 +2618,17 @@ pre {
 .contacts-form-card {
   display: grid;
   gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.contacts-form-card > h3,
+.contacts-form-card > .contacts-multivalue,
+.contacts-form-card > .contacts-form-actions,
+.contacts-form-card > button,
+.contacts-form-card > .contacts-pgp-fingerprint,
+.contacts-form-card > .contacts-pgp-error,
+.contacts-form-card > label:has(textarea) {
+  grid-column: 1 / -1;
 }
 
 .contacts-form-card label {
@@ -3149,7 +3160,7 @@ pre {
 }
 
 .contact-form-window {
-  width: min(480px, 92vw);
+  width: min(900px, 94vw);
   max-height: 92vh;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -3157,6 +3168,12 @@ pre {
   padding: 18px;
   box-shadow: 0 14px 40px var(--modal-shadow);
   overflow: auto;
+}
+
+@media (max-width: 700px) {
+  .contacts-form-card {
+    grid-template-columns: 1fr;
+  }
 }
 
 .contact-details-head {
