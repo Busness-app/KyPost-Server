@@ -137,6 +137,12 @@ var markerRequiresCall = map[string][]string{
 var publicRoutes = map[string]string{
 	"POST /api/auth/login":             "issues the session; by definition has none yet",
 	"GET /api/auth/captcha-config":     "tells an anonymous browser which CAPTCHA widget to render",
+	"GET /api/auth/sso-config":         "tells an anonymous browser whether SSO login is enabled",
+	"GET /api/auth/oidc/login":         "initiates OIDC authorization flow before user is authenticated",
+	"GET /auth/sso/login":              "alias for OIDC authorization flow initialization",
+	"GET /api/auth/oidc/callback":      "redeems OIDC authorization code for a session",
+	"GET /auth/sso/callback":           "alias for OIDC authorization code callback",
+	"POST /api/sync/webhook":           "receives signed directory replication events from KySignOn with HMAC signature validation",
 	"GET /api/auth/login-params":       "pre-login KDF parameters; login_params.go covers why it cannot reveal account existence",
 	"GET /api/auth/pow-challenge":      "issues the proof-of-work challenge required to attempt a login",
 	"POST /api/auth/mfa/totp":          "second factor; the challenge id is the credential and no session exists until it passes",

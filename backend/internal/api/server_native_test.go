@@ -14,6 +14,7 @@ import (
 	"kypost-server/backend/internal/health"
 	"kypost-server/backend/internal/logging"
 	"kypost-server/backend/internal/pgpmail"
+	"kypost-server/backend/internal/sso"
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
@@ -63,6 +64,7 @@ func newTestServer(t *testing.T) *Server {
 	srv.pairingSecret = "test-pairing-secret"
 	srv.stateDir = stateDir
 	srv.configDir = configDir
+	srv.ssoStore = sso.NewStore(configDir)
 	srv.totpSecretKeyPath = filepath.Join(configDir, "totp-secret.key")
 	srv.pgpPrivateKeyPath = filepath.Join(configDir, "pgp-private-key.key")
 	// NewServer wires pickupStore to the process-default /kypost/...

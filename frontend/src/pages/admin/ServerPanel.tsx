@@ -1,5 +1,6 @@
 import { PanelTabs } from "../../components/PanelTabs";
 import { ApplicationRuntime } from "../../admin/sections/ApplicationRuntime";
+import { SSOConfig } from "../../admin/sections/SSOConfig";
 import { WkdDomains } from "../../admin/sections/WkdDomains";
 import { LabelRules } from "../../admin/sections/LabelRules";
 import { Users } from "../../admin/sections/Users";
@@ -28,6 +29,7 @@ export function ServerPanel() {
         ariaLabel="Server sections"
         tabs={[
           { id: "runtime", label: "Application", body: <ApplicationRuntime /> },
+          { id: "sso", label: "Single Sign-On (SSO)", body: <SSOConfig /> },
           { id: "label-rules", label: "Default Labels", body: <LabelRules /> },
           { id: "wkd-domains", label: "WKD Domains", body: <WkdDomains /> },
           { id: "users", label: "Manage Users", body: <Users /> }

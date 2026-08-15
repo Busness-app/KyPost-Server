@@ -41,6 +41,11 @@ type CaptchaConfig = {
   siteKey: string;
 };
 
+type SSOConfig = {
+  enabled: boolean;
+  issuerUrl: string;
+};
+
 export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProps) {
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
@@ -60,6 +65,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
   // login from an attacker's, which is the whole MFA-fatigue attack.
   const [mfaMatchDigits, setMfaMatchDigits] = useState("");
   const [captchaConfig, setCaptchaConfig] = useState<CaptchaConfig | null>(null);
+  const [ssoConfig, setSSOConfig] = useState<SSOConfig | null>(null);
   const [captchaToken, setCaptchaToken] = useState("");
   const [captchaNonce, setCaptchaNonce] = useState(0);
   const passwordMode = mode === "password";
@@ -77,6 +83,11 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         // CAPTCHA is an operator opt-in; if the config fetch fails, log in
         // proceeds without it rather than blocking the whole form.
       });
+    getJSON<SSOConfig>("/api/auth/sso-config")
+      .then((cfg) => {
+        if (!cancelled) setSSOConfig(cfg);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -385,6 +396,41 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         <h1 className="auth-title">Sign in</h1>
         <p className="auth-lede">Your mail, on your own server.</p>
       </header>
+
+      {ssoConfig?.enabled ? (
+        <div style={{ marginBottom: "1.25rem" }}>
+          <a
+            href="/api/auth/oidc/login"
+            className="auth-submit"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              textDecoration: "none",
+              background: "#4deeea",
+              color: "#0d0f14",
+              fontWeight: "bold",
+              marginBottom: "1rem",
+            }}
+          >
+            Sign in with KySignOn
+          </a>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              textAlign: "center",
+              color: "var(--color-muted, #888)",
+              fontSize: "0.8rem",
+              margin: "1rem 0",
+            }}
+          >
+            <div style={{ flex: 1, borderBottom: "1px solid rgba(255,255,255,0.1)" }} />
+            <span style={{ padding: "0 0.5rem" }}>or sign in with password</span>
+            <div style={{ flex: 1, borderBottom: "1px solid rgba(255,255,255,0.1)" }} />
+          </div>
+        </div>
+      ) : null}
 
       <label className="auth-field">
         <span className="auth-label">Username</span>

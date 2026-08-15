@@ -8,6 +8,10 @@ export type AuthState = {
   username?: string;
   role?: Role;
   mustChangePassword?: boolean;
+  ssoSub?: string;
+  ssoUsername?: string;
+  ssoEmail?: string;
+  ssoLinkedAt?: number;
 };
 
 export const AuthContext = createContext<AuthState>({ authenticated: false });

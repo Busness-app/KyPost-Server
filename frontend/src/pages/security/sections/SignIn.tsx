@@ -1,7 +1,8 @@
 import { FormEvent, useEffect, useState } from "react";
 import QRCode from "qrcode";
-import { postJSON, toErrorMessage } from "../../../api/client";
+import { getJSON, postJSON, toErrorMessage } from "../../../api/client";
 import { credentialFields, deriveCredential } from "../../../api/auth";
+import { useAuth } from "../../../auth";
 import type { MfaStatus, TotpSetup } from "../types";
 import { Password } from "./Password";
 
@@ -50,6 +51,9 @@ export function SignIn({
 }: SignInProps = {}) {
   const [busy, setBusy] = useState(false);
 
+  const auth = useAuth();
+  const [ssoConfig, setSSOConfig] = useState<{ enabled: boolean; issuerUrl: string } | null>(null);
+
   // Enrollment state.
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [confirmCode, setConfirmCode] = useState("");
@@ -63,6 +67,26 @@ export function SignIn({
   const [showDisable, setShowDisable] = useState(false);
   const [regeneratePassword, setRegeneratePassword] = useState("");
   const [showRegenerate, setShowRegenerate] = useState(false);
+
+  useEffect(() => {
+    getJSON<{ enabled: boolean; issuerUrl: string }>("/api/auth/sso-config")
+      .then((res) => setSSOConfig(res))
+      .catch(() => {});
+  }, []);
+
+  async function unlinkSSO() {
+    if (!confirm("Are you sure you want to unlink your SSO account?")) return;
+    setBusy(true);
+    try {
+      await postJSON("/api/settings/sso/unlink", {});
+      setMessage("SSO identity unlinked.");
+      window.location.reload();
+    } catch (err) {
+      setMessage(toErrorMessage(err, "Failed to unlink SSO account."));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -194,6 +218,74 @@ export function SignIn({
       {/* Credentials before factors: "what I know" reads ahead of "what I
           also have" for someone here to lock the account down. */}
       <Password />
+
+      {ssoConfig?.enabled ? (
+        <div className={`sec-card ${auth.ssoSub ? "sec-card-on" : ""}`}>
+          <div className="sec-card-head">
+            <p className="sec-eyebrow">Single Sign-On</p>
+            <h3>KySignOn / OpenID Connect</h3>
+          </div>
+          <div className="sec-section">
+            {auth.ssoSub ? (
+              <div>
+                <p className="sec-muted" style={{ marginBottom: "0.75rem" }}>
+                  Your KyPost mailbox is paired to your central SSO identity.
+                </p>
+                <div
+                  style={{
+                    background: "rgba(77, 238, 234, 0.08)",
+                    border: "1px solid rgba(77, 238, 234, 0.3)",
+                    borderRadius: "6px",
+                    padding: "0.75rem 1rem",
+                    marginBottom: "1rem",
+                  }}
+                >
+                  <strong style={{ color: "#4deeea" }}>SSO Identity Linked</strong>
+                  <div className="sec-muted" style={{ fontSize: "0.85rem", marginTop: "0.25rem" }}>
+                    Account: <code>{auth.ssoUsername || "Unknown"}</code>{" "}
+                    {auth.ssoEmail ? `(${auth.ssoEmail})` : ""}<br />
+                    Subject: <code>{auth.ssoSub}</code>
+                  </div>
+                </div>
+                <div className="sec-actions">
+                  <button
+                    type="button"
+                    className="sec-action-quiet"
+                    style={{ color: "#ef4444", borderColor: "rgba(239, 68, 68, 0.4)" }}
+                    disabled={busy}
+                    onClick={unlinkSSO}
+                  >
+                    Unlink SSO Account
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <p className="sec-muted" style={{ marginBottom: "0.75rem" }}>
+                  Connect your central KySignOn / Authentik identity for 1-click single sign-on.
+                </p>
+                <div className="sec-actions">
+                  <a
+                    href="/api/auth/oidc/login?link=true"
+                    className="button"
+                    style={{
+                      display: "inline-block",
+                      background: "#4deeea",
+                      color: "#0d0f14",
+                      fontWeight: 600,
+                      textDecoration: "none",
+                      borderRadius: "4px",
+                      padding: "0.5rem 1rem",
+                    }}
+                  >
+                    Link SSO Identity
+                  </a>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       <div className={`sec-card ${totpOn ? "sec-card-on" : ""}`}>
       <div className="sec-card-head">

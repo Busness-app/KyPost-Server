@@ -31,6 +31,7 @@ import (
 	"kypost-server/backend/internal/processor"
 	"kypost-server/backend/internal/rules"
 	"kypost-server/backend/internal/sendas"
+	"kypost-server/backend/internal/sso"
 	"kypost-server/backend/internal/state"
 	"kypost-server/backend/internal/users"
 	"kypost-server/backend/internal/wkdpublish"
@@ -162,6 +163,7 @@ type Server struct {
 	// rooted at the same state directory.
 	classifier   *classifier.HTTPClient
 	globalStore  *state.Store
+	ssoStore     *sso.Store
 	ollamaMu     sync.Mutex
 	ollamaStatus ollamaVersionStatus
 	serverMu     sync.Mutex
@@ -332,6 +334,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		loginIPLockout:           newFailureLockout(loginIPMaxFailures, loginIPLockoutFor),
 		globalStore:              globalStore,
 		wkdStore:                 wkdStore,
+		ssoStore:                 sso.NewStore(configDir),
 	}
 }
 
@@ -394,11 +397,19 @@ func (s *Server) routes() http.Handler {
 
 // routesAuth registers sign-in, session, and second-factor endpoints.
 // The pre-session ones (login, the MFA challenge completions, captcha
+// routesAuth registers sign-in, session, and second-factor endpoints.
+// The pre-session ones (login, the MFA challenge completions, captcha
 // config, the proof-of-work challenge) are deliberately unwrapped: they run
 // before a session exists.
 func (s *Server) routesAuth(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/login", withPublicRoute(s.handleLogin))
 	mux.HandleFunc("GET /api/auth/captcha-config", withPublicRoute(s.handleCaptchaConfig))
+	mux.HandleFunc("GET /api/auth/sso-config", withPublicRoute(s.handleSSOConfig))
+	mux.HandleFunc("GET /api/auth/oidc/login", withPublicRoute(s.handleSSOLogin))
+	mux.HandleFunc("GET /auth/sso/login", withPublicRoute(s.handleSSOLogin))
+	mux.HandleFunc("GET /api/auth/oidc/callback", withPublicRoute(s.handleSSOCallback))
+	mux.HandleFunc("GET /auth/sso/callback", withPublicRoute(s.handleSSOCallback))
+	mux.HandleFunc("POST /api/settings/sso/unlink", s.withAuth(s.handleSSOUnlink))
 	// Pre-login, unauthenticated: tells the browser how to derive its auth
 	// secret so the password never has to be transmitted. See login_params.go
 	// for why the response cannot reveal whether the account exists.
@@ -434,6 +445,9 @@ func (s *Server) routesAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("/api/status", s.withAuth(s.handleStatus))
 	mux.HandleFunc("GET /api/config", s.withAuth(s.handleConfig))
 	mux.HandleFunc("PUT /api/config", s.withAdmin(s.handleConfig))
+	mux.HandleFunc("GET /api/admin/sso", s.withAdmin(s.handleAdminSSOGet))
+	mux.HandleFunc("PUT /api/admin/sso", s.withAdmin(s.handleAdminSSOPut))
+	mux.HandleFunc("POST /api/sync/webhook", withPublicRoute(s.handleSyncWebhook))
 	mux.HandleFunc("GET /api/labels", s.withAuth(s.handleLabels))
 	mux.HandleFunc("GET /api/decisions", s.withAuth(s.handleDecisions))
 	mux.HandleFunc("GET /api/logs", s.withAdmin(s.handleLogs))

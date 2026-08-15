@@ -70,6 +70,12 @@ type User struct {
 	// Milestone 1 sets or reads it.
 	PushMFAEnabled bool `json:"pushMfaEnabled,omitempty"`
 
+	// Single Sign-On (SSO) fields.
+	SSOSub      string `json:"ssoSub,omitempty"`
+	SSOUsername string `json:"ssoUsername,omitempty"`
+	SSOEmail    string `json:"ssoEmail,omitempty"`
+	SSOLinkedAt int64  `json:"ssoLinkedAt,omitempty"`
+
 	// Login credential derivation.
 	//
 	// AuthDerivationPBKDF2: PasswordHash covers the AUTH SECRET the browser
@@ -311,6 +317,10 @@ type Public struct {
 	UpdatedAt          string `json:"updatedAt"`
 	DeactivatedAt      string `json:"deactivatedAt,omitempty"`
 	TOTPEnabled        bool   `json:"totpEnabled,omitempty"`
+	SSOSub             string `json:"ssoSub,omitempty"`
+	SSOUsername        string `json:"ssoUsername,omitempty"`
+	SSOEmail           string `json:"ssoEmail,omitempty"`
+	SSOLinkedAt        int64  `json:"ssoLinkedAt,omitempty"`
 	PGPFingerprint     string `json:"pgpFingerprint,omitempty"`
 	PGPKeyID           string `json:"pgpKeyId,omitempty"`
 	PGPKeySource       string `json:"pgpKeySource,omitempty"`
@@ -332,6 +342,10 @@ func (u User) Public() Public {
 		UpdatedAt:          u.UpdatedAt,
 		DeactivatedAt:      u.DeactivatedAt,
 		TOTPEnabled:        u.TOTPEnabled,
+		SSOSub:             u.SSOSub,
+		SSOUsername:        u.SSOUsername,
+		SSOEmail:           u.SSOEmail,
+		SSOLinkedAt:        u.SSOLinkedAt,
 		PGPFingerprint:     u.PGPFingerprint,
 		PGPKeyID:           u.PGPKeyID,
 		PGPKeySource:       u.PGPKeySource,
@@ -482,12 +496,14 @@ type Store struct {
 type userIndex struct {
 	byID       map[string]int
 	byUsername map[string]int
+	bySSOSub   map[string]int
 }
 
 func buildUserIndex(f usersFile) userIndex {
 	idx := userIndex{
 		byID:       make(map[string]int, len(f.Users)),
 		byUsername: make(map[string]int, len(f.Users)),
+		bySSOSub:   make(map[string]int, len(f.Users)),
 	}
 	for i, u := range f.Users {
 		idx.byID[u.ID] = i
@@ -497,6 +513,11 @@ func buildUserIndex(f usersFile) userIndex {
 		if key := NormalizeUsername(u.Username); key != "" {
 			if _, exists := idx.byUsername[key]; !exists {
 				idx.byUsername[key] = i
+			}
+		}
+		if sub := strings.TrimSpace(u.SSOSub); sub != "" {
+			if _, exists := idx.bySSOSub[sub]; !exists {
+				idx.bySSOSub[sub] = i
 			}
 		}
 	}
@@ -961,6 +982,132 @@ func (s *Store) GetByUsername(username string) (User, error) {
 		return User{}, ErrNotFound
 	}
 	return out, nil
+}
+
+// GetBySSOSub returns a user by their linked SSO subject identifier.
+func (s *Store) GetBySSOSub(ssoSub string) (User, error) {
+	sub := strings.TrimSpace(ssoSub)
+	if sub == "" {
+		return User{}, ErrNotFound
+	}
+	found := false
+	var out User
+	err := s.withIndexedUsers(
+		func(idx userIndex) (int, bool) { pos, ok := idx.bySSOSub[sub]; return pos, ok },
+		func(u User) { out, found = u.clone(), true },
+	)
+	if err != nil {
+		return User{}, err
+	}
+	if !found {
+		return User{}, ErrNotFound
+	}
+	return out, nil
+}
+
+// LinkSSO connects a user's account to an SSO identity.
+func (s *Store) LinkSSO(userID, ssoSub, ssoUsername, ssoEmail string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readFileUnlocked()
+		if err != nil {
+			return err
+		}
+		found := false
+		for i := range f.Users {
+			if f.Users[i].ID == userID {
+				f.Users[i].SSOSub = strings.TrimSpace(ssoSub)
+				f.Users[i].SSOUsername = strings.TrimSpace(ssoUsername)
+				f.Users[i].SSOEmail = strings.TrimSpace(ssoEmail)
+				f.Users[i].SSOLinkedAt = time.Now().UTC().Unix()
+				f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrNotFound
+		}
+		return s.writeFileUnlocked(f)
+	})
+}
+
+// UnlinkSSO removes any linked SSO identity from a user's account.
+func (s *Store) UnlinkSSO(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readFileUnlocked()
+		if err != nil {
+			return err
+		}
+		found := false
+		for i := range f.Users {
+			if f.Users[i].ID == userID {
+				f.Users[i].SSOSub = ""
+				f.Users[i].SSOUsername = ""
+				f.Users[i].SSOEmail = ""
+				f.Users[i].SSOLinkedAt = 0
+				f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrNotFound
+		}
+		return s.writeFileUnlocked(f)
+	})
+}
+
+// CreateSSOUser adds a new user provisioned via SSO.
+func (s *Store) CreateSSOUser(username string, role Role, ssoSub, ssoUsername, ssoEmail string) (User, error) {
+	if err := ValidateUsername(username); err != nil {
+		return User{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var created User
+	err := fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readFileUnlocked()
+		if err != nil {
+			return err
+		}
+		username = strings.TrimSpace(username)
+		want := NormalizeUsername(username)
+		for _, u := range f.Users {
+			if NormalizeUsername(u.Username) == want {
+				return ErrUsernameTaken
+			}
+		}
+		id, err := fsutil.NewUUIDv4()
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		created = User{
+			ID:                 id,
+			Username:           username,
+			Role:               role,
+			Active:             true,
+			MustChangePassword: false,
+			SSOSub:             strings.TrimSpace(ssoSub),
+			SSOUsername:        strings.TrimSpace(ssoUsername),
+			SSOEmail:           strings.TrimSpace(ssoEmail),
+			SSOLinkedAt:        time.Now().UTC().Unix(),
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+		f.Users = append(f.Users, created)
+		return s.writeFileUnlocked(f)
+	})
+	if err != nil {
+		return User{}, err
+	}
+	return created, nil
 }
 
 // Create adds a new user with the given username/password/role.
