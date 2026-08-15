@@ -63,7 +63,7 @@ cp .env.example .env      # set KYPOST_BIND — it has no default, on purpose
 docker compose up --build -d
 ```
 
-To work on the code outside the container you need Go 1.26.5+, Node 26.5.0 (see
+To work on the code outside the container you need Go 1.26.6+, Node 26.5.0 (see
 `frontend/.nvmrc`), and npm 12.0.1. Use those versions rather than whatever your
 distro ships — CI pins to them because a Node major difference has already
 produced a suite that passed on every developer machine and failed all 14 cases
