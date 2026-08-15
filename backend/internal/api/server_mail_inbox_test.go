@@ -375,8 +375,13 @@ func TestServeInbox_DeltaFirstCallAllNew(t *testing.T) {
 	}
 
 	resp := decodeInboxResponse(t, rec)
-	if !resp.Delta {
-		t.Fatalf("expected delta=true")
+	// A first call is since=0, so it returns the whole window and is reported
+	// as a snapshot, not a delta — see
+	// TestServeInbox_SinceZeroIsLabelledAFullSnapshotNotADelta, which owns that
+	// rule. What this test is about is that every entry comes back as New with
+	// a body, on one overview fetch and one body fetch.
+	if resp.Delta {
+		t.Fatalf("a since=0 first call is a full window, not a delta")
 	}
 	if resp.Cursor == 0 {
 		t.Fatalf("expected a non-zero cursor")
@@ -936,5 +941,71 @@ func TestServeInbox_BodylessPGPWarmPreservesFlags(t *testing.T) {
 				t.Fatalf("shouldWarm(%q,%q,%q)=%v want %v", c.body, c.payload, c.decryptErr, got, c.wantWarm)
 			}
 		})
+	}
+}
+
+// since=0 asks for the whole window, and that is what the delta path returns:
+// every entry sorts as New (Rev >= 1 > 0) and carries a body. Labelling it
+// `delta: true` told the client "this only describes what changed", so the
+// client could not prune against it — and pruning against a full window is the
+// documented self-heal for a removal notification it never received. The daily
+// full resync therefore healed nothing, and mail deleted on the web stayed in
+// the inbox. `delta` now reports what the response actually is.
+func TestServeInbox_SinceZeroIsLabelledAFullSnapshotNotADelta(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
+	cache := testInboxCache(t)
+	cfg := config.Default()
+
+	fake := &fakeMailClient{
+		overviews: []imapadapter.Overview{
+			{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z"},
+		},
+		bodies: map[int]string{1: "body-1"},
+	}
+	rec := httptest.NewRecorder()
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
+
+	resp := decodeInboxResponse(t, rec)
+	if resp.Delta {
+		t.Fatalf("since=0 returns the whole window and must not be labelled a delta: %+v", resp)
+	}
+	if resp.Cursor == 0 {
+		t.Fatalf("a full-window response must still issue a cursor, got %+v", resp)
+	}
+	if got := allEmails(resp); len(got) != 1 || got[0].Body != "body-1" {
+		t.Fatalf("expected the full window with bodies, got %+v", got)
+	}
+}
+
+func TestServeInbox_CursorPollIsStillLabelledADelta(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	userID := all[0].ID
+	cache := testInboxCache(t)
+	cfg := config.Default()
+
+	fake := &fakeMailClient{
+		overviews: []imapadapter.Overview{
+			{UID: 1, MessageID: "1", Subject: "a", Sender: "a@example.com", Status: "unread", AtUTC: "2026-01-01T00:00:00Z"},
+		},
+		bodies: map[int]string{1: "body-1"},
+	}
+	rec1 := httptest.NewRecorder()
+	srv.serveInbox(rec1, context.Background(), userID, fake, cache, cfg, "", 10, 0, true)
+	first := decodeInboxResponse(t, rec1)
+
+	rec2 := httptest.NewRecorder()
+	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", 10, first.Cursor, true)
+
+	if resp := decodeInboxResponse(t, rec2); !resp.Delta {
+		t.Fatalf("a cursor poll describes only what changed and must stay a delta: %+v", resp)
 	}
 }

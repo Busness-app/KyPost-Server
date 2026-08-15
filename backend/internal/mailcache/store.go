@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +18,13 @@ import (
 // across months of daemon ticks.
 const maxWindowEntries = 5000
 
+// maxRemovals bounds how many departed UIDs a window remembers, so the retained
+// list stays a delivery buffer for clients that are briefly behind rather than a
+// permanent tombstone log of everything a mailbox ever deleted. A client whose
+// cursor falls off the back of it is far enough behind that its own periodic
+// since=0 full resync is the honest repair, not an ever-growing list here.
+const maxRemovals = 1000
+
 // mailboxWindow is one mailbox's cached "current top-N" view.
 type mailboxWindow struct {
 	// Limit is the `limit` last used by Store.Sync to populate this window.
@@ -27,6 +35,10 @@ type mailboxWindow struct {
 	Limit   int     `json:"limit,omitempty"`
 	Seq     int64   `json:"seq"`
 	Entries []Entry `json:"entries"`
+	// Removals are UIDs that have left the window, newest-Rev last, capped at
+	// maxRemovals. Retained so a removal can be reported to every caller whose
+	// cursor predates it — see Store.Sync.
+	Removals []Removal `json:"removals,omitempty"`
 }
 
 // Store is one user's mail metadata cache, persisted as mailcache.json
@@ -204,10 +216,17 @@ func (s *Store) Snapshot(mailboxKey string, limit int) ([]Entry, bool) {
 // a second poller with an older cursor still correctly receives entries that
 // were bumped by a different caller's earlier Sync.
 //
-// Removed is the one piece not retained across calls: it is only
-// "previously-in-window, now absent from live", computed relative to this call's
-// own prior window. See the package doc for the accepted multi-poller staleness
-// gap this implies.
+// Removed is retained, for the same reason New/Updated are cursor-filtered
+// rather than call-local: a removal observed against this call's own prior
+// window is only ever observable ONCE, because this call then replaces that
+// window. Reporting just that set handed the removal to whichever caller polled
+// first and told every other one nothing — a second device, or a retry after a
+// response that never reached the client, could not learn of it at any later
+// point. Mail deleted on the web stayed in that client's inbox indefinitely.
+//
+// So each departure is stamped with its own Rev and kept (identity only, capped
+// at maxRemovals), and Removed is every retained removal with Rev > since. A UID
+// that returns to the window drops its retained removal.
 //
 // If limit differs from the window's stored Limit, the prior window is discarded
 // without computing Removed (a limit change invalidates window comparability)
@@ -305,19 +324,43 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 
 	sort.Slice(next, func(i, j int) bool { return next[i].UID < next[j].UID })
 
-	var removed []Entry
+	// A UID that is back in the window is not removed, whatever an earlier call
+	// concluded. Dropping its retained removal first is what stops us handing a
+	// client the same message as New and as Removed in one response.
+	retained := win.Removals[:0]
+	for _, r := range win.Removals {
+		if !liveUIDs[r.UID] {
+			retained = append(retained, r)
+		}
+	}
+	win.Removals = retained
+
 	if !resetWindow {
 		for _, e := range prevEntries {
-			if !liveUIDs[e.UID] {
-				removed = append(removed, e)
+			if liveUIDs[e.UID] {
+				continue
 			}
+			// Stamped with its own Rev so it can be compared against a caller's
+			// cursor. Identity only: see Removal.
+			win.Seq++
+			win.Removals = append(win.Removals, Removal{UID: e.UID, MessageID: e.MessageID, Rev: win.Seq})
 		}
+	}
+	if len(win.Removals) > maxRemovals {
+		win.Removals = slices.Clone(win.Removals[len(win.Removals)-maxRemovals:])
 	}
 
 	win.Entries = next
 	win.Limit = limit
 	if err := s.persistLocked(); err != nil {
 		return SyncResult{}, err
+	}
+
+	var removed []Removal
+	for _, r := range win.Removals {
+		if r.Rev > since {
+			removed = append(removed, r)
+		}
 	}
 
 	result := SyncResult{Cursor: win.Seq, Removed: removed}
