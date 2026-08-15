@@ -527,3 +527,130 @@ func TestUpsertNeverStoresADecryptError(t *testing.T) {
 		t.Fatalf("a decrypt error was stored: %q", entries[0].PGPDecryptError)
 	}
 }
+
+// A removal must survive being reported once. It used to be computed purely
+// against this call's own prior window and then thrown away, so whichever
+// caller Synced first consumed it and every later caller — a second device, or
+// a retry of a response that never arrived — was told nothing. Mail deleted on
+// the web then sat in that client's inbox forever, with no way to ever learn of
+// it. Unlike New/Updated, Removed was not filtered by the caller's cursor.
+func TestSync_RemovalStillReportedToASecondPollerWithAnOlderCursor(t *testing.T) {
+	s := newTestStore(t)
+	first, _ := s.Sync("INBOX", 10, []Overview{ov(1, "a", "unread"), ov(2, "b", "unread")}, 0)
+
+	// Device A polls and consumes the removal of uid 1.
+	resA, err := s.Sync("INBOX", 10, []Overview{ov(2, "b", "unread")}, first.Cursor)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(resA.Removed) != 1 || resA.Removed[0].UID != 1 {
+		t.Fatalf("device A should see uid 1 removed, got %+v", resA.Removed)
+	}
+
+	// Device B, whose cursor still predates the removal, must be told too.
+	resB, err := s.Sync("INBOX", 10, []Overview{ov(2, "b", "unread")}, first.Cursor)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(resB.Removed) != 1 || resB.Removed[0].UID != 1 {
+		t.Fatalf("device B should also see uid 1 removed, got %+v", resB.Removed)
+	}
+	if resB.Removed[0].MessageID != itoaTest(1) {
+		t.Fatalf("removal should carry the wire MessageID, got %+v", resB.Removed[0])
+	}
+}
+
+// The flip side: a caller that has already moved its cursor past the removal
+// must not be told again on every subsequent poll.
+func TestSync_RemovalNotRepeatedOnceTheCursorPassesIt(t *testing.T) {
+	s := newTestStore(t)
+	first, _ := s.Sync("INBOX", 10, []Overview{ov(1, "a", "unread"), ov(2, "b", "unread")}, 0)
+	acked, _ := s.Sync("INBOX", 10, []Overview{ov(2, "b", "unread")}, first.Cursor)
+
+	res, err := s.Sync("INBOX", 10, []Overview{ov(2, "b", "unread")}, acked.Cursor)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(res.Removed) != 0 {
+		t.Fatalf("expected no repeat removal past the cursor, got %+v", res.Removed)
+	}
+}
+
+// A UID that comes back (moved out of the mailbox and back, or a flag race
+// between two polls) must stop being advertised as removed — otherwise we would
+// tell a client to delete a message we had just handed it as New.
+func TestSync_ReappearingUIDIsNoLongerReportedRemoved(t *testing.T) {
+	s := newTestStore(t)
+	first, _ := s.Sync("INBOX", 10, []Overview{ov(1, "a", "unread"), ov(2, "b", "unread")}, 0)
+	s.Sync("INBOX", 10, []Overview{ov(2, "b", "unread")}, first.Cursor)
+
+	res, err := s.Sync("INBOX", 10, []Overview{ov(1, "a", "unread"), ov(2, "b", "unread")}, first.Cursor)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	for _, r := range res.Removed {
+		if r.UID == 1 {
+			t.Fatalf("uid 1 is back in the window and must not be reported removed: %+v", res.Removed)
+		}
+	}
+	if len(res.New) != 1 || res.New[0].UID != 1 {
+		t.Fatalf("expected uid 1 reported New on its return, got %+v", res.New)
+	}
+}
+
+// Retained removals are bounded: this is a cache window, not an audit log.
+func TestSync_RetainedRemovalsAreBounded(t *testing.T) {
+	s := newTestStore(t)
+	for uid := 1; uid <= maxRemovals+50; uid++ {
+		s.Sync("INBOX", 10, []Overview{ov(uid, "a", "unread")}, 0)
+	}
+	res, err := s.Sync("INBOX", 10, []Overview{}, 0)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(res.Removed) > maxRemovals {
+		t.Fatalf("retained removals unbounded: got %d, cap %d", len(res.Removed), maxRemovals)
+	}
+}
+
+// Removals live in the same file as the window, so a restarted process must
+// still be able to answer a client whose cursor predates the removal.
+func TestSync_RemovalsSurviveAProcessRestart(t *testing.T) {
+	dir := t.TempDir()
+	s1, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	first, _ := s1.Sync("INBOX", 10, []Overview{ov(1, "a", "unread"), ov(2, "b", "unread")}, 0)
+	s1.Sync("INBOX", 10, []Overview{ov(2, "b", "unread")}, first.Cursor)
+
+	s2, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := s2.Sync("INBOX", 10, []Overview{ov(2, "b", "unread")}, first.Cursor)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(res.Removed) != 1 || res.Removed[0].UID != 1 {
+		t.Fatalf("expected the removal to survive a restart, got %+v", res.Removed)
+	}
+}
+
+// A removal must never carry the deleted message's body to disk or to a client.
+func TestSync_RetainedRemovalCarriesNoBody(t *testing.T) {
+	s := newTestStore(t)
+	first, _ := s.Sync("INBOX", 10, []Overview{ov(1, "a", "unread")}, 0)
+	if err := s.Upsert("INBOX", []Entry{entry(1, "a", "unread", "secret plaintext")}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	s.Sync("INBOX", 10, []Overview{}, first.Cursor)
+
+	raw, err := os.ReadFile(s.path())
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(raw), "secret plaintext") {
+		t.Fatalf("a removed message's body must not be retained on disk:\n%s", raw)
+	}
+}

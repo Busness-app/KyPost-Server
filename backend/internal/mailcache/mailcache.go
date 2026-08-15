@@ -10,7 +10,13 @@
 // churns by nature — a message falling out of the window isn't a deletion,
 // just a loss of visibility (it aged out, moved, or really was deleted; from
 // a polling client's view those are indistinguishable and equally
-// unimportant). There is deliberately no tombstone list and no GC pass.
+// unimportant).
+//
+// What a departure does need is to be *deliverable more than once*: a client
+// mirrors this window locally, so a departure it never receives is one it can
+// never infer. Each is therefore retained as an identity-only mailcache.Removal
+// stamped with a Rev, capped at maxRemovals and dropped if the UID returns —
+// a bounded delivery buffer, not an audit log, and it holds no message content.
 package mailcache
 
 import (
@@ -197,13 +203,29 @@ type SyncResult struct {
 	// since) whose metadata changed since — flag/label-only, no body
 	// needed.
 	Updated []Entry
-	// Removed is messages present in the window before this call, absent
-	// from the freshly fetched live snapshot. Not retained across calls —
-	// see the package doc and Store.Sync for the accepted multi-poller
-	// staleness gap this implies.
-	Removed []Entry
+	// Removed is messages that left the window, filtered by the caller's
+	// cursor exactly like New/Updated: every removal stamped with a Rev
+	// greater than `since`, not merely the ones this particular call
+	// observed. See Removal and Store.Sync.
+	Removed []Removal
 	// Cursor is the window's new high-water Rev.
 	Cursor int64
+}
+
+// Removal is a message that left the window, retained so it can be reported to
+// every caller that has not yet acknowledged it rather than only to whichever
+// one happened to poll first.
+//
+// It deliberately carries identity and nothing else. A removal is retained on
+// disk, and the whole point of the message being gone is that we should not
+// still be holding its subject, sender, or body — see Store.Sync.
+type Removal struct {
+	UID int `json:"uid"`
+	// MessageID is the wire identity, same convention as Entry.MessageID.
+	MessageID string `json:"messageId"`
+	// Rev is the window sequence value at which the removal was observed,
+	// which is what makes it comparable against a caller's cursor.
+	Rev int64 `json:"rev"`
 }
 
 // entryMeta is the subset of fields Entry and Overview share, used to
