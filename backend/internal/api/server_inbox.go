@@ -287,7 +287,12 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	mailbox := strings.TrimSpace(r.URL.Query().Get("mailbox"))
-	useDelta := strings.TrimSpace(r.URL.Query().Get("since")) != ""
+	// Two different questions, and conflating them was a bug. Sending `since`
+	// at all selects the cursor protocol (window diffing, a cursor in the
+	// response); whether the RESPONSE is a partial delta depends on the cursor's
+	// VALUE. since=0 means "I have nothing, send the lot" and comes back as a
+	// full window — see serveInbox's response.
+	cursorSync := strings.TrimSpace(r.URL.Query().Get("since")) != ""
 	since := parseNonNegativeInt64Query(r, "since")
 
 	s.cfgMu.RLock()
@@ -316,14 +321,14 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.serveInbox(w, r.Context(), ac.UserID, mailClient, cache, cfg, mailbox, limit, since, useDelta)
+	s.serveInbox(w, r.Context(), ac.UserID, mailClient, cache, cfg, mailbox, limit, since, cursorSync)
 }
 
 // serveInbox contains handleInbox's core logic once a mail client and cache
 // store are resolved — split out from handleInbox (which only does
 // param/auth/store resolution) so it can be exercised directly in tests
 // against a fake imapadapter.Client, without a real IMAP connection.
-func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID string, mailClient imapadapter.Client, cache *mailcache.Store, cfg config.Config, mailbox string, limit int, since int64, useDelta bool) {
+func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID string, mailClient imapadapter.Client, cache *mailcache.Store, cfg config.Config, mailbox string, limit int, since int64, cursorSync bool) {
 	allowedKeywords := collectAllowedKeywords(s.userLabels(userID))
 	tabs, byTab := buildInboxTabScaffold(allowedKeywords)
 
@@ -376,7 +381,7 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 		return entries
 	}
 
-	if !useDelta {
+	if !cursorSync {
 		// Cache-first: if the background poller (or an earlier request)
 		// has already warmed a full window of `limit` messages with
 		// bodies, serve it with zero IMAP calls.
@@ -625,9 +630,15 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 
 	tabs = append(tabs, inboxUncategorizedTab)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tabs":    tabs,
-		"byTab":   byTab,
-		"delta":   true,
+		"tabs":  tabs,
+		"byTab": byTab,
+		// What this response IS, not which path built it. A since=0 caller has
+		// no cursor to diff against, so mailcache.Sync classifies the entire
+		// window as New and every entry above carries a body: that is a full
+		// snapshot, and saying otherwise denied the client the one thing only a
+		// snapshot can express — which messages are NOT there any more. Pruning
+		// against it is how a client recovers a removal it never received.
+		"delta":   since > 0,
 		"cursor":  result.Cursor,
 		"removed": removed,
 	})

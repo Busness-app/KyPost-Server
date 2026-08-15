@@ -3,7 +3,7 @@
 # The Ollama tarball below is pinned to a published SHA-256 with a paragraph
 # explaining why unpinned build inputs are unacceptable. That argument does not
 # stop at the one dependency it was written about: a tag is a mutable pointer,
-# `debian:stable-slim` moves on every point release, and even `golang:1.26.5`
+# `debian:stable-slim` moves on every point release, and even `golang:1.26.6`
 # is republished when its own base is rebuilt. Two builds of the same commit
 # shipped different userlands, which is exactly the property the Ollama pin
 # exists to prevent.
@@ -13,7 +13,7 @@
 # matches its tag is a silent lie about what is being built, so re-resolve with:
 #
 #   docker buildx imagetools inspect golang:<tag> --format '{{.Manifest.Digest}}'
-FROM golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647 AS backend-builder
+FROM golang:1.26.6@sha256:640a234f4bea3e399c056b7b8f9c667c4939befae8db2f14e9785e16eccd4205 AS backend-builder
 WORKDIR /app
 COPY backend/go.mod backend/go.sum* ./backend/
 RUN cd backend && go mod download
