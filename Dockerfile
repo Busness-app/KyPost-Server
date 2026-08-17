@@ -73,8 +73,8 @@ RUN apt-get update \
 # turned a 2-6 minute ci-docker into a 16 minute one on the first PR that
 # touched the frontend. Nothing here depends on the COPYs; the apt step above
 # is what supplies curl, ca-certificates, zstd and tar.
-ARG OLLAMA_VERSION=0.32.9
-ARG OLLAMA_SHA256=5d747a43369f61e38f20b5a39fcc5c90647e562cdc61e2e56034f1c5b113d540
+ARG OLLAMA_VERSION=0.32.11
+ARG OLLAMA_SHA256=873258110663ff4e72bed8549b9e86589e1c07d99646cac257b71a4a6a72dcc7
 RUN curl -fsSL -o /tmp/ollama.tar.zst \
 	"https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
 	&& echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c - \
