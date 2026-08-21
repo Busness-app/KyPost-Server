@@ -57,6 +57,7 @@ jobs:
       # added to ci.yml and not added here is a visible omission rather than a
       # silent hole in the gate.
       - name: Require CI to have passed for this commit
+        id: gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -98,7 +99,26 @@ jobs:
           fi
           echo "all required CI jobs passed for ${sha}"
 
+          # workflow_run fires on RE-RUNS too, and :main is a mutable tag. Someone
+          # re-running ci.yml against a months-old commit would otherwise move the
+          # published image backwards to it — the tag would silently regress with a
+          # green tick and a valid attestation for the wrong source. Publish only
+          # the current tip.
+          #
+          # Not an error: a newer commit landing while this run was still testing
+          # is ordinary, and that commit's own run publishes it. Failing red here
+          # would turn a normal race into a broken build nobody should act on.
+          git fetch --depth=1 origin main
+          tip="$(git rev-parse FETCH_HEAD)"
+          if [ "$sha" != "$tip" ]; then
+            echo "::notice::${sha} is no longer the tip of main (${tip}); skipping publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GitHub Container Registry
+        if: steps.gate.outputs.publish == 'true'
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -106,6 +126,7 @@ jobs:
           printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Build and publish main tag
+        if: steps.gate.outputs.publish == 'true'
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -118,6 +139,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Publish GitHub image attestation
+        if: steps.gate.outputs.publish == 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE_NAME }}
@@ -125,6 +147,7 @@ jobs:
           push-to-registry: true
 
       - name: Verify the attestation
+        if: steps.gate.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DIGEST: ${{ steps.build.outputs.digest }}

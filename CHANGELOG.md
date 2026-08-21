@@ -121,7 +121,22 @@ non-prerelease version.
   still become the public `:main` image — with an attestation proving exactly
   which broken source produced it. Publishing is now triggered by the test
   workflow completing, and still refuses to move `:main` unless every required
-  job completed successfully for that exact commit.
+  job completed successfully for that exact commit **and** that commit is still
+  the tip of `main` — re-running an old test run would otherwise walk the
+  published image backwards behind a green tick and a valid attestation.
+
+- **The SSO `redirect_uri` no longer comes from the `Host` header.** It was
+  built from `r.Host`, which behind a reverse proxy is the internal name — so
+  the value never matched what was registered at the identity provider and SSO
+  could not work there at all. It now follows the configured server base URL,
+  falling back to the same trusted-proxy-aware helper the rest of the server
+  uses, which also stops a request header influencing where an authorization
+  code is delivered.
+
+- **A rejected sync webhook no longer reads the settings file.** The unauthorized
+  path loaded `sso.json` from disk on every request, so an unauthenticated
+  caller could drive disk reads. The pairing secret is now checked first and
+  alone.
 
 - **A recipient whose PGP key changed no longer gets a plaintext pickup link.**
   The resolver already refused to switch keys when a contact's pinned

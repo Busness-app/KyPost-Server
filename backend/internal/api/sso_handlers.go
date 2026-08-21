@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -87,13 +86,34 @@ func (s *Server) handleAdminSSOPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": req})
 }
 
+// ssoRedirectURI builds the callback URL the provider must be told to return to.
+//
+// It goes through the configured base URL, falling back to externalBaseURL,
+// rather than reading r.Host directly. Two reasons, and the first is plain
+// correctness: behind a reverse proxy r.Host is the internal name, so a
+// Host-derived redirect_uri does not match the one registered at the provider
+// and every login is rejected. externalBaseURL is the helper that already
+// honours X-Forwarded-Host, and only from a trusted proxy. The second is that
+// OAuth pins redirect_uri across the authorize and token calls, so letting an
+// arbitrary Host header choose it hands a request header influence over where
+// an authorization code is sent.
+func (s *Server) ssoRedirectURI(r *http.Request) string {
+	base := s.serverBaseURL
+	if base == "" {
+		base = externalBaseURL(r)
+	}
+	if base == "" {
+		return ""
+	}
+	return strings.TrimRight(base, "/") + "/api/auth/oidc/callback"
+}
+
 // ssoProvider discovers and policy-checks the configured provider for one request.
 func (s *Server) ssoProvider(r *http.Request, settings sso.SSOSettings) (*sso.Provider, string, error) {
-	scheme := "http"
-	if isRequestSecure(r) {
-		scheme = "https"
+	redirectURI := s.ssoRedirectURI(r)
+	if redirectURI == "" {
+		return nil, "", errors.New("cannot determine this server's external URL; set SERVER_BASE_URL")
 	}
-	redirectURI := fmt.Sprintf("%s://%s/api/auth/oidc/callback", scheme, r.Host)
 	p, err := sso.NewProvider(r.Context(), settings, redirectURI)
 	return p, redirectURI, err
 }

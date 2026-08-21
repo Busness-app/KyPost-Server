@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"kypost-server/backend/internal/sso"
 	"kypost-server/backend/internal/users"
 )
 
@@ -134,10 +135,23 @@ func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings := s.ssoStore.Load()
-	if !s.syncRequestAuthorized(r, body, settings.ClientSecret) {
+	// The pairing secret is tried first, and on its own, so an unauthenticated
+	// flood costs one HMAC rather than a settings file read per request.
+	// ssoStore.Load() reads from disk every call; it is only reached once a
+	// caller has either authenticated or forced the client-secret fallback.
+	authorized := syncSecretMatches(r, body, s.pairingSecret)
+	settings := sso.SSOSettings{}
+	loaded := false
+	if !authorized {
+		settings, loaded = s.ssoStore.Load(), true
+		authorized = syncSecretMatches(r, body, settings.ClientSecret)
+	}
+	if !authorized {
 		http.Error(w, "unauthorized sync request", http.StatusUnauthorized)
 		return
+	}
+	if !loaded {
+		settings = s.ssoStore.Load()
 	}
 
 	var ev SyncWebhookEvent
@@ -188,30 +202,22 @@ func (s *Server) handleSyncWebhook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// syncRequestAuthorized accepts either the pairing secret or the SSO client
-// secret, as a bearer token or as an HMAC over the exact bytes received.
-func (s *Server) syncRequestAuthorized(r *http.Request, body []byte, clientSecret string) bool {
-	authHeader := r.Header.Get("Authorization")
-	sigHeader := r.Header.Get("X-Sync-Signature")
-
-	for _, secret := range []string{s.pairingSecret, clientSecret} {
-		if secret == "" {
-			continue
-		}
-		if hmac.Equal([]byte(authHeader), []byte("Bearer "+secret)) {
-			return true
-		}
-		if sigHeader == "" {
-			continue
-		}
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write(body)
-		expected := hex.EncodeToString(mac.Sum(nil))
-		if hmac.Equal([]byte(sigHeader), []byte(expected)) {
-			return true
-		}
+// syncSecretMatches reports whether the request proves possession of secret,
+// as a bearer token or as an HMAC over the exact bytes received.
+func syncSecretMatches(r *http.Request, body []byte, secret string) bool {
+	if secret == "" {
+		return false
 	}
-	return false
+	if hmac.Equal([]byte(r.Header.Get("Authorization")), []byte("Bearer "+secret)) {
+		return true
+	}
+	sigHeader := r.Header.Get("X-Sync-Signature")
+	if sigHeader == "" {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return hmac.Equal([]byte(sigHeader), []byte(hex.EncodeToString(mac.Sum(nil))))
 }
 
 // applySyncEvent performs the requested state transition, returning the status

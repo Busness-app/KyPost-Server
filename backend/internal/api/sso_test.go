@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -635,5 +636,39 @@ func TestSSOLinkCookieIsBoundToItsOwnSession(t *testing.T) {
 	}
 	if after.SSOSub != "" {
 		t.Fatalf("a planted link cookie bound SSO identity %q to the victim", after.SSOSub)
+	}
+}
+
+// The redirect_uri must follow the configured external URL, not the Host
+// header. Behind a reverse proxy r.Host is the internal name, and a
+// redirect_uri built from it matches nothing registered at the provider.
+func TestSSORedirectURIFollowsConfiguredBaseURL(t *testing.T) {
+	srv, _ := setupSSOTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil)
+	req.Host = "kypost.internal:5866"
+
+	if got := srv.ssoRedirectURI(req); got != "http://kypost.internal:5866/api/auth/oidc/callback" {
+		t.Errorf("without a configured base URL, ssoRedirectURI() = %q", got)
+	}
+
+	srv.serverBaseURL = "https://mail.urlxl.com/"
+	want := "https://mail.urlxl.com/api/auth/oidc/callback"
+	if got := srv.ssoRedirectURI(req); got != want {
+		t.Errorf("ssoRedirectURI() = %q, want %q — the Host header must not win", got, want)
+	}
+
+	// The authorization request the provider actually receives carries it.
+	rec := httptest.NewRecorder()
+	srv.handleSSOLogin(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("handleSSOLogin status = %d: %s", rec.Code, rec.Body.String())
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse redirect: %v", err)
+	}
+	if got := loc.Query().Get("redirect_uri"); got != want {
+		t.Errorf("authorization request redirect_uri = %q, want %q", got, want)
 	}
 }
