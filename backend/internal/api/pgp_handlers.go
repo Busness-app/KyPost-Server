@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -86,9 +87,16 @@ func (s *Server) handlePGPIdentity(w http.ResponseWriter, r *http.Request) {
 		}
 		// An empty body is fine and stays a 401 rather than a 400: an account
 		// with no identity has nothing to delete and nothing to confirm, and one
-		// that does gets the credential prompt from requirePGPStepUp.
+		// that does gets the credential prompt from requirePGPStepUp. A body
+		// that is present but malformed is NOT the same thing — decoding it
+		// leaves whichever fields happened to parse, and the least surprising
+		// answer for the one irreversible operation in this file is to refuse
+		// rather than to act on a half-read confirmation.
 		if r.Body != nil {
-			_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, "invalid request payload", http.StatusBadRequest)
+				return
+			}
 		}
 		if !s.requirePGPStepUp(w, r, ac.UserID, req.Password, req.AuthSecret) {
 			return

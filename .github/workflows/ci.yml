@@ -217,6 +217,7 @@ jobs:
             push-relay-shared/relay-budget.test.mts \
             worker-apns/src/apns-config.test.mts \
             worker-apns/src/apns-stale.test.mts \
+            worker-apns/src/apns-payload.test.mts \
             worker-apns/src/send-budget-order.test.mts \
             worker/src/fcm-oauth-redaction.test.mts \
             worker/src/fcm-stale.test.mts

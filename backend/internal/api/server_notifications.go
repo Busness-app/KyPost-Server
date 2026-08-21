@@ -187,7 +187,20 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
-	// Before any work. This handler dispatches to every registration the
+	// Parse before metering. The cooldown used to be consumed here, above a
+	// decode whose error was discarded — so a truncated or malformed body fell
+	// through to the zero value, sent the default notification, and left the
+	// caller unable to retry the request they actually meant until the cooldown
+	// expired. A request the server refuses must not cost the caller their turn.
+	//
+	// An empty body stays valid (io.EOF): both fields have defaults below.
+	var payload notificationTestPayload
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid test notification payload", http.StatusBadRequest)
+		return
+	}
+
+	// Metered before any work. This handler dispatches to every registration the
 	// account has, serially, each with its own network timeout — so without a
 	// meter it is an authenticated user's switch for making the server spend
 	// unbounded time on outbound requests to destinations they chose.
@@ -203,8 +216,6 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
 		return
 	}
-	var payload notificationTestPayload
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&payload)
 	title := strings.TrimSpace(payload.Title)
 	body := strings.TrimSpace(payload.Body)
 	if title == "" {

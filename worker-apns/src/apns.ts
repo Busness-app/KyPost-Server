@@ -32,10 +32,17 @@ export interface PushMessage {
   data?: Record<string, string>;
 }
 
+/**
+ * `reachedProvider` is required on every failure so each construction site has
+ * to answer it. False means no APNs request was made, and the caller refunds the
+ * daily budget draw on the strength of it — a wrong answer either leaks the
+ * operator's quota or spends their whole day on nothing, so it is not a field to
+ * default. True is the conservative answer whenever a request may have gone out.
+ */
 export type ApnsResult =
   | { ok: true }
-  | { ok: false; stale: true; status: number; detail: string } // device token is dead
-  | { ok: false; stale: false; status: number; detail: string }; // transient/server error
+  | { ok: false; stale: true; reachedProvider: boolean; status: number; detail: string } // device token is dead
+  | { ok: false; stale: false; reachedProvider: boolean; status: number; detail: string }; // transient/server error
 
 /**
  * Import a PKCS#8 PEM ES256 private key for APNs provider-token signing.
@@ -139,7 +146,7 @@ export async function sendApnsMessage(
 ): Promise<ApnsResult> {
   const token = (message.token ?? "").trim();
   if (!token) {
-    return { ok: false, stale: false, status: 400, detail: "missing token" };
+    return { ok: false, stale: false, reachedProvider: false, status: 400, detail: "missing token" };
   }
 
   let providerToken: string;
@@ -149,6 +156,9 @@ export async function sendApnsMessage(
     return {
       ok: false,
       stale: false,
+      // Signing/fetching the provider token failed, so nothing was sent to
+      // Apple. This is the shape a wrong APNS_KEY_ID or APNS_AUTH_KEY takes.
+      reachedProvider: false,
       status: 500,
       detail: `provider token generation failed: ${(err as Error).message}`,
     };
@@ -163,6 +173,13 @@ export async function sendApnsMessage(
   // Build the APS payload (matching FCM's structure for consistency)
   const data = message.data ?? {};
   const payload = {
+    // Caller data spreads FIRST so `aps` below always wins. `data` is a
+    // caller-supplied string map and `aps` is Apple's reserved dictionary, so
+    // spreading last let any key holder send `"aps": "..."` and replace the
+    // alert, the sound and the category with a string — a push that passed
+    // validation, spent a rate-limit slot and a unit of the daily budget, and
+    // then could not be delivered. See apns-payload.test.mts.
+    ...data,
     aps: {
       alert: {
         title: message.title,
@@ -174,8 +191,6 @@ export async function sendApnsMessage(
       // (Approve/Deny for MFA challenges); without it the buttons never show.
       category: data.type === "mfa_challenge" ? "MFA_CHALLENGE" : "MAIL_NOTIFICATION",
     },
-    // Spread the data fields into top-level custom keys (matching fcm.ts pattern)
-    ...data,
   };
 
   try {
@@ -199,7 +214,7 @@ export async function sendApnsMessage(
 
     // Distinguish device-token errors (stale) from provider/server errors (retriable)
     if (isStaleResponse(resp.status, detail)) {
-      return { ok: false, stale: true, status: resp.status, detail };
+      return { ok: false, stale: true, reachedProvider: true, status: resp.status, detail };
     }
 
     // Provider-token errors: refresh the token cache and return 502 so backend retries
@@ -212,14 +227,18 @@ export async function sendApnsMessage(
       return {
         ok: false,
         stale: false,
+        reachedProvider: true,
         status: 502,
         detail: "provider token expired; backend should retry",
       };
     }
 
-    return { ok: false, stale: false, status: resp.status, detail };
+    return { ok: false, stale: false, reachedProvider: true, status: resp.status, detail };
   } catch (err) {
     const msg = (err as Error).message ?? String(err);
-    return { ok: false, stale: false, status: 502, detail: `apns fetch error: ${msg}` };
+    // A throw out of fetch() usually means the request never completed, but it
+    // cannot be told apart from a failure reading a response Apple did send.
+    // Unproven means not refunded.
+    return { ok: false, stale: false, reachedProvider: true, status: 502, detail: `apns fetch error: ${msg}` };
   }
 }

@@ -597,3 +597,83 @@ test("registrations from one IPv6 /64 share a coordinator and so share the one k
   const second = await secondResponse.json();
   assert.deepEqual(activeKeyIds(kv), [second.id]);
 });
+
+// A registration that claims the IP and then FAILS to mint is the other half of
+// the same window. Its predecessor is still the IP's only usable key — nothing
+// revoked it, because the revoke happens after a commit that never came — so
+// the claim it made must not swallow the debt of revoking that predecessor. If
+// it does, the next registration is handed a dangling id to revoke, the real
+// predecessor is never revoked, and one address holds two permanent keys.
+test("a registration whose mint fails does not strand the key it displaced", async () => {
+  const kv = registerKv();
+  const env = registerEnv(kv);
+
+  const firstResponse = await handleRegister(registerRequest(), requestContext(env));
+  assert.equal(firstResponse.status, 201);
+  const first = await firstResponse.json();
+
+  // Second registration claims the IP, then its mint throws.
+  kv.beforePut = async (cell) => {
+    if (cell.startsWith(KEY_PREFIX)) throw new Error("KV write failed");
+  };
+  await assert.rejects(handleRegister(registerRequest(), requestContext(env)));
+
+  // The failed mint handed out nothing, so the first key is still the IP's one
+  // key and must still work.
+  assert.deepEqual(activeKeyIds(kv), [first.id], "the failed mint disturbed the existing key");
+
+  // A third registration succeeds. It must revoke the FIRST key — the only one
+  // that ever existed — not just the dangling id the failed mint left behind.
+  kv.beforePut = async () => {};
+  const thirdResponse = await handleRegister(registerRequest(), requestContext(env));
+  assert.equal(thirdResponse.status, 201);
+  const third = await thirdResponse.json();
+
+  assert.deepEqual(
+    activeKeyIds(kv),
+    [third.id],
+    "a failed mint left one address holding two permanently active keys",
+  );
+});
+
+// The same debt, lost the other way: a registration displaced WHILE minting
+// deletes its own key and answers 503, but it was also carrying the obligation
+// to revoke its predecessor. The winner is handed only the displaced id, which
+// has no record, so the revoke chain breaks in the middle and the predecessor
+// survives alongside the winner.
+test("a registration displaced while minting hands its predecessor on to the winner", async () => {
+  const kv = registerKv();
+  const env = registerEnv(kv);
+
+  const firstResponse = await handleRegister(registerRequest(), requestContext(env));
+  assert.equal(firstResponse.status, 201);
+
+  // A claims the IP (predecessor: the first key) and stalls inside mintKey.
+  let releaseA;
+  const aIsMinting = new Promise((resolveReached) => {
+    const held = new Promise((r) => { releaseA = r; });
+    let stalled = false;
+    kv.beforePut = async (cell) => {
+      if (stalled || !cell.startsWith(KEY_PREFIX)) return;
+      stalled = true;
+      resolveReached();
+      await held;
+    };
+  });
+  const a = handleRegister(registerRequest(), requestContext(env));
+  await aIsMinting;
+
+  // B registers start to finish while A is parked, displacing A.
+  const bResponse = await handleRegister(registerRequest(), requestContext(env));
+  assert.equal(bResponse.status, 201);
+  const b = await bResponse.json();
+
+  releaseA();
+  assert.equal((await a).status, 503);
+
+  assert.deepEqual(
+    activeKeyIds(kv),
+    [b.id],
+    "the predecessor of a displaced registration was never revoked",
+  );
+});

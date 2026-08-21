@@ -43,6 +43,7 @@ import {
   bearer,
   checkMinuteLimit,
   checkDailyBudget,
+  refundDailyBudget,
   secondsUntilUTCMidnight,
   claimTokenForSend,
   createRelayFetchHandler,
@@ -177,6 +178,14 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
   // defer, because an unsettled send still counts as in flight and so blocks a
   // concurrent rollback either way.
   const settle = (delivered: boolean) => rc.ctx.waitUntil(settleToken(rc, token, record.id, delivered));
+  // The budget's other half: the draw below is taken before dispatch (it has to
+  // be — the outcome is not known yet), so a send that provably never reached
+  // APNs gives it back. Otherwise one wrong credential fails every send and
+  // spends the whole day's ceiling on traffic that never left Cloudflare, and
+  // the relay stays refused until UTC midnight after the credential is fixed.
+  // An answer from APNs of any kind, including a rejected device token, keeps
+  // its draw: that request spent the quota this budget exists to bound.
+  const refund = () => rc.ctx.waitUntil(refundDailyBudget(rc));
 
   // Relay-wide day tier, AFTER the claim rather than before it.
   //
@@ -221,6 +230,9 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     // never happened, same as the result.stale/failure branches below — so the
     // claim must not be confirmed by it.
     settle(false);
+    // Thrown rather than answered: the provider request was never completed, so
+    // the draw goes back.
+    refund();
     rc.log({ level: "error", event: "send.error", keyId: record.id, error: String((err as Error).message ?? err) });
     return failDelivery(rc);
   }
@@ -239,6 +251,11 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     return json({ stale: true, requestId: rc.requestId }, 410);
   }
   settle(false);
+  // Refunded only when APNs was never asked — a wrong credential, not a token
+  // APNs rejected. See refundDailyBudget.
+  if (!result.reachedProvider) {
+    refund();
+  }
   // Carry Apple's reason, not just the status. The 400s that name a device token
   // (BadDeviceToken, DeviceTokenNotForTopic) are relay misconfiguration and no
   // longer retire the device (see isStaleResponse) — which means this log line is

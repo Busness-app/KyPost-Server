@@ -108,3 +108,33 @@ func TestNotificationTestEndpointIsMetered(t *testing.T) {
 		t.Fatalf("second test notification: status = %d, want %d", code, http.StatusTooManyRequests)
 	}
 }
+
+// A malformed body must not spend the meter.
+//
+// The cooldown was consumed before the body was decoded, and the decode error
+// was discarded — so a truncated or malformed request fell through to the zero
+// value, sent the default notification anyway, and left the caller refused
+// until the cooldown expired. Whether the notification is "harmless" is beside
+// the point: the request the user meant to make is the one that gets rejected,
+// and they cannot retry it.
+func TestMalformedNotificationTestDoesNotSpendTheCooldown(t *testing.T) {
+	srv, u := newTestServerWithUser(t)
+
+	post := func(body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/notifications/test", bytes.NewReader([]byte(body)))
+		authRequestAs(srv, req, u.ID)
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if code := post(`{"title": "truncated`); code != http.StatusBadRequest {
+		t.Fatalf("malformed body: status = %d, want %d", code, http.StatusBadRequest)
+	}
+
+	// The real request must still go through: the malformed one above cost the
+	// caller nothing.
+	if code := post(`{"title":"real","body":"real"}`); code == http.StatusTooManyRequests {
+		t.Fatal("a malformed request spent the cooldown; the caller cannot retry correctly")
+	}
+}
