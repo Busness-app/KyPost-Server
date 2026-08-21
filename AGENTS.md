@@ -122,6 +122,8 @@ Default section order:
 - **Non-loopback cleartext requires `ALLOW_INSECURE_HTTP=true`.** The entrypoint receives `KYPOST_BIND` and refuses a remote cleartext publish unless inbound TLS is configured or the operator explicitly accepts the risk. Keep loopback HTTP available for a local TLS proxy. Unset refuses too — the entrypoint cannot see the real publish address, so this is an acknowledgement gate and an operator who never says how the port is reached is who it is for. Anything starting the image outside compose must therefore pass `KYPOST_BIND` (the CI smoke test does); do not add an empty-string arm to quieten a bare `docker run`.
 - **Bounded `startretries`, and FATAL exits the container.** `supervisord` has no backoff between restart attempts, so a large `startretries` is a hot loop rather than resilience; its default of 3 leaves PID 1 healthy in front of a dead service, because Docker restart policies react to a container exiting and never to a healthcheck. The pair that works is 20 retries plus the `crashexit` event listener taking PID 1 down, letting `restart: unless-stopped` (which does back off) restart the container. Changing either half alone reintroduces one of the two failure modes.
 
+- **`zero_code_pairing_handoff_spec.md` is the KyRecovery pairing contract.** This service pairs to KyRecovery with an ephemeral 6-digit PIN, then pushes backups plus a declarative verification recipe. This repo owns the client half (`POST /api/pairing/claim`, `POST /api/backup/push`); KyRecovery owns the spec.
+
 ## User Preferences
 
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md

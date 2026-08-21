@@ -88,6 +88,10 @@ type Server struct {
 	serverBaseURL       string
 	baseURLFallbackWarn sync.Once
 	pairingSecretWarn   sync.Once
+	// syncReplay refuses a KySignOn replication event whose jti was already
+	// applied; syncFreshnessWarn nags once when a sender omits jti/iat.
+	syncReplay        replayCache
+	syncFreshnessWarn sync.Once
 	// singleUse makes each one-shot token — PGP QR key exchange, native device
 	// pairing nonces — redeemable exactly once. See singleUseTokens.
 	singleUse            *singleUseTokens

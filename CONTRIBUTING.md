@@ -168,6 +168,7 @@ if a job is genuinely flaky, that is a bug to fix in the job.
 | `ci-backend-other` | Same lint gates, `go test -race` on every other backend package |
 | `ci-frontend` | `npm audit --omit=dev --audit-level=low` (blocking), `tsc --noEmit`, `vitest`, `vite build` |
 | `ci-relay` | Typecheck both relay Workers, `node --test` on the relay behaviour suites |
+| `ci-scripts` | Shell syntax, the `update-host` and model-installer self-checks, `compose config`, and the workflow shape assertions that keep the release and `:main` publish gates from being quietly deleted |
 | `ci-docker` | `docker build`, container reaches `healthy`, and the entrypoint still refuses a non-loopback cleartext bind |
 
 Notes that trip people up:
@@ -178,6 +179,13 @@ Notes that trip people up:
 - **The frontend audit gate is `--audit-level=low` on runtime dependencies.**
   That is deliberate: a "low" XSS advisory in the editor that renders quoted
   hostile email is not low here. Do not raise the threshold to get green.
+- **Publishing waits for this workflow, it does not race it.** `:main` is
+  published by `publish-main.yml` on `workflow_run` when `ci.yml` completes,
+  and only after re-checking that every job in the table above succeeded for
+  that exact commit and that the commit is still the tip of `main`. Adding a
+  job to `ci.yml` without adding its name to the `required` list in
+  `publish-main.yml` and `release-image.yml` leaves it outside both gates.
+
 - **`ci-docker` has two halves and both are gates.** One proves the container
   starts; the other proves the bind guard still refuses `0.0.0.0` without TLS.
   A red build is never fixed by loosening the entrypoint.
