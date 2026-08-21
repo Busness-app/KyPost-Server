@@ -40,6 +40,19 @@ const CONFIRMED_KEY = "confirmed";
 const INFLIGHT_KEY = "inflight";
 /** When the current claim was taken (ms epoch), for the caller's takeover guard. */
 const CLAIMED_AT_KEY = "claimedAt";
+/**
+ * Keys the CURRENT registration must revoke once it commits — see
+ * claimRegistrationIp. Carried across claims, because a registration that never
+ * commits still displaced whoever it took the IP from.
+ */
+const REG_DEBT_KEY = "registrationDebt";
+/**
+ * Ceiling on that list. Each registration that claims and then never commits
+ * adds one id, and /register is public, so the list needs a bound. The oldest
+ * entry is the one that matters — it is the last key that actually committed,
+ * and so the only one with a record to revoke — so the cap drops the newest.
+ */
+const MAX_REG_DEBT = 16;
 /** UTC day (YYYY-MM-DD) the relay-wide budget count below belongs to. */
 const BUDGET_DAY_KEY = "budgetDay";
 /** Sends drawn from the relay-wide budget during BUDGET_DAY_KEY. */
@@ -217,10 +230,9 @@ export class RelayCoordinator extends DurableObject {
   }
 
   /**
-   * Records newKeyId as the one active key for this IP and returns whichever key
-   * held it before, for the caller to revoke. Swap-and-return in one turn, so
-   * concurrent registrations from one address serialize into a chain: each sees
-   * its immediate predecessor and revokes it.
+   * Records newKeyId as the one active key for this IP and returns every key the
+   * caller must revoke once it commits. Swap-and-return in one turn, so
+   * concurrent registrations from one address serialize into a chain.
    *
    * The swap alone is NOT enough to leave one key standing, which is what this
    * comment used to claim. The mint happens outside this turn, so a registration
@@ -228,28 +240,58 @@ export class RelayCoordinator extends DurableObject {
    * revoke — the successor's revoke is a no-op against an id that does not exist
    * yet, and the pauser then mints a second permanently active key. Every caller
    * must therefore come back through confirmRegistrationIp after minting.
+   *
+   * Nor is returning the immediate predecessor enough, which is what this
+   * comment claimed next. That made the revoke a chain of single links, and a
+   * link that never commits — a mint that threw, a registration displaced while
+   * minting — breaks it in the middle and strands everything behind it:
+   *
+   *   1. P holds the IP.
+   *   2. A claims, is handed P to revoke, and its mint fails (or it is displaced
+   *      before it can commit). A revokes nothing.
+   *   3. B claims and is handed A — an id with no record. Revoking it is a
+   *      no-op, so P is never revoked and never expires.
+   *
+   * So the obligation is inherited, not just passed on: an uncommitted claim's
+   * debt is added to its successor's. It is discharged only by a commit, so
+   * whichever registration finally wins revokes everything its predecessors
+   * displaced and did not clean up. Dangling ids ride along harmlessly —
+   * revokeKeyById reports an unknown id as already gone.
    */
-  async claimRegistrationIp(newKeyId: string, legacyKeyId?: string | null): Promise<string | null> {
+  async claimRegistrationIp(newKeyId: string, legacyKeyId?: string | null): Promise<string[]> {
     const prior = await this.currentOwner(legacyKeyId);
-    await this.ctx.storage.put(OWNER_KEY, newKeyId);
-    return prior === undefined || prior === newKeyId ? null : prior;
+    const inherited = (await this.ctx.storage.get<string[]>(REG_DEBT_KEY)) ?? [];
+    // Oldest first: the inherited debt predates the owner being displaced now,
+    // and MAX_REG_DEBT drops from the far end.
+    const debt = [...new Set([...inherited, prior])]
+      .filter((id): id is string => !!id && id !== newKeyId)
+      .slice(0, MAX_REG_DEBT);
+    await this.ctx.storage.put({ [OWNER_KEY]: newKeyId, [REG_DEBT_KEY]: debt });
+    return debt;
   }
 
   /**
    * The commit half of claimRegistrationIp: reports whether keyId is STILL this
-   * IP's registration, now that its record exists in KV.
+   * IP's registration, now that its record exists in KV, and discharges the debt
+   * it was handed at claim time.
    *
    * False means a concurrent registration displaced it while it was minting. The
    * successor already tried to revoke this id and found nothing, so nothing else
    * will ever clean it up — the caller must delete the key it just minted and
    * hand out nothing. That is the whole reason this exists: it is the only
-   * moment at which a superseded registration can still be told it lost.
+   * moment at which a superseded registration can still be told it lost. Its
+   * debt is not cleared on that path: the successor inherited it and is now the
+   * one that owes it.
    *
-   * Deliberately a read, not a compare-and-delete. Clearing the owner here would
-   * unclaim the IP for the winner that legitimately holds it.
+   * Deliberately not a compare-and-delete of the owner. Clearing the owner here
+   * would unclaim the IP for the winner that legitimately holds it.
    */
   async confirmRegistrationIp(keyId: string): Promise<boolean> {
-    return (await this.ctx.storage.get<string>(OWNER_KEY)) === keyId;
+    if ((await this.ctx.storage.get<string>(OWNER_KEY)) !== keyId) {
+      return false;
+    }
+    await this.ctx.storage.delete(REG_DEBT_KEY);
+    return true;
   }
 
   /**
@@ -307,5 +349,31 @@ export class RelayCoordinator extends DurableObject {
     const next = used + 1;
     await this.ctx.storage.put({ [BUDGET_DAY_KEY]: day, [BUDGET_USED_KEY]: next });
     return { allowed: true, used: next, day };
+  }
+
+  /**
+   * Give a draw back, for a send that provably never reached the provider.
+   *
+   * The budget measures what the relay spends against the operator's FCM/APNs
+   * quota, so a request that failed before any provider request was made spent
+   * none of it. Without this, one wrong credential burns the whole day on
+   * traffic that never left Cloudflare, and the relay stays refused until UTC
+   * midnight after the credential is fixed.
+   *
+   * Only for failures the caller can prove made no provider request — NOT for a
+   * token the provider rejected. That request spent the quota, and refunding it
+   * would make invented device tokens free and the ceiling meaningless.
+   *
+   * A refund that arrives after the UTC day rolls over is dropped rather than
+   * taken off the new day's count: it belongs to a day that is already closed.
+   * Storage-only for the same gating reason as spendDailyBudget — keep it so.
+   */
+  async refundDailyBudget(now: number): Promise<void> {
+    const day = new Date(now).toISOString().slice(0, 10);
+    if ((await this.ctx.storage.get<string>(BUDGET_DAY_KEY)) !== day) {
+      return;
+    }
+    const used = (await this.ctx.storage.get<number>(BUDGET_USED_KEY)) ?? 0;
+    await this.ctx.storage.put(BUDGET_USED_KEY, Math.max(0, used - 1));
   }
 }

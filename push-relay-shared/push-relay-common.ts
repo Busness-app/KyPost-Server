@@ -584,6 +584,40 @@ export async function checkDailyBudget(
 }
 
 /**
+ * Give back a draw taken by a send that never reached the provider.
+ *
+ * checkDailyBudget draws before dispatch, because the counter has to be taken in
+ * the coordinator's serialized turn and the outcome is not known until after.
+ * That is right for the common case and wrong for the case where no provider
+ * request is ever made: a bad APNS_KEY_ID or FCM service account fails every
+ * send before it leaves Cloudflare, and un-refunded those failures spend the
+ * whole day's budget on zero delivery — so the relay stays refused until UTC
+ * midnight even after the credential is fixed.
+ *
+ * Callers refund ONLY on a result that proves no provider request was made
+ * (`reachedProvider: false`) or on a thrown send. A provider that answered — a
+ * dead token, a rejected token, a 5xx — spent the quota this budget bounds, and
+ * refunding those would make invented device tokens free.
+ *
+ * Best-effort and never throws: a failed refund overcounts the day by one, which
+ * is the safe direction, and the request it belongs to has already failed.
+ */
+export async function refundDailyBudget(rc: RequestContext, now: number = Date.now()): Promise<void> {
+  if ((rc.env.RELAY_DAILY_BUDGET ?? "").trim() === "") {
+    return;
+  }
+  const binding = rc.env.RELAY_COORDINATOR;
+  if (!binding || typeof binding.idFromName !== "function") {
+    return;
+  }
+  try {
+    await binding.get(binding.idFromName(BUDGET_INSTANCE)).refundDailyBudget(now);
+  } catch (err) {
+    rc.log({ level: "error", event: "budget.refund_failed", error: String((err as Error).message ?? err) });
+  }
+}
+
+/**
  * Record one accepted send to Analytics Engine (off the KV write path). Query
  * lifetime totals per key later via the WAE SQL API. Best-effort: never throws.
  */
@@ -938,18 +972,22 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   //
   // Reordering beats minting-then-rolling-back: a compensating revoke is another
   // write on the path that just failed, so it is exactly the write least likely
-  // to succeed. Here a failed mint instead leaves the coordinator pointing at an
-  // id that has no record, which costs nothing — revokeKeyById reports the
-  // unknown id as "already gone", the previous key is never revoked and keeps
-  // working, and the next registration displaces the dangling id.
+  // to succeed. A failed mint instead leaves the coordinator pointing at an id
+  // that has no record, and the previous key is never revoked and keeps working
+  // — which is only harmless because the claim below hands the obligation to
+  // revoke that previous key on to the next registration. This comment used to
+  // say a failed mint "costs nothing" while the coordinator returned the
+  // immediate predecessor only, and that was false: it dropped the sole
+  // reference to the live key, and the address kept two permanent keys forever.
   const keyId = crypto.randomUUID();
   // Swap first, then revoke what the swap displaced. The other order is the
   // race: two registrations can both read the same prior key and both believe
   // they superseded it, leaving both of their own keys active. Here each
-  // registration is handed its own immediate predecessor, so N racers form a
-  // chain of N-1 revocations and exactly one key is left standing.
+  // registration is handed its predecessor PLUS whatever its predecessor never
+  // got round to revoking, so N racers form a chain of revocations that no
+  // failed or superseded link can break and exactly one key is left standing.
   const legacyKeyId = await env.API_KEYS.get(IP_INDEX_PREFIX + registeredIp);
-  const priorId = await ipStub.claimRegistrationIp(keyId, legacyKeyId);
+  const priorIds = await ipStub.claimRegistrationIp(keyId, legacyKeyId);
 
   // Self-registered keys don't expire — they back long-lived servers.
   const { record, key } = await mintKey(env, rc, { label, registeredIp, id: keyId });
@@ -977,8 +1015,14 @@ export async function handleRegister(request: Request, rc: RequestContext): Prom
   // revokeKeyById's cleanup below; that costs nothing, because the coordinator
   // holds the real answer and ignores the seed once set.
   await env.API_KEYS.put(IP_INDEX_PREFIX + registeredIp, record.id);
-  if (priorId && (await revokeKeyById(env, priorId))) {
-    rc.log({ level: "info", event: "key.superseded", keyId: priorId, ip: registeredIp });
+  // Every id the claim handed over, not just the immediate predecessor: an
+  // uncommitted registration's debt is inherited, so this list is the whole
+  // backlog for this address. Most of it is usually dangling ids from mints that
+  // failed, which revokeKeyById reports as already gone.
+  for (const priorId of priorIds) {
+    if (await revokeKeyById(env, priorId)) {
+      rc.log({ level: "info", event: "key.superseded", keyId: priorId, ip: registeredIp });
+    }
   }
   return json({ id: record.id, label: record.label, key, expiresAt: record.expiresAt }, 201);
 }

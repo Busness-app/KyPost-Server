@@ -113,8 +113,15 @@ func (s *Server) handleIMAPTest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
+	// A malformed body is refused rather than silently read as "no fields
+	// supplied", which is a different request: the all-or-nothing rule below
+	// treats an empty payload as "test the stored configuration". An empty body
+	// (io.EOF) really is that request and stays valid.
 	var req imapConfigPayload
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid imap test payload", http.StatusBadRequest)
+		return
+	}
 
 	// All-or-nothing, deliberately. The fallback used to be applied per field,
 	// so a caller who supplied only a host — leaving username and password

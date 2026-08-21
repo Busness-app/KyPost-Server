@@ -185,3 +185,110 @@ test("the budget still bounds sends that do reach the provider", async () => {
     globalThis.fetch = realFetch;
   }
 });
+
+// The other half of the same question: what the budget must GIVE BACK.
+//
+// A draw that is never spent is a draw that should not have been taken. The
+// budget bounds what this relay spends against the operator's APNs quota, and a
+// send that fails before any request is made to Apple spends none of it — so
+// charging it is the same amplification as charging a refused claim, just
+// arrived at from the other end. The realistic shape is not an attacker: it is
+// one wrong APNS_KEY_ID. Every send then fails provider-token generation, and
+// by the time the operator notices and fixes it, the day's budget is gone and
+// the relay stays down until UTC midnight on traffic that never left Cloudflare.
+//
+// This is deliberately narrow. A token Apple REJECTED (410, BadDeviceToken) is
+// not refunded: that request reached Apple and spent the quota this budget
+// exists to bound. Refunding it would make garbage device tokens free and hand
+// any key holder an unmetered channel to Apple, which is the trade backwards.
+test("a send that never reaches Apple gives its budget draw back", async () => {
+  const e = await env();
+  // An empty token cache forces provider-token generation, and the harness's
+  // auth key is not a usable ES256 key — so the send fails before any request
+  // to Apple, exactly as a wrong APNS_KEY_ID does in production.
+  e.APNS_TOKEN_CACHE = {
+    async get() {
+      return null;
+    },
+    async put() {},
+    async delete() {},
+  } as unknown as typeof e.APNS_TOKEN_CACHE;
+
+  const workingCache = (await env()).APNS_TOKEN_CACHE;
+  const realFetch = globalThis.fetch;
+  let appleCalls = 0;
+  const deferred: Promise<unknown>[] = [];
+  const trackingCtx = { waitUntil(p: Promise<unknown>) { deferred.push(p); } };
+  globalThis.fetch = (async () => {
+    appleCalls++;
+    return new Response("", { status: 200 });
+  }) as typeof fetch;
+
+  const sendWith = (token: string) =>
+    worker.default.fetch(
+      new Request("https://relay.example/send", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + API_KEY },
+        body: JSON.stringify({ token, title: "t", body: "b" }),
+      }),
+      e,
+      trackingCtx,
+    );
+
+  try {
+    const failed = await sendWith("token-one");
+    assert.equal(failed.status, 502, "expected a delivery failure before Apple");
+    assert.equal(appleCalls, 0, "the send reached Apple after all; this test proves nothing");
+    await Promise.all(deferred);
+
+    // The operator fixes the credential. The budget is 1: if the failure above
+    // kept its draw, the relay is still down for the day having delivered
+    // nothing, and no amount of fixing brings it back before UTC midnight.
+    e.APNS_TOKEN_CACHE = workingCache;
+    const allowed = await sendWith("token-two");
+    assert.equal(
+      allowed.status,
+      200,
+      `a send that never reached Apple spent the day's budget; the next got ${allowed.status}`,
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a token Apple rejected keeps its budget draw", async () => {
+  const e = await env();
+
+  const realFetch = globalThis.fetch;
+  const deferred: Promise<unknown>[] = [];
+  const trackingCtx = { waitUntil(p: Promise<unknown>) { deferred.push(p); } };
+  let appleCalls = 0;
+  globalThis.fetch = (async () => {
+    appleCalls++;
+    return new Response(JSON.stringify({ reason: "BadDeviceToken" }), { status: 400 });
+  }) as typeof fetch;
+
+  const sendWith = (token: string) =>
+    worker.default.fetch(
+      new Request("https://relay.example/send", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + API_KEY },
+        body: JSON.stringify({ token, title: "t", body: "b" }),
+      }),
+      e,
+      trackingCtx,
+    );
+
+  try {
+    assert.equal((await sendWith("garbage-one")).status, 502);
+    assert.equal(appleCalls, 1, "the rejected send did not reach Apple");
+    await Promise.all(deferred);
+
+    // That request spent Apple's quota, so the budget of 1 is gone. Refunding
+    // it would make an endless stream of invented device tokens free.
+    const over = await sendWith("garbage-two");
+    assert.equal(over.status, 429, "a rejected device token was refunded the quota it spent");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

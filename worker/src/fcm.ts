@@ -25,10 +25,17 @@ export interface FcmMessage {
   data?: Record<string, string>;
 }
 
+/**
+ * `reachedProvider` is required on every failure so each construction site has
+ * to answer it. False means no FCM request was made, and the caller refunds the
+ * daily budget draw on the strength of it — a wrong answer either leaks the
+ * operator's quota or spends their whole day on nothing, so it is not a field to
+ * default. True is the conservative answer whenever a request may have gone out.
+ */
 export type FcmResult =
   | { ok: true }
-  | { ok: false; stale: true; status: number; detail: string }
-  | { ok: false; stale: false; status: number; detail: string };
+  | { ok: false; stale: true; reachedProvider: boolean; status: number; detail: string }
+  | { ok: false; stale: false; reachedProvider: boolean; status: number; detail: string };
 
 /**
  * Import a PKCS8 PEM RSA private key for RS256 signing.
@@ -254,6 +261,9 @@ export async function sendFcmMessage(
   cache: KVNamespace,
   message: FcmMessage,
 ): Promise<FcmResult> {
+  // Throws on a bad service account / drifted clock, before any request to FCM
+  // is made. handleSend catches it and refunds the budget draw on that basis —
+  // see the catch there. Nothing below this line may be moved above it.
   const accessToken = await getAccessToken(config, cache);
 
   const payload = {
@@ -282,7 +292,7 @@ export async function sendFcmMessage(
 
   const detail = (await resp.text()).trim();
   if (isStaleResponse(resp.status, detail)) {
-    return { ok: false, stale: true, status: resp.status, detail };
+    return { ok: false, stale: true, reachedProvider: true, status: resp.status, detail };
   }
-  return { ok: false, stale: false, status: resp.status, detail };
+  return { ok: false, stale: false, reachedProvider: true, status: resp.status, detail };
 }
