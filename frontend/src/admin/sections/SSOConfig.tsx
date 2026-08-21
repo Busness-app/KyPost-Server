@@ -7,7 +7,23 @@ type SSOSettings = {
   clientId: string;
   clientSecret?: string;
   autoProvision: boolean;
+  allowInsecureIssuer: boolean;
+  requireFreshEvents: boolean;
 };
+
+// The server refuses a cleartext issuer unless allowInsecureIssuer is set,
+// because the client secret and authorization code both travel that link.
+// Loopback is exempt: nothing leaves the machine.
+function isCleartextIssuer(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:") return false;
+    const host = parsed.hostname.toLowerCase();
+    return !(host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "[::1]" || host === "::1");
+  } catch {
+    return false;
+  }
+}
 
 export function SSOConfig() {
   const [settings, setSettings] = useState<SSOSettings>({
@@ -16,6 +32,8 @@ export function SSOConfig() {
     clientId: "",
     clientSecret: "",
     autoProvision: true,
+    allowInsecureIssuer: false,
+    requireFreshEvents: false,
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -143,6 +161,43 @@ export function SSOConfig() {
             onChange={(e) => setSettings({ ...settings, autoProvision: e.target.checked })}
           />
           <span>Auto-provision new accounts upon successful SSO authentication</span>
+        </label>
+      </div>
+
+      {isCleartextIssuer(settings.issuerUrl) || settings.allowInsecureIssuer ? (
+        <div className="field-group">
+          <label className="checkbox-label" style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={settings.allowInsecureIssuer}
+              onChange={(e) => setSettings({ ...settings, allowInsecureIssuer: e.target.checked })}
+            />
+            <span>
+              Allow a cleartext <code>http://</code> issuer
+              <span className="muted" style={{ fontSize: "0.75rem", display: "block" }}>
+                Your client secret and every authorization code will cross the network unencrypted, so anyone who can
+                watch that traffic can sign in as any of your users. Only for an identity provider on a trusted network
+                that has no TLS — prefer <code>https://</code>. Not needed for <code>localhost</code>.
+              </span>
+            </span>
+          </label>
+        </div>
+      ) : null}
+
+      <div className="field-group">
+        <label className="checkbox-label" style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem", cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={settings.requireFreshEvents}
+            onChange={(e) => setSettings({ ...settings, requireFreshEvents: e.target.checked })}
+          />
+          <span>
+            Require directory sync events to carry <code>jti</code> and <code>iat</code>
+            <span className="muted" style={{ fontSize: "0.75rem", display: "block" }}>
+              A signature proves who sent an event, not when. Without these fields a captured “promote to admin” event
+              stays valid forever and can be replayed. Turn this on once your provider sends them.
+            </span>
+          </span>
         </label>
       </div>
 

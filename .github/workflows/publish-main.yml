@@ -1,7 +1,16 @@
 name: publish main image
 
+# Triggered by ci.yml finishing, never by the push itself.
+#
+# Both workflows used to start from the same `push` event and race. Publishing
+# is faster than testing, so the ordinary outcome was that :main moved to a
+# commit whose test results did not exist yet — and if they came back red,
+# nothing withdrew the image. Consumers pulling :main got the broken build and
+# a provenance attestation proving exactly which broken source produced it.
 on:
-  push:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
     branches: [main]
 
 # Serialise publishes to :main. Two pushes racing both write the same
@@ -15,16 +24,79 @@ permissions:
   packages: write
   attestations: write
   id-token: write
+  # Read the check runs recorded against the tested commit. Without this the
+  # CI gate below cannot see whether every required job passed for it.
+  checks: read
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # A green run of ci.yml, for a push to main, and nothing else. The
+    # `branches:` filter above matches the triggering run's head branch, so it
+    # is restated here: if that filter is ever edited away, this stays.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     env:
       IMAGE_NAME: ghcr.io/yoshiofthewire/kypost-server
+      TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
+      # workflow_run checks out the default branch by default, which is a
+      # moving target. Build the commit CI actually tested.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # "The run concluded success" is weaker than it sounds: a run whose
+      # expensive ci-docker job was skipped still concludes success. Ask the
+      # same question release-image.yml asks — did every required job, named
+      # explicitly, complete successfully for this exact commit — so a job
+      # added to ci.yml and not added here is a visible omission rather than a
+      # silent hole in the gate.
+      - name: Require CI to have passed for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          if [ "$sha" != "$TESTED_SHA" ]; then
+            echo "::error::checked out $sha but CI ran against $TESTED_SHA" >&2
+            exit 1
+          fi
+          echo "tested commit: $sha"
+
+          required="ci-backend-api ci-backend-other ci-frontend ci-relay ci-scripts ci-docker"
+
+          # filter=latest asks the API for the most recent run per check name,
+          # so a re-run supersedes what it replaced.
+          runs="$(gh api --paginate \
+            "repos/${REPO}/commits/${sha}/check-runs?filter=latest&per_page=100" \
+            --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "none")"')"
+          echo "check runs for this commit:"
+          printf '%s\n' "${runs:-<none>}"
+
+          missing=""
+          for job in $required; do
+            rows="$(printf '%s\n' "$runs" | awk -F'\t' -v j="$job" '$1 == j { print $2 "/" $3 }')"
+            if [ -z "$rows" ]; then
+              missing="${missing} ${job}(absent)"
+              continue
+            fi
+            bad="$(printf '%s\n' "$rows" | grep -v '^completed/success$' || true)"
+            if [ -n "$bad" ]; then
+              missing="${missing} ${job}($(printf '%s' "$bad" | tr '\n' ','))"
+            fi
+          done
+
+          if [ -n "$missing" ]; then
+            echo "::error::refusing to publish ${sha}: CI did not pass for it —${missing}" >&2
+            exit 1
+          fi
+          echo "all required CI jobs passed for ${sha}"
 
       - name: Log in to GitHub Container Registry
         env:

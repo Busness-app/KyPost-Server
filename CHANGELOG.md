@@ -51,6 +51,78 @@ non-prerelease version.
 
 ### Security
 
+- **SSO ID tokens are now cryptographically verified.** The OIDC callback
+  base64-decoded the ID token payload and trusted it — no signature, issuer,
+  audience, expiry, algorithm or nonce was ever checked — so anything that could
+  answer the configured token endpoint could mint `{"role":"admin"}` and be
+  granted an administrator session. Verification is now delegated to
+  `github.com/coreos/go-oidc` and requires a signature from the issuer's
+  published JWKS using an asymmetric algorithm, an exact issuer, an audience
+  containing the client ID, unexpired `exp`, `nbf` not in the future, `at_hash`
+  matching the access token where the provider publishes one, a non-empty `sub`,
+  and a `nonce` bound to the browser that started the login. The hand-written
+  token parser is gone. **Anyone running SSO should treat previously
+  auto-provisioned accounts as unverified and review them.**
+
+- **An SSO identity can no longer seize an account by claiming its username.**
+  When no linked subject matched, the callback fell back to looking the account
+  up by `preferred_username` and silently linked whatever it found — so any
+  directory user who could set that claim to `admin` inherited the local
+  administrator and signed in with its role. Username collision is not proof of
+  ownership even when the provider genuinely signs it. An existing account is
+  now claimed only through a stored subject, or by linking from a session
+  already authenticated as that account; one subject can never be linked to two
+  accounts.
+
+- **The SSO state cookie no longer names the account to link.** It carried the
+  target user id, and the browser supplies it, so anyone who knew a victim's
+  user id could set that cookie, complete the flow with their own identity
+  provider account, and bind it to the victim's account. Link mode is now only a
+  marker; the account is resolved from the caller's authenticated session at
+  callback time.
+
+- **OIDC discovery is held to a transport policy.** The issuer had no scheme
+  requirement, no issuer-equality check, no response-size ceiling and no redirect
+  restriction, so a typo or a hostile discovery document could send the OAuth
+  client secret and authorization code to a cleartext or unrelated endpoint.
+  https is now required of the issuer and of every endpoint discovery names,
+  discovery must agree about its own issuer, redirects are refused, and bodies
+  are bounded. Cleartext `http://` stays available for loopback, and for a LAN
+  provider with no TLS via a new `allowInsecureIssuer` setting that an operator
+  must turn on deliberately. Invalid settings are refused when saved rather than
+  at the next sign-in.
+
+- **Directory replication no longer reports failed writes as successes.**
+  `POST /api/sync/webhook` discarded every persistence and credential-revocation
+  error and answered `200 {"ok":true}`, so a deactivation that never reached
+  disk was recorded as delivered, the identity provider stopped retrying, and a
+  removed user stayed authenticated. Errors now reach the sender: a 5xx means
+  retry, a 4xx means an operator must intervene, and unknown event types are
+  rejected instead of silently acknowledged. Removal also runs unconditionally,
+  so a retry after a half-applied deletion still performs the revocation the
+  first attempt skipped.
+
+- **Replication events can carry replay protection.** An HMAC proves who wrote
+  an event, never when, so a captured `user.updated{role:"admin"}` stayed valid
+  indefinitely and re-promoted a user the directory had since demoted. Events may
+  now carry `jti` and `iat` (the RFC 8417 Security Event Token fields OIDC
+  back-channel logout uses); those inside the freshness window are applied once
+  and replays are refused. They are optional until an operator enables
+  `requireFreshEvents`, so a sender that does not send them yet keeps working.
+
+- **A short OIDC subject no longer panics the callback.** Provisioning sliced
+  `sub[:8]`, and `sub` is whatever the provider chose — `42` is legal — so such a
+  provider broke sign-in entirely. Derived usernames now come from a hash of the
+  subject and are always valid.
+
+- **`:main` images are no longer published before CI has passed.** The publish
+  workflow started from the same push as the test workflow and raced it, so a
+  commit that failed authentication, migration, race or frontend tests could
+  still become the public `:main` image — with an attestation proving exactly
+  which broken source produced it. Publishing is now triggered by the test
+  workflow completing, and still refuses to move `:main` unless every required
+  job completed successfully for that exact commit.
+
 - **A recipient whose PGP key changed no longer gets a plaintext pickup link.**
   The resolver already refused to switch keys when a contact's pinned
   fingerprint stopped matching what discovery served, but the send path threw

@@ -270,6 +270,22 @@ jobs:
               || { echo "::error::release-image.yml is missing step: $step" >&2; exit 1; }
           done
 
+          # publish-main.yml has the same silent failure mode, and one stage
+          # that matters more than the rest: it must not move :main until this
+          # workflow has passed for the exact commit. It used to publish
+          # straight off the push, racing the tests it was supposed to wait
+          # for. Assert both the gate and the trigger that feeds it.
+          for step in \
+            "Require CI to have passed for this commit" \
+            "Build and publish main tag" \
+            "Publish GitHub image attestation" \
+            "Verify the attestation"; do
+            grep -qF -e "- name: $step" .github/workflows/publish-main.yml \
+              || { echo "::error::publish-main.yml is missing step: $step" >&2; exit 1; }
+          done
+          grep -qF "workflow_run:" .github/workflows/publish-main.yml \
+            || { echo "::error::publish-main.yml must trigger on workflow_run, not on push" >&2; exit 1; }
+
           # Anchored to the start of the line so this step does not read its
           # own grep patterns as workflow references.
           unpinned="$(grep -rhE '^[[:space:]]*(- )?uses:' .github/workflows/ \
