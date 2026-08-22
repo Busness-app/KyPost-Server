@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -165,6 +166,18 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 
 	logDir := config.LogDir()
 
+	// These three are diagnostics, not evidence: a classifier that cannot
+	// write its transcript should still classify mail, so an open failure is
+	// reported rather than fatal. The writer reopens on demand, so it starts
+	// working again if the operator fixes the directory.
+	openDiagnosticLog := func(name string) io.WriteCloser {
+		w, err := logging.NewRotatingWriter(filepath.Join(logDir, name), diagnosticLogMaxSize, diagnosticLogMaxFiles)
+		if err != nil {
+			slog.Error("classifier diagnostic log unavailable", "file", name, "error", err.Error())
+		}
+		return w
+	}
+
 	return &HTTPClient{
 		baseURL:        strings.TrimRight(baseURL, "/"),
 		apiKey:         strings.TrimSpace(apiKey),
@@ -174,9 +187,9 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 		tuningTemplate: tuningTemplate,
 		classifySem:    make(chan struct{}, concurrency),
 		paceInterval:   pace,
-		outputLog:      logging.NewRotatingWriter(filepath.Join(logDir, "classifier.log"), diagnosticLogMaxSize, diagnosticLogMaxFiles),
-		serverLog:      logging.NewRotatingWriter(filepath.Join(logDir, "classifier-server.log"), diagnosticLogMaxSize, diagnosticLogMaxFiles),
-		errorLog:       logging.NewRotatingWriter(filepath.Join(logDir, "classifier.err.log"), diagnosticLogMaxSize, diagnosticLogMaxFiles),
+		outputLog:      openDiagnosticLog("classifier.log"),
+		serverLog:      openDiagnosticLog("classifier-server.log"),
+		errorLog:       openDiagnosticLog("classifier.err.log"),
 	}
 }
 

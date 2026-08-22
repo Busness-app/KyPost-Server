@@ -53,6 +53,10 @@ export function SignIn({
 
   const auth = useAuth();
   const [ssoConfig, setSSOConfig] = useState<{ enabled: boolean; issuerUrl: string } | null>(null);
+  // A failed config read used to render exactly like "SSO is switched off":
+  // the card disappeared. For an account that HAS a linked identity that also
+  // takes away the unlink control, so the failure has to be visible.
+  const [ssoConfigError, setSSOConfigError] = useState("");
 
   // Enrollment state.
   const [qrDataUrl, setQrDataUrl] = useState("");
@@ -70,8 +74,11 @@ export function SignIn({
 
   useEffect(() => {
     getJSON<{ enabled: boolean; issuerUrl: string }>("/api/auth/sso-config")
-      .then((res) => setSSOConfig(res))
-      .catch(() => {});
+      .then((res) => {
+        setSSOConfig(res);
+        setSSOConfigError("");
+      })
+      .catch((error: unknown) => setSSOConfigError(toErrorMessage(error, "unknown error")));
   }, []);
 
   async function unlinkSSO() {
@@ -218,6 +225,21 @@ export function SignIn({
       {/* Credentials before factors: "what I know" reads ahead of "what I
           also have" for someone here to lock the account down. */}
       <Password />
+
+      {ssoConfigError ? (
+        <div className="sec-card">
+          <div className="sec-card-head">
+            <p className="sec-eyebrow">Single Sign-On</p>
+            <h3>KySignOn / OpenID Connect</h3>
+          </div>
+          <div className="sec-section">
+            <p className="sec-muted">
+              Single Sign-On settings could not be loaded ({ssoConfigError}). This is not the same
+              as SSO being switched off — reload to try again.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       {ssoConfig?.enabled ? (
         <div className={`sec-card ${auth.ssoSub ? "sec-card-on" : ""}`}>

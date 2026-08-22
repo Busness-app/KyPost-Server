@@ -18,10 +18,16 @@ type rotatingWriter struct {
 	currentSz int64
 }
 
-func newRotatingWriter(path string, maxSize int64, maxFiles int) *rotatingWriter {
+// newRotatingWriter returns a writer that is usable whether or not the initial
+// open succeeded — Write reopens on demand — together with that open's error.
+// The writer is returned alongside a non-nil error on purpose: a caller for whom
+// the log is diagnostic can report the failure and keep the self-healing writer,
+// while a caller for whom the log is durable evidence can refuse to continue.
+// Discarding the error here is what let a process run with no log file at all
+// while every layer above it believed logging had initialized.
+func newRotatingWriter(path string, maxSize int64, maxFiles int) (*rotatingWriter, error) {
 	w := &rotatingWriter{path: path, maxSize: maxSize, maxFiles: maxFiles}
-	_ = w.open()
-	return w
+	return w, w.open()
 }
 
 // NewRotatingWriter returns a size- and count-bounded rotating file writer,
@@ -29,7 +35,9 @@ func newRotatingWriter(path string, maxSize int64, maxFiles int) *rotatingWriter
 // timestamped/prefixed line format (rather than Logger's structured
 // key=value output) can still share this rotation implementation instead of
 // hand-rolling their own.
-func NewRotatingWriter(path string, maxSize int64, maxFiles int) io.WriteCloser {
+//
+// The returned writer is non-nil even when err is non-nil; see newRotatingWriter.
+func NewRotatingWriter(path string, maxSize int64, maxFiles int) (io.WriteCloser, error) {
 	return newRotatingWriter(path, maxSize, maxFiles)
 }
 

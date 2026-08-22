@@ -142,7 +142,10 @@ export function ContactsPage() {
     void refresh();
     void listGroups()
       .then(setGroups)
-      .catch(() => {});
+      // An empty group list and a group list that failed to load look
+      // identical in the UI, and the second one silently hides every group
+      // filter and every group a contact belongs to.
+      .catch((error: unknown) => setStatus(`Failed to load contact groups: ${toErrorMessage(error, "unknown error")}`));
     void getPGPIdentity()
       .then((identity) => setMyPgpKey(identity.publicKey))
       .catch(() => setMyPgpKey(""));

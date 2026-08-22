@@ -17,7 +17,14 @@ func New(logDir string) (*Logger, error) {
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, err
 	}
-	w := newRotatingWriter(filepath.Join(logDir, "app.log"), 16*1024*1024, 8)
+	// A logger that cannot open its file is a failed dependency, not a
+	// degraded one: this is the log operators read after an incident, and
+	// slog silently discards write errors, so nothing downstream would ever
+	// notice the absence.
+	w, err := newRotatingWriter(filepath.Join(logDir, "app.log"), 16*1024*1024, 8)
+	if err != nil {
+		return nil, err
+	}
 	mw := io.MultiWriter(os.Stdout, w)
 	return &Logger{
 		logger: slog.New(slog.NewTextHandler(mw, nil)),

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpError, postFormData, postJSON } from "./client";
+import { HttpError, SessionExpiredError, postFormData, postJSON } from "./client";
 
 function fakeJSONResponse(status: number, body: unknown) {
   return {
@@ -107,15 +107,28 @@ describe("postFormData", () => {
     expect((caught as Error).message).toBe("request failed: 413 - file too large");
   });
 
-  it("hands an expired session to the central 401 recovery instead of the caller", async () => {
+  it("hands an expired session to the central 401 recovery and still settles for the caller", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(fakeJSONResponse(401, { error: "unauthorized" })));
     const reload = vi.fn();
     vi.stubGlobal("location", { ...window.location, reload });
 
-    // The returned promise never settles by design (see requestJSON), so the
-    // assertion is that the reload fired and nothing was thrown at the caller.
-    const pending = postFormData("/api/contacts/import", new FormData());
-    await Promise.race([pending, Promise.resolve()]);
+    // The reload is the recovery, but it is not allowed to be the only thing
+    // that unwinds the caller: a promise that never settles leaves every
+    // caller's `finally` — loading flags, cleanup — permanently pending if the
+    // reload is blocked or deferred. Here reload is stubbed, which is exactly
+    // that case.
+    let settled = false;
+    let caught: unknown;
+    try {
+      await postFormData("/api/contacts/import", new FormData());
+    } catch (e) {
+      caught = e;
+    } finally {
+      settled = true;
+    }
+
     expect(reload).toHaveBeenCalled();
+    expect(settled).toBe(true);
+    expect(caught).toBeInstanceOf(SessionExpiredError);
   });
 });
