@@ -31,7 +31,10 @@ func TestRotate_NormalRotationHasNoErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
 
-	w := newRotatingWriter(path, 10, 2)
+	w, err := newRotatingWriter(path, 10, 2)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
 	defer w.Close()
 
 	if _, err := w.Write([]byte("0123456789")); err != nil {
@@ -62,7 +65,10 @@ func TestRotate_SurfacesRenameErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
 
-	w := newRotatingWriter(path, 1<<20, 2)
+	w, err := newRotatingWriter(path, 1<<20, 2)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
 	defer func() {
 		_ = os.Chmod(dir, 0o755) // restore so t.TempDir() cleanup can remove it
 		w.Close()
@@ -82,7 +88,7 @@ func TestRotate_SurfacesRenameErrors(t *testing.T) {
 		t.Fatalf("chmod dir: %v", err)
 	}
 
-	err := w.rotate()
+	err = w.rotate()
 	if err == nil {
 		t.Fatal("rotate() returned nil error despite a failed rename; the failure was silently swallowed")
 	}
@@ -105,7 +111,10 @@ func TestRotate_PreservesSizeOnFailedRename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
 
-	w := newRotatingWriter(path, 1<<20, 2)
+	w, err := newRotatingWriter(path, 1<<20, 2)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
 	defer func() {
 		_ = os.Chmod(dir, 0o755)
 		_ = os.Chmod(path, 0o644)
@@ -132,7 +141,7 @@ func TestRotate_PreservesSizeOnFailedRename(t *testing.T) {
 		t.Fatalf("chmod file: %v", err)
 	}
 
-	err := w.rotate()
+	err = w.rotate()
 	if err == nil {
 		t.Fatal("rotate() returned nil error despite failed rename and failed reopen")
 	}
@@ -156,7 +165,10 @@ func TestRotate_JoinsMultipleErrors(t *testing.T) {
 
 	// maxFiles=3 so the backup-rotation loop (path.2 -> path.3) also runs
 	// and can independently fail alongside the main rename.
-	w := newRotatingWriter(path, 1<<20, 3)
+	w, err := newRotatingWriter(path, 1<<20, 3)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
 	defer func() {
 		_ = os.Chmod(dir, 0o755)
 		w.Close()
@@ -173,7 +185,7 @@ func TestRotate_JoinsMultipleErrors(t *testing.T) {
 		t.Fatalf("chmod dir: %v", err)
 	}
 
-	err := w.rotate()
+	err = w.rotate()
 	if err == nil {
 		t.Fatal("rotate() returned nil error despite multiple failing filesystem operations")
 	}
@@ -209,7 +221,10 @@ func TestRotate_SurfacesInitialStatErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
 
-	w := newRotatingWriter(path, 1<<20, 2)
+	w, err := newRotatingWriter(path, 1<<20, 2)
+	if err != nil {
+		t.Fatalf("newRotatingWriter: %v", err)
+	}
 	defer func() {
 		_ = os.Chmod(dir, 0o755) // restore so t.TempDir() cleanup can remove it
 		w.Close()
@@ -237,7 +252,7 @@ func TestRotate_SurfacesInitialStatErrors(t *testing.T) {
 		t.Fatalf("chmod dir: %v", err)
 	}
 
-	err := w.rotate()
+	err = w.rotate()
 	if err == nil {
 		t.Fatal("rotate() returned nil error despite a non-ENOENT failure of the initial Stat")
 	}

@@ -74,7 +74,7 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 ### Auth Flow
 
 1. App mounts → `App.useEffect` calls `GET /api/auth/me`
-2. 401 → redirect to `LoginPage`
+2. 401 → redirect to `LoginPage`. On any endpoint outside `/api/auth/`, `client.ts` reloads the page and throws `SessionExpiredError`. It must *throw*, not hang: it used to return a never-settling promise so no caller acted on a dead session, which also meant no caller's `finally` ran — loading flags stayed set and cleanup never happened whenever the reload was blocked, deferred, or stubbed. Callers that must not render an expiry as an ordinary failure check for the type
 3. Successful login → session cookie set → redirect to `ReadPage`
 4. First login with temporary password → `mustChangePassword` flag → redirect to password-change form
 

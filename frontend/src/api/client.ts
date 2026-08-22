@@ -20,6 +20,18 @@ export class HttpError extends Error {
   }
 }
 
+// SessionExpiredError is thrown when the server rejects a request because the
+// session is gone. It is not a request failure the caller can retry or report:
+// a full reload is already in flight, and the only reason it surfaces at all is
+// so `finally` blocks run and callers can tell an expiry apart from a real
+// error.
+export class SessionExpiredError extends Error {
+  constructor() {
+    super("session expired");
+    this.name = "SessionExpiredError";
+  }
+}
+
 // readCsrfToken reads the non-HttpOnly csrf_token cookie the backend sets
 // alongside the session cookie at login (double-submit CSRF pattern — see
 // backend's csrfCheckOK). It carries no authority on its own; it only proves
@@ -56,12 +68,20 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
     // expected, in-band outcome (login, password change, MFA challenge)
     // lives under /api/auth/ and is excluded above. Force a hard reload
     // rather than trying to recover in-SPA: it re-triggers the normal
-    // "not authenticated" flow (see refreshAuth/App.tsx) cleanly. Return a
-    // never-resolving promise so no caller's .then/catch runs against this
-    // response while the reload is in flight (reload() doesn't synchronously
-    // halt JS execution in every browser).
+    // "not authenticated" flow (see refreshAuth/App.tsx) cleanly.
+    //
+    // Reject rather than hang. This used to return a never-settling promise so
+    // that no caller's .then ran against a session that no longer exists — but
+    // it also stopped every caller's `finally` from running, which is where the
+    // loading flags get cleared and the cleanup happens. That is only harmless
+    // while the reload is guaranteed to win the race, and it isn't: reload can
+    // be blocked, deferred by the browser's lifecycle handling, or (in tests)
+    // stubbed. A distinct error type keeps the original intent available —
+    // callers that must not render an expiry as a normal failure can check for
+    // it — without making "the page is about to reload" the only thing keeping
+    // application state consistent.
     window.location.reload();
-    return new Promise<T>(() => {});
+    throw new SessionExpiredError();
   }
   if (!response.ok) {
     let detail = "";

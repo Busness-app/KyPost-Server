@@ -304,6 +304,49 @@ non-prerelease version.
 
 ### Fixed
 
+- **A server that cannot open its log file no longer starts anyway.** The
+  rotating writer's initial `open` was discarded, so `logging.New` reported
+  success whatever happened — and because `slog` drops write errors, the process
+  then ran with no durable log and nothing to indicate it. An `app.log` that is
+  unwritable or has become a directory (a bad mount, a permission change on the
+  volume) meant the security and incident record was simply absent when someone
+  went looking for it. The error is now propagated and startup refuses. The
+  classifier's three diagnostic logs stay non-fatal but now report the failure
+  instead of swallowing it.
+
+- **A notification whose stored payload will not decode is no longer reported as
+  delivered.** `PullNotificationsAfterStrict` discarded the JSON error and
+  returned the notification with its routing metadata missing; the handler
+  answered 200 and the device advanced its cursor past a notification it never
+  received, permanently. The read now fails, and the handler already fails closed
+  with 503 on it.
+
+- **An expired session settles the caller's promise instead of hanging it.**
+  `client.ts` answered a 401 by reloading the page and returning a promise that
+  by design never settled, so no caller acted on a dead session — but no caller's
+  `finally` ran either, leaving loading flags set and cleanup undone whenever the
+  reload was blocked, deferred, or stubbed. It now reloads and throws
+  `SessionExpiredError`.
+
+- **Three UI failures are visible rather than erased.** The contact group list,
+  the admin log file list, and the Single Sign-On configuration each had a
+  `catch(() => {})`, so a failed load rendered identically to "there is nothing
+  here" — an administrator opening Logs during the incident they were
+  investigating saw no files, and an account with a linked SSO identity lost the
+  unlink control entirely. Each now reports the failure.
+
+- **The lock-order check can no longer pass because a mutex was never
+  registered.** `TestLockOrderIsRespected` ignores any mutex missing from
+  `lockRank`, which meant the suite went green precisely when the step it exists
+  to enforce was skipped — `pinProbeMu` had shipped unranked.
+  `TestEveryServerMutexIsRanked` now reads the `Server` struct and fails on any
+  unranked mutex.
+
+- **Relay tests are discovered, not listed.** CI named eight test files by hand,
+  so a new one ran only if whoever added it also edited the workflow, and
+  `npm test` failed outright in both Worker packages. `scripts/test-relays.sh` is
+  now the single command CI and both packages use.
+
 - **Encrypted Sent copies no longer lose their BCC recipients.** The copy was
   built by encrypting the delivered message, which omits `Bcc` on purpose so no
   recipient can see who else received it — and `SaveSent` ignores the draft's

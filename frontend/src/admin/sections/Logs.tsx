@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { getJSON } from "../../api/client";
+import { getJSON, toErrorMessage } from "../../api/client";
 
 const LINE_OPTIONS = [50, 100, 200, 500, 1000];
 const REFRESH_OPTIONS = [
@@ -123,6 +123,10 @@ function LogViewer({ filename }: { filename: string }) {
 export function Logs() {
   const [files, setFiles]   = useState<string[]>([]);
   const [active, setActive] = useState<string>("app.log");
+  // "The list could not be read" and "there are no logs" are the same picture
+  // to an administrator, and the first one is most likely during exactly the
+  // incident they opened this page to investigate.
+  const [listError, setListError] = useState("");
 
   useEffect(() => {
     getJSON<{ files: string[] }>("/api/logs/list")
@@ -131,9 +135,10 @@ export function Logs() {
           (d.files ?? []).filter((name) => !HIDDEN_LOG_FILES.includes(name))
         );
         setFiles(list);
+        setListError("");
         if (list.length > 0 && !list.includes(active)) setActive(list[0]);
       })
-      .catch(() => {});
+      .catch((error: unknown) => setListError(toErrorMessage(error, "unknown error")));
   }, []);
 
   return (
@@ -159,7 +164,13 @@ export function Logs() {
             {tabLabel(f)}
           </button>
         ))}
-        {files.length === 0 && <span style={{ padding: "0.35rem 0.5rem", fontSize: "0.8rem", opacity: 0.4 }}>Loading...</span>}
+        {files.length === 0 && (
+          listError
+            ? <span style={{ padding: "0.35rem 0.5rem", fontSize: "0.8rem", color: "var(--bad, #ff6b6b)" }}>
+                Log file list unavailable: {listError}
+              </span>
+            : <span style={{ padding: "0.35rem 0.5rem", fontSize: "0.8rem", opacity: 0.4 }}>Loading...</span>
+        )}
       </div>
 
       {active && <LogViewer key={active} filename={active} />}

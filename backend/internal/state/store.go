@@ -779,7 +779,14 @@ func (s *Store) PullNotificationsAfterStrict(after int64) ([]PullNotification, i
 			return nil, cursor, err
 		}
 		if data != "" && data != "null" {
-			_ = json.Unmarshal([]byte(data), &n.Data)
+			// A notification whose payload will not decode has lost the
+			// routing metadata the device acts on. Returning it anyway is
+			// worse than returning nothing: the handler reports success and
+			// the client advances its cursor past a notification it never
+			// actually received.
+			if err := json.Unmarshal([]byte(data), &n.Data); err != nil {
+				return nil, cursor, fmt.Errorf("decode pull notification %d: %w", n.Seq, err)
+			}
 		}
 		out = append(out, n)
 	}

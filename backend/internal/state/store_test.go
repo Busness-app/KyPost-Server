@@ -847,3 +847,45 @@ func TestDiskUsageIncludesWAL(t *testing.T) {
 		t.Fatalf("DiskUsageBytes did not grow after 200 inserts: %d -> %d", before, after)
 	}
 }
+
+// TestPullNotificationsAfterStrictRejectsCorruptPayload pins the "strict" in the
+// name. The data column is written by an older/newer build of this same server,
+// so a payload this build cannot decode is reachable without any corruption of
+// the file itself. Returning the row with an empty Data — its routing metadata
+// gone — while reporting success is the worst of the three options: the handler
+// answers 200, the device advances its cursor past the seq, and the real
+// notification is never delivered.
+func TestPullNotificationsAfterStrictRejectsCorruptPayload(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.EnqueuePullNotification(PullNotification{
+		Title: "New mail",
+		Body:  "from someone",
+		Data:  map[string]string{"messageId": "msg-1"},
+	}); err != nil {
+		t.Fatalf("EnqueuePullNotification: %v", err)
+	}
+
+	// Sanity: the well-formed row reads back before we damage it.
+	notes, _, err := store.PullNotificationsAfterStrict(0)
+	if err != nil || len(notes) != 1 {
+		t.Fatalf("PullNotificationsAfterStrict on a healthy row = %d notes, %v; want 1, nil", len(notes), err)
+	}
+
+	if _, err := store.db.Exec(`UPDATE pull_notifications SET data = ? WHERE seq = ?`, "{not json", notes[0].Seq); err != nil {
+		t.Fatalf("corrupt the payload: %v", err)
+	}
+
+	got, _, err := store.PullNotificationsAfterStrict(0)
+	if err == nil {
+		t.Fatalf("PullNotificationsAfterStrict returned no error for an undecodable payload; "+
+			"the client would advance its cursor past a notification it never received (got %d notifications)", len(got))
+	}
+	if got != nil {
+		t.Errorf("PullNotificationsAfterStrict returned %d notifications alongside an error, want nil", len(got))
+	}
+}

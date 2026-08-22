@@ -37,15 +37,12 @@ The Cloudflare Workers that deliver KyPost push notifications for every self-hos
 
 ```sh
 cd worker && npm ci && npm run typecheck       # and the same in worker-apns/
-node --test \
-  push-relay-shared/relay-claims.test.mts \
-  push-relay-shared/relay-budget.test.mts \
-  worker-apns/src/apns-config.test.mts \
-  worker-apns/src/apns-stale.test.mts \
-  worker-apns/src/apns-payload.test.mts \
-  worker-apns/src/send-budget-order.test.mts \
-  worker/src/fcm-oauth-redaction.test.mts \
-  worker/src/fcm-stale.test.mts
+./scripts/test-relays.sh                       # or `npm test` in either Worker package
 ```
 
-Both run in CI as the `ci-relay` job. The test uses node's own runner and type stripping (Node >= 22.18) with no dependencies; it stubs `cloudflare:workers` through a module hook so the Durable Object can run outside workerd. The `.mts` extension is load-bearing: there is no `package.json` above this directory, so a `.ts` file would be ESM only by Node's syntax detection, and adding one later would silently turn the test into a parse error.
+`scripts/test-relays.sh` is the one canonical relay test command: CI runs it, and
+`npm test` in `worker/` and `worker-apns/` delegates to it. It discovers
+`*.test.mts` under `push-relay-shared/`, `worker/src/`, and `worker-apns/src/`,
+pruning `node_modules` (which is why `node --test <dir>` cannot be used directly),
+and fails if it finds none. A new test file therefore runs without anyone editing
+a list. Both run in CI as the `ci-relay` job. The test uses node's own runner and type stripping (Node >= 22.18) with no dependencies; it stubs `cloudflare:workers` through a module hook so the Durable Object can run outside workerd. The `.mts` extension is load-bearing: there is no `package.json` above this directory, so a `.ts` file would be ESM only by Node's syntax detection, and adding one later would silently turn the test into a parse error.

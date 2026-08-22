@@ -22,14 +22,85 @@ import (
 // under concurrent load, in production, and no unit test would provoke it.
 //
 // Adding a mutex to Server means adding it here. A lock absent from this map is
-// invisible to the check.
+// invisible to the ordering check below — which is why TestEveryServerMutexIsRanked
+// reads the struct and fails when one is missing, rather than trusting the next
+// person to remember.
 var lockRank = map[string]int{
-	"cfgMu":     1,
-	"sessMu":    2,
-	"pairingMu": 3,
-	"userMu":    4,
-	"ollamaMu":  5,
-	"serverMu":  6,
+	"cfgMu":      1,
+	"sessMu":     2,
+	"pairingMu":  3,
+	"userMu":     4,
+	"ollamaMu":   5,
+	"serverMu":   6,
+	"pinProbeMu": 7,
+}
+
+// TestEveryServerMutexIsRanked closes the hole that made the ordering check
+// opt-in: mutexCall ignores any field not present in lockRank, so a mutex nobody
+// registered is not "unchecked", it is invisible — and the suite goes green
+// precisely when the step it exists to enforce was skipped. It was not
+// hypothetical: pinProbeMu shipped unranked.
+//
+// The struct is the source of truth; lockRank has to match it.
+func TestEveryServerMutexIsRanked(t *testing.T) {
+	fields := serverMutexFields(t)
+	if len(fields) == 0 {
+		t.Fatal("no mutex fields found on Server; this test is no longer reading the struct")
+	}
+	for _, name := range fields {
+		if _, ranked := lockRank[name]; !ranked {
+			t.Errorf("Server.%s is a mutex with no entry in lockRank. Until it has one, "+
+				"TestLockOrderIsRespected cannot see it at all: every acquisition of it, in any "+
+				"order, passes. Give it a rank in the order it must be taken relative to %s.",
+				name, declaredOrder())
+		}
+	}
+	ranked := map[string]bool{}
+	for _, name := range fields {
+		ranked[name] = true
+	}
+	for name := range lockRank {
+		if !ranked[name] {
+			t.Errorf("lockRank has %s, but Server has no such mutex field; it was renamed or removed", name)
+		}
+	}
+}
+
+// serverMutexFields reports the names of Server's sync.Mutex/sync.RWMutex fields.
+func serverMutexFields(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, file := range parsePackage(t) {
+		ast.Inspect(file.ast, func(n ast.Node) bool {
+			spec, ok := n.(*ast.TypeSpec)
+			if !ok || spec.Name.Name != "Server" {
+				return true
+			}
+			st, ok := spec.Type.(*ast.StructType)
+			if !ok {
+				return true
+			}
+			for _, field := range st.Fields.List {
+				sel, ok := field.Type.(*ast.SelectorExpr)
+				if !ok {
+					continue
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if !ok || pkg.Name != "sync" {
+					continue
+				}
+				if sel.Sel.Name != "Mutex" && sel.Sel.Name != "RWMutex" {
+					continue
+				}
+				for _, name := range field.Names {
+					out = append(out, name.Name)
+				}
+			}
+			return false
+		})
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestLockOrderIsRespected enforces lockRank across the package, including
