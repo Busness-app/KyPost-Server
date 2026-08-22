@@ -24,11 +24,21 @@ non-prerelease version.
   `kypost://native-pair` link now carries `pin=`, the base64 SHA-256 of the
   serving certificate's leaf SubjectPublicKeyInfo, and the app pins the
   registration handshake to that one key before sending anything. Read live from
-  the certificate in use at link-generation time, so renewals need no action. Only
-  published where this process terminates TLS: behind a reverse proxy the
-  certificate the device sees is the proxy's, and the app fails closed on a
-  mismatch, so a pin we cannot vouch for would break pairing rather than secure
-  it. Absent `pin` keeps today's trust-on-first-use behaviour.
+  the certificate in use at link-generation time, so renewals need no action.
+  Reverse-proxy deployments are covered without configuration: the server reads
+  the pin from a verified handshake with `SERVER_BASE_URL`, which is the
+  certificate the device is actually handed — for the `cloudflared` setup the
+  docs describe there is no certificate on disk to read at all, and the probe
+  leaves over anycast to the same edge rather than depending on the router
+  hairpinning traffic back to itself. Falls back to this process's own
+  certificate when it terminates TLS. The chain is verified, so a deployment
+  behind a private CA gets no pin and should set `TLS_CERT_FILE` instead; every
+  other failure leaves `pin` absent, which keeps today's trust-on-first-use
+  behaviour rather than breaking pairing.
+
+  Pinning behind a terminating proxy pins you to that proxy. With Cloudflare in
+  front, this closes the hostile-local-network hole — it does not make the
+  tunnel end-to-end, and Cloudflare still terminates.
 
 - **Client-protected PGP identities can be backed up and restored.** Security
   now downloads a browser-encrypted recovery file and displays its separate

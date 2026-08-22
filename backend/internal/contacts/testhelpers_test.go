@@ -42,15 +42,6 @@ func mustSearch(t *testing.T, s *Store, query string, limit int) []Contact {
 	return out
 }
 
-func mustChangedSince(t *testing.T, s *Store, rev int64) ([]Contact, []Contact, int64, bool) {
-	t.Helper()
-	changed, deleted, cursor, tooOld, err := s.ChangedSince(rev)
-	if err != nil {
-		t.Fatalf("ChangedSince(%d): %v", rev, err)
-	}
-	return changed, deleted, cursor, tooOld
-}
-
 func mustPGPKeyGeneration(t *testing.T, s *Store) int64 {
 	t.Helper()
 	gen, err := s.PGPKeyGeneration()

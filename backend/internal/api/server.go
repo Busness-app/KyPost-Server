@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -215,6 +216,17 @@ type Server struct {
 	tlsErr      error
 	tlsCertFile string
 	tlsKeyFile  string
+
+	// Negative cache for the outbound certificate probe behind the pairing
+	// link's pin — see probedSPKIPin. Only failures are remembered, and only
+	// so a deployment whose router will not hairpin does not pay the dial
+	// timeout on every refresh of a 90-second pairing code.
+	pinProbeMu       sync.Mutex
+	pinProbeHost     string
+	pinProbeFailedAt time.Time
+	// pinProbeRoots overrides the system certificate pool for that probe.
+	// nil everywhere but tests, which point it at an httptest server's CA.
+	pinProbeRoots *x509.CertPool
 
 	// httpServer is the live *http.Server backing Run/Serve, constructed by
 	// Prepare so that a Shutdown call arriving before Serve's goroutine has

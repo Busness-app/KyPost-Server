@@ -18,10 +18,3 @@ func must2[A, B any](a A, b B, err error) (A, B) {
 	}
 	return a, b
 }
-
-func must4[A, B, C, D any](a A, b B, c C, d D, err error) (A, B, C, D) {
-	if err != nil {
-		panic(err)
-	}
-	return a, b, c, d
-}
