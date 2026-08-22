@@ -42,7 +42,11 @@ func (s *Server) handleContactsSearch(w http.ResponseWriter, r *http.Request) {
 		limit = contactsSearchMaxLimit
 	}
 
-	results := store.Search(q, limit)
+	results, err := store.Search(q, limit)
+	if err != nil {
+		http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+		return
+	}
 	if results == nil {
 		results = []contacts.Contact{}
 	}

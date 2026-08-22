@@ -35,7 +35,7 @@ func TestSyncDoesNotGraftAVerdictOntoADifferentMessage(t *testing.T) {
 		t.Fatalf("Sync: %v", err)
 	}
 
-	got, _ := s.Snapshot("INBOX", 1)
+	got, _ := mustSnapshot(t, s, "INBOX", 1)
 	if len(got) != 1 {
 		t.Fatalf("expected one entry, got %d", len(got))
 	}
@@ -73,7 +73,7 @@ func TestSyncKeepsTheVerdictAcrossAFlagFlip(t *testing.T) {
 		t.Fatalf("Sync: %v", err)
 	}
 
-	got, _ := s.Snapshot("INBOX", 1)
+	got, _ := mustSnapshot(t, s, "INBOX", 1)
 	if len(got) != 1 {
 		t.Fatalf("expected one entry, got %d", len(got))
 	}

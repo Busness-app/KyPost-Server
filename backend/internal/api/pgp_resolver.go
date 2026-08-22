@@ -43,6 +43,12 @@ type resolvedKey struct {
 	Fingerprint string
 	Tier        resolveTier
 	Usable      bool
+	// Err is set when the address book could not be read at all. It is not
+	// tierNone: tierNone means "this recipient has no key", which the send
+	// path answers by offering the plaintext pickup fallback. A storage fault
+	// reported as tierNone would invite the sender to downgrade a recipient
+	// whose pinned key was there all along.
+	Err error
 }
 
 // keyResolver runs the PGP key discovery ladder — pinned contact key → WKD
@@ -66,16 +72,20 @@ type keyResolver struct {
 // insensitively. Unlike findContactPGPKey (server.go), this returns the
 // whole Contact so callers can inspect/update provenance fields beyond
 // PGPKey.
-func findContact(store *contacts.Store, email string) (contacts.Contact, bool) {
+func findContact(store *contacts.Store, email string) (contacts.Contact, bool, error) {
+	all, err := store.List()
+	if err != nil {
+		return contacts.Contact{}, false, err
+	}
 	target := strings.ToLower(strings.TrimSpace(email))
-	for _, c := range store.List() {
+	for _, c := range all {
 		for _, e := range c.Emails {
 			if strings.ToLower(strings.TrimSpace(e.Value)) == target {
-				return c, true
+				return c, true, nil
 			}
 		}
 	}
-	return contacts.Contact{}, false
+	return contacts.Contact{}, false, nil
 }
 
 // pin writes a discovered key + provenance to the matching contact,
@@ -86,7 +96,13 @@ func findContact(store *contacts.Store, email string) (contacts.Contact, bool) {
 // a refresh of the same key and any existing source/verified provenance
 // (e.g. a manual, eyeball-verified pin) is preserved rather than downgraded.
 func (kr *keyResolver) pin(email, armored, fingerprint, source string) {
-	c, ok := findContact(kr.store, email)
+	c, ok, err := findContact(kr.store, email)
+	if err != nil {
+		// Creating a contact here would pin a discovered key to a brand-new
+		// record while an existing, possibly manually verified one sits in an
+		// unreadable file. Skip the pin; the send still uses the key it holds.
+		return
+	}
 	if !ok {
 		c = contacts.Contact{
 			FormattedName:    email,
@@ -129,7 +145,10 @@ func (kr *keyResolver) resolve(ctx context.Context, email string) resolvedKey {
 		return resolvedKey{Tier: tierNone}
 	}
 	email = parsed.Address
-	c, hasContact := findContact(kr.store, email)
+	c, hasContact, err := findContact(kr.store, email)
+	if err != nil {
+		return resolvedKey{Tier: tierNone, Err: err}
+	}
 	pinnedFP := ""
 	if hasContact && c.PGPKey != "" {
 		if st, err := pgpmail.CheckKeyStatus(c.PGPKey); err == nil && st.Usable() {

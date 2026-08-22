@@ -158,6 +158,10 @@ func (s *Store) InvalidatePGPVerdicts() error {
 	return s.persistLocked()
 }
 
+// refreshFromDiskLocked re-reads mailcache.json into memory. Its error is
+// never discarded: entries carry PGP signature verdicts and warm bodies, so an
+// in-memory copy served after a failed re-read is a message body and a trust
+// badge this process can no longer confirm.
 func (s *Store) refreshFromDiskLocked() error {
 	return fsutil.LoadJSONFile(s.path(), s.applyFile, nil)
 }
@@ -171,27 +175,34 @@ func (s *Store) persistLocked() error {
 // snapshot alone with zero IMAP calls: the window must hold at least limit
 // entries and every one of the returned entries must have a non-empty Body.
 // Read-only; never mutates the store.
-func (s *Store) Snapshot(mailboxKey string, limit int) ([]Entry, bool) {
+//
+// A failed disk re-read is an error, not an empty window. Entries carry warm
+// bodies and cached signature verdicts, so serving whatever this process last
+// managed to load would present a stale body — and a badge computed against an
+// address book generation that can no longer be checked — as current.
+func (s *Store) Snapshot(mailboxKey string, limit int) ([]Entry, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, false, err
+	}
 
 	if limit <= 0 {
-		return nil, false
+		return nil, false, nil
 	}
 	win := s.mailboxes[mailboxKey]
 	if win == nil || len(win.Entries) < limit {
 		if win == nil {
-			return nil, false
+			return nil, false, nil
 		}
-		return append([]Entry{}, win.Entries...), false
+		return append([]Entry{}, win.Entries...), false, nil
 	}
 
 	start := len(win.Entries) - limit
 	out := append([]Entry{}, win.Entries[start:]...)
 	for _, e := range out {
 		if e.Body == "" {
-			return out, false
+			return out, false, nil
 		}
 		// A body is not enough. The daemon poller writes a body but never looks
 		// for PGP content, so serving its entry as warm reported "not signed"
@@ -200,10 +211,10 @@ func (s *Store) Snapshot(mailboxKey string, limit int) ([]Entry, bool) {
 		// turned the check off rather than merely dropping a badge. Report the
 		// window cold so the caller does a live fetch and classifies.
 		if !e.PGPClassified {
-			return out, false
+			return out, false, nil
 		}
 	}
-	return out, true
+	return out, true, nil
 }
 
 // Sync reconciles mailboxKey's cached window against a freshly fetched live

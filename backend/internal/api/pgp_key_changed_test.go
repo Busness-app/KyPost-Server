@@ -77,8 +77,8 @@ func TestKeyChangedRecipientIsNotTreatedAsKeyless(t *testing.T) {
 		settings: pgpdiscovery.Settings{StoreDiscoveredKeys: true},
 		discover: true,
 	}
-	plan := buildPGPRecipientPlan(context.Background(),
-		[]string{"alice@example.com"}, nil, nil, resolver)
+	plan := must1(buildPGPRecipientPlan(context.Background(),
+		[]string{"alice@example.com"}, nil, nil, resolver))
 
 	for _, e := range plan.withoutKeyEmails {
 		if strings.EqualFold(e, "alice@example.com") {

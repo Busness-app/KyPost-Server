@@ -169,38 +169,42 @@ func sanitizeHeaderValue(value string) string {
 // findContactPGPKey looks up email among the store's contacts (case-
 // insensitive) and returns its armored PGP public key, if the matching
 // contact has one on file.
-func findContactPGPKey(store *contacts.Store, email string) (string, bool) {
+func findContactPGPKey(store *contacts.Store, email string) (string, bool, error) {
 	target := strings.ToLower(strings.TrimSpace(email))
 	if target == "" {
-		return "", false
+		return "", false, nil
 	}
-	for _, c := range store.List() {
+	all, err := store.List()
+	if err != nil {
+		return "", false, err
+	}
+	for _, c := range all {
 		if c.PGPKey == "" {
 			continue
 		}
 		for _, e := range c.Emails {
 			if strings.ToLower(strings.TrimSpace(e.Value)) == target {
-				return c.PGPKey, true
+				return c.PGPKey, true, nil
 			}
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 // buildPGPRecipientPlan resolves each recipient's contact PGP key and
 // builds a pgpRecipientPlan. Recipients are deduplicated case-insensitively
 // across To+CC+BCC combined, keeping only the first occurrence — an address
 // listed in both To and BCC is treated as a To recipient.
-func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string, resolver *keyResolver) pgpRecipientPlan {
+func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string, resolver *keyResolver) (pgpRecipientPlan, error) {
 	var plan pgpRecipientPlan
 	seen := map[string]bool{}
 
 	// The TIER is load-bearing and must not be collapsed away here: tierKeyChanged
 	// carries Usable:false, so returning only (Armored, Usable) made a broken pin
 	// indistinguishable from a recipient who never had a key.
-	resolve := func(recipient string) (armoredKey string, usable bool, changed bool) {
+	resolve := func(recipient string) (armoredKey string, usable bool, changed bool, err error) {
 		rk := resolver.resolve(ctx, recipient)
-		return rk.Armored, rk.Usable, rk.Tier == tierKeyChanged
+		return rk.Armored, rk.Usable, rk.Tier == tierKeyChanged, rk.Err
 	}
 
 	toCC := append(append([]string{}, toList...), ccList...)
@@ -210,7 +214,10 @@ func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string
 			continue
 		}
 		seen[lower] = true
-		key, ok, changed := resolve(recipient)
+		key, ok, changed, err := resolve(recipient)
+		if err != nil {
+			return pgpRecipientPlan{}, err
+		}
 		switch {
 		case ok:
 			plan.toCCEmails = append(plan.toCCEmails, recipient)
@@ -227,7 +234,10 @@ func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string
 			continue
 		}
 		seen[lower] = true
-		key, ok, changed := resolve(recipient)
+		key, ok, changed, err := resolve(recipient)
+		if err != nil {
+			return pgpRecipientPlan{}, err
+		}
 		switch {
 		case ok:
 			plan.bccEmails = append(plan.bccEmails, recipient)
@@ -238,7 +248,7 @@ func buildPGPRecipientPlan(ctx context.Context, toList, ccList, bccList []string
 			plan.withoutKeyEmails = append(plan.withoutKeyEmails, recipient)
 		}
 	}
-	return plan
+	return plan, nil
 }
 
 // buildPGPDeliveries encrypts msg once for plan's shared To/CC recipients
@@ -606,7 +616,13 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resolver := &keyResolver{store: contactsStore, settings: discoverySettings, discover: req.Encrypt, suppressed: suppressed}
-	plan := buildPGPRecipientPlan(r.Context(), toList, ccList, bccList, resolver)
+	plan, perr := buildPGPRecipientPlan(r.Context(), toList, ccList, bccList, resolver)
+	if perr != nil {
+		// Refuse rather than treat unreadable contacts as "these recipients
+		// have no key" — that path offers the plaintext pickup fallback.
+		http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+		return
+	}
 
 	// Refuse before any delivery when a recipient has no usable key and the
 	// caller did not opt in. The pickup fallback stores this message's

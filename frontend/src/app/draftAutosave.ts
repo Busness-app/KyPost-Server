@@ -1,19 +1,34 @@
 // Autosave for the compose window.
 //
-// This saves to localStorage, NOT to the server, and that is forced by what
-// the server's draft endpoint is. POST /api/mail/draft is a bare IMAP APPEND
+// This saves to sessionStorage, NOT to the server, and the "not to the server"
+// half is forced by what the server's draft endpoint is. POST /api/mail/draft is a bare IMAP APPEND
 // (see imap.APIClient.SaveDraft): it returns no UID and has no replace, so
 // autosaving there would append a brand-new message on every tick — dozens of
 // copies of one half-written email in the Drafts folder. It also rejects a
 // draft with no recipient, which is exactly the state a compose window is in
 // for its first minute.
 //
-// localStorage also covers strictly more failure modes than a server draft
-// would: a crashed tab, a closed window, a browser restart, and a reboot all
-// lose the compose buffer, and none of them involve the server at all.
+// Browser-side storage also covers strictly more failure modes than a server
+// draft would: a crashed tab, a closed window and a reload all lose the compose
+// buffer, and none of them involve the server at all.
+//
+// SESSION storage, not local. What is stored is the PLAINTEXT of a message the
+// user may be about to PGP-encrypt — body, recipients, subject and attachment
+// names — and localStorage keeps that on disk until something deletes it, which
+// on a shared workstation, a profile backup, or a machine that is simply not
+// re-opened is "indefinitely". sessionStorage is scoped to the tab: it survives
+// the cases this feature actually exists for (a reload, a crash restore, a
+// reopened-closed-tab) and dies with the tab in the cases it was never worth
+// keeping plaintext for. The one case it gives up is a deliberate browser quit
+// and restart; that is the trade, and it is the direction the product's
+// end-to-end claim has to lean.
 //
 // Explicit "Save Draft" still writes a real IMAP draft. This is the safety
 // net underneath it, not a replacement.
+//
+// Neither store is encrypted, so same-origin XSS reads it either way — that is
+// not what changed here. What changed is how long the plaintext outlives the
+// session that produced it.
 
 import type { ComposeAttachment } from "./types";
 
@@ -23,22 +38,16 @@ const SNAPSHOT_VERSION = 1;
 /**
  * How long a snapshot stays restorable before it is discarded on sight.
  *
- * This matters more here than in a typical autosave. The buffer being stored
- * is the PLAINTEXT of a message the user may be about to PGP-encrypt, and it
- * is stored unencrypted. clearDraftSnapshot on logout was the only thing that
- * ever removed it — but closing the tab, crashing, rebooting, or simply never
- * clicking Log Out all skip that path, and those are precisely the cases this
- * feature exists to survive. Without an expiry the plaintext of an
- * end-to-end-encrypted email sat in localStorage indefinitely.
- *
- * 24 hours keeps the actual recovery story (crash, accidental close, restart,
- * "I'll finish this after lunch") while bounding how long the plaintext can
- * outlive the session that produced it.
+ * The tab bounds the plaintext's lifetime; this bounds it inside a long-lived
+ * tab, which a PWA left open for days is. clearDraftSnapshot on logout does not
+ * cover that: a user who neither logs out nor closes the tab skips it, and
+ * those are precisely the cases this feature exists to survive.
  *
  * The bound is enforced from two places, and it needs both:
- * purgeExpiredDraftSnapshots at startup, and a check on read. Reading alone is
- * not an expiry — loadDraftSnapshot is called only when a blank compose window
- * is opened, so a user who never composes again would never trigger it.
+ * purgeExpiredDraftSnapshots at startup and hourly, and a check on read.
+ * Reading alone is not an expiry — loadDraftSnapshot is called only when a
+ * blank compose window is opened, so a user who never composes again would
+ * never trigger it.
  */
 const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -53,6 +62,11 @@ function storageKey(userId: string): string {
   return `${KEY_PREFIX}${userId}`;
 }
 
+/** The single place that names which Storage holds draft plaintext. */
+function draftStorage(): Storage {
+  return window.sessionStorage;
+}
+
 /** isExpired centralises the age rule for both the read path and the sweep. */
 function isExpired(savedAt: unknown, now: number): boolean {
   const savedAtMs = Date.parse(typeof savedAt === "string" ? savedAt : "");
@@ -64,20 +78,24 @@ function isExpired(savedAt: unknown, now: number): boolean {
 
 /**
  * purgeExpiredDraftSnapshots deletes every expired snapshot in this origin,
- * for every user, and is what makes MAX_SNAPSHOT_AGE_MS an actual bound.
+ * for every user, and is what makes MAX_SNAPSHOT_AGE_MS an actual bound inside
+ * a tab that stays open.
  *
- * Expiring on read alone did not bound anything. loadDraftSnapshot runs in one
- * place — opening a BLANK compose window — so the plaintext of a message the
- * user may have been about to PGP-encrypt was deleted only if they came back
- * and started another one. Close the tab and never compose again and it stayed
- * in localStorage forever, which is precisely the case the expiry was added
- * for. Sweeping at startup means the age limit holds whenever the app is
- * opened at all, and sweeping ALL keys rather than the current user's covers
- * the shared browser where the previous account never logs in again.
+ * Expiring on read alone bounds nothing. loadDraftSnapshot runs in one place —
+ * opening a BLANK compose window — so the plaintext of a message the user may
+ * have been about to PGP-encrypt is deleted only if they come back and start
+ * another one. Sweeping at startup and hourly means the age limit holds while
+ * the app is open at all, and sweeping ALL keys rather than the current user's
+ * covers the shared browser where the previous account never signs in again.
+ *
+ * It also deletes every draft key in localStorage OUTRIGHT, regardless of age.
+ * Nothing writes them any more; what is there was written by a version that
+ * stored draft plaintext persistently, and leaving it would mean the switch to
+ * sessionStorage protected only drafts written after the upgrade.
  */
 export function purgeExpiredDraftSnapshots(now: number = Date.now()): void {
   try {
-    const storage = window.localStorage;
+    const storage = draftStorage();
     // Collect first: removeItem reindexes the store, so deleting while walking
     // it by index skips entries.
     const expired: string[] = [];
@@ -101,6 +119,26 @@ export function purgeExpiredDraftSnapshots(now: number = Date.now()): void {
   } catch {
     // Storage disabled or unavailable. See saveDraftSnapshot.
   }
+  purgeLegacyPersistentDrafts();
+}
+
+/** purgeLegacyPersistentDrafts removes draft plaintext left in localStorage by
+ *  versions that stored it there. Age is not consulted: no age makes persistent
+ *  plaintext of an unsent encrypted message worth keeping. */
+function purgeLegacyPersistentDrafts(): void {
+  try {
+    const storage = window.localStorage;
+    const stale: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key?.startsWith(KEY_PREFIX)) stale.push(key);
+    }
+    for (const key of stale) {
+      storage.removeItem(key);
+    }
+  } catch {
+    // Storage disabled or unavailable. See saveDraftSnapshot.
+  }
 }
 
 export type DraftSnapshot = {
@@ -111,7 +149,7 @@ export type DraftSnapshot = {
   subject: string;
   body: string;
   /**
-   * Names only — attachment BYTES are deliberately not stored. localStorage
+   * Names only — attachment BYTES are deliberately not stored. Web storage
    * caps around 5 MB per origin and one attachment may be 25 MB
    * (MAX_ATTACHMENT_BYTES), so storing them would blow the quota and take the
    * whole snapshot with it. Keeping the names lets the restore notice say what
@@ -158,7 +196,7 @@ export function saveDraftSnapshot(userId: string, draft: DraftInput): void {
   if (!userId) return;
   try {
     if (!hasContent(draft)) {
-      window.localStorage.removeItem(storageKey(userId));
+      draftStorage().removeItem(storageKey(userId));
       return;
     }
     const snapshot: DraftSnapshot = {
@@ -171,7 +209,7 @@ export function saveDraftSnapshot(userId: string, draft: DraftInput): void {
       attachmentNames: draft.attachments.map((a) => a.name),
       savedAt: new Date().toISOString()
     };
-    window.localStorage.setItem(storageKey(userId), JSON.stringify(snapshot));
+    draftStorage().setItem(storageKey(userId), JSON.stringify(snapshot));
   } catch {
     // Storage full, disabled, or unavailable (private mode). Autosave is a
     // best-effort safety net; losing it must not cost the user their typing.
@@ -183,18 +221,18 @@ export function saveDraftSnapshot(userId: string, draft: DraftInput): void {
 export function loadDraftSnapshot(userId: string): DraftSnapshot | null {
   if (!userId) return null;
   try {
-    const raw = window.localStorage.getItem(storageKey(userId));
+    const raw = draftStorage().getItem(storageKey(userId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<DraftSnapshot>;
     if (parsed?.version !== SNAPSHOT_VERSION) {
-      window.localStorage.removeItem(storageKey(userId));
+      draftStorage().removeItem(storageKey(userId));
       return null;
     }
     // Expire on read as well as on the startup sweep: this is the path that
     // must never hand back a stale draft, whatever the sweep did or didn't
     // catch (storage written by another tab since startup, a clock change).
     if (isExpired(parsed.savedAt, Date.now())) {
-      window.localStorage.removeItem(storageKey(userId));
+      draftStorage().removeItem(storageKey(userId));
       return null;
     }
     return {
@@ -222,7 +260,7 @@ export function loadDraftSnapshot(userId: string): DraftSnapshot | null {
 export function clearDraftSnapshot(userId: string): void {
   if (!userId) return;
   try {
-    window.localStorage.removeItem(storageKey(userId));
+    draftStorage().removeItem(storageKey(userId));
   } catch {
     // See saveDraftSnapshot.
   }

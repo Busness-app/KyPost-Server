@@ -49,9 +49,13 @@ if (typeof HTMLDialogElement !== "undefined" && typeof HTMLDialogElement.prototy
 // Installing a real, spec-shaped implementation here makes the tests depend on
 // this file rather than on which Node the runner happens to have. Paired with
 // .nvmrc and package.json "engines", which stop the local/CI drift at source.
-if (typeof window !== "undefined" && !window.localStorage) {
+//
+// sessionStorage gets the same treatment, and needs it for the same reason:
+// draft plaintext lives there now (see app/draftAutosave.ts).
+function installStorage(name: "localStorage" | "sessionStorage"): void {
+  if (typeof window === "undefined" || window[name]) return;
   const backing = new Map<string, string>();
-  Object.defineProperty(window, "localStorage", {
+  Object.defineProperty(window, name, {
     configurable: true,
     value: {
       getItem: (key: string): string | null => backing.get(String(key)) ?? null,
@@ -71,3 +75,6 @@ if (typeof window !== "undefined" && !window.localStorage) {
     } satisfies Storage
   });
 }
+
+installStorage("localStorage");
+installStorage("sessionStorage");

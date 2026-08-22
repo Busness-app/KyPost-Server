@@ -37,7 +37,7 @@ func TestStore_CreateRenameDelete(t *testing.T) {
 		t.Error("expected Rev to bump on rename")
 	}
 
-	got, ok := s.Get(created.ID)
+	got, ok := mustGet(t, s, created.ID)
 	if !ok || got.Name != "Immediate Family" {
 		t.Errorf("Get after rename = %+v, ok=%v", got, ok)
 	}
@@ -49,7 +49,7 @@ func TestStore_CreateRenameDelete(t *testing.T) {
 	if !removed {
 		t.Error("expected Delete to report removal")
 	}
-	if _, ok := s.Get(created.ID); ok {
+	if _, ok := mustGet(t, s, created.ID); ok {
 		t.Error("expected Get to fail after Delete")
 	}
 
@@ -80,7 +80,7 @@ func TestStore_ListSortedByName_CrossInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New (second instance): %v", err)
 	}
-	list := s2.List()
+	list := mustList(t, s2)
 	if len(list) != 3 {
 		t.Fatalf("List() len = %d, want 3", len(list))
 	}

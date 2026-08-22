@@ -35,7 +35,7 @@ func TestApplyBatchAppliesUpsertsAndDeletes(t *testing.T) {
 		t.Fatalf("ApplyBatch: %v", err)
 	}
 
-	list := s.List()
+	list := mustList(t, s)
 	if len(list) != 2 {
 		t.Fatalf("List() = %d contacts, want 2: %+v", len(list), list)
 	}
@@ -48,7 +48,7 @@ func TestApplyBatchAppliesUpsertsAndDeletes(t *testing.T) {
 	}
 	// Get deliberately returns tombstones (sync clients need to observe the
 	// deletion), so assert on the tombstone rather than on absence.
-	deleted, ok := s.Get(seed.UID)
+	deleted, ok := mustGet(t, s, seed.UID)
 	if !ok {
 		t.Fatal("the deleted contact's tombstone is gone; sync clients would never see the delete")
 	}
@@ -81,7 +81,7 @@ func TestApplyBatchWritesOnce(t *testing.T) {
 		t.Fatalf("ApplyBatch: %v", err)
 	}
 
-	if got := len(s.List()); got != 200 {
+	if got := len(mustList(t, s)); got != 200 {
 		t.Fatalf("List() = %d, want 200", got)
 	}
 	after, err := os.Stat(path)
@@ -98,7 +98,7 @@ func TestApplyBatchWritesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	if got := len(reloaded.List()); got != 200 {
+	if got := len(mustList(t, reloaded)); got != 200 {
 		t.Errorf("reloaded store has %d contacts, want 200", got)
 	}
 }
@@ -115,7 +115,7 @@ func TestApplyBatchIsAllOrNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	beforeList := s.List()
+	beforeCount := len(mustList(t, s))
 	beforeSeq := s.seq
 
 	// Force the write to fail: replace contacts.json with a directory, which
@@ -136,16 +136,33 @@ func TestApplyBatchIsAllOrNothing(t *testing.T) {
 		t.Fatal("ApplyBatch returned nil despite an unwritable store")
 	}
 
-	// In-memory state must be rolled back, not left ahead of the file.
-	if got := len(s.List()); got != len(beforeList) {
-		t.Errorf("List() = %d after a failed batch, want %d: in-memory state is ahead of disk",
-			got, len(beforeList))
+	// The file is still unreadable, so the readers must refuse rather than
+	// answer from the in-memory copy — that is the whole point of them
+	// returning an error.
+	if _, lerr := s.List(); lerr == nil {
+		t.Error("List() answered from memory while contacts.json was unreadable")
+	}
+	if _, _, gerr := s.Get(seed.UID); gerr == nil {
+		t.Error("Get() answered from memory while contacts.json was unreadable")
+	}
+
+	// In-memory state must be rolled back, not left ahead of the file. Checked
+	// against the fields directly, since the readers now (correctly) refuse.
+	if got := len(s.contacts); got != beforeCount {
+		t.Errorf("in-memory contacts = %d after a failed batch, want %d: state is ahead of disk",
+			got, beforeCount)
 	}
 	if s.seq != beforeSeq {
 		t.Errorf("seq advanced to %d after a failed batch, want %d — revisions would be handed "+
 			"out for changes that were never persisted", s.seq, beforeSeq)
 	}
-	if kept, ok := s.Get(seed.UID); !ok || kept.Deleted {
+	kept := false
+	for _, c := range s.contacts {
+		if c.UID == seed.UID && !c.Deleted {
+			kept = true
+		}
+	}
+	if !kept {
 		t.Error("the pre-existing contact was left tombstoned in memory after the batch failed")
 	}
 }

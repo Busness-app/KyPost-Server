@@ -109,7 +109,7 @@ func TestEnsureOwnAddressProvenSendsProbeAndRecordsPendingAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userSendAsStore: %v", err)
 	}
-	list := store.List()
+	list := must1(store.List())
 	if len(list) != 1 {
 		t.Fatalf("alias records = %d, want 1", len(list))
 	}
@@ -235,7 +235,7 @@ func TestEnsureOwnAddressProvenBacksOffAfterRecentFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userSendAsStore: %v", err)
 	}
-	alias := store.List()[0]
+	alias := must1(store.List())[0]
 	if err := store.MarkFailed(alias.ID); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestEnsureOwnAddressProvenFailureSurvivesTerminalSweep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userSendAsStore: %v", err)
 	}
-	alias := store.List()[0]
+	alias := must1(store.List())[0]
 	if err := store.MarkFailed(alias.ID); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestEnsureOwnAddressProvenFailureSurvivesTerminalSweep(t *testing.T) {
 		t.Fatalf("SweepTerminal: %v", err)
 	}
 
-	if got := len(store.List()); got != 1 {
+	if got := len(must1(store.List())); got != 1 {
 		t.Fatalf("alias records after sweep = %d, want 1: the auto record carries the failure state", got)
 	}
 }
@@ -299,7 +299,7 @@ func TestEnsureOwnAddressProvenDropsRecordWhenSendFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userSendAsStore: %v", err)
 	}
-	if got := len(store.List()); got != 0 {
+	if got := len(must1(store.List())); got != 0 {
 		t.Fatalf("alias records = %d, want 0 after a failed send", got)
 	}
 }

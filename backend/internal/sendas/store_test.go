@@ -54,7 +54,7 @@ func TestCreateGetRoundTrip(t *testing.T) {
 		t.Errorf("ExpiresAt - CreatedAt = %v, want 5m", diff)
 	}
 
-	got, ok := s.Get(created.ID)
+	got, ok := mustGet(t, s, created.ID)
 	if !ok {
 		t.Fatal("Get: expected to find record just created")
 	}
@@ -62,7 +62,7 @@ func TestCreateGetRoundTrip(t *testing.T) {
 		t.Errorf("Get returned %+v, want %+v", got, created)
 	}
 
-	if _, ok := s.Get("does-not-exist"); ok {
+	if _, ok := mustGet(t, s, "does-not-exist"); ok {
 		t.Error("Get: expected not found for unknown ID")
 	}
 }
@@ -81,7 +81,7 @@ func TestMarkVerifiedIdempotent(t *testing.T) {
 	if err := s.MarkVerified(created.ID); err != nil {
 		t.Fatalf("MarkVerified (first): %v", err)
 	}
-	first, _ := s.Get(created.ID)
+	first, _ := mustGet(t, s, created.ID)
 	if first.Status != "verified" {
 		t.Fatalf("Status = %q, want verified", first.Status)
 	}
@@ -94,7 +94,7 @@ func TestMarkVerifiedIdempotent(t *testing.T) {
 	if err := s.MarkVerified(created.ID); err != nil {
 		t.Fatalf("MarkVerified (second, idempotent call): %v", err)
 	}
-	second, _ := s.Get(created.ID)
+	second, _ := mustGet(t, s, created.ID)
 	if second.Status != "verified" {
 		t.Fatalf("Status after second call = %q, want verified", second.Status)
 	}
@@ -124,7 +124,7 @@ func TestMarkFailedRejectsNonPending(t *testing.T) {
 	if err := s.MarkFailed(created.ID); err == nil {
 		t.Error("MarkFailed: expected error when record is already verified")
 	}
-	stillVerified, _ := s.Get(created.ID)
+	stillVerified, _ := mustGet(t, s, created.ID)
 	if stillVerified.Status != "verified" {
 		t.Errorf("Status = %q, want still verified after rejected MarkFailed", stillVerified.Status)
 	}
@@ -137,7 +137,7 @@ func TestMarkFailedRejectsNonPending(t *testing.T) {
 	if err := s.MarkFailed(pending.ID); err != nil {
 		t.Fatalf("MarkFailed on pending record: %v", err)
 	}
-	failed, _ := s.Get(pending.ID)
+	failed, _ := mustGet(t, s, pending.ID)
 	if failed.Status != "failed" {
 		t.Errorf("Status = %q, want failed", failed.Status)
 	}
@@ -202,7 +202,7 @@ func TestPendingNotExpired(t *testing.T) {
 	}
 	s.mu.Unlock()
 
-	result := s.PendingNotExpired()
+	result := mustPendingNotExpired(t, s)
 
 	foundFresh := false
 	for _, a := range result {
@@ -299,11 +299,11 @@ func TestDelete(t *testing.T) {
 	if err := s.Delete(created.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if _, ok := s.Get(created.ID); ok {
+	if _, ok := mustGet(t, s, created.ID); ok {
 		t.Error("Get: expected record to be gone after Delete")
 	}
-	if len(s.List()) != 0 {
-		t.Errorf("List: expected empty after deleting only record, got %d", len(s.List()))
+	if len(mustList(t, s)) != 0 {
+		t.Errorf("List: expected empty after deleting only record, got %d", len(mustList(t, s)))
 	}
 
 	if err := s.Delete("does-not-exist"); err == nil {
@@ -364,16 +364,16 @@ func TestSweepTerminal(t *testing.T) {
 		t.Fatalf("SweepTerminal: %v", err)
 	}
 
-	if _, ok := s.Get(oldFailed.ID); ok {
+	if _, ok := mustGet(t, s, oldFailed.ID); ok {
 		t.Error("SweepTerminal: expected old failed record to be removed")
 	}
-	if _, ok := s.Get(recentFailed.ID); !ok {
+	if _, ok := mustGet(t, s, recentFailed.ID); !ok {
 		t.Error("SweepTerminal: recent failed record must be left untouched")
 	}
-	if _, ok := s.Get(verified.ID); !ok {
+	if _, ok := mustGet(t, s, verified.ID); !ok {
 		t.Error("SweepTerminal: verified record must never be removed")
 	}
-	if _, ok := s.Get(pending.ID); !ok {
+	if _, ok := mustGet(t, s, pending.ID); !ok {
 		t.Error("SweepTerminal: pending record must never be removed")
 	}
 }
@@ -404,12 +404,12 @@ func TestListAndListVerified(t *testing.T) {
 		t.Fatalf("MarkFailed: %v", err)
 	}
 
-	all := s.List()
+	all := mustList(t, s)
 	if len(all) != 3 {
 		t.Fatalf("List: got %d records, want 3", len(all))
 	}
 
-	onlyVerified := s.ListVerified()
+	onlyVerified := mustListVerified(t, s)
 	if len(onlyVerified) != 1 || onlyVerified[0].ID != verified.ID {
 		t.Errorf("ListVerified: got %+v, want only %q", onlyVerified, verified.ID)
 	}

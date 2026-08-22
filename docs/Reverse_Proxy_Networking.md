@@ -113,3 +113,28 @@ auto-allocates project networks as /16s out of `172.17.0.0/12` — 172.17, 172.1
 projects, and the collision surfaces as the error above rather than as anything
 mentioning this file. `10.89.0.0/24` is outside that pool. Change it if it
 clashes with your own LAN or VPN routes.
+
+## The pairing QR reads your proxy's certificate
+
+The mobile pairing QR carries a pin for the certificate the device will be
+handed, so the app can pin the registration handshake before it discloses the
+pairing token and its push credentials. See
+[Certificate pinning in the pairing QR](../README.md#certificate-pinning-in-the-pairing-qr).
+
+Your proxy holds that certificate, not this server — with `cloudflared` there is
+no file to mount at all, because the device validates a Cloudflare edge
+certificate. So the server reads it the same way the device will: at the moment
+it builds each QR, it makes a verified TLS connection to `SERVER_BASE_URL` and
+takes the leaf.
+
+**Set `SERVER_BASE_URL` to your public `https://` URL.** That is the whole
+configuration. It is deliberately not derived from the request's `Host` header
+the way other base URLs are — a caller who could steer that would be choosing
+which key the app pins.
+
+If your public hostname does not resolve back to the proxy from inside the
+server's network — a self-hosted proxy behind a consumer router with no NAT
+hairpinning is the usual case — the probe fails and the QR simply omits the pin,
+leaving pairing exactly as it was. Split-horizon DNS pointing the hostname at
+the proxy's LAN address fixes it; so does `cloudflared`, whose traffic leaves to
+the anycast edge and never needs to come back in.

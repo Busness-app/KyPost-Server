@@ -10,7 +10,7 @@ func TestSetSelf_MarksAndEnforcesUniqueness(t *testing.T) {
 	a, _ := s.Upsert(Contact{FormattedName: "Alice"})
 	b, _ := s.Upsert(Contact{FormattedName: "Bob"})
 
-	if _, ok := s.GetSelf(); ok {
+	if _, ok := mustGetSelf(t, s); ok {
 		t.Fatal("expected no self-contact before SetSelf")
 	}
 
@@ -21,7 +21,7 @@ func TestSetSelf_MarksAndEnforcesUniqueness(t *testing.T) {
 	if !updated.IsSelf {
 		t.Fatal("expected IsSelf true on returned contact")
 	}
-	self, ok := s.GetSelf()
+	self, ok := mustGetSelf(t, s)
 	if !ok || self.UID != a.UID {
 		t.Fatalf("GetSelf: ok=%v uid=%q, want %q", ok, self.UID, a.UID)
 	}
@@ -30,11 +30,11 @@ func TestSetSelf_MarksAndEnforcesUniqueness(t *testing.T) {
 	if _, found, err := s.SetSelf(b.UID, true); err != nil || !found {
 		t.Fatalf("SetSelf(b, true): found=%v err=%v", found, err)
 	}
-	self, ok = s.GetSelf()
+	self, ok = mustGetSelf(t, s)
 	if !ok || self.UID != b.UID {
 		t.Fatalf("GetSelf after re-marking: ok=%v uid=%q, want %q", ok, self.UID, b.UID)
 	}
-	refreshedA, _ := s.Get(a.UID)
+	refreshedA, _ := mustGet(t, s, a.UID)
 	if refreshedA.IsSelf {
 		t.Fatal("expected a's IsSelf to be cleared after b was marked self")
 	}
@@ -72,7 +72,7 @@ func TestSetSelf_FalseClearsFlag(t *testing.T) {
 	if _, _, err := s.SetSelf(a.UID, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.GetSelf(); ok {
+	if _, ok := mustGetSelf(t, s); ok {
 		t.Fatal("expected no self-contact after unmarking")
 	}
 }
@@ -93,7 +93,7 @@ func TestUpsert_PreservesIsSelfAcrossEdits(t *testing.T) {
 	if _, _, err := s.SetSelf(a.UID, true); err != nil {
 		t.Fatal(err)
 	}
-	edited, _ := s.Get(a.UID)
+	edited, _ := mustGet(t, s, a.UID)
 	edited.Title = "Engineer"
 	edited.IsSelf = false // what toContact() would produce on a normal edit
 	updated, err := s.Upsert(edited)
@@ -117,7 +117,7 @@ func TestDelete_ClearsIsSelf(t *testing.T) {
 	if _, err := s.Delete(a.UID); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.GetSelf(); ok {
+	if _, ok := mustGetSelf(t, s); ok {
 		t.Fatal("expected no self-contact after deleting the self-contact")
 	}
 }

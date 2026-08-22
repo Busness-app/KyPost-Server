@@ -14,6 +14,32 @@ non-prerelease version.
 
 ### Added
 
+- **The pairing QR now publishes a certificate pin.** The pairing request is
+  the one call that carries the pairing token, the push endpoint and the WebPush
+  keys, and until now the app sent all of it inside a trust-on-first-use window —
+  the certificate was only trusted *after* the secrets were already disclosed. On
+  a network with a locally trusted CA (enterprise MDM, a user-installed root, a
+  hostile captive portal) an interceptor read the token, registered its own device
+  against the relay first, and handed back credentials it controlled. The
+  `kypost://native-pair` link now carries `pin=`, the base64 SHA-256 of the
+  serving certificate's leaf SubjectPublicKeyInfo, and the app pins the
+  registration handshake to that one key before sending anything. Read live from
+  the certificate in use at link-generation time, so renewals need no action.
+  Reverse-proxy deployments are covered without configuration: the server reads
+  the pin from a verified handshake with `SERVER_BASE_URL`, which is the
+  certificate the device is actually handed — for the `cloudflared` setup the
+  docs describe there is no certificate on disk to read at all, and the probe
+  leaves over anycast to the same edge rather than depending on the router
+  hairpinning traffic back to itself. Falls back to this process's own
+  certificate when it terminates TLS. The chain is verified, so a deployment
+  behind a private CA gets no pin and should set `TLS_CERT_FILE` instead; every
+  other failure leaves `pin` absent, which keeps today's trust-on-first-use
+  behaviour rather than breaking pairing.
+
+  Pinning behind a terminating proxy pins you to that proxy. With Cloudflare in
+  front, this closes the hostile-local-network hole — it does not make the
+  tunnel end-to-end, and Cloudflare still terminates.
+
 - **Client-protected PGP identities can be backed up and restored.** Security
   now downloads a browser-encrypted recovery file and displays its separate
   secret once. Restoring decrypts locally, verifies the existing fingerprint,
@@ -51,6 +77,31 @@ non-prerelease version.
 
 ### Security
 
+- **Every per-user JSON store now fails closed on a read it could not perform.**
+  `contacts`, `groups`, `sendas`, `rules` and `mailcache` kept a warm in-memory
+  copy of a file the api and daemon processes both write, and their readers
+  discarded the re-read error — so once the file became unreadable or corrupt,
+  a process answered from that copy indefinitely and indistinguishably from a
+  healthy read. Concretely: a cached "signature verified" badge outlived the
+  contact key the user removed to retire it; a recipient with a pinned key was
+  reported as keyless, which is the bucket the send path offers the plaintext
+  pickup fallback for; the contact-photo sweep read "nothing is referenced" and
+  deleted every photo on disk; an unreadable `groups.json` erased a contact's
+  group memberships on the next save. Readers now return the error and each
+  caller fails closed — refusing the operation, discarding the derived trust, or
+  answering with the empty set where empty is the safe answer.
+- **Compose autosave no longer writes draft plaintext to `localStorage`.** The
+  buffer being saved is the plaintext of a message the user may be about to
+  PGP-encrypt, and `localStorage` kept it on disk until something deleted it.
+  It now lives in `sessionStorage`, which still survives a reload, a crash
+  restore and a reopened tab, and dies with the tab otherwise; the startup sweep
+  additionally deletes any draft an earlier version left in `localStorage`,
+  regardless of age.
+- **`POST /api/contacts/carddav-client/sync` no longer answers `200` after
+  failing to save its own state.** The write carrying the discovered
+  address-book path, timestamp and counters was best-effort, so a failed
+  persist left the next sync repeating discovery and re-importing while the UI
+  reported success.
 - **SSO ID tokens are now cryptographically verified.** The OIDC callback
   base64-decoded the ID token payload and trusted it — no signature, issuer,
   audience, expiry, algorithm or nonce was ever checked — so anything that could

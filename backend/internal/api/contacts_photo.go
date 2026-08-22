@@ -68,7 +68,11 @@ func (s *Server) handleContactPhoto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := strings.TrimSpace(r.PathValue("id"))
-	c, found := store.Get(uid)
+	c, found, err := store.Get(uid)
+	if err != nil {
+		http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+		return
+	}
 	if !found || c.Deleted {
 		http.Error(w, "contact not found", http.StatusNotFound)
 		return
@@ -227,8 +231,15 @@ func (s *Server) sweepContactPhotos(userID string) error {
 	if err != nil {
 		return err
 	}
+	// The sweep deletes every photo file this set does not name, so a failed
+	// read must abort it: an empty set means "nothing is referenced", and the
+	// sweep would delete every photo the user has.
+	all, err := store.List()
+	if err != nil {
+		return err
+	}
 	referenced := map[string]bool{}
-	for _, c := range store.List() {
+	for _, c := range all {
 		if c.Deleted || c.PhotoRef == "" {
 			continue
 		}

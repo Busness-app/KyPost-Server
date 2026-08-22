@@ -133,10 +133,13 @@ func backfillPGPKeyFingerprint(c contacts.Contact) contacts.Contact {
 // it exists and was created by the key-discovery ladder — the set to suppress
 // when it is deleted. A non-discovery contact (or a missing one) yields nil,
 // so deleting it records no suppression.
-func discoveryCreatedEmails(store *contacts.Store, uid string) []string {
-	c, ok := store.Get(uid)
+func discoveryCreatedEmails(store *contacts.Store, uid string) ([]string, error) {
+	c, ok, err := store.Get(uid)
+	if err != nil {
+		return nil, err
+	}
 	if !ok || !c.DiscoveryCreated {
-		return nil
+		return nil, nil
 	}
 	emails := make([]string, 0, len(c.Emails))
 	for _, e := range c.Emails {
@@ -144,7 +147,7 @@ func discoveryCreatedEmails(store *contacts.Store, uid string) []string {
 			emails = append(emails, v)
 		}
 	}
-	return emails
+	return emails, nil
 }
 
 // suppressDiscoveryOnDelete records a discovery opt-out (reason "deleted") for
@@ -168,7 +171,11 @@ func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		list := store.List()
+		list, err := store.List()
+		if err != nil {
+			http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+			return
+		}
 		if list == nil {
 			list = []contacts.Contact{}
 		}
@@ -184,7 +191,12 @@ func (s *Server) handleContacts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ac, ok := authFromContext(r); ok {
-			payload.GroupIDs = s.sanitizeGroupIDsForUser(ac.UserID, payload.GroupIDs)
+			ids, gerr := s.sanitizeGroupIDsForUser(ac.UserID, payload.GroupIDs)
+			if gerr != nil {
+				http.Error(w, "failed to read groups", http.StatusInternalServerError)
+				return
+			}
+			payload.GroupIDs = ids
 		}
 		created, err := store.Upsert(backfillPGPKeyFingerprint(payload.toContact("")))
 		if err != nil {
@@ -230,14 +242,22 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		c, ok := store.Get(uid)
+		c, ok, err := store.Get(uid)
+		if err != nil {
+			http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+			return
+		}
 		if !ok || c.Deleted {
 			http.Error(w, "contact not found", http.StatusNotFound)
 			return
 		}
 		writeJSON(w, http.StatusOK, c)
 	case http.MethodPut:
-		existing, ok := store.Get(uid)
+		existing, ok, err := store.Get(uid)
+		if err != nil {
+			http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+			return
+		}
 		if !ok || existing.Deleted {
 			http.Error(w, "contact not found", http.StatusNotFound)
 			return
@@ -252,7 +272,12 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ac, ok := authFromContext(r); ok {
-			payload.GroupIDs = s.sanitizeGroupIDsForUser(ac.UserID, payload.GroupIDs)
+			ids, gerr := s.sanitizeGroupIDsForUser(ac.UserID, payload.GroupIDs)
+			if gerr != nil {
+				http.Error(w, "failed to read groups", http.StatusInternalServerError)
+				return
+			}
+			payload.GroupIDs = ids
 		}
 		updated, err := store.Upsert(backfillPGPKeyFingerprint(payload.toContact(uid)))
 		if err != nil {
@@ -262,8 +287,21 @@ func (s *Server) handleContactByID(w http.ResponseWriter, r *http.Request) {
 		s.invalidatePGPVerdictsOnKeyChange(r, existing, updated)
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
-		deleted, _ := store.Get(uid)
-		emails := discoveryCreatedEmails(store, uid)
+		// Both reads run before the delete and both must succeed: `deleted` is
+		// the before-image the verdict invalidation is computed from, and
+		// `emails` is the discovery opt-out set. Deleting without them removes
+		// the key while leaving cached verdicts standing and lets the discovery
+		// ladder re-create the contact on the next encrypted send.
+		deleted, _, err := store.Get(uid)
+		if err != nil {
+			http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+			return
+		}
+		emails, err := discoveryCreatedEmails(store, uid)
+		if err != nil {
+			http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+			return
+		}
 		removed, err := store.Delete(uid)
 		if err != nil {
 			http.Error(w, "failed to delete contact", http.StatusInternalServerError)
@@ -326,7 +364,11 @@ func (s *Server) handleContactsBulkDelete(w http.ResponseWriter, r *http.Request
 	failures := make([]bulkDeleteFailure, 0)
 	processed := 0
 	for _, uid := range uniqueIDs {
-		emails := discoveryCreatedEmails(store, uid)
+		emails, err := discoveryCreatedEmails(store, uid)
+		if err != nil {
+			failures = append(failures, bulkDeleteFailure{ID: uid, Error: err.Error()})
+			continue
+		}
 		if _, err := store.Delete(uid); err != nil {
 			failures = append(failures, bulkDeleteFailure{ID: uid, Error: err.Error()})
 			continue
@@ -524,7 +566,12 @@ func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(change.FormattedName) == "" {
 				continue
 			}
-			change.GroupIDs = s.sanitizeGroupIDsForUser(userID, change.GroupIDs)
+			ids, gerr := s.sanitizeGroupIDsForUser(userID, change.GroupIDs)
+			if gerr != nil {
+				http.Error(w, "failed to read groups", http.StatusInternalServerError)
+				return
+			}
+			change.GroupIDs = ids
 			ops = append(ops, contacts.BatchOp{Contact: change.toContact(uid)})
 		}
 		if err := store.ApplyBatch(ops); err != nil {
@@ -538,7 +585,14 @@ func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeContactsSyncResponse(w http.ResponseWriter, store *contacts.Store, since int64) {
-	changed, deleted, cursor, tooOld := store.ChangedSince(since)
+	changed, deleted, cursor, tooOld, err := store.ChangedSince(since)
+	if err != nil {
+		// A delta computed from a stale in-memory copy hands the client a
+		// cursor that claims to cover changes this process could not read, and
+		// the client then never asks for them again.
+		http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+		return
+	}
 	resp := map[string]any{"cursor": cursor, "tooOld": tooOld}
 	if !tooOld {
 		resp["changed"] = changed

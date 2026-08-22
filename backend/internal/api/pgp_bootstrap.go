@@ -100,9 +100,19 @@ func (s *Server) handlePGPBootstrap(w http.ResponseWriter, r *http.Request) {
 	// key material only, each labelled with the addresses the address book
 	// binds it to — the client must not re-derive that binding from the keys
 	// themselves. See boundSignerKeys.
+	//
+	// An address book this process cannot read yields NO keys rather than the
+	// last set it managed to load: an empty list can only ever produce "signed,
+	// but not by a key you hold", never a green badge for a key the user
+	// removed. The client stays usable and no verdict is invented.
 	signerKeys := []boundSignerKey{}
 	if contactsStore, cerr := s.userContactsStore(ac.UserID); cerr == nil {
-		signerKeys = boundSignerKeys(contactsStore)
+		keys, kerr := boundSignerKeys(contactsStore)
+		if kerr != nil {
+			s.logger.Error("could not read contact signer keys", "user_id", ac.UserID, "error", kerr.Error())
+		} else {
+			signerKeys = keys
+		}
 	}
 	resp["signerKeys"] = signerKeys
 
@@ -142,7 +152,12 @@ func (s *Server) suggestedKeyUserIDs(userID string) []string {
 		s.logger.Error("failed to open send-as store for key user ids", "user_id", userID, "error", err.Error())
 		return out
 	}
-	for _, alias := range store.ListVerified() {
+	verified, err := store.ListVerified()
+	if err != nil {
+		s.logger.Error("failed to read send-as aliases for key user ids", "user_id", userID, "error", err.Error())
+		return out
+	}
+	for _, alias := range verified {
 		addr := strings.TrimSpace(alias.Email)
 		if addr == "" || seen[strings.ToLower(addr)] {
 			continue

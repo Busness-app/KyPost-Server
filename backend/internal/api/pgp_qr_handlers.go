@@ -84,7 +84,7 @@ func (s *Server) handlePGPQRKey(w http.ResponseWriter, r *http.Request) {
 		"publicKey":   u.PGPPublicKey,
 	}
 	if store, err := s.userContactsStore(userID); err == nil {
-		if self, ok := store.GetSelf(); ok {
+		if self, ok, err := store.GetSelf(); err == nil && ok {
 			resp["contactCard"] = contactCardFromContact(self)
 		}
 	}

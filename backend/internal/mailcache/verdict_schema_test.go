@@ -52,7 +52,7 @@ func TestStaleVerdictsAreDroppedOnLoad(t *testing.T) {
 	}
 	// The bool reports "window fully warm and at least `limit` long", which is
 	// not what these tests are about.
-	got, _ := reopened.Snapshot("INBOX", 10)
+	got, _ := mustSnapshot(t, reopened, "INBOX", 10)
 	if len(got) != 1 {
 		t.Fatalf("Snapshot returned %d entries, want 1", len(got))
 	}
@@ -83,7 +83,7 @@ func TestCurrentVerdictsSurviveALoad(t *testing.T) {
 	}
 	// The bool reports "window fully warm and at least `limit` long", which is
 	// not what these tests are about.
-	got, _ := reopened.Snapshot("INBOX", 10)
+	got, _ := mustSnapshot(t, reopened, "INBOX", 10)
 	if len(got) != 1 {
 		t.Fatalf("Snapshot returned %d entries, want 1", len(got))
 	}
@@ -104,7 +104,7 @@ func TestSyncCarriesTheVerdictStamp(t *testing.T) {
 	if _, err := s.Sync("INBOX", 10, []Overview{ov(1, "subject", "read")}, 0); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	got, _ := s.Snapshot("INBOX", 10)
+	got, _ := mustSnapshot(t, s, "INBOX", 10)
 	if len(got) != 1 {
 		t.Fatalf("Snapshot returned %d entries, want 1", len(got))
 	}
@@ -131,7 +131,7 @@ func TestInvalidatePGPVerdictsClearsTheWindow(t *testing.T) {
 		t.Fatalf("InvalidatePGPVerdicts: %v", err)
 	}
 	for _, mailbox := range []string{"INBOX", "Archive"} {
-		got, _ := s.Snapshot(mailbox, 10)
+		got, _ := mustSnapshot(t, s, mailbox, 10)
 		if len(got) != 1 {
 			t.Fatalf("%s: Snapshot returned %d entries, want 1", mailbox, len(got))
 		}

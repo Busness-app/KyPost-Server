@@ -157,7 +157,7 @@ func TestStoreDedupe(t *testing.T) {
 		t.Fatalf("MergedCount = %d, want 1", rep.MergedCount)
 	}
 
-	live := s.List()
+	live := mustList(t, s)
 	if len(live) != 1 {
 		t.Fatalf("live contacts = %d, want 1", len(live))
 	}
@@ -174,7 +174,7 @@ func TestStoreDedupe(t *testing.T) {
 
 	// Loser is tombstoned and points back at the survivor.
 	loserUID := survivor.MergedUIDs[0]
-	loser, ok := s.Get(loserUID)
+	loser, ok := mustGet(t, s, loserUID)
 	if !ok || !loser.Deleted {
 		t.Fatalf("loser %q should be a tombstone", loserUID)
 	}

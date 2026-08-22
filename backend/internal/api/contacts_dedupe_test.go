@@ -48,7 +48,7 @@ func TestContactsDedupeEndpoint(t *testing.T) {
 		t.Fatalf("groups = %+v, want survivor %q", report.Groups, a.UID)
 	}
 
-	live := store.List()
+	live := must1(store.List())
 	if len(live) != 1 {
 		t.Fatalf("live contacts = %d, want 1 after merge", len(live))
 	}

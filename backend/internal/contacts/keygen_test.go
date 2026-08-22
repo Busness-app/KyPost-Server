@@ -28,13 +28,13 @@ func TestPGPKeyGenerationChangesWhenKeyMaterialChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	before := store.PGPKeyGeneration()
+	before := mustPGPKeyGeneration(t, store)
 
 	c.PGPKey = "KEY-B"
 	if _, err := store.Upsert(c); err != nil {
 		t.Fatalf("Upsert (key change): %v", err)
 	}
-	if store.PGPKeyGeneration() == before {
+	if mustPGPKeyGeneration(t, store) == before {
 		t.Fatal("generation unchanged after a contact's PGP key was replaced")
 	}
 }
@@ -56,13 +56,13 @@ func TestPGPKeyGenerationChangesWhenAnAddressIsRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	before := store.PGPKeyGeneration()
+	before := mustPGPKeyGeneration(t, store)
 
 	c.Emails = []ContactValue{{Value: "bob@example.com"}}
 	if _, err := store.Upsert(c); err != nil {
 		t.Fatalf("Upsert (address removal): %v", err)
 	}
-	if store.PGPKeyGeneration() == before {
+	if mustPGPKeyGeneration(t, store) == before {
 		t.Fatal("generation unchanged after a contact's address set narrowed")
 	}
 }
@@ -82,13 +82,13 @@ func TestPGPKeyGenerationIsStableForUnrelatedEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	before := store.PGPKeyGeneration()
+	before := mustPGPKeyGeneration(t, store)
 
 	c.FormattedName = "Robert"
 	if _, err := store.Upsert(c); err != nil {
 		t.Fatalf("Upsert (rename): %v", err)
 	}
-	if store.PGPKeyGeneration() != before {
+	if mustPGPKeyGeneration(t, store) != before {
 		t.Fatal("a rename bumped the key generation, invalidating unrelated verdicts")
 	}
 }

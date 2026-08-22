@@ -363,13 +363,35 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 	// dedupe, the discovery-suppression button and the daemon's Autocrypt
 	// harvest, none of which could call the handler-level invalidation helper,
 	// and three of which run in a different process entirely.
+	//
+	// Fails closed. The generation is what decides whether a cached verdict
+	// survives, so if it cannot be confirmed — the store will not open, the
+	// file will not read, or the reconciliation will not persist — this request
+	// must not serve verdicts computed against an address book it could not
+	// check. Dropping the whole window's verdicts costs one body re-fetch per
+	// signed message; keeping them shows a green badge for a trust basis the
+	// user may already have removed.
 	var contactKeyGen int64
-	if contactsStore, err := s.userContactsStore(userID); err == nil {
-		contactKeyGen = contactsStore.PGPKeyGeneration()
-		if err := cache.SyncContactKeyGeneration(contactKeyGen); err != nil {
-			s.logger.Error("could not reconcile cached PGP verdicts with the address book",
-				"user_id", userID, "error", err.Error())
+	confirmKeyGen := func() error {
+		contactsStore, err := s.userContactsStore(userID)
+		if err != nil {
+			return err
 		}
+		if contactKeyGen, err = contactsStore.PGPKeyGeneration(); err != nil {
+			return err
+		}
+		return cache.SyncContactKeyGeneration(contactKeyGen)
+	}
+	if err := confirmKeyGen(); err != nil {
+		s.logger.Error("could not reconcile cached PGP verdicts with the address book",
+			"user_id", userID, "error", err.Error())
+		if ierr := cache.InvalidatePGPVerdicts(); ierr != nil {
+			s.logger.Error("could not drop cached PGP verdicts after a failed address-book read",
+				"user_id", userID, "error", ierr.Error())
+			http.Error(w, "failed to reconcile cached signature verdicts", http.StatusInternalServerError)
+			return
+		}
+		contactKeyGen = 0
 	}
 	// stampKeyGen records the address-book generation a verdict was computed
 	// under, so a later change to any contact's key or addresses invalidates it
@@ -385,7 +407,12 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 		// Cache-first: if the background poller (or an earlier request)
 		// has already warmed a full window of `limit` messages with
 		// bodies, serve it with zero IMAP calls.
-		if entries, warmed := cache.Snapshot(cacheKey, limit); warmed {
+		entries, warmed, err := cache.Snapshot(cacheKey, limit)
+		if err != nil {
+			http.Error(w, "failed to read mail cache", http.StatusInternalServerError)
+			return
+		}
+		if warmed {
 			for _, e := range entries {
 				bucket(e.Keywords, inboxEmail{
 					MessageID:            e.MessageID,

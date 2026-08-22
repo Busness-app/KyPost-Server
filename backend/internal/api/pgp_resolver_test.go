@@ -45,7 +45,7 @@ func TestResolveUsesWKDAndPinsContact(t *testing.T) {
 	if !got.Usable || got.Tier != tierWKD {
 		t.Fatalf("expected usable WKD tier, got %+v", got)
 	}
-	if _, ok := findContactPGPKey(store, "erin@example.com"); !ok {
+	if _, ok := must2(findContactPGPKey(store, "erin@example.com")); !ok {
 		t.Fatalf("expected the WKD key to be pinned to a contact")
 	}
 }
@@ -128,7 +128,7 @@ func TestResolveTOFUMismatchDoesNotSwitch(t *testing.T) {
 		t.Fatalf("expected Usable=false on key-changed TOFU mismatch, got %+v", got)
 	}
 
-	after, ok := store.Get(pinned.UID)
+	after, ok := must2(store.Get(pinned.UID))
 	if !ok {
 		t.Fatalf("expected contact %s to still exist", pinned.UID)
 	}
@@ -237,7 +237,7 @@ func TestResolvePreservesManualVerificationOnSameFingerprint(t *testing.T) {
 		t.Fatalf("expected resolved fingerprint to match identity A's %s, got %s", fpA, got.Fingerprint)
 	}
 
-	after, ok := store.Get(pinned.UID)
+	after, ok := must2(store.Get(pinned.UID))
 	if !ok {
 		t.Fatalf("expected contact %s to still exist", pinned.UID)
 	}
@@ -278,7 +278,7 @@ func TestResolveMarksDiscoveryCreatedOnNewContact(t *testing.T) {
 	if got := kr.resolve(context.Background(), "gale@example.com"); got.Tier != tierWKD {
 		t.Fatalf("expected tierWKD, got %+v", got)
 	}
-	c, ok := findContact(store, "gale@example.com")
+	c, ok := must2(findContact(store, "gale@example.com"))
 	if !ok {
 		t.Fatalf("expected an auto-created contact")
 	}
@@ -324,7 +324,7 @@ func TestResolveDoesNotMarkDiscoveryCreatedOnExistingContact(t *testing.T) {
 	if got := kr.resolve(context.Background(), "hana@example.com"); got.Tier != tierWKD {
 		t.Fatalf("expected tierWKD, got %+v", got)
 	}
-	after, ok := store.Get(pinned.UID)
+	after, ok := must2(store.Get(pinned.UID))
 	if !ok {
 		t.Fatalf("expected contact %s to still exist", pinned.UID)
 	}
@@ -360,7 +360,7 @@ func TestResolveSkipsSuppressedAddress(t *testing.T) {
 	if got.Tier != tierNone {
 		t.Fatalf("expected tierNone for a suppressed address, got %+v", got)
 	}
-	if _, ok := findContact(store, "erin@example.com"); ok {
+	if _, ok := must2(findContact(store, "erin@example.com")); ok {
 		t.Fatalf("expected no contact to be auto-created for a suppressed address")
 	}
 }

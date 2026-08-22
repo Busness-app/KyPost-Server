@@ -144,7 +144,11 @@ func (s *Server) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
-		existing, ok := store.Get(id)
+		existing, ok, err := store.Get(id)
+		if err != nil {
+			http.Error(w, "failed to read rules", http.StatusInternalServerError)
+			return
+		}
 		if !ok {
 			http.Error(w, "rule not found", http.StatusNotFound)
 			return
@@ -233,7 +237,11 @@ func (s *Server) handleRuleSieve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("id"))
-	existing, ok := store.Get(id)
+	existing, ok, err := store.Get(id)
+	if err != nil {
+		http.Error(w, "failed to read rules", http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		http.Error(w, "rule not found", http.StatusNotFound)
 		return

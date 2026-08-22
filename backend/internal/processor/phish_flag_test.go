@@ -374,7 +374,7 @@ func TestMirrorPhishKeywordAddsTheFlagToTheCachedEntry(t *testing.T) {
 
 	// Snapshot's bool reports "safe to serve with zero IMAP calls", which needs
 	// at least `limit` entries -- not "found". Only the entries matter here.
-	entries, _ := cache.Snapshot("INBOX", 10)
+	entries, _ := must2(cache.Snapshot("INBOX", 10))
 	if len(entries) != 1 {
 		t.Fatalf("got %d cached entries, want 1", len(entries))
 	}

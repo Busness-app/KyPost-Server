@@ -36,7 +36,7 @@ func TestHarvestPinCreatesContact(t *testing.T) {
 	if action != harvestCreated {
 		t.Fatalf("action = %q, want created", action)
 	}
-	c, ok := findContactByEmail(store, "alice@example.com")
+	c, ok := must2(findContactByEmail(store, "alice@example.com"))
 	if !ok {
 		t.Fatalf("expected a created contact")
 	}
@@ -69,7 +69,7 @@ func TestHarvestPinFillsExistingContactGap(t *testing.T) {
 	if action != harvestPinned {
 		t.Fatalf("action = %q, want pinned", action)
 	}
-	c, _ := store.Get(existing.UID)
+	c, _ := must2(store.Get(existing.UID))
 	if c.PGPKeySource != contacts.PGPSourceAutocrypt || c.PGPKeyFingerprint != fp {
 		t.Fatalf("expected autocrypt key pinned, got %+v", c)
 	}
@@ -103,7 +103,7 @@ func TestHarvestPinSkipsStrongerSource(t *testing.T) {
 	if action != harvestSkipped {
 		t.Fatalf("action = %q, want skipped", action)
 	}
-	c, _ := store.Get(existing.UID)
+	c, _ := must2(store.Get(existing.UID))
 	if c.PGPKeyFingerprint != manualFP || c.PGPKeySource != contacts.PGPSourceWKD {
 		t.Fatalf("existing wkd key must be untouched, got %+v", c)
 	}
@@ -137,7 +137,7 @@ func TestHarvestPinUpdatesOlderAutocryptKey(t *testing.T) {
 	if action != harvestUpdated {
 		t.Fatalf("action = %q, want updated", action)
 	}
-	c, _ := store.Get(existing.UID)
+	c, _ := must2(store.Get(existing.UID))
 	if c.PGPKeyFingerprint != newFP {
 		t.Fatalf("expected newest autocrypt key to win, got %+v", c)
 	}
@@ -167,7 +167,7 @@ func TestHarvestPinSameAutocryptFingerprintIsNoop(t *testing.T) {
 	if action != harvestUnchanged {
 		t.Fatalf("action = %q, want unchanged", action)
 	}
-	c, _ := store.Get(existing.UID)
+	c, _ := must2(store.Get(existing.UID))
 	if c.Rev != existing.Rev {
 		t.Fatalf("no-op must not bump Rev: was %d now %d", existing.Rev, c.Rev)
 	}
@@ -274,7 +274,7 @@ func TestHarvestAutocryptPinsOnDKIMPass(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userContactsStore: %v", err)
 	}
-	c, ok := findContactByEmail(store, "faythe@example.com")
+	c, ok := must2(findContactByEmail(store, "faythe@example.com"))
 	if !ok || c.PGPKeySource != contacts.PGPSourceAutocrypt || !c.DiscoveryCreated {
 		t.Fatalf("expected a harvested autocrypt contact, got ok=%v %+v", ok, c)
 	}
@@ -315,7 +315,7 @@ func TestHarvestAutocryptAuthenticatesTheFolderItReadHeadersFrom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userContactsStore: %v", err)
 	}
-	if _, ok := findContactByEmail(store, "heidi@example.com"); !ok {
+	if _, ok := must2(findContactByEmail(store, "heidi@example.com")); !ok {
 		t.Fatal("expected the key to be harvested; a mismatched folder makes the raw fetch return nothing and the harvest die silently")
 	}
 }
@@ -336,7 +336,7 @@ func TestHarvestAutocryptSkipsOnDKIMFail(t *testing.T) {
 	p.harvestAutocrypt(context.Background(), uc, imapadapter.Message{ID: "7"}, nil)
 
 	store, _ := p.userContactsStore("u1")
-	if _, ok := findContactByEmail(store, "grace@example.com"); ok {
+	if _, ok := must2(findContactByEmail(store, "grace@example.com")); ok {
 		t.Fatalf("DKIM failure must harvest nothing")
 	}
 }
@@ -358,7 +358,7 @@ func TestHarvestAutocryptSkipsAddrMismatch(t *testing.T) {
 	p.harvestAutocrypt(context.Background(), uc, imapadapter.Message{ID: "7"}, nil)
 
 	store, _ := p.userContactsStore("u1")
-	if _, ok := findContactByEmail(store, "heidi@example.com"); ok {
+	if _, ok := must2(findContactByEmail(store, "heidi@example.com")); ok {
 		t.Fatalf("addr/From mismatch must harvest nothing")
 	}
 }
@@ -384,7 +384,7 @@ func TestHarvestAutocryptSkipsMultipleHeaders(t *testing.T) {
 	p.harvestAutocrypt(context.Background(), uc, imapadapter.Message{ID: "7"}, nil)
 
 	store, _ := p.userContactsStore("u1")
-	if _, ok := findContactByEmail(store, "ivan@example.com"); ok {
+	if _, ok := must2(findContactByEmail(store, "ivan@example.com")); ok {
 		t.Fatalf("multiple Autocrypt headers must be treated as none")
 	}
 }
@@ -405,7 +405,7 @@ func TestHarvestAutocryptSkipsSuppressedAddress(t *testing.T) {
 	p.harvestAutocrypt(context.Background(), uc, imapadapter.Message{ID: "7"}, map[string]bool{"judy@example.com": true})
 
 	store, _ := p.userContactsStore("u1")
-	if _, ok := findContactByEmail(store, "judy@example.com"); ok {
+	if _, ok := must2(findContactByEmail(store, "judy@example.com")); ok {
 		t.Fatalf("suppressed address must harvest nothing")
 	}
 }
@@ -449,7 +449,7 @@ func TestHarvestPinSkipsSecondaryAddressOnMultiAddressContact(t *testing.T) {
 	if action != harvestSkipped {
 		t.Fatalf("action = %q, want skipped", action)
 	}
-	c, _ := store.Get(existing.UID)
+	c, _ := must2(store.Get(existing.UID))
 	if c.PGPKey != "" || c.PGPKeyFingerprint != "" {
 		t.Fatalf("a key proven only for a secondary address must not become the "+
 			"contact-wide anchor for bob@example.com, got fp=%q", c.PGPKeyFingerprint)
@@ -488,7 +488,7 @@ func TestHarvestPinSecondaryAddressCannotReplaceAnExistingKey(t *testing.T) {
 	if action != harvestSkipped {
 		t.Fatalf("action = %q, want skipped", action)
 	}
-	c, _ := store.Get(existing.UID)
+	c, _ := must2(store.Get(existing.UID))
 	if c.PGPKeyFingerprint != realFP {
 		t.Fatalf("Bob's real key was replaced by one proven only for a secondary "+
 			"address: fp = %q, want %q", c.PGPKeyFingerprint, realFP)
@@ -522,7 +522,7 @@ func TestHarvestPinStillWorksForThePrimaryAddress(t *testing.T) {
 	if action != harvestPinned {
 		t.Fatalf("action = %q, want pinned", action)
 	}
-	c, _ := store.Get(existing.UID)
+	c, _ := must2(store.Get(existing.UID))
 	if c.PGPKeyFingerprint != fp {
 		t.Fatalf("primary-address harvest must still pin, got fp=%q", c.PGPKeyFingerprint)
 	}

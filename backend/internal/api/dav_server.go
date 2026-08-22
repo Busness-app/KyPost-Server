@@ -194,7 +194,10 @@ func (b *contactsDAVBackend) GetAddressObject(ctx context.Context, p string, _ *
 	if err != nil {
 		return nil, err
 	}
-	c, ok := store.Get(uidFromObjectPath(p))
+	c, ok, err := store.Get(uidFromObjectPath(p))
+	if err != nil {
+		return nil, err
+	}
 	if !ok || c.Deleted {
 		return nil, webdav.NewHTTPError(http.StatusNotFound, errors.New("contact not found"))
 	}
@@ -211,7 +214,10 @@ func (b *contactsDAVBackend) ListAddressObjects(ctx context.Context, p string, _
 	if err != nil {
 		return nil, err
 	}
-	list := store.List()
+	list, err := store.List()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]carddav.AddressObject, 0, len(list))
 	// Photo bytes are inlined as base64 data: URIs, and go-webdav builds the
 	// entire MultiStatus in memory before encoding it (its ServeMultiStatus
@@ -299,8 +305,15 @@ func (s *Server) contactToVCardForUser(userID string, c contacts.Contact) vcard.
 			// per-id loop re-paid that cost once per group on every PROPFIND
 			// and every vCard export — turning an import's one-off expense into
 			// a permanent one.
+			all, lerr := gs.List()
+			if lerr != nil {
+				// Render the card without CATEGORIES rather than with a stale
+				// group list. A vCard is what a sync client writes back, so a
+				// name resolved from an unreadable file would be persisted.
+				all = nil
+			}
 			byID := make(map[string]string, len(c.GroupIDs))
-			for _, g := range gs.List() {
+			for _, g := range all {
 				byID[g.ID] = g.Name
 			}
 			for _, id := range c.GroupIDs {
@@ -751,8 +764,12 @@ func resolveGroupIDsByName(store *groups.Store, names []string) []string {
 		return nil
 	}
 
-	known := make(map[string]bool, len(names))
-	for _, g := range store.List() {
+	existing, err := store.List()
+	if err != nil {
+		return nil
+	}
+	known := make(map[string]bool, len(existing))
+	for _, g := range existing {
 		known[strings.ToLower(g.Name)] = true
 	}
 	kept := make([]string, 0, len(names))

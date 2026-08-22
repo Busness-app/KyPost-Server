@@ -53,12 +53,12 @@ func TestFindContactPGPKey(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	key, ok := findContactPGPKey(store, "bob@example.com")
+	key, ok := must2(findContactPGPKey(store, "bob@example.com"))
 	if !ok || key == "" {
 		t.Fatalf("expected a key for bob@example.com, got ok=%v key=%q", ok, key)
 	}
 
-	if _, ok := findContactPGPKey(store, "nobody@example.com"); ok {
+	if _, ok := must2(findContactPGPKey(store, "nobody@example.com")); ok {
 		t.Fatal("expected no key for an unknown address")
 	}
 }
@@ -194,13 +194,13 @@ func TestBuildPGPRecipientPlanSplitsToCCFromBCCAndFiltersUnusableKeys(t *testing
 	}
 
 	resolver := &keyResolver{store: store, discover: false}
-	plan := buildPGPRecipientPlan(
+	plan := must1(buildPGPRecipientPlan(
 		context.Background(),
 		[]string{"bob@example.com"},
 		[]string{"revoked@example.com"},
 		[]string{"dave@example.com", "expired@example.com", "nokey@example.com"},
 		resolver,
-	)
+	))
 
 	if len(plan.toCCEmails) != 1 || plan.toCCEmails[0] != "bob@example.com" || len(plan.toCCKeys) != 1 || plan.toCCKeys[0] != bobID.ArmoredPublicKey {
 		t.Fatalf("expected bob alone in toCCEmails with his key, got emails=%v keys=%d", plan.toCCEmails, len(plan.toCCKeys))
@@ -400,13 +400,13 @@ func TestBuildPGPRecipientPlanDedupesAcrossToCcBccKeepingFirstOccurrence(t *test
 	// bob@example.com appears in both To and BCC (different case) — must be
 	// counted once as a To recipient, never duplicated into bccEmails too.
 	resolver := &keyResolver{store: store, discover: false}
-	plan := buildPGPRecipientPlan(
+	plan := must1(buildPGPRecipientPlan(
 		context.Background(),
 		[]string{"bob@example.com"},
 		nil,
 		[]string{"Bob@Example.com"},
 		resolver,
-	)
+	))
 
 	if len(plan.toCCEmails) != 1 || len(plan.bccEmails) != 0 {
 		t.Fatalf("expected bob counted once in toCCEmails and not duplicated into bccEmails, got toCC=%v bcc=%v", plan.toCCEmails, plan.bccEmails)

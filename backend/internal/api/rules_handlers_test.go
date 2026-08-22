@@ -250,7 +250,7 @@ func TestRulesUpdate_RejectsDeeplyNestedMatch(t *testing.T) {
 	}
 
 	// The original rule must be untouched by the rejected update.
-	stillThere, ok := store.Get(existing.ID)
+	stillThere, ok := must2(store.Get(existing.ID))
 	if !ok {
 		t.Fatal("expected original rule to still exist")
 	}

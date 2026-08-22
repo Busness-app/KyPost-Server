@@ -227,12 +227,24 @@ func (s *Server) handleContactsCardDAVClientSync(w http.ResponseWriter, r *http.
 			payload.AddressBookPath = addressBookPath
 		}
 	}
-	// Best-effort: persist the sync outcome even if it failed, so the UI can
-	// show the last error without needing a separate status endpoint.
-	_ = writeCardDAVClientConfigPayload(cfgPath, s.imapConfigKeyPath, payload)
+	// The sync outcome is persisted even when the sync failed, so the UI can
+	// show the last error without a separate status endpoint — but the write
+	// is not best-effort. It carries the discovered address-book path, the
+	// timestamp and the counters, so a discarded failure means the next sync
+	// repeats discovery and re-imports while the UI reports a success whose
+	// state was never recorded.
+	persistErr := writeCardDAVClientConfigPayload(cfgPath, s.imapConfigKeyPath, payload)
+	if persistErr != nil {
+		s.logger.Error("failed to persist carddav client sync state",
+			"user_id", ac.UserID, "error", persistErr.Error())
+	}
 
 	if syncErr != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": syncErr.Error(), "discoveredAddressBooks": discovered})
+		return
+	}
+	if persistErr != nil {
+		http.Error(w, "contacts synchronized but sync state could not be saved", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -595,7 +607,10 @@ func syncCardDAVClient(ctx context.Context, cfg carddavClientConfigPayload, stor
 			return imported, updated, addressBookPath, discovered, err
 		}
 		uid := remoteContactUID(c)
-		_, existed := store.Get(uid)
+		_, existed, err := store.Get(uid)
+		if err != nil {
+			return imported, updated, addressBookPath, discovered, fmt.Errorf("read contact %s: %w", uid, err)
+		}
 		parsed := contactFromVCard(uid, c.Card)
 		newContact := parsed.contact
 		if len(parsed.categoryNames) > 0 && groupsStore != nil {

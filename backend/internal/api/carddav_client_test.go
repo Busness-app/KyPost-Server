@@ -190,7 +190,7 @@ func TestSyncCardDAVClientProbesEveryDiscoveredBook(t *testing.T) {
 		t.Errorf("discovered counts = %+v, want [0, 1]", discovered)
 	}
 
-	list := store.List()
+	list := must1(store.List())
 	if len(list) != 1 || list[0].FormattedName != "Remote Person" {
 		t.Fatalf("store.List() = %+v, want one contact named Remote Person", list)
 	}

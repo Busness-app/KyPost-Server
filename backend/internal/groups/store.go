@@ -53,6 +53,10 @@ func (s *Store) applyFile(gf groupsFile) {
 	s.seq = gf.Seq
 }
 
+// refreshFromDiskLocked re-reads groups.json into memory. Its error is never
+// discarded: the in-memory copy is a cache of a file two processes write, so a
+// failed re-read means this process does not know what the groups are — and a
+// group is a recipient set. See contacts.Store for the same rule.
 func (s *Store) refreshFromDiskLocked() error {
 	return fsutil.LoadJSONFile(s.path(), s.applyFile, nil)
 }
@@ -65,27 +69,31 @@ func (s *Store) persistLocked() error {
 }
 
 // List returns all groups, sorted by name for stable UI ordering.
-func (s *Store) List() []Group {
+func (s *Store) List() ([]Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, fmt.Errorf("read groups: %w", err)
+	}
 	out := make([]Group, len(s.groups))
 	copy(out, s.groups)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return out, nil
 }
 
 // Get returns a group by ID.
-func (s *Store) Get(id string) (Group, bool) {
+func (s *Store) Get(id string) (Group, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return Group{}, false, fmt.Errorf("read groups: %w", err)
+	}
 	for _, g := range s.groups {
 		if g.ID == id {
-			return g, true
+			return g, true, nil
 		}
 	}
-	return Group{}, false
+	return Group{}, false, nil
 }
 
 // Upsert creates (when g.ID is empty) or renames/replaces a group, stamping

@@ -287,9 +287,13 @@ func keyMatchesPin(c contacts.Contact) bool {
 // A key with no bound address is omitted rather than sent unlabelled: it could
 // only ever verify nothing, and an empty Addresses list is exactly the kind of
 // thing a client might read as "matches everything".
-func boundSignerKeys(store *contacts.Store) []boundSignerKey {
+func boundSignerKeys(store *contacts.Store) ([]boundSignerKey, error) {
+	all, err := store.List()
+	if err != nil {
+		return nil, err
+	}
 	out := []boundSignerKey{}
-	for _, c := range store.List() {
+	for _, c := range all {
 		if c.PGPKey == "" {
 			continue
 		}
@@ -319,7 +323,7 @@ func boundSignerKeys(store *contacts.Store) []boundSignerKey {
 			Source:    c.PGPKeySource,
 		})
 	}
-	return out
+	return out, nil
 }
 
 // boundSignerKeysForSender is boundSignerKeys narrowed to one sender.
@@ -337,12 +341,16 @@ func boundSignerKeys(store *contacts.Store) []boundSignerKey {
 // address must already be a bare addr-spec from senderAddrSpec. An empty
 // address matches nothing, which is the safe direction: no keys, so no verdict
 // beyond "signed, but not by a key you hold for this sender".
-func boundSignerKeysForSender(store *contacts.Store, address string) []boundSignerKey {
+func boundSignerKeysForSender(store *contacts.Store, address string) ([]boundSignerKey, error) {
 	out := []boundSignerKey{}
 	if address == "" {
-		return out
+		return out, nil
 	}
-	for _, k := range boundSignerKeys(store) {
+	all, err := boundSignerKeys(store)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range all {
 		for _, a := range k.Addresses {
 			if a == address {
 				out = append(out, k)
@@ -350,5 +358,5 @@ func boundSignerKeysForSender(store *contacts.Store, address string) []boundSign
 			}
 		}
 	}
-	return out
+	return out, nil
 }

@@ -84,16 +84,18 @@ func (s *Store) List() ([]Rule, error) {
 }
 
 // Get returns a rule by ID.
-func (s *Store) Get(id string) (Rule, bool) {
+func (s *Store) Get(id string) (Rule, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return Rule{}, false, fmt.Errorf("read rules: %w", err)
+	}
 	for _, r := range s.rules {
 		if r.ID == id {
-			return r, true
+			return r, true, nil
 		}
 	}
-	return Rule{}, false
+	return Rule{}, false, nil
 }
 
 // Upsert creates (when r.ID is empty) or replaces a rule, stamping a new

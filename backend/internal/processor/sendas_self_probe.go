@@ -89,7 +89,16 @@ func (p *Poller) ensureOwnAddressProven(userID string) {
 			"user_id", userID, "error", err.Error())
 		return
 	}
-	stale, ok := ownAddressProbeDue(store.List(), ownAddress)
+	aliases, err := store.List()
+	if err != nil {
+		p.log.Error("failed to read send-as aliases for own-address probe",
+			"user_id", userID, "error", err.Error())
+		return
+	}
+	// An unreadable list must not read as "no probe on record": that is the
+	// branch that sends a fresh probe email, so a storage fault would mail one
+	// on every tick.
+	stale, ok := ownAddressProbeDue(aliases, ownAddress)
 	if !ok {
 		return
 	}

@@ -54,7 +54,7 @@ func TestContactCreateBackfillsPGPKeyFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userContactsStore: %v", err)
 	}
-	stored, ok := store.Get(created.UID)
+	stored, ok := must2(store.Get(created.UID))
 	if !ok {
 		t.Fatalf("contact %s not found in store", created.UID)
 	}
