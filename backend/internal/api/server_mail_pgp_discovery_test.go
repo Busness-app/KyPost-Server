@@ -43,7 +43,7 @@ func TestBuildPlanUsesDiscovery(t *testing.T) {
 	}
 	resolver := &keyResolver{store: store, settings: pgpdiscovery.Settings{StoreDiscoveredKeys: true}, discover: true}
 
-	plan := buildPGPRecipientPlan(context.Background(), []string{"erin@example.com"}, nil, nil, resolver)
+	plan := must1(buildPGPRecipientPlan(context.Background(), []string{"erin@example.com"}, nil, nil, resolver))
 
 	if len(plan.toCCEmails) != 1 || plan.toCCEmails[0] != "erin@example.com" {
 		t.Fatalf("expected erin in toCCEmails via WKD discovery, got toCC=%v withoutKey=%v", plan.toCCEmails, plan.withoutKeyEmails)

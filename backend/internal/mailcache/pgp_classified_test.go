@@ -43,7 +43,7 @@ func TestUnclassifiedWriteDoesNotErasePGPSigned(t *testing.T) {
 		t.Fatalf("Upsert poller: %v", err)
 	}
 
-	got, _ := s.Snapshot("INBOX", 1)
+	got, _ := mustSnapshot(t, s, "INBOX", 1)
 	if len(got) != 1 {
 		t.Fatalf("expected one entry, got %d", len(got))
 	}
@@ -78,7 +78,7 @@ func TestClassifiedWriteCanClearPGPSigned(t *testing.T) {
 		t.Fatalf("Upsert reclassify: %v", err)
 	}
 
-	got, _ := s.Snapshot("INBOX", 1)
+	got, _ := mustSnapshot(t, s, "INBOX", 1)
 	if len(got) != 1 {
 		t.Fatalf("expected one entry, got %d", len(got))
 	}

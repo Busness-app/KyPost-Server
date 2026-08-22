@@ -92,27 +92,36 @@ func (s *Store) update(mutate func() error) error {
 
 // List returns all alias records regardless of status (pending, verified,
 // and failed), for the settings-UI listing.
-func (s *Store) List() []Alias {
+//
+// The refresh error is returned for the same reason FindVerifiedByEmail
+// returns it: an alias list is the set of identities this account may send
+// as, and answering from a stale copy shows — and re-authorizes work against —
+// aliases the file may no longer contain.
+func (s *Store) List() ([]Alias, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, fmt.Errorf("read send-as aliases: %w", err)
+	}
 	out := make([]Alias, len(s.aliases))
 	copy(out, s.aliases)
-	return out
+	return out, nil
 }
 
 // ListVerified returns only records with Status == "verified".
-func (s *Store) ListVerified() []Alias {
+func (s *Store) ListVerified() ([]Alias, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, fmt.Errorf("read send-as aliases: %w", err)
+	}
 	out := make([]Alias, 0, len(s.aliases))
 	for _, a := range s.aliases {
 		if a.Status == "verified" {
 			out = append(out, a)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // FindVerifiedByEmail returns the verified alias whose Email matches email
@@ -145,26 +154,30 @@ func (s *Store) FindVerifiedByEmail(email string) (Alias, bool, error) {
 }
 
 // Get returns an alias record by ID regardless of status.
-func (s *Store) Get(id string) (Alias, bool) {
+func (s *Store) Get(id string) (Alias, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return Alias{}, false, fmt.Errorf("read send-as aliases: %w", err)
+	}
 	for _, a := range s.aliases {
 		if a.ID == id {
-			return a, true
+			return a, true, nil
 		}
 	}
-	return Alias{}, false
+	return Alias{}, false, nil
 }
 
 // PendingNotExpired returns records with Status == "pending" whose ExpiresAt
 // is still in the future. Pending records whose ExpiresAt has already passed
 // are excluded — the background poller task is responsible for expiring
 // those via MarkFailed, not this method silently including them.
-func (s *Store) PendingNotExpired() []Alias {
+func (s *Store) PendingNotExpired() ([]Alias, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, fmt.Errorf("read send-as aliases: %w", err)
+	}
 	now := time.Now()
 	out := make([]Alias, 0, len(s.aliases))
 	for _, a := range s.aliases {
@@ -177,7 +190,7 @@ func (s *Store) PendingNotExpired() []Alias {
 		}
 		out = append(out, a)
 	}
-	return out
+	return out, nil
 }
 
 // newVerificationCode returns a random "kp-XXXXXXXX" code (8 hex chars) via

@@ -147,7 +147,12 @@ func (s *Server) handlePGPRecipientsCheck(w http.ResponseWriter, r *http.Request
 	statuses := make([]addressStatus, 0, len(req.Addresses))
 	for _, addr := range req.Addresses {
 		status := addressStatus{Address: addr, Tier: string(tierNone)}
-		if key, ok := findContactPGPKey(contactsStore, addr); ok {
+		key, ok, err := findContactPGPKey(contactsStore, addr)
+		if err != nil {
+			http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+			return
+		}
+		if ok {
 			if ks, err := pgpmail.CheckKeyStatus(key); err == nil {
 				status.Revoked = ks.Revoked
 				status.Expired = ks.Expired

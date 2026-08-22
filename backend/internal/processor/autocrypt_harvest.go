@@ -30,16 +30,20 @@ const (
 // findContactByEmail returns the first contact carrying email (case-
 // insensitive). Mirrors the api package's findContact; duplicated here because
 // that one is unexported in a different package/process.
-func findContactByEmail(store *contacts.Store, email string) (contacts.Contact, bool) {
+func findContactByEmail(store *contacts.Store, email string) (contacts.Contact, bool, error) {
+	all, err := store.List()
+	if err != nil {
+		return contacts.Contact{}, false, err
+	}
 	target := strings.ToLower(strings.TrimSpace(email))
-	for _, c := range store.List() {
+	for _, c := range all {
 		for _, e := range c.Emails {
 			if strings.ToLower(strings.TrimSpace(e.Value)) == target {
-				return c, true
+				return c, true, nil
 			}
 		}
 	}
-	return contacts.Contact{}, false
+	return contacts.Contact{}, false, nil
 }
 
 // authenticatedForContact reports whether storing a key proven for addr on
@@ -76,7 +80,13 @@ func authenticatedForContact(c contacts.Contact, addr string) bool {
 // when the contact has no key, creates a DiscoveryCreated contact when none
 // exists, and for an existing autocrypt key lets the newest fingerprint win.
 func harvestPinAutocryptKey(store *contacts.Store, addr, armored, fingerprint string) (harvestAction, error) {
-	c, ok := findContactByEmail(store, addr)
+	// An unreadable address book must not read as "no such contact": that is
+	// the branch that CREATES a contact and pins the harvested key to it, so a
+	// storage fault would turn the weakest trust rung into a new record.
+	c, ok, err := findContactByEmail(store, addr)
+	if err != nil {
+		return "", err
+	}
 	if ok && !authenticatedForContact(c, addr) {
 		// DKIM proved control of `addr` and of nothing else. The key, however,
 		// is stored on the contact RECORD, and findContact,
@@ -133,7 +143,7 @@ func harvestPinAutocryptKey(store *contacts.Store, addr, armored, fingerprint st
 	c.PGPKey = armored
 	c.PGPKeyFingerprint = fingerprint
 	c.PGPKeyVerified = false
-	_, err := store.UpsertWithPrecondition(c, contacts.ContactPrecondition{RequireETag: c.ETag()})
+	_, err = store.UpsertWithPrecondition(c, contacts.ContactPrecondition{RequireETag: c.ETag()})
 	if errors.Is(err, contacts.ErrPreconditionFailed) {
 		// The contact changed between our read and our write (e.g. the api
 		// process pinned a key). Abort rather than clobber it; the next poll

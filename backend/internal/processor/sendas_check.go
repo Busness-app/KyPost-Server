@@ -76,7 +76,12 @@ func (p *Poller) checkPendingSendAsAliases(ctx context.Context, userID string, m
 		return
 	}
 
-	for _, alias := range store.List() {
+	aliases, err := store.List()
+	if err != nil {
+		p.log.Error("failed to read send-as aliases", "user_id", userID, "error", err.Error())
+		return
+	}
+	for _, alias := range aliases {
 		if alias.Status != "pending" {
 			continue
 		}

@@ -141,7 +141,11 @@ func (s *Server) handlePGPDiscoverySuppressContact(w http.ResponseWriter, r *htt
 		http.Error(w, "failed to open contacts store", http.StatusInternalServerError)
 		return
 	}
-	c, found := store.Get(uid)
+	c, found, err := store.Get(uid)
+	if err != nil {
+		http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+		return
+	}
 	if !found || c.Deleted {
 		http.Error(w, "contact not found", http.StatusNotFound)
 		return

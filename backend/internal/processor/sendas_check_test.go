@@ -145,7 +145,7 @@ func TestCheckPendingSendAsAliasesStaysPendingOnNoDKIMSignature(t *testing.T) {
 
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
 
-	got, ok := store.Get(alias.ID)
+	got, ok := must2(store.Get(alias.ID))
 	if !ok {
 		t.Fatalf("Get: alias not found")
 	}
@@ -182,7 +182,7 @@ func TestCheckPendingSendAsAliasesStaysPendingOnRawFetchError(t *testing.T) {
 
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
 
-	got, ok := store.Get(alias.ID)
+	got, ok := must2(store.Get(alias.ID))
 	if !ok {
 		t.Fatalf("Get: alias not found")
 	}
@@ -210,7 +210,7 @@ func TestCheckPendingSendAsAliasesStaysPendingOnNoSearchMatch(t *testing.T) {
 
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
 
-	got, ok := store.Get(alias.ID)
+	got, ok := must2(store.Get(alias.ID))
 	if !ok {
 		t.Fatalf("Get: alias not found")
 	}
@@ -242,7 +242,7 @@ func TestCheckPendingSendAsAliasesMarksExpiredAsFailed(t *testing.T) {
 
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
 
-	got, ok := store.Get(alias.ID)
+	got, ok := must2(store.Get(alias.ID))
 	if !ok {
 		t.Fatalf("Get: alias not found")
 	}
@@ -312,7 +312,7 @@ func TestCheckPendingSendAsAliasesSweepsOldFailedRecords(t *testing.T) {
 
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
 
-	if _, ok := store.Get(failed.ID); ok {
+	if _, ok := must2(store.Get(failed.ID)); ok {
 		t.Fatalf("Get: expected record to be swept, still present")
 	}
 }
@@ -404,7 +404,7 @@ func verifyAliasViaPoller(t *testing.T, p *Poller, userID, email string) sendas.
 	}
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
 
-	got, ok := store.Get(alias.ID)
+	got, ok := must2(store.Get(alias.ID))
 	if !ok {
 		t.Fatal("Get: alias not found after verification")
 	}
@@ -467,7 +467,7 @@ func TestCheckPendingSendAsAliasesRejectsAMessageThatDoesNotCarryTheCode(t *test
 	}
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
 
-	got, ok := store.Get(alias.ID)
+	got, ok := must2(store.Get(alias.ID))
 	if !ok {
 		t.Fatal("alias vanished")
 	}
@@ -504,7 +504,7 @@ func TestCheckPendingSendAsAliasesRejectsAMessagePredatingTheChallenge(t *testin
 	}
 	p.checkPendingSendAsAliases(context.Background(), userID, mail)
 
-	got, ok := store.Get(alias.ID)
+	got, ok := must2(store.Get(alias.ID))
 	if !ok {
 		t.Fatal("alias vanished")
 	}

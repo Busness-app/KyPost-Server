@@ -21,7 +21,10 @@
 package api
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -183,4 +186,43 @@ func newTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 		MinVersion:     tls.VersionTLS12,
 		GetCertificate: rc.get,
 	}, nil
+}
+
+// leafSPKIPin is the `pin` value published in a pairing link: base64 of the
+// SHA-256 of the leaf certificate's SubjectPublicKeyInfo, the format OkHttp's
+// CertificatePinner.pin() emits. Empty when this process does not terminate
+// TLS.
+//
+// It exists because the pairing request is the one call that carries the
+// pairing token and the device's push credentials, and until the app has a pin
+// it sends them inside a trust-on-first-use window — on a network with a
+// locally trusted CA an interceptor reads them, registers its own device first,
+// and the app then pins the attacker. Publishing the pin lets the app pin
+// before it discloses anything.
+//
+// The leaf, not an issuer. Pinning an intermediate on a Let's Encrypt
+// deployment asserts only "issued by Let's Encrypt", which anyone who can
+// answer for the host obtains for free.
+//
+// Read live from GetCertificate on every call rather than cached at startup, so
+// a renewal that rotates the key is reflected in the next link generated — see
+// reloadingCertificate. Empty is not a failure: the app treats an absent pin as
+// trust-on-first-use, which is exactly what pairing did before this existed, so
+// a deployment that terminates TLS in a proxy is unchanged rather than broken.
+func leafSPKIPin(cfg *tls.Config) string {
+	if cfg == nil || cfg.GetCertificate == nil {
+		return ""
+	}
+	cert, err := cfg.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil || cert == nil || len(cert.Certificate) == 0 {
+		return ""
+	}
+	leaf := cert.Leaf
+	if leaf == nil {
+		if leaf, err = x509.ParseCertificate(cert.Certificate[0]); err != nil {
+			return ""
+		}
+	}
+	sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+	return "sha256/" + base64.StdEncoding.EncodeToString(sum[:])
 }

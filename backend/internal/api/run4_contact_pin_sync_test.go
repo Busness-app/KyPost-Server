@@ -60,7 +60,7 @@ func TestContactsSyncPushKeepsPGPKeyPin(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	got, ok := store.Get(seeded.UID)
+	got, ok := must2(store.Get(seeded.UID))
 	if !ok {
 		t.Fatal("contact not found after sync")
 	}

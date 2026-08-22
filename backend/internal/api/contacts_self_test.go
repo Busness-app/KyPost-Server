@@ -40,7 +40,7 @@ func TestHandleContactSelf_SetsFlagAndReturnsUpdatedContact(t *testing.T) {
 		t.Fatalf("expected isSelf true in response, got %+v", updated)
 	}
 
-	self, ok := store.GetSelf()
+	self, ok := must2(store.GetSelf())
 	if !ok || self.UID != a.UID {
 		t.Fatalf("GetSelf: ok=%v uid=%q, want %q", ok, self.UID, a.UID)
 	}

@@ -37,7 +37,7 @@ func TestSyncContactKeyGenerationDropsVerdictsFromAnOlderGeneration(t *testing.T
 	if err := store.SyncContactKeyGeneration(7); err != nil {
 		t.Fatalf("SyncContactKeyGeneration: %v", err)
 	}
-	entries, _ := store.Snapshot("INBOX", 10)
+	entries, _ := mustSnapshot(t, store, "INBOX", 10)
 	if len(entries) != 1 || !entries[0].PGPVerified {
 		t.Fatalf("verdict was dropped despite an unchanged address book: %+v", entries)
 	}
@@ -46,7 +46,7 @@ func TestSyncContactKeyGenerationDropsVerdictsFromAnOlderGeneration(t *testing.T
 	if err := store.SyncContactKeyGeneration(8); err != nil {
 		t.Fatalf("SyncContactKeyGeneration: %v", err)
 	}
-	entries, _ = store.Snapshot("INBOX", 10)
+	entries, _ = mustSnapshot(t, store, "INBOX", 10)
 	if len(entries) == 1 && entries[0].PGPVerified {
 		t.Fatal("a cached 'signature verified' verdict survived a change to the " +
 			"address book it was derived from")

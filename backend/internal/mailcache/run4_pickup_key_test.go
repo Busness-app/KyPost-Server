@@ -139,7 +139,7 @@ func TestUpsertDoesNotPersistPickupKey(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	entries, _ := store.Snapshot("INBOX", 1)
+	entries, _ := mustSnapshot(t, store, "INBOX", 1)
 	if len(entries) != 1 {
 		t.Fatalf("entries = %d, want 1", len(entries))
 	}

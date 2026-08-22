@@ -44,7 +44,11 @@ func (s *Server) handleContactsExport(w http.ResponseWriter, r *http.Request) {
 		format = "vcard"
 	}
 
-	list := store.List()
+	list, err := store.List()
+	if err != nil {
+		http.Error(w, "failed to read contacts", http.StatusInternalServerError)
+		return
+	}
 
 	switch format {
 	case "vcard":

@@ -45,7 +45,7 @@ func TestStore_CreateUpdateDelete(t *testing.T) {
 		t.Error("expected Rev to bump on update")
 	}
 
-	got, ok := s.Get(created.ID)
+	got, ok := mustGet(t, s, created.ID)
 	if !ok || got.Name != "Archive all newsletters" {
 		t.Errorf("Get after update = %+v, ok=%v", got, ok)
 	}
@@ -57,7 +57,7 @@ func TestStore_CreateUpdateDelete(t *testing.T) {
 	if !removed {
 		t.Error("expected Delete to report removal")
 	}
-	if _, ok := s.Get(created.ID); ok {
+	if _, ok := mustGet(t, s, created.ID); ok {
 		t.Error("expected Get to fail after Delete")
 	}
 

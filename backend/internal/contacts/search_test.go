@@ -13,13 +13,13 @@ func TestSearch_CaseInsensitivity(t *testing.T) {
 	c2, _ := s.Upsert(Contact{FormattedName: "Bob Jones", Emails: []ContactValue{{Value: "bob@example.com"}}})
 
 	// Search for "alice" should match "Alice Smith"
-	results := s.Search("alice", 10)
+	results := mustSearch(t, s, "alice", 10)
 	if len(results) != 1 || results[0].UID != c1.UID {
 		t.Errorf("case-insensitive search for 'alice' failed: got %d results", len(results))
 	}
 
 	// Search for "BOB@EXAMPLE.COM" should match email
-	results = s.Search("BOB@EXAMPLE.COM", 10)
+	results = mustSearch(t, s, "BOB@EXAMPLE.COM", 10)
 	if len(results) != 1 || results[0].UID != c2.UID {
 		t.Errorf("case-insensitive search for 'BOB@EXAMPLE.COM' failed: got %d results", len(results))
 	}
@@ -33,13 +33,13 @@ func TestSearch_EmptyQueryReturnsEmpty(t *testing.T) {
 	_, _ = s.Upsert(Contact{FormattedName: "Alice"})
 
 	// Empty string query
-	results := s.Search("", 10)
+	results := mustSearch(t, s, "", 10)
 	if len(results) != 0 {
 		t.Errorf("empty query should return empty slice, got %d results", len(results))
 	}
 
 	// Whitespace-only query
-	results = s.Search("   ", 10)
+	results = mustSearch(t, s, "   ", 10)
 	if len(results) != 0 {
 		t.Errorf("whitespace-only query should return empty slice, got %d results", len(results))
 	}
@@ -53,13 +53,13 @@ func TestSearch_NonPositiveLimitReturnsEmpty(t *testing.T) {
 	_, _ = s.Upsert(Contact{FormattedName: "Alice"})
 
 	// Zero limit
-	results := s.Search("alice", 0)
+	results := mustSearch(t, s, "alice", 0)
 	if len(results) != 0 {
 		t.Errorf("zero limit should return empty slice, got %d results", len(results))
 	}
 
 	// Negative limit
-	results = s.Search("alice", -1)
+	results = mustSearch(t, s, "alice", -1)
 	if len(results) != 0 {
 		t.Errorf("negative limit should return empty slice, got %d results", len(results))
 	}
@@ -77,7 +77,7 @@ func TestSearch_DeletedContactsExcluded(t *testing.T) {
 	_, _ = s.Delete(c1.UID)
 
 	// Search should only return Bob, not deleted Alice
-	results := s.Search("a", 10)
+	results := mustSearch(t, s, "a", 10)
 	if len(results) != 0 {
 		t.Errorf("deleted contact should be excluded, got %d results", len(results))
 	}
@@ -122,7 +122,7 @@ func TestSearch_RankingOrder(t *testing.T) {
 	})
 
 	// Search for "alice" - should rank: c0 (score 0), c1 (score 1), c2 (score 2), c3 (score 3), c4 (score 4)
-	results := s.Search("alice", 10)
+	results := mustSearch(t, s, "alice", 10)
 	if len(results) != 5 {
 		t.Errorf("expected 5 results, got %d", len(results))
 	} else {
@@ -147,13 +147,13 @@ func TestSearch_LimitTruncation(t *testing.T) {
 	}
 
 	// Search with limit 3 should return 3 results
-	results := s.Search("alice", 3)
+	results := mustSearch(t, s, "alice", 3)
 	if len(results) != 3 {
 		t.Errorf("limit=3 should return 3 results, got %d", len(results))
 	}
 
 	// Search with limit 10 should return 5 results
-	results = s.Search("alice", 10)
+	results = mustSearch(t, s, "alice", 10)
 	if len(results) != 5 {
 		t.Errorf("limit=10 should return 5 results, got %d", len(results))
 	}
@@ -182,19 +182,19 @@ func TestSearch_NameVsEmailMatching(t *testing.T) {
 	})
 
 	// Search for "john" should match c1 (name prefix)
-	results := s.Search("john", 10)
+	results := mustSearch(t, s, "john", 10)
 	if len(results) != 1 || results[0].UID != c1.UID {
 		t.Errorf("search for 'john' should match only c1")
 	}
 
 	// Search for "doe" should match c1 and c2 (name contains)
-	results = s.Search("doe", 10)
+	results = mustSearch(t, s, "doe", 10)
 	if len(results) != 2 {
 		t.Errorf("search for 'doe' should match 2 results, got %d", len(results))
 	}
 
 	// Search for "jane" should match c2 (name) and c3 (email), but c2 should rank higher
-	results = s.Search("jane", 10)
+	results = mustSearch(t, s, "jane", 10)
 	if len(results) != 2 {
 		t.Errorf("search for 'jane' should match 2 results, got %d", len(results))
 	}
@@ -222,13 +222,13 @@ func TestSearch_MultipleEmailMatches(t *testing.T) {
 	})
 
 	// Search for "bob@" should match with email prefix (score 1)
-	results := s.Search("bob@", 10)
+	results := mustSearch(t, s, "bob@", 10)
 	if len(results) != 1 || results[0].UID != c.UID {
 		t.Errorf("email prefix search should match contact")
 	}
 
 	// Search for "work" should match email contains (score 4)
-	results = s.Search("work", 10)
+	results = mustSearch(t, s, "work", 10)
 	if len(results) != 1 || results[0].UID != c.UID {
 		t.Errorf("email contains search should match contact")
 	}
@@ -246,7 +246,7 @@ func TestSearch_NoMatches(t *testing.T) {
 	})
 
 	// Search for something that doesn't match
-	results := s.Search("xyz", 10)
+	results := mustSearch(t, s, "xyz", 10)
 	if len(results) != 0 {
 		t.Errorf("no matches should return empty slice, got %d results", len(results))
 	}
@@ -265,19 +265,19 @@ func TestSearch_GivenAndFamilyNameMatching(t *testing.T) {
 	})
 
 	// Search should match GivenName
-	results := s.Search("john", 10)
+	results := mustSearch(t, s, "john", 10)
 	if len(results) != 1 || results[0].UID != c.UID {
 		t.Errorf("search for 'john' should match GivenName")
 	}
 
 	// Search should match FamilyName
-	results = s.Search("anderson", 10)
+	results = mustSearch(t, s, "anderson", 10)
 	if len(results) != 1 || results[0].UID != c.UID {
 		t.Errorf("search for 'anderson' should match FamilyName")
 	}
 
 	// Partial matches in FamilyName should work
-	results = s.Search("ander", 10)
+	results = mustSearch(t, s, "ander", 10)
 	if len(results) != 1 || results[0].UID != c.UID {
 		t.Errorf("search for 'ander' should match FamilyName contains")
 	}

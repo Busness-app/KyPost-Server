@@ -30,7 +30,7 @@ func TestResolveGroupIDsByNameCapsCategoriesPerCard(t *testing.T) {
 	if len(ids) > maxCategoriesPerCard {
 		t.Fatalf("resolved %d categories from one card, cap is %d", len(ids), maxCategoriesPerCard)
 	}
-	if got := len(store.List()); got > maxCategoriesPerCard {
+	if got := len(must1(store.List())); got > maxCategoriesPerCard {
 		t.Fatalf("one card created %d groups, cap is %d", got, maxCategoriesPerCard)
 	}
 }

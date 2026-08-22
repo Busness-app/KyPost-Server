@@ -363,6 +363,16 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 		pullEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/pull"
 	}
 	pairingTTLSeconds := int64(nativePairingTokenTTL.Seconds())
+	// Leaf SPKI pin for the pairing link, so the app can pin the registration
+	// call — the one that carries the pairing token and the push credentials —
+	// instead of disclosing them inside a trust-on-first-use window. See
+	// leafSPKIPin. Only when this process is the TLS endpoint: behind a proxy
+	// the certificate the device sees is the proxy's and we cannot speak for it,
+	// and publishing a pin we don't serve would fail every pairing closed.
+	tlsPin := ""
+	if strings.HasPrefix(strings.ToLower(registerEndpoint), "https://") {
+		tlsPin = leafSPKIPin(s.tlsConfig)
+	}
 	resp := map[string]any{
 		"subscriberId":      subscriberID,
 		"serverBaseUrl":     serverBaseURL,
@@ -371,6 +381,9 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 		"deliveryMode":      store.NativeDeliveryMode(),
 		"pairingTtlSeconds": pairingTTLSeconds,
 		"configured":        configured,
+	}
+	if tlsPin != "" {
+		resp["tlsPin"] = tlsPin
 	}
 	if configurationError != "" {
 		resp["configurationError"] = configurationError

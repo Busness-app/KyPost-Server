@@ -33,7 +33,7 @@ func TestUpsertAtTheCapStillAllowsUpdates(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	seedContactsToCap(t, store)
-	all := store.List()
+	all := mustList(t, store)
 	if len(all) != MaxContactsPerUser {
 		t.Fatalf("seeded %d contacts, want %d", len(all), MaxContactsPerUser)
 	}

@@ -71,6 +71,14 @@ func (s *Store) applyFile(cf contactsFile) {
 	s.pgpKeyGen = cf.PGPKeyGen
 }
 
+// refreshFromDiskLocked re-reads contacts.json into memory.
+//
+// Its error is never discarded. The in-memory copy is a cache of a file two
+// processes write, so a failed re-read means "this process does not know what
+// the address book says" — and the address book is what decides which key a
+// message is encrypted to and whose signature counts as verified. Answering
+// from the last copy that happened to load is how a key the user removed keeps
+// authorizing. Every reader below propagates it and every caller fails closed.
 func (s *Store) refreshFromDiskLocked() error {
 	return fsutil.LoadJSONFile(s.path(), s.applyFile, nil)
 }
@@ -89,31 +97,35 @@ func (s *Store) persistLocked() error {
 }
 
 // List returns all non-deleted contacts.
-func (s *Store) List() []Contact {
+func (s *Store) List() ([]Contact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, fmt.Errorf("read contacts: %w", err)
+	}
 	out := make([]Contact, 0, len(s.contacts))
 	for _, c := range s.contacts {
 		if !c.Deleted {
 			out = append(out, c)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // Get returns a contact by UID, including a tombstoned one (callers decide
 // whether Deleted should be treated as not-found).
-func (s *Store) Get(uid string) (Contact, bool) {
+func (s *Store) Get(uid string) (Contact, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return Contact{}, false, fmt.Errorf("read contacts: %w", err)
+	}
 	for _, c := range s.contacts {
 		if c.UID == uid {
-			return c, true
+			return c, true, nil
 		}
 	}
-	return Contact{}, false
+	return Contact{}, false, nil
 }
 
 // Upsert creates (when c.UID is empty) or replaces a contact, stamping a new
@@ -463,19 +475,21 @@ func (s *Store) SetSelf(uid string, self bool) (Contact, bool, error) {
 }
 
 // GetSelf returns the caller's own contact card — the (at most one) live
-// contact with IsSelf set — or ok=false if none is set.
-func (s *Store) GetSelf() (Contact, bool) {
+// contact with IsSelf set — or ok=false if none is set. A read failure is
+// returned as an error rather than as ok=false, which would report a storage
+// fault as "you have no own card" and let the caller act on it.
+func (s *Store) GetSelf() (Contact, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.refreshFromDiskLocked(); err != nil {
-		return Contact{}, false
+		return Contact{}, false, fmt.Errorf("read contacts: %w", err)
 	}
 	for _, c := range s.contacts {
 		if c.IsSelf && !c.Deleted {
-			return c, true
+			return c, true, nil
 		}
 	}
-	return Contact{}, false
+	return Contact{}, false, nil
 }
 
 // ChangedSince returns contacts created/updated/deleted after rev, plus the
@@ -483,10 +497,12 @@ func (s *Store) GetSelf() (Contact, bool) {
 // the tombstone GC watermark, meaning some deletions may no longer be
 // representable as tombstones — the caller must discard its cursor and
 // request a full snapshot (rev=0) instead of trusting a partial delta.
-func (s *Store) ChangedSince(rev int64) (changed, deleted []Contact, cursor int64, tooOld bool) {
+func (s *Store) ChangedSince(rev int64) (changed, deleted []Contact, cursor int64, tooOld bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, nil, 0, false, fmt.Errorf("read contacts: %w", err)
+	}
 
 	tooOld = rev > 0 && rev < s.gcHighWaterRev
 	changed = make([]Contact, 0)
@@ -503,7 +519,7 @@ func (s *Store) ChangedSince(rev int64) (changed, deleted []Contact, cursor int6
 			}
 		}
 	}
-	return changed, deleted, s.seq, tooOld
+	return changed, deleted, s.seq, tooOld, nil
 }
 
 // DedupeMerge records one applied merge: the survivor UID and the UIDs it
@@ -647,13 +663,15 @@ func (s *Store) GC(retention time.Duration) error {
 // rank higher than email matches), sorted stable by score ascending, and
 // truncated to the specified limit. Deleted contacts are excluded.
 // Empty query or non-positive limit returns an empty slice.
-func (s *Store) Search(query string, limit int) []Contact {
+func (s *Store) Search(query string, limit int) ([]Contact, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return nil, fmt.Errorf("read contacts: %w", err)
+	}
 
 	if query = strings.TrimSpace(query); query == "" || limit <= 0 {
-		return []Contact{}
+		return []Contact{}, nil
 	}
 
 	q := strings.ToLower(query)
@@ -728,7 +746,7 @@ func (s *Store) Search(query string, limit int) []Contact {
 	for i, cs := range results {
 		out[i] = cs.contact
 	}
-	return out
+	return out, nil
 }
 
 // BatchOp is one change in an ApplyBatch call. Delete tombstones UID;
@@ -852,11 +870,18 @@ func (s *Store) liveContactCountLocked() int {
 // It also covers the case the handler helper explicitly skipped: it returned
 // early when the key bytes were unchanged, so REMOVING AN ADDRESS — which
 // narrows exactly what the key is an anchor for — invalidated nothing.
-func (s *Store) PGPKeyGeneration() int64 {
+//
+// The refresh error is returned, not swallowed. This is the value that decides
+// whether a cached "signature verified" badge survives, so answering from a
+// stale in-memory copy while contacts.json is unreadable keeps exactly the
+// verdicts a user's key removal was meant to retire.
+func (s *Store) PGPKeyGeneration() (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.refreshFromDiskLocked()
-	return s.pgpKeyGen
+	if err := s.refreshFromDiskLocked(); err != nil {
+		return 0, fmt.Errorf("read contacts: %w", err)
+	}
+	return s.pgpKeyGen, nil
 }
 
 // pgpBindingOf is the part of a contact that determines which addresses its key

@@ -102,7 +102,7 @@ func TestContactsSyncOversizedBatchCommitsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userContactsStore: %v", err)
 	}
-	before := len(store.List())
+	before := len(must1(store.List()))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/contacts/sync", syncPushBody(t, maxContactsSyncChanges+1))
@@ -113,7 +113,7 @@ func TestContactsSyncOversizedBatchCommitsNothing(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
 	}
-	if after := len(store.List()); after != before {
+	if after := len(must1(store.List())); after != before {
 		t.Fatalf("contact count went %d -> %d on a rejected batch; a 413 must commit nothing", before, after)
 	}
 }

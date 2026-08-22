@@ -42,7 +42,7 @@ func TestEnsureByNameCreatesEveryMissingGroup(t *testing.T) {
 	if len(ids) != 3 {
 		t.Fatalf("ids = %v, want 3", ids)
 	}
-	if got := len(store.List()); got != 3 {
+	if got := len(mustList(t, store)); got != 3 {
 		t.Fatalf("stored groups = %d, want 3", got)
 	}
 }
@@ -76,7 +76,7 @@ func TestEnsureByNameWritesTheFileOnce(t *testing.T) {
 	if !after.ModTime().After(before.ModTime()) && after.Size() == before.Size() {
 		t.Fatal("nothing was written at all")
 	}
-	if got := len(store.List()); got != 200 {
+	if got := len(mustList(t, store)); got != 200 {
 		t.Fatalf("stored groups = %d, want 200", got)
 	}
 }
@@ -97,7 +97,7 @@ func TestEnsureByNameReusesExistingGroupsCaseInsensitively(t *testing.T) {
 			t.Fatalf("ids = %v, want every entry to be the existing group %q", ids, created.ID)
 		}
 	}
-	if got := len(store.List()); got != 1 {
+	if got := len(mustList(t, store)); got != 1 {
 		t.Fatalf("stored groups = %d, want 1 — case variants must not mint duplicates", got)
 	}
 }
@@ -126,7 +126,7 @@ func TestEnsureByNameIgnoresBlankNames(t *testing.T) {
 	if len(ids) != 0 {
 		t.Fatalf("ids = %v, want none", ids)
 	}
-	if got := len(store.List()); got != 0 {
+	if got := len(mustList(t, store)); got != 0 {
 		t.Fatalf("stored groups = %d, want 0", got)
 	}
 }
@@ -146,7 +146,7 @@ func TestEnsureByNameRefusesPastThePerUserCap(t *testing.T) {
 		t.Fatalf("err = %v, want ErrTooManyGroups", err)
 	}
 	// Nothing partial: a refused batch leaves the store as it was.
-	if got := len(store.List()); got != 0 {
+	if got := len(mustList(t, store)); got != 0 {
 		t.Fatalf("a refused batch persisted %d groups", got)
 	}
 }
@@ -180,7 +180,7 @@ func TestEnsureByNameTrimsNames(t *testing.T) {
 	if _, err := store.EnsureByName([]string{"  Work  "}); err != nil {
 		t.Fatalf("EnsureByName: %v", err)
 	}
-	list := store.List()
+	list := mustList(t, store)
 	if len(list) != 1 || list[0].Name != "Work" {
 		t.Fatalf("stored %+v, want a single trimmed \"Work\"", list)
 	}

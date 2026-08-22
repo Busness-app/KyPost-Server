@@ -26,6 +26,9 @@ All code under `backend/internal/mailcache/`. Consumed by both `api/`
   `fsutil.AtomicWriteFile` — required because `api` and `processor` run as
   separate processes sharing no memory (see root `backend/AGENTS.md`), and
   here it's not hypothetical: both actually call into this package.
+- **`Snapshot` returns that re-read's error.** Entries carry warm bodies and
+  cached signature verdicts, so a window served after a failed re-read is a
+  stale body and a badge this process cannot check, presented as current.
 - A `Store` holds one independent window per mailbox key (`map[string]*mailboxWindow`)
   — a user can poll several folders, each with its own cursor.
 - **Not a permanent store, unlike `contacts`.** A window represents "the
@@ -52,7 +55,10 @@ All code under `backend/internal/mailcache/`. Consumed by both `api/`
   rules it was computed under) and `ContactKeyGen` (`contacts.Store.PGPKeyGeneration`
   at the time). `dropStaleVerdicts` clears the first on load;
   `SyncContactKeyGeneration` clears the second, called from the inbox read path,
-  where it is one integer comparison in the common case. That is what makes
+  where it is one integer comparison in the common case. **When the generation
+  cannot be confirmed at all** — the contacts store will not open or will not
+  read — `handleInbox` calls `InvalidatePGPVerdicts` and serves the window with
+  no verdicts rather than with the ones it could not check. That is what makes
   invalidation cover ALL eleven contact writers rather than the three handlers
   that called an invalidation helper — three of them are the daemon's Autocrypt
   writes, in a process with no `*http.Request`, so no handler-level hook could

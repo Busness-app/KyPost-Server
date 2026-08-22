@@ -7,6 +7,7 @@ import {
   clamp,
   pairingBarColor
 } from "./format";
+import { buildNativePairingLink } from "./pairingLink";
 
 /**
  * "Pair a new device" — the QR code, its expiry bar, and the desktop deep link.
@@ -34,27 +35,11 @@ type PairingStatusResponse = {
   pairingToken?: string;
   pairingExpiresAt?: string;
   pairingTtlSeconds?: number;
+  /** Leaf SPKI pin of the serving certificate; absent when the server does not terminate TLS. */
+  tlsPin?: string;
   configurationError?: string;
   configured: boolean;
 };
-
-function buildNativePairingLink(pairing: PairingStatusResponse): string {
-  const params = new URLSearchParams();
-  params.set("sub", pairing.subscriberId);
-  if (pairing.subscriberHash) {
-    params.set("hash", pairing.subscriberHash);
-  }
-  if (pairing.serverBaseUrl) {
-    params.set("srv", pairing.serverBaseUrl);
-  }
-  if (pairing.registerEndpoint) {
-    params.set("reg", pairing.registerEndpoint);
-  }
-  if (pairing.pairingToken) {
-    params.set("pt", pairing.pairingToken);
-  }
-  return `kypost://native-pair?${params.toString()}`;
-}
 
 export type PairingPanelProps = {
   /** Called after a pairing attempt, so the device list can pick up a new one. */

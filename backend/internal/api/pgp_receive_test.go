@@ -179,7 +179,7 @@ func TestSignerKeysRequireTheContactPin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	got := boundSignerKeysForSender(contactsStore, "bob@example.com")
+	got := must1(boundSignerKeysForSender(contactsStore, "bob@example.com"))
 	if len(got) != 1 || got[0].PublicKey != real.ArmoredPublicKey {
 		t.Fatalf("pinned key should be offered with its material, got %+v", got)
 	}
@@ -202,7 +202,7 @@ func TestSignerKeysRequireTheContactPin(t *testing.T) {
 	// key material, so nothing can verify against it. Both halves matter: the
 	// absent PublicKey is the security property, the Conflict flag is the
 	// honest badge.
-	got = boundSignerKeysForSender(contactsStore, "bob@example.com")
+	got = must1(boundSignerKeysForSender(contactsStore, "bob@example.com"))
 	if len(got) != 1 || !got[0].Conflict {
 		t.Fatalf("a pin mismatch must be reported as a conflict, got %+v", got)
 	}
@@ -241,7 +241,7 @@ func TestBoundSignerKeysCarriesProvenance(t *testing.T) {
 		t.Fatalf("Upsert harvested contact: %v", err)
 	}
 
-	got := boundSignerKeys(store)
+	got := must1(boundSignerKeys(store))
 
 	byAddr := map[string]boundSignerKey{}
 	for _, k := range got {
@@ -275,7 +275,7 @@ func TestBoundSignerKeysMarksPinConflictInsteadOfDropping(t *testing.T) {
 		t.Fatalf("Upsert rotated contact: %v", err)
 	}
 
-	got := boundSignerKeys(store)
+	got := must1(boundSignerKeys(store))
 
 	if len(got) != 1 {
 		t.Fatalf("want the conflicted contact reported, got %d entries", len(got))
@@ -319,7 +319,7 @@ func TestBoundSignerKeysForSenderExcludesOtherContacts(t *testing.T) {
 		t.Fatalf("Upsert eve contact: %v", err)
 	}
 
-	got := boundSignerKeysForSender(store, "bob@example.com")
+	got := must1(boundSignerKeysForSender(store, "bob@example.com"))
 
 	if len(got) != 1 {
 		t.Fatalf("want only the sender's key, got %d: %+v", len(got), got)
@@ -361,7 +361,7 @@ func TestBoundSignerKeysForSenderIgnoresAnAddressHiddenInAComment(t *testing.T) 
 	}
 
 	resolved := senderAddrSpec("Bob Smith (Eve <eve@evil.example>) <bob@example.com>")
-	got := boundSignerKeysForSender(store, resolved)
+	got := must1(boundSignerKeysForSender(store, resolved))
 
 	if resolved != "bob@example.com" {
 		t.Fatalf("senderAddrSpec bound the decoy: %q", resolved)
@@ -412,7 +412,7 @@ func TestBoundSignerKeysForSenderStillReportsAConflict(t *testing.T) {
 		t.Fatalf("Upsert eve contact: %v", err)
 	}
 
-	got := boundSignerKeysForSender(store, "bob@example.com")
+	got := must1(boundSignerKeysForSender(store, "bob@example.com"))
 
 	if len(got) != 1 || !got[0].Conflict {
 		t.Fatalf("want a conflict marker, got %+v", got)

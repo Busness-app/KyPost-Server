@@ -169,7 +169,7 @@ func TestStore_PersistenceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New (second store): %v", err)
 	}
-	entries, _ := s2.Snapshot("INBOX", 1)
+	entries, _ := mustSnapshot(t, s2, "INBOX", 1)
 	if len(entries) != 1 || entries[0].UID != 1 {
 		t.Fatalf("expected persisted entry to be visible from a second Store instance, got %+v", entries)
 	}
@@ -180,8 +180,8 @@ func TestStore_IndependentMailboxWindows(t *testing.T) {
 	s.Sync("INBOX", 10, []Overview{ov(1, "a", "unread")}, 0)
 	s.Sync("Archive/2026", 10, []Overview{ov(1, "x", "read"), ov(2, "y", "read")}, 0)
 
-	inbox, _ := s.Snapshot("INBOX", 1)
-	archive, _ := s.Snapshot("Archive/2026", 2)
+	inbox, _ := mustSnapshot(t, s, "INBOX", 1)
+	archive, _ := mustSnapshot(t, s, "Archive/2026", 2)
 	if len(inbox) != 1 {
 		t.Fatalf("expected INBOX window to have 1 entry, got %d", len(inbox))
 	}
@@ -199,7 +199,7 @@ func TestUpsert_NoRemovalInferenceFromPartialInput(t *testing.T) {
 	if err := s.Upsert("INBOX", []Entry{entry(3, "c", "unread", "body-3")}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	entries, _ := s.Snapshot("INBOX", 3)
+	entries, _ := mustSnapshot(t, s, "INBOX", 3)
 	if len(entries) != 3 {
 		t.Fatalf("expected all 3 entries to remain in the window, got %+v", entries)
 	}
@@ -213,7 +213,7 @@ func TestUpsert_BodyAttachedWithoutBumpingRev(t *testing.T) {
 	if err := s.Upsert("INBOX", []Entry{entry(1, "a", "unread", "warmed-body")}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	entries, warmed := s.Snapshot("INBOX", 1)
+	entries, warmed := mustSnapshot(t, s, "INBOX", 1)
 	if !warmed {
 		t.Fatalf("expected snapshot to be fully warmed after Upsert attached a body")
 	}
@@ -242,7 +242,7 @@ func TestPGPProtectedSubject_WarmedWithoutChurnAndPreserved(t *testing.T) {
 	if err := s.Upsert("INBOX", []Entry{warm}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	entries, _ := s.Snapshot("INBOX", 1)
+	entries, _ := mustSnapshot(t, s, "INBOX", 1)
 	if entries[0].PGPProtectedSubject != "Quarterly numbers" {
 		t.Fatalf("expected protected subject warmed in, got %+v", entries[0])
 	}
@@ -262,7 +262,7 @@ func TestPGPProtectedSubject_WarmedWithoutChurnAndPreserved(t *testing.T) {
 	if len(second.Updated) != 1 {
 		t.Fatalf("expected the read-flag change reported as an update, got %+v", second)
 	}
-	entries, _ = s.Snapshot("INBOX", 1)
+	entries, _ = mustSnapshot(t, s, "INBOX", 1)
 	if entries[0].PGPProtectedSubject != "Quarterly numbers" {
 		t.Fatalf("metadata-only overview change must preserve the protected subject, got %+v", entries[0])
 	}
@@ -287,7 +287,7 @@ func TestPGPBody_NeverPersisted(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	entries, _ := s.Snapshot("INBOX", 10)
+	entries, _ := mustSnapshot(t, s, "INBOX", 10)
 	if len(entries) != 1 {
 		t.Fatalf("expected one entry, got %+v", entries)
 	}
@@ -322,7 +322,7 @@ func TestPGPBody_NeverPersisted(t *testing.T) {
 	if err := s.Upsert("INBOX", []Entry{rewarm}); err != nil {
 		t.Fatalf("Upsert rewarm: %v", err)
 	}
-	entries, _ = s.Snapshot("INBOX", 10)
+	entries, _ = mustSnapshot(t, s, "INBOX", 10)
 	for _, e := range entries {
 		if e.UID == 2 && e.Body != "" {
 			t.Fatalf("re-warming an encrypted message must clear a previously cached body, got %q", e.Body)
@@ -346,7 +346,7 @@ func TestNonPGPBody_StillWarmed(t *testing.T) {
 	if err := s.Upsert("INBOX", []Entry{entry(1, "s", "unread", "ordinary body")}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	entries, _ := s.Snapshot("INBOX", 10)
+	entries, _ := mustSnapshot(t, s, "INBOX", 10)
 	if len(entries) != 1 || entries[0].Body != "ordinary body" {
 		t.Fatalf("expected an ordinary body warmed into the cache, got %+v", entries)
 	}
@@ -358,7 +358,7 @@ func TestHasAttachments_WarmPathSetsIt_OverviewLeavesUnset(t *testing.T) {
 	// Overview sync (the cheap path) carries no attachment info, so the flag
 	// stays false regardless of the real message.
 	s.Sync("INBOX", 10, []Overview{ov(1, "a", "unread")}, 0)
-	entries, _ := s.Snapshot("INBOX", 1)
+	entries, _ := mustSnapshot(t, s, "INBOX", 1)
 	if entries[0].HasAttachments {
 		t.Fatalf("overview-sync path must leave HasAttachments false, got %+v", entries[0])
 	}
@@ -370,7 +370,7 @@ func TestHasAttachments_WarmPathSetsIt_OverviewLeavesUnset(t *testing.T) {
 	if err := s.Upsert("INBOX", []Entry{warm}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	entries, _ = s.Snapshot("INBOX", 1)
+	entries, _ = mustSnapshot(t, s, "INBOX", 1)
 	if !entries[0].HasAttachments {
 		t.Fatalf("warm path must set HasAttachments, got %+v", entries[0])
 	}
@@ -378,7 +378,7 @@ func TestHasAttachments_WarmPathSetsIt_OverviewLeavesUnset(t *testing.T) {
 	// A metadata-only overview change (e.g. read flag) must preserve the
 	// warmed flag, not reset it from the attachment-less overview.
 	s.Sync("INBOX", 10, []Overview{ov(1, "a", "read")}, 0)
-	entries, _ = s.Snapshot("INBOX", 1)
+	entries, _ = mustSnapshot(t, s, "INBOX", 1)
 	if !entries[0].HasAttachments {
 		t.Fatalf("overview-sync metadata change must preserve HasAttachments, got %+v", entries[0])
 	}
@@ -390,7 +390,7 @@ func TestHasAttachments_WarmPathSetsIt_OverviewLeavesUnset(t *testing.T) {
 	if err := s.Upsert("INBOX", []Entry{warm}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	entries, _ = s.Snapshot("INBOX", 1)
+	entries, _ = mustSnapshot(t, s, "INBOX", 1)
 	if entries[0].HasAttachments {
 		t.Fatalf("warm path must clear HasAttachments when the message has none, got %+v", entries[0])
 	}
@@ -405,7 +405,7 @@ func TestUpsert_WindowCapTrimsOldestUIDs(t *testing.T) {
 	if err := s.Upsert("INBOX", entries); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	all, _ := s.Snapshot("INBOX", maxWindowEntries)
+	all, _ := mustSnapshot(t, s, "INBOX", maxWindowEntries)
 	if len(all) != maxWindowEntries {
 		t.Fatalf("expected window capped at %d entries, got %d", maxWindowEntries, len(all))
 	}
@@ -419,24 +419,24 @@ func TestSnapshot_FullyWarmedBoundary(t *testing.T) {
 	s.Sync("INBOX", 10, []Overview{ov(1, "a", "unread"), ov(2, "b", "unread")}, 0)
 
 	// Fewer entries than limit -> not fully warmed.
-	if _, warmed := s.Snapshot("INBOX", 5); warmed {
+	if _, warmed := mustSnapshot(t, s, "INBOX", 5); warmed {
 		t.Fatalf("expected fullyWarmed=false when window has fewer entries than limit")
 	}
 
 	// Enough entries but none have a Body (Sync never sets Body) -> not warmed.
-	if _, warmed := s.Snapshot("INBOX", 2); warmed {
+	if _, warmed := mustSnapshot(t, s, "INBOX", 2); warmed {
 		t.Fatalf("expected fullyWarmed=false when entries lack Body")
 	}
 
 	// Warm one of two entries -> still not fully warmed.
 	s.Upsert("INBOX", []Entry{entry(1, "a", "unread", "body-1")})
-	if _, warmed := s.Snapshot("INBOX", 2); warmed {
+	if _, warmed := mustSnapshot(t, s, "INBOX", 2); warmed {
 		t.Fatalf("expected fullyWarmed=false when only some entries have Body")
 	}
 
 	// Warm both -> fully warmed.
 	s.Upsert("INBOX", []Entry{entry(2, "b", "unread", "body-2")})
-	if _, warmed := s.Snapshot("INBOX", 2); !warmed {
+	if _, warmed := mustSnapshot(t, s, "INBOX", 2); !warmed {
 		t.Fatalf("expected fullyWarmed=true when all requested entries have Body")
 	}
 }
@@ -461,7 +461,7 @@ func TestUpsertKeepsPGPFlagsForBodylessClientProtectedMessage(t *testing.T) {
 		t.Fatalf("warm upsert: %v", err)
 	}
 
-	entries, _ := s.Snapshot("INBOX", 1)
+	entries, _ := mustSnapshot(t, s, "INBOX", 1)
 	if len(entries) != 1 {
 		t.Fatalf("want 1 entry, got %d", len(entries))
 	}
@@ -488,7 +488,7 @@ func TestUpsertStillDropsFlagsWhenDecryptFailed(t *testing.T) {
 		t.Fatalf("warm upsert: %v", err)
 	}
 
-	entries, _ := s.Snapshot("INBOX", 1)
+	entries, _ := mustSnapshot(t, s, "INBOX", 1)
 	if len(entries) != 1 {
 		t.Fatalf("want 1 entry, got %d", len(entries))
 	}
@@ -519,7 +519,7 @@ func TestUpsertNeverStoresADecryptError(t *testing.T) {
 		t.Fatalf("in-memory window kept a decrypt error: %q", got)
 	}
 
-	entries, _ := s.Snapshot("INBOX", 1)
+	entries, _ := mustSnapshot(t, s, "INBOX", 1)
 	if len(entries) != 1 {
 		t.Fatalf("want 1 entry, got %d", len(entries))
 	}

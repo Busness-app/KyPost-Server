@@ -82,7 +82,7 @@ func TestUpsertPinSurvivesReRead(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	got, ok := store.Get(seeded.UID)
+	got, ok := mustGet(t, store, seeded.UID)
 	if !ok {
 		t.Fatal("contact not found")
 	}

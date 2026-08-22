@@ -259,7 +259,7 @@ func TestContactPhotoRefIsNotClientSettable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userContactsStore: %v", err)
 	}
-	for _, c := range store.List() {
+	for _, c := range must1(store.List()) {
 		if c.PhotoRef != "" {
 			t.Fatalf("client-supplied photoRef %q was stored; the server owns this field", c.PhotoRef)
 		}

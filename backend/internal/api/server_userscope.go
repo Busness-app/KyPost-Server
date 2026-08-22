@@ -325,21 +325,34 @@ func (s *Server) rulesFor(r *http.Request) (*rules.Store, error) {
 // sanitizeGroupIDsForUser drops any group ID that isn't a real group owned
 // by userID, so a stale or forged ID from a client can't create a dangling
 // Contact.GroupIDs reference.
-func (s *Server) sanitizeGroupIDsForUser(userID string, ids []string) []string {
+//
+// A groups read failure is returned, not answered with an empty set: every
+// caller writes the result straight onto a contact, so "I could not read
+// groups.json" silently became "this contact belongs to no groups" and the
+// user's group memberships were erased by a transient storage fault.
+func (s *Server) sanitizeGroupIDsForUser(userID string, ids []string) ([]string, error) {
 	if len(ids) == 0 {
-		return ids
+		return ids, nil
 	}
 	gs, err := s.userGroupsStore(userID)
 	if err != nil {
-		return nil
+		return nil, err
+	}
+	all, err := gs.List()
+	if err != nil {
+		return nil, err
+	}
+	known := make(map[string]bool, len(all))
+	for _, g := range all {
+		known[g.ID] = true
 	}
 	kept := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if _, ok := gs.Get(id); ok {
+		if known[id] {
 			kept = append(kept, id)
 		}
 	}
-	return kept
+	return kept, nil
 }
 
 // userContactPhotosDir is where a user's contact photo files live, one

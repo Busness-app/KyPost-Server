@@ -53,7 +53,7 @@ func TestHandleSendAsCreateHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userSendAsStore: %v", err)
 	}
-	list := store.List()
+	list := must1(store.List())
 	if len(list) != 1 {
 		t.Fatalf("len(list) = %d, want 1", len(list))
 	}
@@ -92,11 +92,11 @@ func TestHandleSendAsCreateAcceptsOwnAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userSendAsStore: %v", err)
 	}
-	if len(store.List()) != 1 {
+	if len(must1(store.List())) != 1 {
 		t.Fatalf("expected the own-address alias to be created, got %d (status %d, body=%s)",
-			len(store.List()), rec.Code, rec.Body.String())
+			len(must1(store.List())), rec.Code, rec.Body.String())
 	}
-	if got := store.List()[0].Email; got != "alice@example.com" {
+	if got := must1(store.List())[0].Email; got != "alice@example.com" {
 		t.Fatalf("alias email = %q, want normalized %q", got, "alice@example.com")
 	}
 }
@@ -117,8 +117,8 @@ func TestHandleSendAsCreateInvalidEmail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userSendAsStore: %v", err)
 	}
-	if len(store.List()) != 0 {
-		t.Fatalf("expected no alias created, got %d", len(store.List()))
+	if len(must1(store.List())) != 0 {
+		t.Fatalf("expected no alias created, got %d", len(must1(store.List())))
 	}
 }
 
@@ -144,8 +144,8 @@ func TestHandleSendAsCreateEnforcesMaxAliasesPerUser(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
-	if len(store.List()) != maxSendAsAliasesPerUser {
-		t.Fatalf("len(list) = %d, want %d (no new alias created)", len(store.List()), maxSendAsAliasesPerUser)
+	if len(must1(store.List())) != maxSendAsAliasesPerUser {
+		t.Fatalf("len(list) = %d, want %d (no new alias created)", len(must1(store.List())), maxSendAsAliasesPerUser)
 	}
 }
 
@@ -244,7 +244,7 @@ func TestHandleSendAsDeleteHappyPath(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if _, ok := store.Get(alias.ID); ok {
+	if _, ok := must2(store.Get(alias.ID)); ok {
 		t.Fatalf("expected alias to be deleted")
 	}
 }
@@ -274,7 +274,7 @@ func TestHandleSendAsDeleteRejectsOtherUsersAlias(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
-	if _, ok := store.Get(alias.ID); !ok {
+	if _, ok := must2(store.Get(alias.ID)); !ok {
 		t.Fatalf("expected alias to still exist after cross-user delete attempt")
 	}
 }

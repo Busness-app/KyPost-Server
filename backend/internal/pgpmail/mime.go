@@ -387,10 +387,15 @@ func buildSignedEnvelope(envelope textproto.MIMEHeader, content []byte, armoredS
 	return msg.Bytes()
 }
 
+// randomBoundary returns a MIME boundary with 128+ bits of entropy.
+//
+// crypto/rand.Text is used rather than rand.Read so there is no error to
+// discard: it panics if the system CSPRNG fails, which is the contract this
+// code wants — a boundary built from a failed read would be a constant, and a
+// predictable boundary in a signed message is an attacker-chosen delimiter.
+// Its alphabet (base32, A-Z2-7) is valid in a boundary unquoted.
 func randomBoundary() string {
-	var buf [16]byte
-	_, _ = rand.Read(buf[:])
-	return fmt.Sprintf("pgpmail-%x", buf)
+	return "pgpmail-" + rand.Text()
 }
 
 // Detached-signature verification lives in the BROWSER, not here — see

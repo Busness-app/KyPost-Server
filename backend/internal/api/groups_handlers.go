@@ -27,7 +27,12 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"groups": store.List()})
+		list, err := store.List()
+		if err != nil {
+			http.Error(w, "failed to read groups", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"groups": list})
 	case http.MethodPost:
 		var payload groupPayload
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&payload); err != nil {
@@ -66,7 +71,12 @@ func (s *Server) handleGroupByID(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
-		if _, ok := store.Get(id); !ok {
+		_, ok, err := store.Get(id)
+		if err != nil {
+			http.Error(w, "failed to read groups", http.StatusInternalServerError)
+			return
+		}
+		if !ok {
 			http.Error(w, "group not found", http.StatusNotFound)
 			return
 		}
@@ -111,7 +121,11 @@ func (s *Server) removeGroupFromContacts(r *http.Request, groupID string) error 
 	if err != nil {
 		return err
 	}
-	for _, c := range contactsStore.List() {
+	all, err := contactsStore.List()
+	if err != nil {
+		return err
+	}
+	for _, c := range all {
 		if !slices.Contains(c.GroupIDs, groupID) {
 			continue
 		}

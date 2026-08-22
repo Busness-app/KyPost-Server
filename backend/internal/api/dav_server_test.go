@@ -60,7 +60,7 @@ func TestHandleCardDAVPutRejectsOversizedBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userContactsStore: %v", err)
 	}
-	if _, ok := store.Get("oversized-card"); ok {
+	if _, ok := must2(store.Get("oversized-card")); ok {
 		t.Fatal("oversized PUT must not have been persisted")
 	}
 }
@@ -89,7 +89,7 @@ func TestHandleCardDAVPutAcceptsNormalBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userContactsStore: %v", err)
 	}
-	if _, ok := store.Get("normal-card"); !ok {
+	if _, ok := must2(store.Get("normal-card")); !ok {
 		t.Fatal("normal PUT should have been persisted")
 	}
 }
@@ -136,7 +136,7 @@ func TestHandleCardDAVPutRejectsHeavilyFoldedCard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userContactsStore: %v", err)
 	}
-	if _, ok := store.Get("folded-card"); ok {
+	if _, ok := must2(store.Get("folded-card")); ok {
 		t.Fatal("heavily folded PUT must not have been persisted")
 	}
 }
@@ -173,7 +173,7 @@ func TestCardDAVPutDoesNotStoreAnUnusableKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("userContactsStore: %v", err)
 	}
-	c, ok := store.Get("junk-key")
+	c, ok := must2(store.Get("junk-key"))
 	if !ok {
 		t.Skip("card was rejected outright, which is also acceptable")
 	}

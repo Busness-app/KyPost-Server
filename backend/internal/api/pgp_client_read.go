@@ -135,9 +135,16 @@ func (s *Server) handlePGPPayload(w http.ResponseWriter, r *http.Request) {
 	// here to just this message's sender: the client no longer parses the
 	// From header itself at all, so this narrowing IS the binding. See
 	// boundSignerKeysForSender.
+	// An unreadable address book yields no keys, never the last set this
+	// process loaded — see handlePGPBootstrap.
 	signerKeys := []boundSignerKey{}
 	if contactsStore, cerr := s.userContactsStore(ac.UserID); cerr == nil {
-		signerKeys = boundSignerKeysForSender(contactsStore, resolvedSender)
+		keys, kerr := boundSignerKeysForSender(contactsStore, resolvedSender)
+		if kerr != nil {
+			s.logger.Error("could not read contact signer keys", "user_id", ac.UserID, "error", kerr.Error())
+		} else {
+			signerKeys = keys
+		}
 	}
 
 	var signedPartBase64, signaturePayload string

@@ -22,6 +22,11 @@ imports the other; `api/` is the only place that knows about both.
   (`refreshFromDiskLocked`), then writes atomically via
   `fsutil.AtomicWriteFile`, for the same shared-nothing-process reason as
   `contacts.Store`.
+- **`List` and `Get` return that re-read's error.** A group is a recipient set,
+  and `api.Server.sanitizeGroupIDsForUser` writes its result straight onto the
+  contact being saved — so an unreadable `groups.json` answered as "no groups"
+  erased the user's memberships on the next contact write. See root
+  `backend/AGENTS.md`.
 - Unlike `contacts.Store`, `Store.Delete` is a **hard delete**, not a
   tombstone — groups aren't synced incrementally by CardDAV or mobile sync
   today (a contacts-sync response embeds the full groups list rather than a

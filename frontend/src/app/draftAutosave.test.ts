@@ -16,6 +16,7 @@ function draft(over: Partial<DraftInput> = {}): DraftInput {
 const USER = "user-1";
 
 beforeEach(() => {
+  window.sessionStorage.clear();
   window.localStorage.clear();
 });
 
@@ -51,7 +52,7 @@ describe("save/load round trip", () => {
       USER,
       draft({ subject: "x", attachments: [{ name: "report.pdf", mimeType: "application/pdf", dataBase64: "QUJD", size: 3 }] })
     );
-    const raw = window.localStorage.getItem(`kypost-compose-draft:${USER}`) ?? "";
+    const raw = window.sessionStorage.getItem(`kypost-compose-draft:${USER}`) ?? "";
     expect(raw).toContain("report.pdf");
     // The bytes are what blow the ~5MB quota; they must not be there.
     expect(raw).not.toContain("QUJD");
@@ -63,6 +64,38 @@ describe("save/load round trip", () => {
     expect(loadDraftSnapshot(USER)).not.toBeNull();
     saveDraftSnapshot(USER, draft());
     expect(loadDraftSnapshot(USER)).toBeNull();
+  });
+});
+
+describe("plaintext never becomes persistent", () => {
+  // The stored buffer is the plaintext of a message the user may be about to
+  // PGP-encrypt. localStorage keeps it on disk until something deletes it —
+  // on a shared workstation or a profile backup, that is indefinitely.
+  it("writes the draft to sessionStorage and never to localStorage", () => {
+    saveDraftSnapshot(USER, draft({ subject: "secret", body: "<p>plaintext</p>" }));
+    expect(window.sessionStorage.getItem(`kypost-compose-draft:${USER}`)).toContain("secret");
+    expect(window.localStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
+    expect(window.localStorage.length).toBe(0);
+  });
+
+  // Upgrading only helps drafts written after the upgrade unless the old ones
+  // go too, and no age makes persistent plaintext of an unsent encrypted
+  // message worth keeping.
+  it("deletes drafts a previous version left in localStorage, however fresh", () => {
+    window.localStorage.setItem(
+      `kypost-compose-draft:${USER}`,
+      JSON.stringify({ version: 1, subject: "old plaintext", attachmentNames: [], savedAt: new Date().toISOString() })
+    );
+    purgeExpiredDraftSnapshots();
+    expect(window.localStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
+  });
+
+  it("leaves unrelated localStorage keys alone while doing it", () => {
+    window.localStorage.setItem("kypost-theme", "dark");
+    window.localStorage.setItem(`kypost-compose-draft:${USER}`, "{not json");
+    purgeExpiredDraftSnapshots();
+    expect(window.localStorage.getItem("kypost-theme")).toBe("dark");
+    expect(window.localStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
   });
 });
 
@@ -80,19 +113,19 @@ describe("isolation and cleanup", () => {
 
   it("ignores a missing user id rather than writing a shared key", () => {
     saveDraftSnapshot("", draft({ subject: "x" }));
-    expect(window.localStorage.length).toBe(0);
+    expect(window.sessionStorage.length).toBe(0);
     expect(loadDraftSnapshot("")).toBeNull();
   });
 });
 
 describe("robustness", () => {
   it("returns null for corrupt stored JSON instead of throwing", () => {
-    window.localStorage.setItem(`kypost-compose-draft:${USER}`, "{not json");
+    window.sessionStorage.setItem(`kypost-compose-draft:${USER}`, "{not json");
     expect(loadDraftSnapshot(USER)).toBeNull();
   });
 
   it("discards a snapshot from a different version rather than guessing its shape", () => {
-    window.localStorage.setItem(`kypost-compose-draft:${USER}`, JSON.stringify({ version: 99, subject: "old" }));
+    window.sessionStorage.setItem(`kypost-compose-draft:${USER}`, JSON.stringify({ version: 99, subject: "old" }));
     expect(loadDraftSnapshot(USER)).toBeNull();
   });
 
@@ -104,13 +137,13 @@ describe("robustness", () => {
     // so a prototype spy misses it there. A spy that silently fails to
     // intercept turns this into an assertion that nothing throws when nothing
     // was asked to throw — green, and worthless.
-    const original = Object.getOwnPropertyDescriptor(window, "localStorage");
+    const original = Object.getOwnPropertyDescriptor(window, "sessionStorage");
     const setItem = vi.fn(() => {
       throw new DOMException("QuotaExceededError");
     });
-    Object.defineProperty(window, "localStorage", {
+    Object.defineProperty(window, "sessionStorage", {
       configurable: true,
-      value: { ...window.localStorage, setItem }
+      value: { ...window.sessionStorage, setItem }
     });
 
     try {
@@ -119,7 +152,7 @@ describe("robustness", () => {
       expect(setItem).toHaveBeenCalled();
     } finally {
       if (original) {
-        Object.defineProperty(window, "localStorage", original);
+        Object.defineProperty(window, "sessionStorage", original);
       }
     }
   });
@@ -130,7 +163,7 @@ describe("expiry", () => {
   // PGP-encrypted. Logout clears it, but closing the tab or never logging out
   // does not — so it has to expire on its own.
   function storeWithAge(ageMs: number): void {
-    window.localStorage.setItem(
+    window.sessionStorage.setItem(
       `kypost-compose-draft:${USER}`,
       JSON.stringify({
         version: 1,
@@ -158,13 +191,13 @@ describe("expiry", () => {
   it("removes the expired plaintext rather than merely refusing to return it", () => {
     storeWithAge(25 * 60 * 60 * 1000);
     loadDraftSnapshot(USER);
-    expect(window.localStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
+    expect(window.sessionStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
   });
 
   it("treats an unparseable savedAt as expired, not as fresh", () => {
     // Snapshots written before the expiry check existed have no usable
     // timestamp; those are the oldest plaintext on disk, not the newest.
-    window.localStorage.setItem(
+    window.sessionStorage.setItem(
       `kypost-compose-draft:${USER}`,
       JSON.stringify({ version: 1, subject: "ancient", attachmentNames: [], savedAt: "" })
     );
@@ -189,7 +222,7 @@ describe("restoreNotice", () => {
 
 describe("purgeExpiredDraftSnapshots", () => {
   function storeFor(userId: string, ageMs: number, subject = "secret"): void {
-    window.localStorage.setItem(
+    window.sessionStorage.setItem(
       `kypost-compose-draft:${userId}`,
       JSON.stringify({
         version: 1,
@@ -208,11 +241,11 @@ describe("purgeExpiredDraftSnapshots", () => {
   // loadDraftSnapshot is called from exactly one place — opening a BLANK
   // compose window — so a user who closed the tab and never composed again
   // kept the plaintext of a message they may have been about to PGP-encrypt in
-  // localStorage forever, while the code claimed a 24-hour lifetime.
+  // storage forever, while the code claimed a 24-hour lifetime.
   it("deletes expired plaintext without anyone opening compose", () => {
     storeFor(USER, 25 * 60 * 60 * 1000);
     purgeExpiredDraftSnapshots();
-    expect(window.localStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
+    expect(window.sessionStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
   });
 
   it("keeps a snapshot inside the window", () => {
@@ -228,36 +261,36 @@ describe("purgeExpiredDraftSnapshots", () => {
     storeFor("user-2", 25 * 60 * 60 * 1000);
     storeFor("user-3", 1000, "fresh");
     purgeExpiredDraftSnapshots();
-    expect(window.localStorage.getItem("kypost-compose-draft:user-1")).toBeNull();
-    expect(window.localStorage.getItem("kypost-compose-draft:user-2")).toBeNull();
+    expect(window.sessionStorage.getItem("kypost-compose-draft:user-1")).toBeNull();
+    expect(window.sessionStorage.getItem("kypost-compose-draft:user-2")).toBeNull();
     expect(loadDraftSnapshot("user-3")?.subject).toBe("fresh");
   });
 
   it("removes a snapshot whose age cannot be established", () => {
-    window.localStorage.setItem(
+    window.sessionStorage.setItem(
       `kypost-compose-draft:${USER}`,
       JSON.stringify({ version: 1, subject: "ancient", attachmentNames: [] })
     );
     purgeExpiredDraftSnapshots();
-    expect(window.localStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
+    expect(window.sessionStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
   });
 
   it("removes an unparseable snapshot — unreadable is still plaintext", () => {
-    window.localStorage.setItem(`kypost-compose-draft:${USER}`, "{not json");
+    window.sessionStorage.setItem(`kypost-compose-draft:${USER}`, "{not json");
     purgeExpiredDraftSnapshots();
-    expect(window.localStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
+    expect(window.sessionStorage.getItem(`kypost-compose-draft:${USER}`)).toBeNull();
   });
 
   it("leaves unrelated keys alone", () => {
-    window.localStorage.setItem("kypost-theme", "dark");
-    window.localStorage.setItem("unrelated", "keep me");
+    window.sessionStorage.setItem("kypost-theme", "dark");
+    window.sessionStorage.setItem("unrelated", "keep me");
     storeFor(USER, 25 * 60 * 60 * 1000);
     purgeExpiredDraftSnapshots();
-    expect(window.localStorage.getItem("kypost-theme")).toBe("dark");
-    expect(window.localStorage.getItem("unrelated")).toBe("keep me");
+    expect(window.sessionStorage.getItem("kypost-theme")).toBe("dark");
+    expect(window.sessionStorage.getItem("unrelated")).toBe("keep me");
   });
 
-  // removeItem reindexes localStorage, so a sweep that deleted while walking
+  // removeItem reindexes the store, so a sweep that deleted while walking
   // by index would skip every other match.
   it("deletes all expired snapshots when several are adjacent", () => {
     for (let i = 0; i < 6; i++) {
@@ -265,13 +298,13 @@ describe("purgeExpiredDraftSnapshots", () => {
     }
     purgeExpiredDraftSnapshots();
     for (let i = 0; i < 6; i++) {
-      expect(window.localStorage.getItem(`kypost-compose-draft:user-${i}`)).toBeNull();
+      expect(window.sessionStorage.getItem(`kypost-compose-draft:user-${i}`)).toBeNull();
     }
   });
 
   it("does not throw when storage is unavailable", () => {
-    const original = Object.getOwnPropertyDescriptor(window, "localStorage")!;
-    Object.defineProperty(window, "localStorage", {
+    const original = Object.getOwnPropertyDescriptor(window, "sessionStorage")!;
+    Object.defineProperty(window, "sessionStorage", {
       configurable: true,
       get() {
         throw new Error("storage disabled");
@@ -280,7 +313,7 @@ describe("purgeExpiredDraftSnapshots", () => {
     try {
       expect(() => purgeExpiredDraftSnapshots()).not.toThrow();
     } finally {
-      Object.defineProperty(window, "localStorage", original);
+      Object.defineProperty(window, "sessionStorage", original);
     }
   });
 });

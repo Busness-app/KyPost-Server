@@ -28,7 +28,11 @@ func (s *Server) handleSendAs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to open send-as store", http.StatusInternalServerError)
 			return
 		}
-		list := store.List()
+		list, err := store.List()
+		if err != nil {
+			http.Error(w, "failed to read send-as aliases", http.StatusInternalServerError)
+			return
+		}
 		if list == nil {
 			list = []sendas.Alias{}
 		}
@@ -96,7 +100,12 @@ func (s *Server) handleSendAsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to open send-as store", http.StatusInternalServerError)
 		return
 	}
-	if len(store.List()) >= maxSendAsAliasesPerUser {
+	existing, err := store.List()
+	if err != nil {
+		http.Error(w, "failed to read send-as aliases", http.StatusInternalServerError)
+		return
+	}
+	if len(existing) >= maxSendAsAliasesPerUser {
 		http.Error(w, "too many send-as aliases for this account", http.StatusBadRequest)
 		return
 	}
@@ -171,7 +180,11 @@ func (s *Server) handleSendAsByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to open send-as store", http.StatusInternalServerError)
 			return
 		}
-		record, ok := store.Get(id)
+		record, ok, err := store.Get(id)
+		if err != nil {
+			http.Error(w, "failed to read send-as aliases", http.StatusInternalServerError)
+			return
+		}
 		if !ok {
 			http.Error(w, "alias not found", http.StatusNotFound)
 			return

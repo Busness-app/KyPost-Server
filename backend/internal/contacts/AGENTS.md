@@ -41,6 +41,13 @@ derived from it must be invalidated by a mechanism the daemon can reach — see
   `fsutil.AtomicWriteFile` — required because the API and daemon processes
   share no memory (see root `backend/AGENTS.md`), and here it is not
   hypothetical: both actually write, the daemon through the Autocrypt harvest.
+- **Every reader returns that re-read's error**: `List`, `Get`, `GetSelf`,
+  `Search`, `ChangedSince` and `PGPKeyGeneration`. This store decides which key
+  a message is encrypted to and whose signature counts as verified, so a stale
+  answer is not a degraded answer — it is the removed key still working. New
+  readers follow suit; a reader that cannot fail is a reader that fails open.
+  See root `backend/AGENTS.md` for the repo-wide rule and the three fail-closed
+  shapes callers may use.
 - `Contact.Rev` is bumped by `Store.Upsert`/`Store.Delete` on every mutation;
   `Contact.ETag()` derives `"rev-<Rev>"` from it — there is no separately
   stored ETag field.
@@ -62,8 +69,8 @@ derived from it must be invalidated by a mechanism the daemon can reach — see
   contact (and a tombstone being revived) stays writable at the cap, or a full
   address book becomes read-only and the user cannot delete their way out.
   Tombstones do not count, so a deletion frees headroom immediately.
-- **`PGPKeyGeneration` changes whenever key material or the ADDRESS SET
-  changes**, bumped in `applyUpsertLocked`/`applyDeleteLocked` via
+- **`PGPKeyGeneration` returns `(int64, error)` and changes whenever key
+  material or the ADDRESS SET changes**, bumped in `applyUpsertLocked`/`applyDeleteLocked` via
   `bumpPGPKeyGenIfBindingChanged`. It exists so consumers can invalidate
   anything derived from this store — see `mailcache`'s `ContactKeyGen`. Two
   properties are load-bearing: it must move when addresses narrow (that changes
@@ -91,7 +98,10 @@ derived from it must be invalidated by a mechanism the daemon can reach — see
 ## Verification
 
 - `go vet ./internal/contacts/...` must pass.
-- Unit tests should cover: create/update/delete, tombstone field-clearing,
+- Unit tests should cover: readers refusing to answer from memory while
+  `contacts.json` is unreadable (`apply_batch_test.go`, and
+  `api/store_fail_closed_test.go` for the caller side),
+  create/update/delete, tombstone field-clearing,
   `ChangedSince` cursor semantics (including `tooOld` after GC), GC
   actually removing old tombstones while preserving live contacts, and dedupe
   (email/phone normalization, group selection incl. the name guard, merge

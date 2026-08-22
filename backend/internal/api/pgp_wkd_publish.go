@@ -337,7 +337,13 @@ func (s *Server) publishableAddressesAt(u users.User, domain string) []string {
 	// published until they run it — fail-closed, and recoverable by a flow
 	// that already exists.
 	if store, err := s.userSendAsStore(u.ID); err == nil {
-		for _, alias := range store.ListVerified() {
+		verified, verr := store.ListVerified()
+		if verr != nil {
+			// No addresses: an unreadable alias file must not publish a key
+			// under an address whose verification this process cannot confirm.
+			return nil
+		}
+		for _, alias := range verified {
 			addr := strings.ToLower(strings.TrimSpace(alias.Email))
 			if domainOfEmail(addr) == domain {
 				out = append(out, addr)
