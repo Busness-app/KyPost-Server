@@ -369,7 +369,7 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 	// unless the serving certificate can be established; see pairing_pin.go.
 	tlsPin := ""
 	if strings.HasPrefix(strings.ToLower(registerEndpoint), "https://") {
-		tlsPin = s.pairingSPKIPin(r.Context())
+		tlsPin = s.pairingSPKIPin()
 	}
 	resp := map[string]any{
 		"subscriberId":      subscriberID,

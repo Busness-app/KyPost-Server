@@ -186,7 +186,7 @@ func TestPairingSPKIPinSourceOrder(t *testing.T) {
 		srv.pinProbeRoots = roots
 		srv.tlsConfig = localCfg
 
-		got := srv.pairingSPKIPin(context.Background())
+		got := srv.pairingSPKIPin()
 		if got == localPin {
 			t.Fatal("published the local leaf while a different certificate is being served")
 		}
@@ -202,7 +202,7 @@ func TestPairingSPKIPinSourceOrder(t *testing.T) {
 		srv.serverBaseURL = closedHTTPSOrigin(t)
 		srv.tlsConfig = localCfg
 
-		if got := srv.pairingSPKIPin(context.Background()); got != localPin {
+		if got := srv.pairingSPKIPin(); got != localPin {
 			t.Errorf("pairingSPKIPin() = %q, want the local %q", got, localPin)
 		}
 	})
@@ -210,7 +210,7 @@ func TestPairingSPKIPinSourceOrder(t *testing.T) {
 	t.Run("no certificate anywhere means no pin", func(t *testing.T) {
 		srv := newTestServer(t)
 		srv.serverBaseURL = closedHTTPSOrigin(t)
-		if got := srv.pairingSPKIPin(context.Background()); got != "" {
+		if got := srv.pairingSPKIPin(); got != "" {
 			t.Errorf("pairingSPKIPin() = %q, want empty", got)
 		}
 	})
@@ -221,7 +221,7 @@ func TestPairingSPKIPinSourceOrder(t *testing.T) {
 		// outbound connections and choose the pin we publish.
 		srv := newTestServer(t)
 		srv.pinProbeRoots = x509.NewCertPool()
-		if got := srv.probedSPKIPin(context.Background()); got != "" {
+		if got := srv.probedSPKIPin(); got != "" {
 			t.Errorf("probedSPKIPin() = %q with no configured base URL", got)
 		}
 		if srv.pinProbeHost != "" {
@@ -243,14 +243,14 @@ func TestProbeFailureIsCached(t *testing.T) {
 	// even though it would now succeed.
 	srv.pinProbeHost = baseURL
 	srv.pinProbeFailedAt = time.Now()
-	if got := srv.probedSPKIPin(context.Background()); got != "" {
+	if got := srv.probedSPKIPin(); got != "" {
 		t.Errorf("probedSPKIPin() = %q, want empty from the failure cache", got)
 	}
 
 	// Once the entry ages out the probe runs again — a cache that never expired
 	// would strand a deployment on trust-on-first-use until a restart.
 	srv.pinProbeFailedAt = time.Now().Add(-pinProbeFailureTTL - time.Second)
-	if got := srv.probedSPKIPin(context.Background()); got != want {
+	if got := srv.probedSPKIPin(); got != want {
 		t.Errorf("probedSPKIPin() = %q after the cache expired, want %q", got, want)
 	}
 }

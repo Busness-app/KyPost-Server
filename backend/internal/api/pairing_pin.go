@@ -71,8 +71,8 @@ func spkiPin(leaf *x509.Certificate) string {
 // something else terminates TLS in front of us — including a reverse proxy
 // configured to reach an HTTPS origin, where publishing our own leaf would fail
 // every new pairing closed.
-func (s *Server) pairingSPKIPin(ctx context.Context) string {
-	if pin := s.probedSPKIPin(ctx); pin != "" {
+func (s *Server) pairingSPKIPin() string {
+	if pin := s.probedSPKIPin(); pin != "" {
 		return pin
 	}
 	return leafSPKIPin(s.tlsConfig)
@@ -115,7 +115,7 @@ func leafSPKIPin(cfg *tls.Config) string {
 // base URL is externalBaseURL, which falls back to the request's Host header:
 // dialling that would let a caller both aim our outbound connections and choose
 // the pin we publish.
-func (s *Server) probedSPKIPin(ctx context.Context) string {
+func (s *Server) probedSPKIPin() string {
 	base := strings.TrimSpace(s.serverBaseURL)
 	if base == "" {
 		return ""
@@ -128,7 +128,10 @@ func (s *Server) probedSPKIPin(ctx context.Context) string {
 		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, pinProbeTimeout)
+	// Deliberately not the request's context. A caller who navigates away mid
+	// request would otherwise cancel the dial, and that cancellation would be
+	// recorded as a failure and suppress probing for the whole TTL.
+	ctx, cancel := context.WithTimeout(context.Background(), pinProbeTimeout)
 	defer cancel()
 	pin, err := probeSPKIPin(ctx, base, s.pinProbeRoots)
 	if err != nil {

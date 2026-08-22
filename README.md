@@ -413,16 +413,51 @@ mkdir -p share/ollama/models
 The backend handles mobile pairing directly. It does not require Novu.
 
 - Nothing to configure: the pairing secret is generated on first start and kept at `/kypost/private/pairing.key`. Set `PAIRING_SECRET` only if you run multiple replicas that must share one.
-- Optional: set `SERVER_BASE_URL` so that QR code payloads always point to the correct public backend URL. Use an `https://` URL: pairing tokens, pickup links and QR key-exchange URLs are all built from it, and each carries a bearer credential in the query string. See the TLS note in Quick Start.
+- Optional but recommended: set `SERVER_BASE_URL` so that QR code payloads always point to the correct public backend URL. Use an `https://` URL: pairing tokens, pickup links and QR key-exchange URLs are all built from it, and each carries a bearer credential in the query string. It is also what the pairing QR's certificate pin is read from — without it, pairing falls back to trust on first use. See the TLS note in Quick Start and [Certificate pinning](#certificate-pinning-in-the-pairing-qr) below.
 - Keep all pairing secrets on the server only.
 
 Desktop pairing behavior:
 
-- Security's Devices tab renders a QR code link with `sub`, `hash`, `srv`, `reg`, and `pt`.
+- Security's Devices tab renders a QR code link with `sub`, `hash`, `srv`, `reg`, `pt`, and — when the serving certificate can be read — `pin`.
 - Set `SERVER_BASE_URL` in `.env`. Then `srv` and `reg` always point to the deployment address that the mobile app must use. Nobody enters a server URL by hand.
 - `pt` is a signed pairing token. It is valid for 90 seconds.
 - The UI shows a 4px countdown bar under the QR code. The bar shrinks over 90 seconds and changes from green to red. It is red for the last 15 seconds.
 - The mobile app scans the QR code and registers its push token through `reg`. If `reg` is absent, the app uses `srv` plus `/api/notifications/native/register` instead.
+
+### Certificate pinning in the pairing QR
+
+The pairing request is the one call that carries the pairing token, the push
+endpoint and the app's WebPush keys. Without a pin the app sends all of it and
+only *then* decides whether to trust the certificate it just used. On a network
+with a locally trusted CA — an MDM root, a certificate someone installed, a
+captive portal — an interceptor reads the token, registers its own device
+against your server first, and hands the app back credentials it controls.
+
+So the QR carries `pin`: the SHA-256 of your serving certificate's public key.
+The app pins the registration handshake to that one key *before* it sends
+anything, and refuses a certificate that does not match.
+
+**Set `SERVER_BASE_URL` to your public `https://` URL and this works with no
+further configuration.** At the moment it builds each QR, the server makes a
+verified TLS connection to that URL and reads the certificate you are actually
+serving — whether that is Caddy, Traefik, nginx-proxy-manager, a Cloudflare
+tunnel, or this server's own `TLS_CERT_FILE`. Because it is read fresh every
+time, certificate renewal needs no action from you.
+
+Two things worth knowing:
+
+- **Behind a proxy, you are pinned to the proxy.** With Cloudflare in front,
+  this closes the hostile-network hole between the phone and Cloudflare. It does
+  not make the tunnel end to end; Cloudflare still terminates TLS.
+- **A private or self-signed CA gets no pin.** The server will not tell the app
+  "trust only this key" on the word of a certificate it could not verify. Use
+  `TLS_CERT_FILE`/`TLS_KEY_FILE` to terminate TLS here instead, and the pin is
+  read from that certificate directly.
+
+Any other failure — no `SERVER_BASE_URL`, an unreachable URL, a router that will
+not route your public hostname back to itself — simply omits `pin`, and pairing
+behaves exactly as it did before. It never breaks a pairing; it only declines to
+protect one. Already-paired devices are unaffected either way.
 
 Native registration behavior:
 
