@@ -111,10 +111,9 @@ func leafSPKIPin(cfg *tls.Config) string {
 // host over anycast to the same edge, so it never depends on the router
 // hairpinning traffic back to itself.
 //
-// Gated on SERVER_BASE_URL being explicitly configured. The other source of a
-// base URL is externalBaseURL, which falls back to the request's Host header:
-// dialling that would let a caller both aim our outbound connections and choose
-// the pin we publish.
+// Gated on SERVER_BASE_URL being explicitly configured, which pairingBaseURL
+// now requires anyway: dialling an address read off the request would let a
+// caller both aim our outbound connections and choose the pin we publish.
 func (s *Server) probedSPKIPin() string {
 	base := strings.TrimSpace(s.serverBaseURL)
 	if base == "" {

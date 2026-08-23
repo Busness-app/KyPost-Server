@@ -86,7 +86,7 @@ See [Session Behavior](README.md#session-behavior) for full details. Key points:
 
 - Pairing tokens are valid for 90 seconds and signed with a per-instance secret.
 - All pairing payloads (QR codes, pickup links, key exchange URLs) carry bearer credentials in the query string.
-- Set `SERVER_BASE_URL` to an HTTPS URL so credentials travel over TLS.
+- Set `SERVER_BASE_URL` to an HTTPS URL so credentials travel over TLS. It is required: pairing endpoints are built from it and never from the request's `Host` header, because that header names whatever hostname the caller reached the server through — a pairing package built from it aims the token at that hostname. Unset, pairing refuses and says so.
 - Pairing secrets must remain on the server only. Multi-replica deployments share one secret via `PAIRING_SECRET`.
 
 ## Deployment Security

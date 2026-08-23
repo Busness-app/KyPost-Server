@@ -93,6 +93,27 @@ describe("sanitizeEmailHtml", () => {
       expect(out).not.toContain("position:fixed");
     });
   });
+
+  // Why sender colours are stripped, and that the words survive it, is
+  // pages/read/readability.test.tsx. This covers only the half that file does
+  // not: the strip must hold in BOTH branches of sanitizeEmailHtml. The style
+  // attribute had exactly this bug — listed only in the remote-content branch,
+  // so pressing "Show Images" also unblocked sender CSS. color/bgcolor are the
+  // presentational spelling of the same thing and can be moved the same way.
+  it.each([[true], [false]])(
+    "strips sender colours whether or not remote content is blocked (blockRemoteContent=%s)",
+    (block) => {
+      const out = sanitizeEmailHtml(
+        '<font color="#000000">dark text</font>' +
+          '<table bgcolor="#000000"><tr><td>dark panel</td></tr></table>',
+        block
+      );
+      expect(out).not.toContain("color=");
+      expect(out).not.toContain("bgcolor=");
+      expect(out).toContain("dark text");
+      expect(out).toContain("dark panel");
+    }
+  );
 });
 
 describe("processEmailHtml", () => {

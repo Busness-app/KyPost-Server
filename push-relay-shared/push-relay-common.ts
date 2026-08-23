@@ -149,6 +149,23 @@ export interface RequestContext<TEnv extends CommonEnv = CommonEnv> {
   log: (fields: Record<string, unknown>) => void;
 }
 
+/**
+ * The one way a caught value becomes log text.
+ *
+ * A `catch` binding is `unknown` and JavaScript lets anything be thrown, so
+ * `(err as Error).message` is a lie the compiler accepts: on `throw null` it
+ * throws a TypeError of its own, out of the handler that exists to keep the
+ * failure contained. Every one of these sits on a fail-closed path — the 502
+ * for a dead provider, the 429 for a throwing rate limiter — so the replacement
+ * failure is the generic 500 from the outer router, and the log line records
+ * the logging bug instead of the outage.
+ *
+ * Total by construction: `String()` accepts every value, including symbols.
+ */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -504,7 +521,7 @@ export async function checkMinuteLimit(
     // Callers surface it as 429 with a Retry-After: the request is refused not
     // because the caller misbehaved but because the relay cannot currently tell
     // whether they did.
-    rc.log({ level: "error", event: "ratelimit.binding_error", error: String((err as Error).message ?? err) });
+    rc.log({ level: "error", event: "ratelimit.binding_error", error: errorMessage(err) });
     return false;
   }
 }
@@ -578,7 +595,7 @@ export async function checkDailyBudget(
     }
     return { allowed: result.allowed, used: result.used, limit };
   } catch (err) {
-    rc.log({ level: "error", event: "budget.error", error: String((err as Error).message ?? err) });
+    rc.log({ level: "error", event: "budget.error", error: errorMessage(err) });
     return { allowed: false, used: 0, limit };
   }
 }
@@ -613,7 +630,7 @@ export async function refundDailyBudget(rc: RequestContext, now: number = Date.n
   try {
     await binding.get(binding.idFromName(BUDGET_INSTANCE)).refundDailyBudget(now);
   } catch (err) {
-    rc.log({ level: "error", event: "budget.refund_failed", error: String((err as Error).message ?? err) });
+    rc.log({ level: "error", event: "budget.refund_failed", error: errorMessage(err) });
   }
 }
 
@@ -1118,7 +1135,7 @@ export function createRelayFetchHandler<TEnv extends CommonEnv>(opts: RelayRoute
     try {
       response = await routeRelay(request, path, rc, opts);
     } catch (err) {
-      log({ level: "error", event: "unhandled", method: request.method, path, error: String((err as Error)?.message ?? err) });
+      log({ level: "error", event: "unhandled", method: request.method, path, error: errorMessage(err) });
       response = json({ error: "internal error", requestId }, 500);
     }
 

@@ -77,6 +77,39 @@ non-prerelease version.
 
 ### Security
 
+- **No URL that carries a credential is built from the request any more.**
+  `externalBaseURL` read `X-Forwarded-Host` from a trusted proxy and otherwise
+  fell back to the request's `Host` header, and four things were built from it:
+  the native pairing package (`serverBaseUrl`, `registerEndpoint`,
+  `pullEndpoint`), the pull endpoint returned after a device registers, the
+  desktop pairing `registerEndpoint`, and the OIDC `redirect_uri`. Every one of
+  those names an address a secret is then sent to — a 90-second pairing token, a
+  device secret, an authorization code — so a deployment reachable through a
+  second hostname produced a pairing package aiming the token at that hostname.
+  The helper is deleted rather than guarded, so nothing can reach for it again;
+  `pairingBaseURL` and `ssoRedirectURI` read `SERVER_BASE_URL` and nothing else.
+
+  **`SERVER_BASE_URL` is now required for mobile pairing, desktop pairing and
+  Single Sign-On.** Unset, the pairing panel shows "set SERVER_BASE_URL" and no
+  token is minted, `POST /api/notifications/desktop/pair` answers 503 without
+  spending one of its five codes per hour, and SSO refuses with the message it
+  already had. This is a deliberate breaking change for deployments that never
+  set it: there is no safe way to guess where a credential should be sent, and
+  the previous guess was whatever hostname the caller happened to arrive on.
+  Pickup links and PGP QR key-exchange URLs are unaffected — they never read the
+  request, and still fall back to `http://localhost:5866` with a logged warning.
+
+- **A caught value can no longer take out the handler that caught it.** Eight
+  `catch` blocks across the two relay Workers and their shared logic formatted
+  the error as `String((err as Error).message ?? err)`. The cast is a lie the
+  compiler accepts: a `catch` binding is `unknown`, `throw null` is legal
+  JavaScript, and reading `.message` off it throws a TypeError out of the
+  handler. Every one of those blocks is a fail-closed path — the 429 for a rate
+  limiter whose binding threw, the 502 for a provider that never answered — so
+  the refusal became the router's generic 500 and the log line described the
+  logging bug instead of the outage. One total `errorMessage(unknown)` helper
+  now does it everywhere, held by `push-relay-shared/error-message.test.mts`.
+
 - **Every per-user JSON store now fails closed on a read it could not perform.**
   `contacts`, `groups`, `sendas`, `rules` and `mailcache` kept a warm in-memory
   copy of a file the api and daemon processes both write, and their readers

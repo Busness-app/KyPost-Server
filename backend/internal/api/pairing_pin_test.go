@@ -216,8 +216,7 @@ func TestPairingSPKIPinSourceOrder(t *testing.T) {
 	})
 
 	t.Run("an unset SERVER_BASE_URL is never dialled", func(t *testing.T) {
-		// The other source of a base URL is externalBaseURL, which falls back to
-		// the request's Host header. Dialling that would let a caller aim our
+		// Dialling an address read off the request would let a caller aim our
 		// outbound connections and choose the pin we publish.
 		srv := newTestServer(t)
 		srv.pinProbeRoots = x509.NewCertPool()

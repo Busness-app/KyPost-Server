@@ -88,6 +88,7 @@ type Server struct {
 	pairingSecret       string
 	serverBaseURL       string
 	baseURLFallbackWarn sync.Once
+	pairingBaseURLWarn  sync.Once
 	pairingSecretWarn   sync.Once
 	// syncReplay refuses a KySignOn replication event whose jti was already
 	// applied; syncFreshnessWarn nags once when a sender omits jti/iat.
