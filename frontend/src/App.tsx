@@ -1,7 +1,9 @@
-import { type DragEvent, type MouseEvent as ReactMouseEvent, type ReactElement, useEffect, useRef, useState } from "react";
+import { type DragEvent, type MouseEvent as ReactMouseEvent, type ReactElement, lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
-import Quill from "quill";
-import "quill/dist/quill.snow.css";
+// Quill (and its theme CSS) is the editor for one dialog, but a static import
+// puts it in the entry chunk, so the login page pays for it too. loadQuill
+// below fetches it when compose first opens.
+import type Quill from "quill";
 import { deleteJSON, getJSON, HttpError, postJSON, putJSON, toErrorMessage } from "./api/client";
 import { checkPGPRecipients, getPGPDiscoverySettings, type DiscoverySettings, type PGPRecipientTier } from "./api/pgp";
 import { listSendAsAliases, type SendAsAlias } from "./api/sendas";
@@ -16,17 +18,7 @@ import { sealPickup } from "./lib/pickupCrypto";
 import { createSealedPickup, resolveRecipientKeys, sendClientEncryptedMail } from "./api/pgp";
 import { PgpUnlockDialog } from "./components/PgpUnlockDialog";
 import type { RecipientFieldState, RecipientToken } from "./lib/recipients";
-import { ContactsPage } from "./pages/ContactsPage";
 import { LoginPage } from "./pages/LoginPage";
-import { ReadPage } from "./pages/ReadPage";
-import { AppearancePanel } from "./pages/settings/AppearancePanel";
-import { MailPanel } from "./pages/settings/MailPanel";
-import { NotificationsPanel } from "./pages/settings/NotificationsPanel";
-import { StatusPanel } from "./pages/settings/StatusPanel";
-import { ServerPanel } from "./pages/admin/ServerPanel";
-import { AutomationPanel } from "./pages/settings/AutomationPanel";
-import { DiagnosticsPanel } from "./pages/admin/DiagnosticsPanel";
-import { SecurityPage } from "./pages/SecurityPage";
 import { ReauthGate, clearReauth } from "./components/ReauthGate";
 import agplLicenseText from "./agpl-3.0.txt?raw";
 
@@ -62,6 +54,27 @@ import {
   restoreNotice,
   saveDraftSnapshot
 } from "./app/draftAutosave";
+
+// loadQuill pulls the editor and its theme CSS in one chunk. The module is
+// cached after the first call, so reopening compose costs nothing.
+async function loadQuill(): Promise<typeof Quill> {
+  const [quill] = await Promise.all([import("quill"), import("quill/dist/quill.snow.css")]);
+  return quill.default;
+}
+
+// Every page below is a separate chunk. Only LoginPage is eager: it is what an
+// unauthenticated visitor lands on, so putting it behind a second round trip
+// would slow down the one route that has to be fast.
+const ContactsPage = lazy(() => import("./pages/ContactsPage").then((m) => ({ default: m.ContactsPage })));
+const ReadPage = lazy(() => import("./pages/ReadPage").then((m) => ({ default: m.ReadPage })));
+const SecurityPage = lazy(() => import("./pages/SecurityPage").then((m) => ({ default: m.SecurityPage })));
+const AppearancePanel = lazy(() => import("./pages/settings/AppearancePanel").then((m) => ({ default: m.AppearancePanel })));
+const MailPanel = lazy(() => import("./pages/settings/MailPanel").then((m) => ({ default: m.MailPanel })));
+const NotificationsPanel = lazy(() => import("./pages/settings/NotificationsPanel").then((m) => ({ default: m.NotificationsPanel })));
+const StatusPanel = lazy(() => import("./pages/settings/StatusPanel").then((m) => ({ default: m.StatusPanel })));
+const AutomationPanel = lazy(() => import("./pages/settings/AutomationPanel").then((m) => ({ default: m.AutomationPanel })));
+const ServerPanel = lazy(() => import("./pages/admin/ServerPanel").then((m) => ({ default: m.ServerPanel })));
+const DiagnosticsPanel = lazy(() => import("./pages/admin/DiagnosticsPanel").then((m) => ({ default: m.DiagnosticsPanel })));
 
 export function App() {
   const location = useLocation();
@@ -116,6 +129,7 @@ export function App() {
   const [composeEncryptOverridden, setComposeEncryptOverridden] = useState(false);
   const quillEditorRef = useRef<HTMLDivElement | null>(null);
   const quillInstanceRef = useRef<Quill | null>(null);
+  const [quillCtor, setQuillCtor] = useState<typeof Quill | null>(null);
   const composeDialogRef = useRef<HTMLDialogElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const composeNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -467,16 +481,29 @@ export function App() {
     void loadArchiveFolders();
   }, [archiveOpen, auth?.authenticated]);
 
+  // Fetch the editor the first time compose opens. Landing it in state rather
+  // than a ref is what re-runs the effect below, which is otherwise never
+  // rendered again in time to build the editor.
+  useEffect(() => {
+    if (!composeOpen || quillCtor) return;
+    // Wrapped in a thunk: a class is a function, and a bare setState(fn)
+    // would be taken for an updater and called.
+    void loadQuill()
+      .then((ctor) => setQuillCtor(() => ctor))
+      .catch(() => setComposeError("Could not load the message editor. Reload the page and try again."));
+  }, [composeOpen, quillCtor]);
+
   useEffect(() => {
     if (!composeOpen) return;
     if (!quillEditorRef.current) return;
+    if (!quillCtor) return;
 
     if (quillInstanceRef.current && quillInstanceRef.current.container !== quillEditorRef.current) {
       quillInstanceRef.current = null;
     }
 
     if (!quillInstanceRef.current) {
-      const quill = new Quill(quillEditorRef.current, {
+      const quill = new quillCtor(quillEditorRef.current, {
         theme: "snow"
       });
       quill.on("text-change", () => {
@@ -489,7 +516,7 @@ export function App() {
     if (editor && editor.root.innerHTML !== composeHtmlBody) {
       editor.root.innerHTML = composeHtmlBody;
     }
-  }, [composeOpen, composeHtmlBody]);
+  }, [composeOpen, composeHtmlBody, quillCtor]);
 
   useDialogOpen(composeDialogRef, composeOpen);
   useDialogOpen(licenseDialogRef, licenseOpen);
@@ -1316,6 +1343,10 @@ export function App() {
         </div>
       </aside>
       <main className="content">
+        {/* One boundary for every lazy page. The fallback is deliberately
+            quiet: the chunks are same-origin and small, and a spinner that
+            flashes for 30 ms is worse than nothing. */}
+        <Suspense fallback={<p>Loading&hellip;</p>}>
         <Routes>
             <Route path="/" element={<Navigate to={auth.authenticated ? "/read" : "/login"} replace />} />
           <Route path="/login" element={<LoginPage auth={auth} onAuthChanged={refreshAuth} />} />
@@ -1360,6 +1391,7 @@ export function App() {
           <Route path="/admin/server" element={protect(<ServerPanel />, true)} />
           <Route path="/admin/diagnostics" element={protect(<DiagnosticsPanel />, true)} />
         </Routes>
+        </Suspense>
       </main>
       <dialog
         ref={licenseDialogRef}

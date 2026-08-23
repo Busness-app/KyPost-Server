@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"kypost-server/backend/internal/contacts"
 	"kypost-server/backend/internal/users"
 )
 
@@ -179,5 +180,119 @@ func TestCardDAVPutDoesNotStoreAnUnusableKey(t *testing.T) {
 	}
 	if c.PGPKey != "" {
 		t.Fatalf("stored an unparseable value as a PGP trust anchor: %q", c.PGPKey)
+	}
+}
+
+// seedContacts writes n contacts, each with the given note text, in one batch.
+// Per-contact Upsert rewrites contacts.json every time, which at address-book
+// scale is minutes of fsyncs; ApplyBatch is one write.
+func seedContacts(t *testing.T, srv *Server, userID string, n int, note string) {
+	t.Helper()
+	store, err := srv.userContactsStore(userID)
+	if err != nil {
+		t.Fatalf("userContactsStore: %v", err)
+	}
+	ops := make([]contacts.BatchOp, 0, n)
+	for i := range n {
+		ops = append(ops, contacts.BatchOp{Contact: contacts.Contact{
+			UID:           fmt.Sprintf("seed-%d", i),
+			FormattedName: fmt.Sprintf("Contact Number %d", i),
+			GivenName:     "Contact",
+			FamilyName:    fmt.Sprintf("Number%d", i),
+			Org:           "A Reasonably Named Organization, Inc.",
+			Title:         "Senior Person Of Some Description",
+			Emails: []contacts.ContactValue{
+				{Label: "work", Value: fmt.Sprintf("contact%d@example.com", i)},
+				{Label: "home", Value: fmt.Sprintf("contact%d@personal.example.com", i)},
+			},
+			Phones: []contacts.ContactValue{
+				{Label: "cell", Value: "+1-555-0100"},
+				{Label: "work", Value: "+1-555-0199"},
+			},
+			Addresses: []contacts.ContactAddress{{
+				Label: "work", Street: "1234 Some Reasonably Long Street Name",
+				City: "Springfield", Region: "IL", PostalCode: "62704", Country: "USA",
+			}},
+			Notes: note,
+		}})
+	}
+	if err := store.ApplyBatch(ops); err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+}
+
+// TestListAddressObjectsServesAFullAddressBook is the scale check behind
+// maxAddressBookResponseBytes: a completely full address book of ordinary
+// contacts must render, and must render well under the ceiling. If a new vCard
+// field ever pushes a real book near it, this fails before a user does.
+func TestListAddressObjectsServesAFullAddressBook(t *testing.T) {
+	if testing.Short() {
+		t.Skip("renders a full 10,000-contact address book")
+	}
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "fullbook", "irrelevant-password", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ac := AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}
+	seedContacts(t, srv, u.ID, contacts.MaxContactsPerUser, "A note of the length someone actually writes in an address book entry.")
+
+	b := &contactsDAVBackend{server: srv}
+	ctx := context.WithValue(context.Background(), authContextKey{}, ac)
+	objs, err := b.ListAddressObjects(ctx, b.addressBookPath(ac), nil)
+	if err != nil {
+		t.Fatalf("a full address book of ordinary contacts must still serve: %v", err)
+	}
+	if len(objs) != contacts.MaxContactsPerUser {
+		t.Fatalf("got %d objects, want %d", len(objs), contacts.MaxContactsPerUser)
+	}
+	total := 0
+	for _, o := range objs {
+		total += cardBytes(o.Card)
+	}
+	// Half the ceiling: the headroom is the point. A book at the cap should not
+	// be one field away from being refused.
+	if total > maxAddressBookResponseBytes/2 {
+		t.Fatalf("a full book of ordinary contacts renders to %d bytes, over half the %d ceiling", total, maxAddressBookResponseBytes)
+	}
+	t.Logf("%d contacts render to %d bytes (ceiling %d)", len(objs), total, maxAddressBookResponseBytes)
+}
+
+// TestListAddressObjectsRefusesAnOversizedAddressBook pins the ceiling itself.
+// No contact field has a length cap, so contacts carrying megabyte free-text
+// fields make the peak heap of one PROPFIND a function of what the caller
+// stored. Refusing is the point: truncating the listing would tell the client
+// the missing contacts were deleted.
+func TestListAddressObjectsRefusesAnOversizedAddressBook(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "hugebook", "irrelevant-password", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ac := AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}
+	// 1 MiB of notes each — the per-request JSON body ceiling — enough of them
+	// to pass the response ceiling.
+	perContact := 1 << 20
+	seedContacts(t, srv, u.ID, maxAddressBookResponseBytes/perContact+8, strings.Repeat("n", perContact))
+
+	b := &contactsDAVBackend{server: srv}
+	ctx := context.WithValue(context.Background(), authContextKey{}, ac)
+	objs, err := b.ListAddressObjects(ctx, b.addressBookPath(ac), nil)
+	if err == nil {
+		t.Fatalf("an oversized address book must be refused, got %d objects", len(objs))
+	}
+	if objs != nil {
+		t.Fatal("a refused listing must not also return a partial result")
+	}
+
+	// What the client sees is what matters: an error status, never a short 207.
+	req := davAuthedRequest(ac, "PROPFIND", "/dav/"+u.Username+"/contacts/default/", bytes.NewReader([]byte(
+		`<?xml version="1.0" encoding="utf-8"?><D:propfind xmlns:D="DAV:"><D:prop><D:getetag/></D:prop></D:propfind>`)))
+	req.Header.Set("Depth", "1")
+	req.Header.Set("Content-Type", "application/xml")
+	rec := httptest.NewRecorder()
+	srv.handleCardDAV(rec, req)
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("PROPFIND on an oversized book: got status %d, want %d; body=%s", rec.Code, http.StatusInsufficientStorage, rec.Body.String())
 	}
 }
