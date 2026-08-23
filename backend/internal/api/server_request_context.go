@@ -109,27 +109,14 @@ func lastForwardedValue(r *http.Request, header string) string {
 	return strings.TrimSpace(parts[len(parts)-1])
 }
 
-func externalBaseURL(r *http.Request) string {
-	var proto, host string
-	if proxyHeadersTrusted(r) {
-		proto = lastForwardedValue(r, "X-Forwarded-Proto")
-		host = lastForwardedValue(r, "X-Forwarded-Host")
-	}
-	if proto == "" {
-		if r.TLS != nil {
-			proto = "https"
-		} else {
-			proto = "http"
-		}
-	}
-	if host == "" {
-		host = strings.TrimSpace(r.Host)
-	}
-	if host == "" {
-		return ""
-	}
-	return proto + "://" + host
-}
+// There is deliberately no externalBaseURL here. Every URL this server hands
+// out — pickup links, PGP QR key exchange, native and desktop pairing — carries
+// a bearer credential to the address it names, and the only address a request
+// can offer is one the caller chose: an untrusted peer's Host header, or a
+// trusted proxy's X-Forwarded-Host. Deriving a credential's destination from
+// either lets whoever picked that hostname receive the credential. SERVER_BASE_URL
+// is the operator's own statement of the address, and it is the only source:
+// see pickupBaseURL and pairingBaseURL in pickup_handlers.go.
 
 // clientIP resolves the caller's IP for logging, CAPTCHA context, and lockout
 // keying.

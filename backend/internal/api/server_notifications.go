@@ -347,14 +347,18 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 	s.userMu.Lock()
 	s.subIndex[subscriberID] = ac.UserID
 	s.userMu.Unlock()
-	configured := s.pairingSecret != ""
+	// Both halves are required, and an unconfigured server mints no token:
+	// PAIRING_SECRET is what signs it, SERVER_BASE_URL is where the device
+	// sends it. See pairingBaseURL for why the request cannot supply the
+	// second one.
+	serverBaseURL := s.pairingBaseURL()
+	configured := s.pairingSecret != "" && serverBaseURL != ""
 	configurationError := ""
-	if !configured {
+	switch {
+	case s.pairingSecret == "":
 		configurationError = "pairing is not configured on the server; set PAIRING_SECRET"
-	}
-	serverBaseURL := s.serverBaseURL
-	if serverBaseURL == "" {
-		serverBaseURL = externalBaseURL(r)
+	case serverBaseURL == "":
+		configurationError = "pairing is not configured on the server; set SERVER_BASE_URL"
 	}
 	registerEndpoint := ""
 	pullEndpoint := ""
@@ -637,10 +641,7 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		}
 	}
 
-	serverBaseURL := s.serverBaseURL
-	if serverBaseURL == "" {
-		serverBaseURL = externalBaseURL(r)
-	}
+	serverBaseURL := s.pairingBaseURL()
 	pullEndpoint := ""
 	if serverBaseURL != "" {
 		pullEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/native/pull"
@@ -892,6 +893,17 @@ func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Before minting anything: a pairing code with no address to redeem it at
+	// is a live credential the caller cannot use, and it still spends one of
+	// the five per hour. Refuse instead, naming what the operator must set.
+	serverBaseURL := s.pairingBaseURL()
+	if serverBaseURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "desktop pairing is not configured on the server; set SERVER_BASE_URL",
+		})
+		return
+	}
+
 	store, err := s.userStore(ac.UserID)
 	if err != nil {
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
@@ -940,15 +952,7 @@ func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
 	// keeps a real hash if a redemption ever needs matching to an issuance.
 	s.logger.Info("desktop pairing initiated", "user_id", ac.UserID)
 
-	// Build server URL and register endpoint for desktop app
-	serverBaseURL := s.serverBaseURL
-	if serverBaseURL == "" {
-		serverBaseURL = externalBaseURL(r)
-	}
-	registerEndpoint := ""
-	if serverBaseURL != "" {
-		registerEndpoint = strings.TrimRight(serverBaseURL, "/") + "/api/notifications/desktop/register"
-	}
+	registerEndpoint := strings.TrimRight(serverBaseURL, "/") + "/api/notifications/desktop/register"
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":               true,

@@ -46,6 +46,7 @@ import {
   secondsUntilUTCMidnight,
   claimTokenForSend,
   createRelayFetchHandler,
+  errorMessage,
   fail,
   failDelivery,
   isExpired,
@@ -197,7 +198,7 @@ async function handleSend(request: Request, rc: RequestContext<Env>): Promise<Re
     // Thrown rather than answered: the provider request was never completed, so
     // the draw goes back.
     refund();
-    rc.log({ level: "error", event: "send.error", keyId: record.id, error: String((err as Error).message ?? err) });
+    rc.log({ level: "error", event: "send.error", keyId: record.id, error: errorMessage(err) });
     return failDelivery(rc);
   }
 

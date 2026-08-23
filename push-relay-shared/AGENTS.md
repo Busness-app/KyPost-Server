@@ -31,6 +31,7 @@ The Cloudflare Workers that deliver KyPost push notifications for every self-hos
 
 - Typechecking is the floor here, not the gate. Both ownership bugs found in review typechecked perfectly; what caught them was writing the interleaving down.
 - Anything touching claims, releases, key lifecycle, or rate limiting gets a case in `relay-claims.test.mts` expressed as an explicit ordering of concurrent operations.
+- **A caught value becomes text through `errorMessage` and nothing else.** `catch` binds `unknown`, `throw null` is legal, and `(err as Error).message` on it throws a second exception out of the handler — turning a fail-closed 429 or 502 into the router's generic 500 and logging the logging bug instead of the outage. `error-message.test.mts` runs every throwable shape through the rate limiter to hold it.
 - Prefer a coarse log reason (`token_claim_too_recent`) over an error string. These logs are operator-facing and must not carry credentials or upstream response bodies — with one recorded exception, the clipped provider reason on the send failure path, whose terms are in Local Contracts above. Widening it is a contract change, not a tidy-up.
 
 ## Verification

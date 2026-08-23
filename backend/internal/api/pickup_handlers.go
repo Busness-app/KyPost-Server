@@ -284,17 +284,6 @@ func (s *Server) sendPickupNotification(userID, from, recipient, subject, plainB
 	return nil
 }
 
-// pickupBaseURL is the externally-reachable base URL used to build pickup
-// links, preferring the explicit SERVER_BASE_URL override — pickup
-// notification emails are sent outside any HTTP request context, so
-// externalBaseURL's X-Forwarded-* header trick isn't available here. It is
-// also used to build the QR key-exchange URL (handlePGPQRToken).
-//
-// When SERVER_BASE_URL is unset, this falls back to a localhost URL so the
-// feature still nominally works in local/dev setups, but that fallback is
-// silently wrong for anyone else: pickup links emailed to recipients and QR
-// codes scanned by other devices will point at the operator's own machine.
-// Log a warning once so the degraded state is observable instead of silent.
 // pairingSecretConfigured reports whether PAIRING_SECRET is set, logging a
 // one-time warning when it's not: without it, pickup links and QR
 // key-exchange tokens would otherwise be HMAC-signed with a known-empty key,
@@ -309,6 +298,17 @@ func (s *Server) pairingSecretConfigured() bool {
 	return false
 }
 
+// pickupBaseURL is the externally-reachable base URL used to build pickup
+// links, and the QR key-exchange URL (handlePGPQRToken). SERVER_BASE_URL is
+// its only source: pickup notification emails are sent outside any HTTP
+// request context, so there is no request to read an address off even if that
+// were safe.
+//
+// When SERVER_BASE_URL is unset, this falls back to a localhost URL so the
+// feature still nominally works in local/dev setups, but that fallback is
+// silently wrong for anyone else: pickup links emailed to recipients and QR
+// codes scanned by other devices will point at the operator's own machine.
+// Log a warning once so the degraded state is observable instead of silent.
 func (s *Server) pickupBaseURL() string {
 	if s.serverBaseURL != "" {
 		return s.serverBaseURL
@@ -317,6 +317,31 @@ func (s *Server) pickupBaseURL() string {
 		s.logger.Error("SERVER_BASE_URL is not set; pickup links and PGP QR key-exchange URLs will fall back to http://localhost:5866 and will not work for remote recipients or scanners")
 	})
 	return "http://localhost:5866"
+}
+
+// pairingBaseURL is the base URL that native and desktop pairing responses are
+// built from. SERVER_BASE_URL only, and "" when it is unset — no localhost
+// fallback and, deliberately, nothing read off the request.
+//
+// Every URL derived from this routes a credential: the pairing QR sends a
+// 90-second pairing token to registerEndpoint, and a paired device sends its
+// device secret to pullEndpoint. These used to fall back to the request's Host
+// header, which is whatever hostname the caller reached this server through —
+// so a deployment answering on an alternate name produced a pairing package
+// aiming the token at that name. Same reasoning as probedSPKIPin, which
+// already refuses to dial anything but SERVER_BASE_URL.
+//
+// Empty rather than a guess: the pairing handler reports a configuration error
+// and mints no token, because a wrong address here is a disclosed credential
+// rather than a broken link.
+func (s *Server) pairingBaseURL() string {
+	if s.serverBaseURL != "" {
+		return s.serverBaseURL
+	}
+	s.pairingBaseURLWarn.Do(func() {
+		s.logger.Error("SERVER_BASE_URL is not set; native and desktop pairing are disabled (the pairing token would otherwise be aimed at whatever hostname the request arrived on)")
+	})
+	return ""
 }
 
 // minPairingSecretLength is the shortest operator-supplied PAIRING_SECRET this

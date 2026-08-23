@@ -128,9 +128,10 @@ it builds each QR, it makes a verified TLS connection to `SERVER_BASE_URL` and
 takes the leaf.
 
 **Set `SERVER_BASE_URL` to your public `https://` URL.** That is the whole
-configuration. It is deliberately not derived from the request's `Host` header
-the way other base URLs are — a caller who could steer that would be choosing
-which key the app pins.
+configuration, and pairing does not work without it. No URL that carries a
+credential is derived from the request's `Host` header — a caller who could
+steer that would be choosing which key the app pins, and where the pairing
+token is sent.
 
 If your public hostname does not resolve back to the proxy from inside the
 server's network — a self-hosted proxy behind a consumer router with no NAT

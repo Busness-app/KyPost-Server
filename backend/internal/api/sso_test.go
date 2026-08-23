@@ -25,6 +25,10 @@ const ssoTestHost = "localhost:5866"
 func setupSSOTestServer(t *testing.T) (*Server, *ssotest.IdP) {
 	t.Helper()
 	srv := newTestServer(t)
+	// SSO needs an explicitly configured external URL: ssoRedirectURI reads
+	// SERVER_BASE_URL and nothing else, because redirect_uri is where the
+	// provider sends an authorization code.
+	srv.serverBaseURL = "http://" + ssoTestHost
 	idp := ssotest.New(t, "kypost-test")
 
 	if err := srv.ssoStore.Save(sso.SSOSettings{
@@ -639,23 +643,27 @@ func TestSSOLinkCookieIsBoundToItsOwnSession(t *testing.T) {
 	}
 }
 
-// The redirect_uri must follow the configured external URL, not the Host
-// header. Behind a reverse proxy r.Host is the internal name, and a
-// redirect_uri built from it matches nothing registered at the provider.
+// The redirect_uri must follow the configured external URL and nothing else.
+// Behind a reverse proxy r.Host is the internal name, and a redirect_uri built
+// from it matches nothing registered at the provider; worse, OAuth pins
+// redirect_uri across the authorize and token calls, so a Host-derived value
+// lets a request header influence where an authorization code is sent.
 func TestSSORedirectURIFollowsConfiguredBaseURL(t *testing.T) {
 	srv, _ := setupSSOTestServer(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil)
 	req.Host = "kypost.internal:5866"
 
-	if got := srv.ssoRedirectURI(req); got != "http://kypost.internal:5866/api/auth/oidc/callback" {
-		t.Errorf("without a configured base URL, ssoRedirectURI() = %q", got)
+	srv.serverBaseURL = ""
+	if got := srv.ssoRedirectURI(); got != "" {
+		t.Errorf("without a configured base URL, ssoRedirectURI() = %q, want empty — "+
+			"the Host header must never supply it", got)
 	}
 
 	srv.serverBaseURL = "https://mail.urlxl.com/"
 	want := "https://mail.urlxl.com/api/auth/oidc/callback"
-	if got := srv.ssoRedirectURI(req); got != want {
-		t.Errorf("ssoRedirectURI() = %q, want %q — the Host header must not win", got, want)
+	if got := srv.ssoRedirectURI(); got != want {
+		t.Errorf("ssoRedirectURI() = %q, want %q", got, want)
 	}
 
 	// The authorization request the provider actually receives carries it.

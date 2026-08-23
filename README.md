@@ -352,7 +352,7 @@ Common variables:
 - `IMAP_CONFIG_FILE` (default `$SECRET_DIR/imap-config.json`)
 - `IMAP_CONFIG_KEY_FILE` (default `$SECRET_DIR/imap-config.key`)
 - `TOTP_SECRET_KEY_FILE` (default `$SECRET_DIR/totp-secret.key`)
-- `SERVER_BASE_URL` (optional. Recommended for mobile pairing. KyPost embeds this public URL as `srv` in the QR code and uses it to build `reg`.)
+- `SERVER_BASE_URL` (**required for mobile pairing, desktop pairing and Single Sign-On**; recommended always. KyPost embeds this public URL as `srv` in the QR code and uses it to build `reg`, and it is the OIDC `redirect_uri`. Every one of those URLs is where a credential gets sent, so it is never derived from the request's `Host` header — leave it unset and those three features refuse with an error naming it. Pickup links and PGP QR key-exchange URLs fall back to `http://localhost:5866`, which works only on the server itself.)
 - `PAIRING_SECRET` (optional. HMAC secret for pickup links, PGP QR key exchange and mobile pairing tokens. Generated automatically on first start and persisted at `PAIRING_SECRET_FILE` — set it only if several replicas must share one secret, and use `openssl rand -base64 32` if you do. A value shorter than 32 bytes is refused and those three features stay disabled, with the reason logged. Bytes, not characters, because the value is used as the HMAC key verbatim; for the ASCII `openssl rand -base64 32` produces they are the same number.)
 - `PAIRING_SECRET_FILE` (default `$SECRET_DIR/pairing.key`)
 - `PUSH_RELAY_URL` (optional. Base URL of the central push relay Worker that delivers Android native push to FCM. Must be `https://` — the relay key travels on every request — except for loopback.)
@@ -413,7 +413,7 @@ mkdir -p share/ollama/models
 The backend handles mobile pairing directly. It does not require Novu.
 
 - Nothing to configure: the pairing secret is generated on first start and kept at `/kypost/private/pairing.key`. Set `PAIRING_SECRET` only if you run multiple replicas that must share one.
-- Optional but recommended: set `SERVER_BASE_URL` so that QR code payloads always point to the correct public backend URL. Use an `https://` URL: pairing tokens, pickup links and QR key-exchange URLs are all built from it, and each carries a bearer credential in the query string. It is also what the pairing QR's certificate pin is read from — without it, pairing falls back to trust on first use. See the TLS note in Quick Start and [Certificate pinning](#certificate-pinning-in-the-pairing-qr) below.
+- Required: set `SERVER_BASE_URL` so that QR code payloads point to the correct public backend URL. Use an `https://` URL: pairing tokens, pickup links and QR key-exchange URLs are all built from it, and each carries a bearer credential in the query string. Unset, the pairing panel reports "set SERVER_BASE_URL" and mints no token — the address a credential is sent to is not something a request's `Host` header may choose, and there is no safe guess. It is also what the pairing QR's certificate pin is read from. See the TLS note in Quick Start and [Certificate pinning](#certificate-pinning-in-the-pairing-qr) below.
 - Keep all pairing secrets on the server only.
 
 Desktop pairing behavior:
@@ -454,10 +454,12 @@ Two things worth knowing:
   `TLS_CERT_FILE`/`TLS_KEY_FILE` to terminate TLS here instead, and the pin is
   read from that certificate directly.
 
-Any other failure — no `SERVER_BASE_URL`, an unreachable URL, a router that will
-not route your public hostname back to itself — simply omits `pin`, and pairing
-behaves exactly as it did before. It never breaks a pairing; it only declines to
-protect one. Already-paired devices are unaffected either way.
+A probe failure — an unreachable URL, a router that will not route your public
+hostname back to itself — simply omits `pin`, and pairing proceeds on trust on
+first use. It never breaks a pairing; it only declines to protect one.
+Already-paired devices are unaffected. A missing `SERVER_BASE_URL` is the one
+case that is not merely unpinned: there is then no address to put in the QR at
+all, so pairing refuses rather than guessing one from the request.
 
 Native registration behavior:
 

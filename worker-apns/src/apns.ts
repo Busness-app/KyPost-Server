@@ -5,6 +5,7 @@
  */
 
 import { base64UrlEncode, base64UrlEncodeString, pemToDer } from "../../push-relay-shared/base64url";
+import { errorMessage } from "../../push-relay-shared/push-relay-common";
 
 const APNS_PRODUCTION_HOST = "api.push.apple.com";
 const APNS_SANDBOX_HOST = "api.sandbox.push.apple.com";
@@ -160,7 +161,7 @@ export async function sendApnsMessage(
       // Apple. This is the shape a wrong APNS_KEY_ID or APNS_AUTH_KEY takes.
       reachedProvider: false,
       status: 500,
-      detail: `provider token generation failed: ${(err as Error).message}`,
+      detail: `provider token generation failed: ${errorMessage(err)}`,
     };
   }
 
@@ -235,7 +236,7 @@ export async function sendApnsMessage(
 
     return { ok: false, stale: false, reachedProvider: true, status: resp.status, detail };
   } catch (err) {
-    const msg = (err as Error).message ?? String(err);
+    const msg = errorMessage(err);
     // A throw out of fetch() usually means the request never completed, but it
     // cannot be told apart from a failure reading a response Apple did send.
     // Unproven means not refunded.

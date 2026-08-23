@@ -45,9 +45,6 @@ func TestProxyHeadersIgnoredByDefault(t *testing.T) {
 	if isRequestSecure(req) {
 		t.Fatal("default: a forged X-Forwarded-Proto must not mark a plain-HTTP request secure")
 	}
-	if got := externalBaseURL(req); got != "http://backend.internal" {
-		t.Fatalf("default: externalBaseURL = %q, want the connection's own host", got)
-	}
 	if got := clientIP(req); got != "203.0.113.50" {
 		t.Fatalf("default: clientIP = %q, want the connection's own address", got)
 	}
@@ -61,9 +58,6 @@ func TestProxyHeadersTrustedFromConfiguredProxy(t *testing.T) {
 	req := forwardedRequest(t)
 	if !isRequestSecure(req) {
 		t.Fatal("trusted peer: X-Forwarded-Proto=https should mark the request secure")
-	}
-	if got := externalBaseURL(req); got != "https://attacker.example" {
-		t.Fatalf("trusted peer: externalBaseURL = %q, want the forwarded host honored", got)
 	}
 	if got := clientIP(req); got != "10.0.0.99" {
 		t.Fatalf("trusted peer: clientIP = %q, want the forwarded address", got)
@@ -87,9 +81,6 @@ func TestProxyHeadersIgnoredFromUntrustedPeer(t *testing.T) {
 	if isRequestSecure(req) {
 		t.Error("untrusted peer: a forged X-Forwarded-Proto must not mark the request secure")
 	}
-	if got := externalBaseURL(req); got != "http://backend.internal" {
-		t.Errorf("untrusted peer: externalBaseURL = %q, want the connection's own host", got)
-	}
 	if got := clientIP(req); got != "203.0.113.50" {
 		t.Errorf("untrusted peer: clientIP = %q, want the peer address — a caller who can choose "+
 			"this value has defeated every lockout keyed on it", got)
@@ -100,9 +91,9 @@ func TestProxyHeadersIgnoredFromUntrustedPeer(t *testing.T) {
 // X-Forwarded-For.
 //
 // clientIP already read the right-most element because the left-most is
-// client-prepended; isRequestSecure and externalBaseURL, in the same file, read
-// the left-most. That asymmetry meant the Secure flag on the session cookie and
-// the HSTS header were decided by a value the client supplies.
+// client-prepended; isRequestSecure, in the same file, read the left-most. That
+// asymmetry meant the Secure flag on the session cookie and the HSTS header
+// were decided by a value the client supplies.
 func TestForwardedHeadersAllUseRightmostHop(t *testing.T) {
 	trustProxyCIDRsForTest(t, "203.0.113.0/24")
 	req := httptest.NewRequest(http.MethodGet, "http://backend.internal/api/x", nil)
@@ -120,9 +111,6 @@ func TestForwardedHeadersAllUseRightmostHop(t *testing.T) {
 	if isRequestSecure(req) {
 		t.Error("isRequestSecure honored the client-prepended https over the proxy's own http; " +
 			"this decides the session cookie's Secure flag")
-	}
-	if got := externalBaseURL(req); got != "http://real.example" {
-		t.Errorf("externalBaseURL = %q, want http://real.example from the right-most hop", got)
 	}
 }
 

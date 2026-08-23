@@ -141,6 +141,7 @@ func TestDeleteDeviceEvictsTheOwnersOwnIndexEntry(t *testing.T) {
 // first 32 bits were logged under the label "code_hash" — which it was not.
 func TestDesktopPairingDoesNotPersistTheRawCode(t *testing.T) {
 	srv := newTestServer(t)
+	srv.serverBaseURL = "https://mail.example"
 	all, _ := srv.users.List()
 	owner := all[0]
 
@@ -178,6 +179,7 @@ func TestDesktopPairingDoesNotPersistTheRawCode(t *testing.T) {
 // worth limiting here is issuance.
 func TestDesktopPairingLimitsIssuance(t *testing.T) {
 	srv := newTestServer(t)
+	srv.serverBaseURL = "https://mail.example"
 	all, _ := srv.users.List()
 	owner := all[0]
 
