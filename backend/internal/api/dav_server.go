@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"kypost-server/backend/internal/contacts"
@@ -102,8 +103,39 @@ func (s *Server) handleCardDAV(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 	}
+	// PROPFIND and REPORT are the two methods that can produce a multistatus,
+	// which go-webdav buffers whole before encoding. maxAddressBookResponseBytes
+	// bounds one such response; this bounds how many of them one account can
+	// have in flight, so a stolen app password cannot multiply that ceiling by
+	// issuing broad queries in parallel. Per account, not global: one client's
+	// large address book must not stall everyone else's sync.
+	if r.Method == "PROPFIND" || r.Method == "REPORT" {
+		release, ok := acquireDAVMultistatusSlot(r.Context(), ac.UserID)
+		if !ok {
+			return // caller gave up while queued
+		}
+		defer release()
+	}
 	handler := &carddav.Handler{Backend: &contactsDAVBackend{server: s}, Prefix: davPrefix}
 	handler.ServeHTTP(w, r)
+}
+
+// davMultistatusSlots holds one capacity-1 slot per user ID. Bounded by the
+// number of accounts that have ever used CardDAV, so it is never swept.
+var davMultistatusSlots sync.Map
+
+// acquireDAVMultistatusSlot blocks until this account's slot is free, returning
+// the release func. It reports false if ctx ended first, in which case nothing
+// was acquired and there is no one left to answer.
+func acquireDAVMultistatusSlot(ctx context.Context, userID string) (func(), bool) {
+	v, _ := davMultistatusSlots.LoadOrStore(userID, make(chan struct{}, 1))
+	slot := v.(chan struct{})
+	select {
+	case slot <- struct{}{}:
+		return func() { <-slot }, true
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 // contactsDAVBackend adapts contacts.Store to carddav.Backend. It resolves
@@ -224,10 +256,24 @@ func (b *contactsDAVBackend) ListAddressObjects(ctx context.Context, p string, _
 	// carries a "TODO: streaming"). Contacts may share one photo by content
 	// hash — one file on disk, charged to the quota once — so the response
 	// could be orders of magnitude larger than anything stored. Budget it.
-	inlined := 0
+	//
+	// The photo budget alone does not bound the response: no contact field has
+	// a length cap, so 10,000 contacts (MaxContactsPerUser) each carrying ~1 MiB
+	// of NOTE or PGP key text — the per-request JSON body ceiling — render to a
+	// multi-gigabyte multistatus that is built, held and encoded in memory.
+	// rendered bounds the whole response, photos included.
+	inlined, rendered := 0, 0
 	for _, c := range list {
 		card, photoBytes := b.toVCardWithPhotoBudget(ac.UserID, c, inlined < maxInlinedPhotoBytesPerResponse)
 		inlined += photoBytes
+		rendered += cardBytes(card)
+		if rendered > maxAddressBookResponseBytes {
+			// Fail closed rather than truncate: a short listing tells the
+			// client the missing contacts were deleted, and it deletes its
+			// local copies to match. An error leaves them alone.
+			return nil, webdav.NewHTTPError(http.StatusInsufficientStorage,
+				errors.New("address book is too large to serve in one CardDAV response"))
+		}
 		out = append(out, carddav.AddressObject{
 			Path:    b.objectPath(ac, c.UID),
 			ETag:    c.ETag(),
@@ -236,6 +282,28 @@ func (b *contactsDAVBackend) ListAddressObjects(ctx context.Context, p string, _
 		})
 	}
 	return out, nil
+}
+
+// cardBytes approximates what card costs once rendered — values, parameters
+// and property names. It is an accounting estimate, not an exact encoded
+// length; the budget it feeds is a backstop, not a quota shown to anyone.
+func cardBytes(card vcard.Card) int {
+	n := 0
+	for name, fields := range card {
+		for _, f := range fields {
+			if f == nil {
+				continue
+			}
+			n += len(name) + len(f.Value) + len(f.Group)
+			for pname, pvalues := range f.Params {
+				n += len(pname)
+				for _, v := range pvalues {
+					n += len(v)
+				}
+			}
+		}
+	}
+	return n
 }
 
 // toVCard resolves the per-user side data contactToVCard needs (group names,
@@ -250,6 +318,16 @@ func (b *contactsDAVBackend) toVCard(userID string, c contacts.Contact) vcard.Ca
 // inflates by ~1.37, so without a budget the peak heap for a single PROPFIND is
 // set by the caller's contact count rather than by anything they stored.
 const maxInlinedPhotoBytesPerResponse = 32 << 20
+
+// maxAddressBookResponseBytes bounds the rendered size of one address-book
+// listing, photos included.
+//
+// Set above anything the photo budget plus a full 10,000-contact book of
+// ordinary cards can reach (~32 MiB of photos and well under 10 MiB of text),
+// so a real address book never meets it — it exists only to stop contacts with
+// megabyte-sized free-text fields from setting the peak heap of a single
+// PROPFIND.
+const maxAddressBookResponseBytes = 64 << 20
 
 // maxValuesPerField bounds how many entries one repeatable vCard field family
 // may contribute to a stored contact.
