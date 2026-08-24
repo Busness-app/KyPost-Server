@@ -238,6 +238,7 @@ Unencrypted:
 - **CardDAV:** Sync clients should use HTTPS-only servers.
 - **Mobile pairing:** QR codes and pickup links carry bearer tokens in the query string. Use HTTPS for `SERVER_BASE_URL`.
 - **External services:** Push relay APIs use HTTPS only (`PUSH_RELAY_URL` and `APNS_RELAY_URL` must be HTTPS).
+- **Outbound SMTP:** STARTTLS is **required**, not opportunistic. If the submission server does not advertise it, the send is refused — an on-path attacker can strip the capability from the EHLO response, and stripping `AUTH` with it means net/smtp's own refusal to authenticate over a cleartext link never fires either, so the message and password would reach the attacker while the user is shown a successful send. `ALLOW_INSECURE_SMTP=true` opts a deployment out for a plaintext relay on a trusted network. There is no per-request or per-account override: a downgrade must be a deployment decision, never something a caller or a remote server can trigger.
 
 ### Sensitive Data in Logs
 

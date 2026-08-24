@@ -284,6 +284,17 @@ non-prerelease version.
 
 ### Changed
 
+- **KyPost is now released under the MIT License, replacing AGPL-3.0.** This is
+  a relaxation, not a restriction: everything permitted before is still
+  permitted, and the copyleft obligation is gone. If you run a modified KyPost
+  as a network service you are no longer required to offer your users its
+  source. Downstream consumers who avoided the project because of AGPL's
+  network clause no longer have that reason to.
+
+  Contributions are accepted under the same terms — see the Licence section of
+  `CONTRIBUTING.md`. `LICENSE.txt` is the authoritative text, and the licence
+  link in the sidebar footer now displays it.
+
 - **Device pairing moved into Security, which is now tabbed.** Pairing, the
   paired-device list, and the per-device "can approve sign-ins" switch were
   spread across two nav sections and rendered the same hardware three times from

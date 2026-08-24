@@ -18,6 +18,9 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 - Contacts address book with groups, dedupe, bulk delete, CSV and vCard import and export, and photo support
 - CardDAV server (`/dav`, `/.well-known/carddav`) to sync contacts to phones and desktop apps. An optional CardDAV client syncs against an external address book.
 - Multi-factor authentication: TOTP authenticator apps, one-time recovery codes, and push-approval sign-in
+- Single Sign-On against any standard OpenID Connect provider — KySignOn (one-click preset), Authentik and Keycloak have their admin-group claims mapped. Authorization code + PKCE, ID tokens verified against the issuer's JWKS. Accounts are claimed by the provider's `sub` and never by username or email. Admin-configured under Admin > Server > SSO; **requires `SERVER_BASE_URL`**.
+- Send-as aliases, each verified by a DKIM-signed challenge from the alias's own domain before it can be used
+- Web Key Directory publishing: serve your users' public keys at `/.well-known/openpgpkey/` for verified domains, so correspondents discover them without a keyserver
 - CAPTCHA on login, **self-hosted proof-of-work by default** (also Turnstile or Friendly Captcha; `CAPTCHA_PROVIDER=none` turns it off). It works alongside a 3-strikes/15-minute account lockout, a looser per-IP lockout, and an instance-wide login rate limit. Note that proof-of-work needs a secure context in the browser — read the CAPTCHA notes in `.env.example` if you serve over plain HTTP on a LAN.
 - Browser push notifications for each user, for all mail or for keyword matches only. KyPost also supports native push pairing for mobile apps.
 - Settings grouped into panels: Appearance, Mail (IMAP/SMTP, send-as, contact sync, filters), Security, Notifications and Status — plus Email Labels for each user's own prompt tuning and classification decisions — and an Admin group for server runtime and diagnostics
@@ -359,11 +362,42 @@ Common variables:
 - `PUSH_RELAY_KEY` (per-server API key from the relay operator. Set it together with `PUSH_RELAY_URL` to enable Android native push.)
 - `APNS_RELAY_URL` (optional. Base URL of the central APNs relay Worker that delivers iOS native push. Must be `https://` — the relay key travels on every request — except for loopback.)
 - `APNS_RELAY_KEY` (per-server API key from the relay operator. Set it together with `APNS_RELAY_URL` to enable iOS native push.)
+- `ALLOW_INSECURE_SMTP` (optional, default off. KyPost **requires** STARTTLS on SMTP submission and refuses to send if the server does not offer it. Opportunistic STARTTLS is not enough: the capability is advertised by the server, so an on-path attacker strips it from the EHLO response and the session continues in cleartext with the full message and the password. Set this to `true` only for a genuinely plaintext relay on a trusted LAN. There is deliberately no per-request or per-account way to set it — a downgrade has to be a deployment decision, not something a caller or a remote server can trigger.)
 - `CAPTCHA_PROVIDER` (optional. Set `pow`, `turnstile`, or `friendly` to require a CAPTCHA solution on login. It works together with the built-in lockout of 3 strikes and 15 minutes.)
   - `pow` is self-hosted proof-of-work: the only provider that makes no third-party network call and adds no third-party origin to the CSP. It requires no account with anyone and no keys to obtain — the signing key is generated on first use at `POW_SECRET_FILE`. **It requires HTTPS**: the browser half uses `crypto.subtle`, which browsers expose only in a secure context, so on a plain-`http://` deployment (anything but `localhost`) the check cannot run and nobody can sign in — put TLS in front of the server, as the note in Quick start says to anyway, or pick another provider. Its difficulty adapts per client IP: an honest first login solves the cheap base challenge in a blink, and each recent failed login from the same address multiplies the next challenge's difficulty, up to a ceiling, decaying after 15 minutes or on a successful login. Each challenge is bound to the address that requested it — the address is signed into the challenge and re-checked when the solution arrives — so the escalation cannot be sidestepped by fetching cheap challenges from a clean address and spending them from an escalated one. (If your own address changes mid-check, say a phone moving from wifi to cellular, the sign-in page tells you to try again and costs you no lockout strike.) Escalation is still counted per address, so an attacker spraying from many addresses gets the base difficulty at each: it prices repetition, not a distributed attacker. An attacker running native code is also one to two orders of magnitude faster than a browser, so this deters casual scripted spraying, not a determined campaign. It does **not** replace the three-strikes lockout, which remains the real brute-force defence. Multi-replica deployments must set `POW_SECRET` so every replica agrees on one signing key — generate it with `openssl rand -base64 32`; anything shorter than 16 characters is refused and the login CAPTCHA then rejects every attempt.
   - `turnstile` and `friendly` verify a token against a third-party siteverify endpoint and need a site key + secret key.
 - `CAPTCHA_SITE_KEY` and `CAPTCHA_SECRET_KEY` (required together with `CAPTCHA_PROVIDER=turnstile` or `friendly`; not used by `pow`. The site key is public. The server verifies solutions with the secret key.)
 - `POW_MAX_NUMBER`, `POW_SECRET_FILE`, `POW_SECRET` (optional, `CAPTCHA_PROVIDER=pow` only — see `.env.example` for tuning notes)
+
+Less common variables:
+
+- `SMTP_HOST`, `SMTP_PORT` (instance-wide fallbacks used only when an account's
+  own IMAP config names no SMTP host or port. Resolution order is: the account's
+  saved SMTP settings, then these, then the IMAP host with a leading `imap.` (or
+  an embedded `.imap.`) rewritten to `smtp.` — and the IMAP host unchanged if it
+  matches neither. The port falls back to `587`.)
+- `CLASSIFIER_BASE_URL`, `OLLAMA_API_KEY`, `OLLAMA_GENERATE_PATH` (point the
+  classifier at something other than the bundled Ollama — a shared instance, or
+  any endpoint that speaks the same generate API. `OLLAMA_BASE_URL` wins if both
+  it and `CLASSIFIER_BASE_URL` are set; `OLLAMA_GENERATE_PATH` defaults to
+  `/api/generate`; `OLLAMA_API_KEY` is sent as a bearer token when set.
+  **A remote classifier receives your mail.** Every message body goes to it after
+  redaction, so a non-loopback plaintext endpoint puts that mail — and the API
+  key — on the wire in the clear. The server logs an error once per boot when the
+  endpoint fails that transport policy, but classification continues, because
+  refusing to start a mail server over a variable the operator set deliberately
+  is the worse outcome. Use `https://` for anything off-host.)
+- `UNHEALTHY_RESTART_SECONDS` (default `300`. How long health may stay red before
+  the process exits and lets supervisord and the Docker restart policy bring it
+  back.)
+- `PGP_PRIVATE_KEY_FILE` (default `$SECRET_DIR/pgp-private-key.key`) and
+  `PICKUP_STORE_KEY_FILE` (default `$SECRET_DIR/pickup-store.key`) — the two
+  remaining `SECRET_DIR`-derived secret paths.
+- `FRONTEND_DIR` (default `/opt/kypost/frontend`. Where the API server reads the
+  built SPA from; there is no reason to change it inside the shipped image.)
+- `MFA_CLEAR_ALL` (recovery only. Clears two-factor enrollment for **every**
+  account on the next boot, then writes a marker so it never runs twice — see
+  `.env.example` before using it.)
 
 Notes:
 
@@ -642,9 +676,21 @@ Auth:
   needs to derive its auth secret, so the password is never transmitted. Public,
   and deliberately answers identically for a username that does not exist.
 - `GET /api/auth/captcha-config`
+- `GET /api/auth/pow-challenge` (`CAPTCHA_PROVIDER=pow` only)
+- `GET /api/auth/csrf`
 - `GET /api/auth/me`
 - `POST /api/auth/logout`
 - `POST /api/auth/password`
+- `POST /api/auth/step-up` (re-confirms the password, and a second factor when one is enrolled, before the Security page renders)
+
+Single Sign-On (OpenID Connect):
+
+- `GET /api/auth/sso-config` — public `{enabled, issuerUrl}` that gates the sign-in button. Never returns the client secret.
+- `GET /api/auth/oidc/login` (alias `/auth/sso/login`) — starts the authorization-code flow. `?link=true` links the provider identity to the *caller's own* session and requires one.
+- `GET /api/auth/oidc/callback` (alias `/auth/sso/callback`) — verifies the ID token, then signs in, auto-provisions, or links by `sub`.
+- `POST /api/settings/sso/unlink`
+- `GET|PUT /api/admin/sso` (admin only. The provider configuration.)
+- `POST /api/sync/webhook` (directory replication push from KySignOn, authenticated by an HMAC over the event body)
 
 Multi-factor authentication:
 
@@ -673,12 +719,15 @@ Runtime:
 - `POST /api/health/repair` (admin only)
 - `POST /api/admin/mail/poll-now` (admin only. Starts an immediate poll.)
 - `GET /api/setup` (reports whether the initial admin setup completed)
-- `GET /pickup/{id}?t=<token>` (single-use mobile pickup link)
+- `GET /api/server/version` (the running version and whether a newer release exists)
+- `GET /api/ollama/version` (the classifier runtime's version)
+- `GET /pickup/{id}?t=<token>` (single-use mobile pickup link), plus `POST /pickup/{id}/open` and `POST /pickup/{id}/blob` for a client-sealed pickup
 
 Config and data:
 
 - `GET|PUT /api/config` (GET omits `redaction.patterns` for non-admins; PUT is admin only)
 - `GET /api/labels`
+- `GET|PUT /api/labels/preferences` (the caller's own label list and auto-apply preference. `PUT` replaces the whole block.)
 - `GET /api/decisions` (the caller's own decisions)
 - `GET|PUT /api/tuning` (the caller's own tuning prompt)
 
@@ -697,6 +746,7 @@ Mail:
 - `POST /api/mail/draft` (the same optional `attachments` shape)
 - `GET /api/mail/attachments?mailbox=&messageId=` (lists the attachment metadata of a message)
 - `GET /api/mail/attachment?mailbox=&messageId=&index=` (downloads one attachment)
+- `GET|POST /api/mail/send-as` and `DELETE /api/mail/send-as/{id}` (alias addresses. A new alias is unusable until a DKIM-signed challenge from its own domain verifies it.)
 
 Filter Rules (the caller's own rules):
 
@@ -710,9 +760,30 @@ PGP:
 
 - `POST /api/pgp/identity/generate` and `POST /api/pgp/identity/import`
 - `GET|DELETE /api/pgp/identity`
+- `POST /api/pgp/identity/client` (store a client-protected identity — the server never sees the private key)
+- `GET /api/pgp/identity/wrapped` and `POST /api/pgp/identity/rewrap` (fetch and re-wrap the account-password-wrapped envelope, used on password change)
+- `POST /api/pgp/identity/export-legacy` (one-time export of a server-held key, so it can be migrated or backed up)
+- `GET|PUT|DELETE /api/pgp/identity/envelope/{slot}` (per-slot key envelopes)
+- `GET /api/pgp/bootstrap` (everything the browser needs to unlock a client-protected identity in one call)
 - `GET /api/pgp/keyserver/lookup` (queries keys.openpgp.org)
 - `POST /api/pgp/recipients/check` (key status for a set of recipients before you send)
+- `POST /api/pgp/recipients/resolve` (resolves the key actually used for each recipient)
 - `GET /api/pgp/qr/token` and `GET /api/pgp/qr/key` (public key exchange through a QR code)
+- `POST /api/pgp/pickup` (creates a sealed pickup for a recipient with no usable key, so a client-protected sender can still use the secure-link fallback)
+- `GET /api/mail/pgp-payload` and `POST /api/mail/send-pgp` (fetch a ciphertext for local decryption; submit a locally encrypted message)
+
+PGP key discovery and device enrollment:
+
+- `GET|PUT /api/pgp/discovery/settings`
+- `GET /api/pgp/discovery/suppressions` and `DELETE /api/pgp/discovery/suppressions/{email}`
+- `POST /api/pgp/discovery/suppress-contact`
+- `GET /api/pgp/device/envelope` (a paired device fetches the envelope sealed to its own secure-element key), `POST /api/pgp/device/enrollment-key` (a device publishes its public sealing key under its pairing credential), `POST /api/pgp/device/enrollment-state` (a device reports whether it can actually read the identity)
+
+Web Key Directory (admin only, plus the public serving path):
+
+- `GET|POST /api/pgp/wkd/domains` and `DELETE /api/pgp/wkd/domains/{domain}`
+- `POST /api/pgp/wkd/domains/{domain}/verify`
+- `GET /.well-known/openpgpkey/...` (public. Serves verified users' keys — see [docs/WKD_Publishing.md](docs/WKD_Publishing.md).)
 
 Contacts:
 
@@ -745,9 +816,13 @@ Notifications (all scoped to the signed-in user):
 - `POST|DELETE /api/notifications/subscriptions`
 - `POST /api/notifications/test`
 - `GET /api/notifications/pairing`
-- `POST /api/notifications/native/register`
+- `POST /api/notifications/native/register` and `POST /api/notifications/native/deregister`
 - `GET|DELETE /api/notifications/native/devices`
+- `PUT /api/notifications/native/mode` (relay push vs. app pull)
+- `PUT /api/notifications/native/devices/{deviceId}/mfa` (allow a device to approve sign-ins)
+- `GET /api/notifications/native/pull` (app-pull delivery mode)
 - `POST /api/notifications/native/unpair`
+- `POST /api/notifications/desktop/pair` (see [docs/Desktop_Pairing.md](docs/Desktop_Pairing.md))
 
 Logs (admin only):
 
@@ -756,20 +831,45 @@ Logs (admin only):
 
 ## Build and Dev Checks
 
+These are the same gates CI runs. All of them must pass before a PR merges —
+see [CONTRIBUTING.md](CONTRIBUTING.md) for the full contract.
+
 Backend:
 
 ```bash
 cd backend
 go build -buildvcs=false ./...
-go test ./...
+gofmt -l .            # must print nothing
+go vet ./...
+go test -race -count=1 -timeout=20m ./...
 ```
+
+The `-timeout` is not optional. `internal/api` alone exceeds Go's default 600s
+under `-race`, which is why CI splits it into its own job.
 
 Frontend:
 
 ```bash
 cd frontend
-npm install
+npm ci
+npx tsc --noEmit
+npm test -- --run
 npm run build
+```
+
+Push relays (only if you touch `worker/`, `worker-apns/` or `push-relay-shared/`):
+
+```bash
+(cd worker && npm ci && npm run typecheck)
+(cd worker-apns && npm ci && npm run typecheck)
+./scripts/test-relays.sh
+```
+
+Install and update scripts:
+
+```bash
+for f in scripts/*.sh; do bash -n "$f"; done
+scripts/update-host.test.sh
 ```
 
 ## Operations
@@ -854,6 +954,11 @@ inside the container. On systems without systemd, schedule
 - Verify the SMTP host and port in Config.
 - Port 465 requires implicit TLS. KyPost supports it.
 - If your provider requires app passwords, use them.
+- `smtp submission refused: server did not offer STARTTLS` means exactly that —
+  the server advertised no STARTTLS, so KyPost refused rather than sending your
+  message and password in the clear. Fix the relay, or, for a plaintext relay on
+  a network you trust, set `ALLOW_INSECURE_SMTP=true` and understand what you
+  are giving up.
 - Check `app.log` for `mail send failed` details.
 
 ### KyPost does not apply labels
@@ -871,9 +976,19 @@ inside the container. On systems without systemd, schedule
 
 - `backend/`: Go API, poller, adapters, config, state, health
 - `frontend/`: React and Vite UI
-- `scripts/`: bootstrap and test helpers
+- `scripts/`: container entrypoint, supervisord orchestration, Ollama model management, host-side update helpers
+- `push-relay-shared/`: shared Cloudflare Worker logic for the push relays — API-key issuance, rate limiting, device-token ownership, and the `RelayCoordinator` Durable Object
+- `worker/`, `worker-apns/`: the FCM and APNs deployments of that relay. Each holds only its provider's `handleSend` plus its wrangler config; everything else is imported from `push-relay-shared/`
+- `docs/`: the contracts the client repos implement against — [E2E_PGP.md](docs/E2E_PGP.md), [Desktop_Pairing.md](docs/Desktop_Pairing.md), [WKD_Publishing.md](docs/WKD_Publishing.md), [WEBMAIL_HANDOFF.md](docs/WEBMAIL_HANDOFF.md) — plus the operator guide [Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md)
+- `share/`: host-side Ollama model blob cache, bind-mounted into the container. Never committed
+- `testdata/`, `fonts/`: test fixtures and the bundled webfonts
 - `Dockerfile`: single image build (backend, frontend, Ollama runtime)
 - `docker-compose.yml`: local orchestration
 - `supervisord.conf`: in-container process supervision
+- `AGENTS.md`: the contribution contract for automated agents. Every subtree with its own rules carries one
+
+## Licence
+
+KyPost is released under the [MIT License](LICENSE.txt).
 
 [![OctoCounts](https://api.octocounts.com/badge/Yoshiofthewire/KyPost-Server/branch/main)](https://octocounts.com/github/Yoshiofthewire/KyPost-Server/tree/main)

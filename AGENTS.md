@@ -109,7 +109,10 @@ Default section order:
 
 ## Root-owned files
 
-`Dockerfile`, `docker-compose.yml`, `supervisord.conf`, `.env.example`, `CODE_OF_CONDUCT.md` and `CONTRIBUTING.md` are owned here, not by any child.
+`Dockerfile`, `docker-compose.yml`, `supervisord.conf`, `.env.example`, `README.md`, `SECURITY.md`, `CHANGELOG.md`, `LICENSE.txt`, `LOGGING.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md` and everything under `docs/` are owned here, not by any child.
+
+- **`README.md` is the operator-facing surface, and it is the one that drifts.** Its Features list, API Highlights, Environment Variables and Project Structure sections each mirror something the code decides. A change that adds a route, an env var, a top-level directory, or a user-visible capability updates them in the same change set — a child `AGENTS.md` being correct does not discharge this, because operators do not read `AGENTS.md`.
+- **`docs/` holds the cross-repo contracts** the client repos (`kypost-android`, `kypost-Linux`, `kypost-for-Mac`) implement against: `E2E_PGP.md`, `Desktop_Pairing.md`, `WKD_Publishing.md`, `WEBMAIL_HANDOFF.md`, plus the operator-facing `Reverse_Proxy_Networking.md`. Changing a behaviour another repo implements means changing the doc in the same change set; these files are the only place that agreement is written down.
 
 - **`CONTRIBUTING.md` is the contribution contract.** It states the user contract (secure by default, every convenience-for-security trade-off signposted where the user reads it), the mandatory AI-attribution rules, and the two merge gates: all CI jobs green, plus an adversarial review pass whose surviving findings go in the PR description. A change to what CI enforces, to the rejection criteria, or to the review skills used belongs in that file in the same change set. **Its PR checklist covers only what a human must attest to.** CI is enforced server-side and blocks the merge on its own, so it carries no checkbox — a box you tick for a machine that has already decided teaches contributors that ticking boxes is the point. Do not add one back; the gate is not missing because the checklist is silent about it.
 - **`CODE_OF_CONDUCT.md`** bounds the adversarial review practice: hostility points at code, never at a person. Do not soften the review standard to satisfy it, and do not use the review personas to excuse conduct it forbids.
@@ -122,7 +125,7 @@ Default section order:
 - **Non-loopback cleartext requires `ALLOW_INSECURE_HTTP=true`.** The entrypoint receives `KYPOST_BIND` and refuses a remote cleartext publish unless inbound TLS is configured or the operator explicitly accepts the risk. Keep loopback HTTP available for a local TLS proxy. Unset refuses too — the entrypoint cannot see the real publish address, so this is an acknowledgement gate and an operator who never says how the port is reached is who it is for. Anything starting the image outside compose must therefore pass `KYPOST_BIND` (the CI smoke test does); do not add an empty-string arm to quieten a bare `docker run`.
 - **Bounded `startretries`, and FATAL exits the container.** `supervisord` has no backoff between restart attempts, so a large `startretries` is a hot loop rather than resilience; its default of 3 leaves PID 1 healthy in front of a dead service, because Docker restart policies react to a container exiting and never to a healthcheck. The pair that works is 20 retries plus the `crashexit` event listener taking PID 1 down, letting `restart: unless-stopped` (which does back off) restart the container. Changing either half alone reintroduces one of the two failure modes.
 
-- **`zero_code_pairing_handoff_spec.md` is the KyRecovery pairing contract.** This service pairs to KyRecovery with an ephemeral 6-digit PIN, then pushes backups plus a declarative verification recipe. This repo owns the client half (`POST /api/pairing/claim`, `POST /api/backup/push`); KyRecovery owns the spec.
+- **`zero_code_pairing_handoff_spec.md` is the KyRecovery pairing contract, and it is a specification this repo has not implemented yet.** It describes pairing to KyRecovery with an ephemeral 6-digit PIN and then pushing backups plus a declarative verification recipe. `POST /api/pairing/claim` and `POST /api/backup/push` are endpoints on the *KyRecovery* server that this repo would call as a client; nothing in `backend/` calls them today. KyRecovery owns the spec — do not edit it here to match an implementation, and do not read it as documentation of a shipped feature.
 
 ## User Preferences
 
@@ -130,7 +133,7 @@ When the user requests a durable behavior change, record it here or in the relev
 
 ## Child DOX Index
 
-- `backend/` — Go 1.26.6 classification engine, HTTP API, IMAP adapter, Ollama adapter, poller, config, state, health, logging, redaction; produces the `kypost-server` binary. See [backend/AGENTS.md](backend/AGENTS.md). Contains nested child: `backend/internal/adapters/`.
+- `backend/` — Go 1.26.6 classification engine, HTTP API, IMAP adapter, Ollama adapter, poller, config, state, health, logging, redaction; produces the `kypost-server` binary. See [backend/AGENTS.md](backend/AGENTS.md). Contains nested children: `backend/internal/adapters/`, `backend/internal/contacts/`, `backend/internal/groups/`, `backend/internal/mailcache/`.
 - `frontend/` — React 19 / TypeScript SPA for config, monitoring, decision audit, and log streaming. See [frontend/AGENTS.md](frontend/AGENTS.md).
 - `scripts/` — Container initialization, process orchestration (supervisord), Ollama model management, and host-side image updates. See [scripts/AGENTS.md](scripts/AGENTS.md).
 - `share/` — Persistent Ollama model blob cache bind-mounted from the host; never committed to git. See [share/AGENTS.md](share/AGENTS.md).
