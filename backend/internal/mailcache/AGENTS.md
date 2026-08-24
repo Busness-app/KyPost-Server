@@ -76,8 +76,7 @@ All code under `backend/internal/mailcache/`. Consumed by both `api/`
   the `"INBOX"` key (it never polls other folders). Non-INBOX mailboxes are
   warmed lazily, the same way INBOX gets warmed for a brand-new user: the
   first `Snapshot` miss in `handleInbox` falls back to a live fetch and then
-  calls `Upsert` itself. This is expected, not a bug — see root
-  `Mobile_Mail_Relay.md` Part 5.
+  calls `Upsert` itself. This is expected, not a bug.
 
 ## Work Guidance
 
