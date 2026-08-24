@@ -340,7 +340,7 @@ function EnrollPanel({
         <p className="sec-muted">Unlock your key before enrolling this device. Nothing was sent.</p>
       ) : failure === "malformed" ? (
         <p className="sec-muted">
-          The code is fourteen characters, shown as XXXXXXX-XXXXXXX. Type all of it.
+          The code is fourteen characters, shown as XXXX-XXX-XXXX-XXX. Type all of it.
         </p>
       ) : failure === "expired" ? (
         <p className="sec-muted">
