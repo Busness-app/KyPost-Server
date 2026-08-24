@@ -379,7 +379,7 @@ Paste this into your PR description and fill it in.
 
 ## Licence
 
-KyPost is licensed under the GNU Affero General Public License v3.0. By
+KyPost is licensed under the MIT License. By
 contributing, you agree that your contribution is licensed under the same
 terms, and that you have the right to submit it — including the right to submit
 anything an AI tool produced on your behalf.
