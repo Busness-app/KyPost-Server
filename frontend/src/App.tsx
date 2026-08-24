@@ -20,7 +20,7 @@ import { PgpUnlockDialog } from "./components/PgpUnlockDialog";
 import type { RecipientFieldState, RecipientToken } from "./lib/recipients";
 import { LoginPage } from "./pages/LoginPage";
 import { ReauthGate, clearReauth } from "./components/ReauthGate";
-import agplLicenseText from "./agpl-3.0.txt?raw";
+import mitLicenseText from "./mit.txt?raw";
 
 import { visibleSettingsGroups } from "./app/navigation";
 import { LEGACY_SETTINGS_PATHS, legacySettingsRedirect } from "./app/routes";
@@ -1337,7 +1337,7 @@ export function App() {
         <div className="sidebar-footer">
           <p>
             <button type="button" className="license-link" onClick={() => setLicenseOpen(true)}>
-              &copy; {new Date().getFullYear()} &ndash; Licensed Under AGPL&nbsp;V3
+              &copy; {new Date().getFullYear()} &ndash; Licensed Under the MIT License
             </button>
           </p>
         </div>
@@ -1412,14 +1412,14 @@ export function App() {
               </div>
               <p className="license-title-sub">Developed by Busnes.app</p>
               <p className="license-title-sub">
-                &copy; {new Date().getFullYear()} &middot; Licensed under AGPL&nbsp;v3
+                &copy; {new Date().getFullYear()} &middot; Licensed under the MIT License
               </p>
             </div>
             <button type="button" className="nav-link-button" onClick={() => setLicenseOpen(false)}>
               Close
             </button>
           </div>
-          <textarea className="license-text" readOnly value={agplLicenseText} />
+          <textarea className="license-text" readOnly value={mitLicenseText} />
         </div>
       </dialog>
       <dialog
