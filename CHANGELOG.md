@@ -10,7 +10,7 @@ image. `:stable` is moved to that image only after its build attestation has
 been published *and* verified, and only when the release is the newest published
 non-prerelease version.
 
-## Unreleased — 0.3.0
+## 0.3.0 — 2026-08-25
 
 ### Added
 
@@ -631,7 +631,8 @@ non-prerelease version.
 | From | To | Path | Rollback |
 |---|---|---|---|
 | 0.1.x | 0.3.0 | `./scripts/update-host.sh`, or `docker compose pull && docker compose up -d` | Automatic on failed health check; otherwise pin the previous digest |
-| Locally built | any published release | `git pull --ff-only && docker compose up --build -d` | Rebuild at the previous commit |
+| Locally built | published images (one-time) | `git pull --ff-only && docker compose pull && docker compose up -d` | `KYPOST_VERSION=<older>`, or rebuild at the previous commit |
+| Locally built | a newer local build | `git pull --ff-only && docker compose up --build -d` | Rebuild at the previous commit |
 | Any | older release | Set `KYPOST_VERSION=<older>` in `.env`, then `docker compose up -d` | — |
 
 Notes:
@@ -646,7 +647,10 @@ Notes:
   image's digest before updating, verifies the new image's attestation, and
   restores the recorded digest if the post-update health check fails. An install
   running a locally built image has no published digest, so the updater refuses
-  it rather than guessing a rollback target.
+  it rather than guessing a rollback target. **Every install predating 0.3.0 is
+  in that state**, because 0.3.0 is the first release to publish an image at
+  all — see "Moving a locally built install onto published images" in the
+  README for the one-time migration.
 
 - **Rolling back the container does not roll back the data.** Restore a backup
   (README, "Backup and Restore") if a downgrade needs the old state too.
