@@ -42,6 +42,19 @@ RUN npm run build
 # `kypost-server --mode bootstrap-admin`. Keep it that way — a Node runtime here
 # is a CVE stream to track for no runtime benefit. See scripts/AGENTS.md.
 FROM debian:stable-slim@sha256:328d16499860ae6cb9b345e2e4cebca08c2a36e4f7278482c7bd1f39d71e5bfd
+
+# The GHCR package is the documented install path, and without
+# org.opencontainers.image.source it is an orphan: the package page links back
+# to no repository, shows no README, and never offers "inherit access from
+# repository". Deliberately no version label — it would have to arrive as a
+# build arg, the documented build (`docker compose up --build`) passes none, and
+# a label that says the wrong version is worse than one that says nothing. The
+# version lives in the binary; see backend/internal/api/server_version.go.
+LABEL org.opencontainers.image.source="https://github.com/Busness-app/KyPost-Server" \
+      org.opencontainers.image.title="KyPost" \
+      org.opencontainers.image.description="Self-hosted IMAP web client that labels mail with a local Ollama model" \
+      org.opencontainers.image.licenses="MIT"
+
 # liblzma5 and tar are named explicitly so apt re-resolves them to the latest
 # available, picking up Debian security fixes published after this base tag.
 #
