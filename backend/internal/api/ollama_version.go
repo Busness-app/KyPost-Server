@@ -52,16 +52,17 @@ func (s *Server) setOllamaStatus(status ollamaVersionStatus) {
 }
 
 // StartVersionMonitor periodically checks the installed Ollama and
-// KyPost-Server versions against the latest releases published upstream, and
-// emails the admin the first time either update becomes available, so a
-// self-hosted operator knows to rebuild and redeploy the container. Safe to
-// call even when SetClassifier was never called — the Ollama half is then a
-// no-op, and the KyPost-Server half does not need it. Intended to be run in
-// its own goroutine (mirrors StartPickupSweeper) and returns when ctx is
-// canceled.
+// KyPost-Server versions, and the newest published Linux client release,
+// against the latest releases published upstream, and emails the admin the
+// first time either server-side update becomes available, so a self-hosted
+// operator knows to rebuild and redeploy the container. Safe to call even
+// when SetClassifier was never called — the Ollama half is then a no-op, and
+// the other two do not need it. Intended to be run in its own goroutine
+// (mirrors StartPickupSweeper) and returns when ctx is canceled.
 func (s *Server) StartVersionMonitor(ctx context.Context) {
 	s.refreshOllamaVersionStatus(ctx)
 	s.checkForServerUpdate(ctx)
+	s.checkForLinuxClientUpdate(ctx)
 
 	ticker := time.NewTicker(versionPollInterval)
 	defer ticker.Stop()
@@ -72,6 +73,7 @@ func (s *Server) StartVersionMonitor(ctx context.Context) {
 		case <-ticker.C:
 			s.refreshOllamaVersionStatus(ctx)
 			s.checkForServerUpdate(ctx)
+			s.checkForLinuxClientUpdate(ctx)
 		}
 	}
 }
