@@ -3,6 +3,7 @@ package contacts
 import (
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // normalizeEmail lowercases and trims an email so "Foo@Bar.COM" and
@@ -31,8 +32,16 @@ func normalizePhone(s string) string {
 	return d
 }
 
+// normalizeName reduces a display name to a comparable identity: lowercased
+// word tokens, punctuation dropped, sorted so word order does not matter. The
+// same person reaches an address book as "Doe, Jane" and "Jane Doe", and a
+// literal comparison let one such variant veto the merge for a whole group.
 func normalizeName(c Contact) string {
-	return strings.ToLower(strings.Join(strings.Fields(c.FormattedName), " "))
+	tokens := strings.FieldsFunc(strings.ToLower(c.FormattedName), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	sort.Strings(tokens)
+	return strings.Join(tokens, " ")
 }
 
 // otherwiseEmpty reports whether a contact carries no email or phone, so its
