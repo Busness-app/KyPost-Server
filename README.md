@@ -999,7 +999,7 @@ inside the container. On systems without systemd, schedule
 - `scripts/`: container entrypoint, supervisord orchestration, Ollama model management, host-side update helpers
 - `push-relay-shared/`: shared Cloudflare Worker logic for the push relays — API-key issuance, rate limiting, device-token ownership, and the `RelayCoordinator` Durable Object
 - `worker/`, `worker-apns/`: the FCM and APNs deployments of that relay. Each holds only its provider's `handleSend` plus its wrangler config; everything else is imported from `push-relay-shared/`
-- `docs/`: the contracts the client repos implement against — [E2E_PGP.md](docs/E2E_PGP.md), [Desktop_Pairing.md](docs/Desktop_Pairing.md), [WKD_Publishing.md](docs/WKD_Publishing.md), [WEBMAIL_HANDOFF.md](docs/WEBMAIL_HANDOFF.md) — plus the operator guide [Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md)
+- `docs/`: the contracts the client repos implement against — [PLATFORM_BASELINE.md](docs/PLATFORM_BASELINE.md) (what a client must implement to call itself a KyPost client), [E2E_PGP.md](docs/E2E_PGP.md), [Desktop_Pairing.md](docs/Desktop_Pairing.md), [WKD_Publishing.md](docs/WKD_Publishing.md), [WEBMAIL_HANDOFF.md](docs/WEBMAIL_HANDOFF.md) — plus the operator guide [Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md)
 - `share/`: host-side Ollama model blob cache, bind-mounted into the container. Never committed
 - `testdata/`, `fonts/`: test fixtures and the bundled webfonts
 - `Dockerfile`: single image build (backend, frontend, Ollama runtime)
