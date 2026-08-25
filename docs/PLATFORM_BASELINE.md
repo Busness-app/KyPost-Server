@@ -324,19 +324,37 @@ Update it in the same change that breaks or adds a contract above.
 | Contract | Server | Browser | Android | Linux (Qt) |
 | --- | --- | --- | --- | --- |
 | Pairing URI, unknown-param tolerance | 0.3.0 | 0.3.0 | 0.3.3 | 0.2.0 |
-| `pin=` published / honoured | 0.3.0 | 0.3.0 | 0.3.3 | unverified |
-| Enrollment code, 14 chars / 70 bits | 0.3.0 | 0.3.0 | 0.3.3 | unverified |
-| Device credential headers | 0.3.0 | n/a | 0.3.3 | unverified |
-| `pull` delivery mode | 0.3.0 | n/a | 0.3.3 | unverified |
+| `pin=` published / honoured | 0.3.0 | 0.3.0 | 0.3.3 | ❌ TOFU instead |
+| Enrollment code, 14 chars / 70 bits | 0.3.0 | 0.3.0 | 0.3.3 | ✅ |
+| Device credential headers | 0.3.0 | n/a | 0.3.3 | ✅ |
+| `pull` delivery mode | 0.3.0 | n/a | 0.3.3 | ✅ |
 | Contact sync, 500-change batching | 0.3.0 | n/a | 0.3.3 | unverified |
 | `bodies=0` + `/api/mail/body` | 0.4.0 | 0.4.0 | not adopted | not adopted |
 
-`unverified` is honest rather than pessimistic: the Linux client's source is not
-in this checkout, so these rows are claims nobody has checked. For `pin=` the
-consequence is bounded — a client that ignores the parameter gets
-trust-on-first-use, which is what it had before 0.3.0 — but a client that parses
-the URI strictly and rejects unknown parameters would fail to pair at all.
-Confirm against the client before the row is filled in.
+> Linux was reported ungrouped on 2026-08-25. That report was wrong: it read
+> `Settings.qml`'s raw property binding without following
+> `PgpEnrollmentController.cpp:107`, which applies `formatEnrollmentCode`
+> before the value reaches QML. The helper has been present since `e92b16b`.
+
+Linux evidence, verified against the client tree at `e1a1a9c` (paths relative
+to the `kypost-Linux` repo root):
+
+- Pairing URI, unknown-param tolerance — `app/pairing/PairingController.cpp:130-148`
+- `pin=` honoured — `core/net/NativeRegistrationClient.h:62-70`, `core/net/CertificatePinSink.cpp`
+- Enrollment code: 14 chars / Crockford / 65-byte key — `core/pgp/DeviceEnrollmentCrypto.cpp:17,127,144-158`
+- Enrollment display grouping (`4-3-4-3`) — `core/pgp/DeviceEnrollmentCrypto.cpp:156-162`, `app/pgp/PgpEnrollmentController.cpp:107`
+- Enrollment bucket size 120 s — `app/pgp/PgpEnrollmentController.cpp:108`
+- `transport` sent explicitly, `"unifiedpush"` — `core/net/NativeRegistrationClient.cpp:43`
+- Device credential headers — `core/net/RelayAuth.h:22-23`
+- Contact sync — `core/net/ContactSyncClient.cpp:215`
+- Delivery modes, `push`/`pull` — `app/pairing/PairingController.h:129-130`
+
+`unverified` remains honest for the one row still marked that way: only the
+contact-sync pull path was read, and the push-path 500-change batching limit
+has not been checked. For `pin=`, verification found a real gap rather than an
+absence of information — Linux never honours a provided pin and always falls
+back to trust-on-first-use, which costs what §1 describes on a network with a
+locally trusted CA.
 
 ---
 
