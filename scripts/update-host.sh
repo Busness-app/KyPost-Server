@@ -3,7 +3,7 @@
 # daemon access belongs to the operator, not to a web-facing mail application.
 set -euo pipefail
 
-readonly official_image="ghcr.io/yoshiofthewire/kypost-server"
+readonly official_image="ghcr.io/busness-app/kypost-server"
 
 mode="manual"
 if [[ "${1:-}" == "--auto" ]]; then
@@ -75,9 +75,14 @@ candidate_image="${official_image}@${candidate_digest}"
 if [[ "${KYPOST_UPDATE_ALLOW_UNVERIFIED_IMAGE:-}" != "true" ]]; then
   command -v gh >/dev/null || { echo "gh is required to verify the published image attestation" >&2; exit 69; }
   log verify info started
-  gh attestation verify "oci://${candidate_image}" --owner Yoshiofthewire \
-    --repo Yoshiofthewire/KyPost-Server \
-    --signer-workflow Yoshiofthewire/KyPost-Server/.github/workflows/release-image.yml
+  # --repo, not --owner: gh rejects both ("if any flags in the group [owner
+  # repo] are set none of the others can be"), so passing the pair made this
+  # step fail every time it ran. It never ran, because the repository had
+  # published no release to verify. --repo is also the stricter of the two, and
+  # --signer-workflow pins the workflow that is allowed to have produced it.
+  gh attestation verify "oci://${candidate_image}" \
+    --repo Busness-app/KyPost-Server \
+    --signer-workflow Busness-app/KyPost-Server/.github/workflows/release-image.yml
 else
   log verify warning bypassed
 fi

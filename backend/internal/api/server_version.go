@@ -30,7 +30,7 @@ const serverVersion = "0.3.0"
 
 // serverReleasesURL is the LIST endpoint for this project's own releases. A
 // var, not a const, only so tests can point it at an httptest server.
-var serverReleasesURL = "https://api.github.com/repos/Yoshiofthewire/KyPost-Server/releases"
+var serverReleasesURL = "https://api.github.com/repos/Busness-app/KyPost-Server/releases"
 
 // serverReleaseMinAge is zero where the Ollama check has a three-day soak
 // window: that window exists because the Dockerfile's Ollama pin lags upstream
@@ -150,7 +150,7 @@ func (s *Server) notifyAdminServerUpdateAvailable(latest string) error {
 				"if startup fails. Your named volumes "+
 				"(config, private keys, logs, state) are kept — only `docker compose down -v` removes those.\n\n"+
 				"Automatic updates are optional: install the systemd timer documented in README.md.\n\n"+
-				"Release notes: https://github.com/Yoshiofthewire/KyPost-Server/releases/tag/v%s\n\n"+
+				"Release notes: https://github.com/Busness-app/KyPost-Server/releases/tag/v%s\n\n"+
 				"You will get this message once per new release, not once per check.",
 			serverVersion, latest, latest,
 		),
