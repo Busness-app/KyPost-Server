@@ -935,10 +935,42 @@ rollback. It requires Docker Compose v2, Docker Buildx, and the GitHub CLI
 when either verification or the health check fails. To stay on a specific
 release instead, set `KYPOST_VERSION=0.3.0` in `.env` before running it.
 
-An install still running a locally built image has no published immutable
-digest, so the updater refuses it rather than guessing at a rollback target.
-Update that install from source with `git pull --ff-only && docker compose up
---build -d`, then use published-image updates going forward.
+### Moving a locally built install onto published images
+
+**Every install created before 2026-08-25 needs this once.** There were no
+published images before then, so any install older than that is running one it
+built itself.
+
+`update-host.sh` refuses a locally built image: it has no published immutable
+digest, so there is no rollback target to preserve, and the updater will not
+guess at one. Rebuilding from source with `docker compose up --build -d` keeps
+you on a local build and hits the same refusal next time. The one-time move onto
+published images is:
+
+```bash
+git pull --ff-only     # pick up the current compose file
+docker compose pull    # fetch the published image over the locally built tag
+docker compose up -d   # recreate the container against it
+```
+
+Confirm it took — this is the exact property `update-host.sh` tests:
+
+```bash
+docker image inspect ghcr.io/busness-app/kypost-server:stable \
+  --format '{{range .RepoDigests}}{{println .}}{{end}}'
+```
+
+One `ghcr.io/busness-app/kypost-server@sha256:...` line means the migration
+worked and `./scripts/update-host.sh` will run from now on. No output means the
+image is still locally built.
+
+Your data is untouched by this: config, state and private keys live in the four
+named volumes, not in the image. Take a backup first anyway — see
+[Backup and Restore](#backup-and-restore).
+
+To keep building from source instead, that is still supported — `docker-compose.yml`
+retains its `build:` stanza. You update with `git pull --ff-only && docker compose
+up --build -d` and simply do not use `update-host.sh`.
 
 Automatic updates are opt-in and require a systemd host. Run this from the
 checkout to install a daily timer (03:15 local time plus up to one hour of

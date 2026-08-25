@@ -61,7 +61,11 @@ previous_image=""
 if [[ -n "$previous_id" ]]; then
   previous_image="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$previous_id" | grep -m1 "^${official_image}@sha256:" || true)"
   if [[ -z "$previous_image" ]]; then
-    echo "current image has no immutable official digest, so there is no rollback target; update this install with 'git pull --ff-only && docker compose up --build -d' and use published images afterwards" >&2
+    echo "current image has no immutable official digest, so there is no rollback target." >&2
+    echo "This install is running an image it built itself, which every install predating 0.3.0 is." >&2
+    echo "Move it onto published images once, then this updater works:" >&2
+    echo "    git pull --ff-only && docker compose pull && docker compose up -d" >&2
+    echo "To keep building from source instead, update with 'docker compose up --build -d' and do not use this script." >&2
     exit 65
   fi
 fi
