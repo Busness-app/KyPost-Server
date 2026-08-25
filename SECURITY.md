@@ -8,7 +8,7 @@ If you discover a security vulnerability in KyPost, please report it responsibly
 
 ### How to Report
 
-1. Go to the [Security Advisories](https://github.com/Yoshiofthewire/kypost-server/security/advisories) page
+1. Go to the [Security Advisories](https://github.com/Busness-app/KyPost-Server/security/advisories) page
 2. Click "Report a vulnerability"
 3. Provide a detailed description, affected versions, and reproduction steps if applicable
 4. Do not disclose the vulnerability publicly until a patch is available
@@ -322,7 +322,7 @@ Security-sensitive PRs should include:
 
 ## Security Contacts
 
-- **Vulnerability reports:** [GitHub Security Advisories](https://github.com/Yoshiofthewire/kypost-server/security/advisories)
+- **Vulnerability reports:** [GitHub Security Advisories](https://github.com/Busness-app/KyPost-Server/security/advisories)
 - **Maintainer:** [Yoshiofthewire](https://github.com/Yoshiofthewire)
 
 ## Additional Resources

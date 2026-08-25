@@ -40,7 +40,7 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
     env:
-      IMAGE_NAME: ghcr.io/yoshiofthewire/kypost-server
+      IMAGE_NAME: ghcr.io/busness-app/kypost-server
       TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
       # workflow_run checks out the default branch by default, which is a

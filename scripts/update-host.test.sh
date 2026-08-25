@@ -14,7 +14,7 @@ state="${FAKE_DOCKER_STATE:?}"
 if [[ "$1 ${2:-}" == "compose version" || "$1 ${2:-}" == "buildx version" ]]; then
   echo "fake"
 elif [[ "$1 ${2:-} ${3:-}" == "compose config --images" ]]; then
-  echo "ghcr.io/yoshiofthewire/kypost-server:stable"
+  echo "ghcr.io/busness-app/kypost-server:stable"
 elif [[ "$1 ${2:-} ${3:-}" == "compose images -q" ]]; then
   echo "sha256:previous"
 elif [[ "$1 ${2:-}" == "buildx imagetools" ]]; then
@@ -22,7 +22,7 @@ elif [[ "$1 ${2:-}" == "buildx imagetools" ]]; then
 elif [[ "$1" == "pull" ]]; then
   :
 elif [[ "$1 ${2:-}" == "image inspect" && "$*" == *"RepoDigests"* ]]; then
-  echo "ghcr.io/yoshiofthewire/kypost-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  echo "ghcr.io/busness-app/kypost-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 elif [[ "$1 ${2:-}" == "image inspect" ]]; then
   if [[ "${FAKE_DOCKER_MODE:-}" == "noop" ]]; then echo "sha256:previous"; else echo "sha256:candidate"; fi
 elif [[ "$1" == "compose" && " $* " == *" up "* ]]; then
