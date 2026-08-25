@@ -73,11 +73,23 @@ RUN apt-get update \
 # code execution at build time from a host this project does not control, and it
 # makes builds non-reproducible.
 #
+# One pin per architecture. Ollama ships a separate tarball per arch, so a
+# single amd64 pin did not merely skip publishing arm64 images — it broke the
+# documented `git clone && docker compose up --build` on an arm64 host, which
+# downloaded an amd64 tarball and then failed executing it. Hetzner CAX and
+# Oracle Ampere are ordinary places to self-host this.
+#
+# TARGETARCH is supplied by BuildKit and its values (`amd64`, `arm64`) are
+# exactly Ollama's asset names, so the URL needs no mapping table. An
+# unrecognised or empty value is refused rather than interpolated into a URL,
+# because the failure would otherwise be a 404 on a subtly wrong asset name.
+#
 # Bumped by .github/workflows/ollama-bump.yml, which only advances to a release
-# that has been public for at least 3 days. That workflow locates these two
-# lines by anchored regex — `^ARG OLLAMA_VERSION=` and `^ARG OLLAMA_SHA256=` —
-# and asserts exactly one match each, so keep them at column 0 and keep them
-# unique. Where they sit in the stage does not matter to it; this does:
+# that has been public for at least 3 days. That workflow locates these lines by
+# anchored regex — `^ARG OLLAMA_VERSION=`, `^ARG OLLAMA_SHA256_AMD64=` and
+# `^ARG OLLAMA_SHA256_ARM64=` — and asserts exactly one match each, so keep them
+# at column 0 and keep them unique. Where they sit in the stage does not matter
+# to it; this does:
 #
 # This block belongs ABOVE the COPY instructions, not below them. It produces a
 # 1.68 GB layer, and Docker invalidates every layer after a changed one — so
@@ -87,13 +99,21 @@ RUN apt-get update \
 # touched the frontend. Nothing here depends on the COPYs; the apt step above
 # is what supplies curl, ca-certificates, zstd and tar.
 ARG OLLAMA_VERSION=0.32.15
-ARG OLLAMA_SHA256=50539c5fe9bf85887733355098dcdb266b433cb8c73fa180713417e9ed6e42bb
-RUN curl -fsSL -o /tmp/ollama.tar.zst \
-	"https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
-	&& echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c - \
-	&& tar -C /usr/local -xaf /tmp/ollama.tar.zst \
-	&& rm /tmp/ollama.tar.zst \
-	&& ollama --version
+ARG OLLAMA_SHA256_AMD64=50539c5fe9bf85887733355098dcdb266b433cb8c73fa180713417e9ed6e42bb
+ARG OLLAMA_SHA256_ARM64=c898270b1690eab0f51aa9e9197686b7b4c6a7d88b83967763818f3127e477e9
+ARG TARGETARCH
+RUN set -eu; \
+	case "${TARGETARCH:-}" in \
+		amd64) sha="${OLLAMA_SHA256_AMD64}" ;; \
+		arm64) sha="${OLLAMA_SHA256_ARM64}" ;; \
+		*) echo "no Ollama pin for TARGETARCH='${TARGETARCH:-<unset>}'" >&2; exit 1 ;; \
+	esac; \
+	curl -fsSL -o /tmp/ollama.tar.zst \
+		"https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-${TARGETARCH}.tar.zst"; \
+	echo "${sha}  /tmp/ollama.tar.zst" | sha256sum -c -; \
+	tar -C /usr/local -xaf /tmp/ollama.tar.zst; \
+	rm /tmp/ollama.tar.zst; \
+	ollama --version
 
 WORKDIR /opt/kypost
 COPY --from=backend-builder /app/bin/kypost-server /usr/local/bin/kypost-server
