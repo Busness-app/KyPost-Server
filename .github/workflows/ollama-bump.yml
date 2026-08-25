@@ -8,8 +8,12 @@ name: bump pinned ollama
 # The 3-day soak is the point: it only ever advances to a release that has
 # been public for at least that long, so a release that gets yanked, or that
 # ships an immediately-obvious regression, is never picked up automatically.
-# The PR still needs a human to merge, and CI builds the image (verifying the
-# checksum) before it can be.
+# The PR is opened as a draft, and that is load-bearing rather than cosmetic.
+# A PR created with GITHUB_TOKEN cannot trigger other workflows, so ci.yml
+# would never run on it and the checksum would go unverified. GitHub refuses
+# to merge a draft, and the human clicking "Ready for review" fires an event
+# under their own identity, which ci.yml does act on. The only path to merge
+# therefore runs the build that verifies the checksum.
 
 on:
   schedule:
@@ -145,6 +149,12 @@ jobs:
         with:
           branch: chore/bump-ollama
           base: main
+          # always-true, not true: an update to an existing PR (a newer
+          # release landing before the last one was merged) pushes a commit
+          # with GITHUB_TOKEN, which again triggers nothing. Returning the PR
+          # to draft forces a second "Ready for review" so CI covers the
+          # commit that actually gets merged, not the one before it.
+          draft: always-true
           commit-message: "chore(deps): bump pinned Ollama to ${{ steps.resolve.outputs.version }}"
           title: "chore(deps): bump pinned Ollama to ${{ steps.resolve.outputs.version }}"
           body: |
@@ -154,6 +164,10 @@ jobs:
             - Released at least ${{ env.MIN_RELEASE_AGE_DAYS }} days ago (soak window).
             - SHA-256 taken from the release's published `sha256sum.txt`; the
               `docker build` job re-verifies it against the real tarball.
+
+            This PR is a draft with no checks on it yet — that is expected.
+            Click **Ready for review** to run CI, which builds the image and
+            verifies the checksum above against the real tarball.
 
             Check the upstream release notes before merging.
           delete-branch: true
