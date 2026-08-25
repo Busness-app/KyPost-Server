@@ -24,7 +24,10 @@ on:
 
 env:
   MIN_RELEASE_AGE_DAYS: "3"
-  OLLAMA_ASSET: ollama-linux-amd64.tar.zst
+  # One tarball per architecture, and the Dockerfile pins each separately.
+  # These names are also Docker's TARGETARCH values, which is what lets the
+  # Dockerfile build the URL without a mapping table.
+  OLLAMA_ARCHES: "amd64 arm64"
 
 permissions:
   contents: write
@@ -106,39 +109,59 @@ jobs:
           VERSION: ${{ steps.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          # Take the SHA from the release's own sha256sum.txt rather than
-          # downloading 1.4 GB just to hash it. The Docker build re-checks it
-          # against the real tarball, so a wrong value fails CI, not users.
+          # Take the SHAs from the release's own sha256sum.txt rather than
+          # downloading 3 GB just to hash them.
+          #
+          # These two are not checked equally hard, and that asymmetry is worth
+          # stating. ci-docker builds amd64, so a wrong amd64 value fails CI
+          # rather than users. Nothing in CI builds arm64 yet, so a wrong arm64
+          # value survives to the first person who builds on arm64 — where the
+          # Dockerfile's own `sha256sum -c` still refuses it. It fails closed
+          # and loudly; it just fails later, and on someone else's machine.
+          # Adding arm64 to ci-docker closes that.
           curl -fsSL -o "$RUNNER_TEMP/sha256sum.txt" \
             "https://github.com/ollama/ollama/releases/download/v${VERSION}/sha256sum.txt"
 
-          sha="$(awk -v asset="./${OLLAMA_ASSET}" '$2 == asset { print $1 }' "$RUNNER_TEMP/sha256sum.txt")"
-          if [ -z "$sha" ]; then
-            echo "no checksum for ${OLLAMA_ASSET} in v${VERSION}/sha256sum.txt" >&2
-            exit 1
-          fi
-          case "$sha" in
-            [0-9a-f]*) [ "${#sha}" -eq 64 ] || { echo "malformed sha: $sha" >&2; exit 1; } ;;
-            *) echo "malformed sha: $sha" >&2; exit 1 ;;
-          esac
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          for arch in $OLLAMA_ARCHES; do
+            asset="ollama-linux-${arch}.tar.zst"
+            sha="$(awk -v a="./${asset}" '$2 == a { print $1 }' "$RUNNER_TEMP/sha256sum.txt")"
+            if [ -z "$sha" ]; then
+              echo "no checksum for ${asset} in v${VERSION}/sha256sum.txt" >&2
+              exit 1
+            fi
+            case "$sha" in
+              [0-9a-f]*) [ "${#sha}" -eq 64 ] || { echo "malformed sha for ${arch}: $sha" >&2; exit 1; } ;;
+              *) echo "malformed sha for ${arch}: $sha" >&2; exit 1 ;;
+            esac
+            echo "sha_${arch}=$sha" >> "$GITHUB_OUTPUT"
+          done
 
       - name: Rewrite the pin
         if: steps.resolve.outputs.changed == 'true'
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
-          SHA: ${{ steps.checksum.outputs.sha }}
+          SHA_AMD64: ${{ steps.checksum.outputs.sha_amd64 }}
+          SHA_ARM64: ${{ steps.checksum.outputs.sha_arm64 }}
         run: |
           set -euo pipefail
           # Values go through env, never interpolated into the script body.
           python3 - <<'PY'
           import os, re, pathlib
-          version, sha = os.environ["VERSION"], os.environ["SHA"]
+          version = os.environ["VERSION"]
+          pins = {
+              "OLLAMA_VERSION": version,
+              "OLLAMA_SHA256_AMD64": os.environ["SHA_AMD64"],
+              "OLLAMA_SHA256_ARM64": os.environ["SHA_ARM64"],
+          }
           p = pathlib.Path("Dockerfile")
           src = p.read_text()
-          src, n1 = re.subn(r"^ARG OLLAMA_VERSION=.*$", f"ARG OLLAMA_VERSION={version}", src, flags=re.M)
-          src, n2 = re.subn(r"^ARG OLLAMA_SHA256=.*$", f"ARG OLLAMA_SHA256={sha}", src, flags=re.M)
-          assert n1 == 1 and n2 == 1, f"expected one match each, got {n1} and {n2}"
+          # Every pin must match exactly once. A rename in the Dockerfile that
+          # this file did not follow would otherwise leave one architecture
+          # silently pinned to the previous release — an image whose two arches
+          # ship different Ollama versions, which is worse than a failed bump.
+          for name, value in pins.items():
+              src, n = re.subn(rf"^ARG {name}=.*$", f"ARG {name}={value}", src, flags=re.M)
+              assert n == 1, f"expected one ARG {name} in Dockerfile, got {n}"
           p.write_text(src)
           PY
           git diff --stat
