@@ -78,9 +78,18 @@ jobs:
           current="$(sed -n 's/^ARG OLLAMA_VERSION=//p' Dockerfile)"
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Only ever move forward. A plain inequality also fires when the pin
+          # is *ahead* of the newest soaked release, so hand-pinning a release
+          # younger than the soak window would have tomorrow's cron open a PR
+          # reverting it. sort -V compares numerically, where a string compare
+          # would put 0.32.9 above 0.32.15.
+          newest="$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)"
           if [ "$version" = "$current" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Already pinned to $current; nothing to do."
+          elif [ "$newest" = "$current" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Pinned $current is ahead of newest soaked $version; not moving backwards."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Pinned $current -> $version"
