@@ -1,0 +1,12 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Busness-app/KyPost-Server/security/advisories/new
+    about: >-
+      Do not open a public issue. Report privately here — private vulnerability
+      reporting is enabled on this repository. See SECURITY.md.
+  - name: Setup and configuration questions
+    url: https://github.com/Busness-app/KyPost-Server/blob/main/README.md
+    about: >-
+      Check the README first — TLS, reverse proxies, SERVER_BASE_URL and push
+      relays each have a section, and most first-run problems are one of them.
