@@ -9,7 +9,14 @@ name: ci
 on:
   push:
     branches: [main]
+  # ready_for_review is not in the default set (opened/synchronize/reopened).
+  # It is here for ollama-bump.yml: a PR that action opens with GITHUB_TOKEN
+  # triggers no workflow at all, so its draft is only ever checked when a
+  # human marks it ready. The cost is one duplicate run when a human takes
+  # their own draft out of draft without pushing — the concurrency group below
+  # cancels the earlier run if it is still going.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
