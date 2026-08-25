@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest something KyPost should do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: >-
+        The problem, not the solution. A described problem can be solved several
+        ways; a described solution can only be accepted or refused.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind, if you have something specific
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How you handle it today
+      description: Including "I don't" — that is useful signal about how much it costs you.

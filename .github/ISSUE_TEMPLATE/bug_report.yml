@@ -1,0 +1,94 @@
+name: Bug report
+description: Something in KyPost-Server does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        **Not for security vulnerabilities.** Report those privately through
+        [Security Advisories](https://github.com/Busness-app/KyPost-Server/security/advisories/new).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected instead
+      placeholder: |
+        I paired a phone by scanning the QR code. The app said "pairing failed".
+        I expected the device to appear under Settings -> Security -> Devices.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        Numbered, from a state someone else can reach. "It happens sometimes" is
+        still worth filing — say so rather than leaving this blank.
+    validations:
+      required: true
+
+  - type: input
+    id: server-version
+    attributes:
+      label: Server version
+      description: >-
+        Admin -> Server -> Application shows "Installed version". The same value
+        is the `version` field of `GET /api/status`.
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is the server installed?
+      options:
+        - git clone + docker compose up --build
+        - docker compose pull (prebuilt image from GHCR)
+        - scripts/update-host.sh
+        - Built from source, no Docker
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: Client and version, if the problem involves one
+      placeholder: "Android 0.3.3 (Play) / Linux 0.2.0 flatpak / Firefox 141"
+
+  - type: dropdown
+    id: delivery-mode
+    attributes:
+      label: Notification delivery mode, if this is a push or notification bug
+      description: Settings -> Notifications. `pull` bypasses the relay entirely.
+      options:
+        - "Not a notification bug"
+        - "push (relay)"
+        - "pull (App Pull)"
+
+  - type: dropdown
+    id: tls
+    attributes:
+      label: How do users reach the server?
+      description: >-
+        Load-bearing more often than it looks. Several features refuse to run
+        without HTTPS and a correct `SERVER_BASE_URL`, and a reverse proxy that
+        hides the client IP changes rate limiting and lockout behaviour.
+      options:
+        - HTTPS through a reverse proxy
+        - HTTPS terminated by KyPost itself
+        - Plain http:// on a LAN
+        - localhost only
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >-
+        `docker compose logs kypost-server`. **Redact before pasting** — logs can
+        carry email addresses, hostnames and tokens.
+      render: text

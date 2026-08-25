@@ -359,9 +359,9 @@ Common variables:
 - `PAIRING_SECRET` (optional. HMAC secret for pickup links, PGP QR key exchange and mobile pairing tokens. Generated automatically on first start and persisted at `PAIRING_SECRET_FILE` — set it only if several replicas must share one secret, and use `openssl rand -base64 32` if you do. A value shorter than 32 bytes is refused and those three features stay disabled, with the reason logged. Bytes, not characters, because the value is used as the HMAC key verbatim; for the ASCII `openssl rand -base64 32` produces they are the same number.)
 - `PAIRING_SECRET_FILE` (default `$SECRET_DIR/pairing.key`)
 - `PUSH_RELAY_URL` (optional. Base URL of the central push relay Worker that delivers Android native push to FCM. Must be `https://` — the relay key travels on every request — except for loopback.)
-- `PUSH_RELAY_KEY` (per-server API key from the relay operator. Set it together with `PUSH_RELAY_URL` to enable Android native push.)
+- `PUSH_RELAY_KEY` (optional override. Setting `PUSH_RELAY_URL` alone is enough: the server self-registers with the relay on first start and persists the key it is issued at `$SECRET_DIR/push_relay_key`. Set this only to pin a key the operator issued you, or when several servers share one public IP — the relay keeps one active key per address, so the newest registration displaces the previous one.)
 - `APNS_RELAY_URL` (optional. Base URL of the central APNs relay Worker that delivers iOS native push. Must be `https://` — the relay key travels on every request — except for loopback.)
-- `APNS_RELAY_KEY` (per-server API key from the relay operator. Set it together with `APNS_RELAY_URL` to enable iOS native push.)
+- `APNS_RELAY_KEY` (optional override, exactly as `PUSH_RELAY_KEY` above, persisted at `$SECRET_DIR/apns_relay_key`.)
 - `ALLOW_INSECURE_SMTP` (optional, default off. KyPost **requires** STARTTLS on SMTP submission and refuses to send if the server does not offer it. Opportunistic STARTTLS is not enough: the capability is advertised by the server, so an on-path attacker strips it from the EHLO response and the session continues in cleartext with the full message and the password. Set this to `true` only for a genuinely plaintext relay on a trusted LAN. There is deliberately no per-request or per-account way to set it — a downgrade has to be a deployment decision, not something a caller or a remote server can trigger.)
 - `CAPTCHA_PROVIDER` (optional. Set `pow`, `turnstile`, or `friendly` to require a CAPTCHA solution on login. It works together with the built-in lockout of 3 strikes and 15 minutes.)
   - `pow` is self-hosted proof-of-work: the only provider that makes no third-party network call and adds no third-party origin to the CSP. It requires no account with anyone and no keys to obtain — the signing key is generated on first use at `POW_SECRET_FILE`. **It requires HTTPS**: the browser half uses `crypto.subtle`, which browsers expose only in a secure context, so on a plain-`http://` deployment (anything but `localhost`) the check cannot run and nobody can sign in — put TLS in front of the server, as the note in Quick start says to anyway, or pick another provider. Its difficulty adapts per client IP: an honest first login solves the cheap base challenge in a blink, and each recent failed login from the same address multiplies the next challenge's difficulty, up to a ceiling, decaying after 15 minutes or on a successful login. Each challenge is bound to the address that requested it — the address is signed into the challenge and re-checked when the solution arrives — so the escalation cannot be sidestepped by fetching cheap challenges from a clean address and spending them from an escalated one. (If your own address changes mid-check, say a phone moving from wifi to cellular, the sign-in page tells you to try again and costs you no lockout strike.) Escalation is still counted per address, so an attacker spraying from many addresses gets the base difficulty at each: it prices repetition, not a distributed attacker. An attacker running native code is also one to two orders of magnitude faster than a browser, so this deters casual scripted spraying, not a determined campaign. It does **not** replace the three-strikes lockout, which remains the real brute-force defence. Multi-replica deployments must set `POW_SECRET` so every replica agrees on one signing key — generate it with `openssl rand -base64 32`; anything shorter than 16 characters is refused and the login CAPTCHA then rejects every attempt.
@@ -514,13 +514,33 @@ Cloudflare Workers deliver native push. The project maintainer runs them.
 - **Android/FCM**: [`worker/`](worker/) — Firebase Cloud Messaging relay
 - **iOS/APNs**: [`worker-apns/`](worker-apns/) — Apple Push Notification service relay
 
-Self-hosters ask the relay operator for per-server API keys.
-- Android: set `PUSH_RELAY_URL` and `PUSH_RELAY_KEY` (Firebase relay)
-- iOS: set `APNS_RELAY_URL` and `APNS_RELAY_KEY` (APNs relay)
+Self-hosters set one variable and the server does the rest — it registers itself
+with the relay on first start, over its public `/register` endpoint, and persists
+the key it is issued under `SECRET_DIR`. No operator involvement, no ticket, no
+waiting.
+
+- Android: set `PUSH_RELAY_URL` (Firebase relay)
+- iOS: set `APNS_RELAY_URL` (APNs relay)
+
+The server looks for a key in three places, in order: the `PUSH_RELAY_KEY` /
+`APNS_RELAY_KEY` environment variable, then the key file from a previous
+registration, and only then does it register. So restarts reuse the key on disk
+rather than minting a new one.
+
+Two things are worth knowing before you rely on it:
+
+- **The relay keeps one active key per public IP address.** Two self-hosted
+  servers behind the same address will take the key from each other, newest
+  registration wins, and the displaced server's push silently stops working. If
+  that is your setup, ask the operator for keys and pin them with
+  `PUSH_RELAY_KEY` / `APNS_RELAY_KEY` instead.
+- **Registration can be closed.** The operator can turn `/register` off — for
+  abuse, or cost. If it is closed, the server logs the refusal and native push
+  stays off; `App Pull` delivery works regardless and needs no relay at all.
 
 Self-hosters need no Firebase account and no Apple Developer account. You never recompile the app.
 
-Maintainers and relay operators deploy both Workers and mint per-server keys. See [`worker/README.md`](worker/README.md) and [`worker-apns/README.md`](worker-apns/README.md) for setup, secrets, and key management.
+Relay operators deploy both Workers and can still mint keys by hand. See [`worker/README.md`](worker/README.md) and [`worker-apns/README.md`](worker-apns/README.md) for setup, secrets, and key management.
 
 ## Persistence
 
@@ -979,7 +999,7 @@ inside the container. On systems without systemd, schedule
 - `scripts/`: container entrypoint, supervisord orchestration, Ollama model management, host-side update helpers
 - `push-relay-shared/`: shared Cloudflare Worker logic for the push relays — API-key issuance, rate limiting, device-token ownership, and the `RelayCoordinator` Durable Object
 - `worker/`, `worker-apns/`: the FCM and APNs deployments of that relay. Each holds only its provider's `handleSend` plus its wrangler config; everything else is imported from `push-relay-shared/`
-- `docs/`: the contracts the client repos implement against — [E2E_PGP.md](docs/E2E_PGP.md), [Desktop_Pairing.md](docs/Desktop_Pairing.md), [WKD_Publishing.md](docs/WKD_Publishing.md), [WEBMAIL_HANDOFF.md](docs/WEBMAIL_HANDOFF.md) — plus the operator guide [Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md)
+- `docs/`: the contracts the client repos implement against — [PLATFORM_BASELINE.md](docs/PLATFORM_BASELINE.md) (what a client must implement to call itself a KyPost client), [E2E_PGP.md](docs/E2E_PGP.md), [Desktop_Pairing.md](docs/Desktop_Pairing.md), [WKD_Publishing.md](docs/WKD_Publishing.md), [WEBMAIL_HANDOFF.md](docs/WEBMAIL_HANDOFF.md) — plus the operator guide [Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md)
 - `share/`: host-side Ollama model blob cache, bind-mounted into the container. Never committed
 - `testdata/`, `fonts/`: test fixtures and the bundled webfonts
 - `Dockerfile`: single image build (backend, frontend, Ollama runtime)
