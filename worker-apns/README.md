@@ -230,7 +230,7 @@ Uncomment it in `[vars]` and redeploy:
 RELAY_DAILY_BUDGET = "50000"
 ```
 
-- **Aggregate, not per-key** — one shared pool across every key, because the scarce thing is your provider quota, which all keys spend from together.
+- **Aggregate, not per-key** — one shared pool across every key, because per-key would just mean an actor registers another key. It is not guarding a provider bill: FCM and APNs are free, and their quotas are send-rate limits. It guards your Cloudflare account, whose per-day KV and Durable Object limits this counter cannot see — so set it below them.
 - **Unset = unmetered**, so an existing deployment that never configures it is unaffected. `"0"` is a real limit of zero (a closed relay), not "unset".
 - **Per UTC day**, counted by the `RELAY_COORDINATOR` Durable Object that `/send` and `/register` already require — no extra binding to create.
 - **Fails closed** when configured but uncountable: once a budget exists it is the only thing bounding daily volume, so a drifted binding refuses rather than waves sends through.
