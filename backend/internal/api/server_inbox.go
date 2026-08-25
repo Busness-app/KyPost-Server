@@ -294,6 +294,16 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	// full window — see serveInbox's response.
 	cursorSync := strings.TrimSpace(r.URL.Query().Get("since")) != ""
 	since := parseNonNegativeInt64Query(r, "since")
+	// bodies=0 asks for the list without message bodies, which is the whole
+	// screen minus ~99% of its bytes: a 500-message window of ordinary HTML
+	// mail measures 13.3 MiB with bodies and 184 KiB without, and the list
+	// rows render none of it — only the opened message does, and it fetches
+	// its own body from /api/mail/body.
+	//
+	// Opt-OUT rather than the default, because `body` on this response is
+	// wire contract that shipped desktop clients still read. They keep the
+	// old payload until they ask for the new one.
+	withBodies := strings.TrimSpace(r.URL.Query().Get("bodies")) != "0"
 
 	s.cfgMu.RLock()
 	cfg := s.cfg
@@ -321,14 +331,14 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.serveInbox(w, r.Context(), ac.UserID, mailClient, cache, cfg, mailbox, limit, since, cursorSync)
+	s.serveInbox(w, r.Context(), ac.UserID, mailClient, cache, cfg, mailbox, limit, since, cursorSync, withBodies)
 }
 
 // serveInbox contains handleInbox's core logic once a mail client and cache
 // store are resolved — split out from handleInbox (which only does
 // param/auth/store resolution) so it can be exercised directly in tests
 // against a fake imapadapter.Client, without a real IMAP connection.
-func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID string, mailClient imapadapter.Client, cache *mailcache.Store, cfg config.Config, mailbox string, limit int, since int64, cursorSync bool) {
+func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID string, mailClient imapadapter.Client, cache *mailcache.Store, cfg config.Config, mailbox string, limit int, since int64, cursorSync, withBodies bool) {
 	allowedKeywords := collectAllowedKeywords(s.userLabels(userID))
 	tabs, byTab := buildInboxTabScaffold(allowedKeywords)
 
@@ -338,6 +348,14 @@ func (s *Server) serveInbox(w http.ResponseWriter, ctx context.Context, userID s
 	// classic, and delta) so bucketing stays identical regardless of where
 	// the data came from.
 	bucket := func(keywords []string, entry inboxEmail) {
+		// The single choke point every path below routes through — cache-warmed
+		// classic, live-fallback classic, and both halves of the delta — so
+		// bodies=0 is one guard rather than four, and cannot drift out of sync
+		// with a path added later. The cache warms are built from their own
+		// source data, not from this entry, so they still store bodies.
+		if !withBodies {
+			entry.Body, entry.BodyMode = "", ""
+		}
 		tab := firstMatchingKeyword(keywords, allowedKeywords)
 		if tab == "" {
 			tab = inboxUncategorizedTab

@@ -83,7 +83,7 @@ func TestInboxDropsCachedVerdictsWhenTheAddressBookIsUnreadable(t *testing.T) {
 	verifiedCount := func() int {
 		t.Helper()
 		rec := httptest.NewRecorder()
-		srv.serveInbox(rec, context.Background(), userID, &fakeMailClient{}, cache, config.Default(), "", 1, 0, false)
+		srv.serveInbox(rec, context.Background(), userID, &fakeMailClient{}, cache, config.Default(), "", 1, 0, false, true)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("serveInbox status = %d, body=%s", rec.Code, rec.Body.String())
 		}
