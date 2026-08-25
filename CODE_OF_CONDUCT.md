@@ -104,7 +104,7 @@ someone else, and you may report an incident you witnessed but were not the
 target of.
 
 **Security vulnerabilities are not a Code of Conduct matter.** Report those
-through [GitHub Security Advisories](https://github.com/Yoshiofthewire/kypost-server/security/advisories),
+through [GitHub Security Advisories](https://github.com/Busness-app/KyPost-Server/security/advisories),
 as described in [SECURITY.md](SECURITY.md).
 
 ## Enforcement

@@ -31,7 +31,7 @@ jobs:
       # ${{ github.repository_owner }} is not. Every other reference to this
       # image — docker-compose.yml, .env.example, scripts/update-host.sh,
       # publish-main.yml — spells it out the same way.
-      IMAGE_NAME: ghcr.io/yoshiofthewire/kypost-server
+      IMAGE_NAME: ghcr.io/busness-app/kypost-server
     steps:
       # First step, before the checkout: this reads nothing but the tag name,
       # and a bad tag should cost nothing to reject.

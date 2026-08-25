@@ -991,4 +991,4 @@ inside the container. On systems without systemd, schedule
 
 KyPost is released under the [MIT License](LICENSE.txt).
 
-[![OctoCounts](https://api.octocounts.com/badge/Yoshiofthewire/KyPost-Server/branch/main)](https://octocounts.com/github/Yoshiofthewire/KyPost-Server/tree/main)
+[![OctoCounts](https://api.octocounts.com/badge/Busness-app/KyPost-Server/branch/main)](https://octocounts.com/github/Busness-app/KyPost-Server/tree/main)
