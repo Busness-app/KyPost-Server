@@ -1,6 +1,7 @@
 package api
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -409,7 +410,7 @@ func (s *Server) routes() http.Handler {
 	s.routesRules(mux)
 	s.routesFrontend(mux)
 
-	return withSecurityHeaders(mux, buildContentSecurityPolicy(s.captchaProvider))
+	return withGzip(withSecurityHeaders(mux, buildContentSecurityPolicy(s.captchaProvider)))
 }
 
 // routesAuth registers sign-in, session, and second-factor endpoints.
@@ -508,6 +509,7 @@ func (s *Server) routesMail(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/mail/send-pgp", withUploadDeadline(s.withMailAuth(s.handleMailSendPGP)))
 	// Read path for end-to-end keys: lazy per-message ciphertext fetch, since
 	// the inbox DTO cannot carry it. See pgp_client_read.go.
+	mux.HandleFunc("GET /api/mail/body", s.withMailAuth(s.handleMailBody))
 	mux.HandleFunc("GET /api/mail/pgp-payload", s.withMailAuth(s.handlePGPPayload))
 	mux.HandleFunc("GET /api/mail/send-as", s.withAuth(s.handleSendAs))
 	mux.HandleFunc("POST /api/mail/send-as", s.withAuth(s.handleSendAs))
@@ -1304,8 +1306,33 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+
+	gw, ok := w.(gzipWriter)
+	if !ok {
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(v)
+		return
+	}
+
+	body, err := json.Marshal(v)
+	if err != nil {
+		// Identical to what the Encoder path does with an unmarshalable value:
+		// send the status and nothing else. Nothing useful is left to say once
+		// the value itself will not serialize.
+		w.WriteHeader(status)
+		return
+	}
+	if len(body) < minGzipBytes {
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		return
+	}
+
+	gw.Header().Set("Content-Encoding", "gzip")
+	gw.WriteHeader(status)
+	zw := gzip.NewWriter(gw)
+	defer func() { _ = zw.Close() }()
+	_, _ = zw.Write(body)
 }
 
 // scheduleContainerRestart exits this process after delay so supervisord's

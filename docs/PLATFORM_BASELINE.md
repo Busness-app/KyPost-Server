@@ -258,7 +258,51 @@ See [`docs/E2E_PGP.md`](E2E_PGP.md) for the full model, and
 
 ---
 
-## 7. Anti-phishing: the `kypost://` scheme in mail
+## 7. Inbox listing and message bodies
+
+`GET /api/inbox` returns message bodies by default and will keep doing so — the
+Android and Qt clients read `body` off the list rows today, and removing it
+would break them silently.
+
+A client that renders bodies only in an opened message should send **`bodies=0`**
+and fetch each body on demand from **`GET /api/mail/body?messageId=<uid>&mailbox=<path>`**,
+which answers `{"body": "...", "bodyMode": "html"|"plain"}`
+(`backend/internal/api/mail_body.go`).
+
+The reason is size. Measured against a 500-message window of ordinary HTML mail
+(`backend/internal/api/inbox_payload_size_test.go`, run with `-v`):
+
+| | uncompressed | gzip |
+| --- | --- | --- |
+| default (`bodies` unset) | 13.3 MiB | 1.5 MiB |
+| `bodies=0` | 183.9 KiB | 3.1 KiB |
+
+The browser re-requests that window every 15 seconds, so the default costs
+~53 MiB/min on an idle open tab.
+
+Two things a client must keep in mind when it opts out:
+
+- **`bodyMode` comes with the body, and only from the same response.** Do not
+  re-derive it by sniffing the text — RFC 5322's own `<user@example.com>`
+  address form parses as an unknown tag and the address disappears
+  (`adapters/imap/client.go:1480`).
+- **PGP mail still needs `/api/mail/pgp-payload`.** `/api/mail/body` returns
+  what the server can see, which for an encrypted message is nothing under
+  either protection mode (§6). A signed message whose verification fails must
+  fall back to the server's copy rather than showing the reader nothing, so
+  fetch both.
+
+Responses from `writeJSON` are gzipped when the client sends `Accept-Encoding:
+gzip` and the payload is at least 1 KiB (`backend/internal/api/gzip.go`). A
+client that does not send the header gets identical bytes to before.
+
+[`docs/INBOX_PAYLOAD_HANDOFF.md`](INBOX_PAYLOAD_HANDOFF.md) is the porting
+guide: what each client has to change, and the three things that break if you
+only do the obvious half.
+
+---
+
+## 8. Anti-phishing: the `kypost://` scheme in mail
 
 Every client registers as the system handler for `kypost://`. That means an
 `<a href="kypost://native-pair?srv=https://evil.example&pt=...">` inside a
@@ -272,7 +316,7 @@ bodies** — including the uppercased `KYPOST://` form, which some parsers miss
 
 ---
 
-## 8. Compatibility matrix
+## 9. Compatibility matrix
 
 Platforms align to 0.4.0 at launch and drift afterwards against this table.
 Update it in the same change that breaks or adds a contract above.
@@ -285,6 +329,7 @@ Update it in the same change that breaks or adds a contract above.
 | Device credential headers | 0.3.0 | n/a | 0.3.3 | unverified |
 | `pull` delivery mode | 0.3.0 | n/a | 0.3.3 | unverified |
 | Contact sync, 500-change batching | 0.3.0 | n/a | 0.3.3 | unverified |
+| `bodies=0` + `/api/mail/body` | 0.4.0 | 0.4.0 | not adopted | not adopted |
 
 `unverified` is honest rather than pessimistic: the Linux client's source is not
 in this checkout, so these rows are claims nobody has checked. For `pin=` the

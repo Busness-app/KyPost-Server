@@ -755,7 +755,7 @@ IMAP and inbox:
 
 - `GET|POST|DELETE /api/imap/config`
 - `POST /api/imap/test`
-- `GET /api/inbox?limit=500&mailbox=<name>`
+- `GET /api/inbox?limit=500&mailbox=<name>`. Add `bodies=0` to get the list without message bodies — 13.3 MiB against 3.1 KiB for a 500-message window, since the rows render no body. Bodies then come one at a time from `GET /api/mail/body`. See [docs/INBOX_PAYLOAD_HANDOFF.md](docs/INBOX_PAYLOAD_HANDOFF.md).
 - `POST /api/inbox/actions`
 - `GET|POST|PUT|DELETE /api/inbox/folders`
 - `GET /api/mail/search`
@@ -764,6 +764,7 @@ Mail:
 
 - `POST /api/mail/send`. Optional `attachments: [{name, mimeType, dataBase64}]`, 25 MB in total. Optional `encrypt` and `sign`. If `encrypt` is true and a recipient has no usable key, the call fails with 409. To allow the pickup-link fallback instead, set `allowPickupFallback`. See [Where your PGP private key lives](#where-your-pgp-private-key-lives).
 - `POST /api/mail/draft` (the same optional `attachments` shape)
+- `GET /api/mail/body?mailbox=&messageId=` (one message's body and its `bodyMode`, for clients that list with `bodies=0`)
 - `GET /api/mail/attachments?mailbox=&messageId=` (lists the attachment metadata of a message)
 - `GET /api/mail/attachment?mailbox=&messageId=&index=` (downloads one attachment)
 - `GET|POST /api/mail/send-as` and `DELETE /api/mail/send-as/{id}` (alias addresses. A new alias is unusable until a DKIM-signed challenge from its own domain verifies it.)
@@ -999,7 +1000,7 @@ inside the container. On systems without systemd, schedule
 - `scripts/`: container entrypoint, supervisord orchestration, Ollama model management, host-side update helpers
 - `push-relay-shared/`: shared Cloudflare Worker logic for the push relays — API-key issuance, rate limiting, device-token ownership, and the `RelayCoordinator` Durable Object
 - `worker/`, `worker-apns/`: the FCM and APNs deployments of that relay. Each holds only its provider's `handleSend` plus its wrangler config; everything else is imported from `push-relay-shared/`
-- `docs/`: the contracts the client repos implement against — [PLATFORM_BASELINE.md](docs/PLATFORM_BASELINE.md) (what a client must implement to call itself a KyPost client), [E2E_PGP.md](docs/E2E_PGP.md), [Desktop_Pairing.md](docs/Desktop_Pairing.md), [WKD_Publishing.md](docs/WKD_Publishing.md), [WEBMAIL_HANDOFF.md](docs/WEBMAIL_HANDOFF.md) — plus the operator guide [Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md)
+- `docs/`: the contracts the client repos implement against — [PLATFORM_BASELINE.md](docs/PLATFORM_BASELINE.md) (what a client must implement to call itself a KyPost client), [E2E_PGP.md](docs/E2E_PGP.md), [Desktop_Pairing.md](docs/Desktop_Pairing.md), [WKD_Publishing.md](docs/WKD_Publishing.md), [WEBMAIL_HANDOFF.md](docs/WEBMAIL_HANDOFF.md), [INBOX_PAYLOAD_HANDOFF.md](docs/INBOX_PAYLOAD_HANDOFF.md) — plus the operator guide [Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md)
 - `share/`: host-side Ollama model blob cache, bind-mounted into the container. Never committed
 - `testdata/`, `fonts/`: test fixtures and the bundled webfonts
 - `Dockerfile`: single image build (backend, frontend, Ollama runtime)

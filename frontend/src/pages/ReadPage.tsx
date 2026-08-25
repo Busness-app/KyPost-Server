@@ -63,6 +63,11 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const [verifyingId, setVerifyingId] = useState("");
   const [pgpUnlockOpen, setPgpUnlockOpen] = useState(false);
   const [, setPgpSession] = useState<PGPSessionState | null>(null);
+  // "" once a body has arrived (or none was expected), "loading" while the
+  // fetch is in flight, otherwise the failure to show in the body's place —
+  // an empty pane must not read as "this message has no text" when the fetch
+  // is what failed.
+  const [bodyStatus, setBodyStatus] = useState("");
   const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
   const [attachmentsError, setAttachmentsError] = useState("");
@@ -295,7 +300,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     // decrypt effect above: including it would re-run on every success, and the
     // guard reads the latest value through the closure on each selection change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, listedMailbox]);
+  }, [selected?.messageId, listedMailbox]);
 
   const swipeSessionRef = useRef<{
     messageId: string;
@@ -365,7 +370,11 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     setError("");
     try {
       const mailboxQuery = mailbox ? `&mailbox=${encodeURIComponent(mailbox)}` : "";
-      const data = await getJSON<InboxResponse>(`/api/inbox?limit=500${mailboxQuery}`);
+      // bodies=0: the rows below render sender, subject, date and badges and
+      // never the body, so shipping 500 bodies to display one measured 13.3 MiB
+      // against 184 KiB for the same window. The opened message fetches its own
+      // body from /api/mail/body.
+      const data = await getJSON<InboxResponse>(`/api/inbox?limit=500&bodies=0${mailboxQuery}`);
       if (loadId !== loadIdRef.current) return;
       setLastLoadedAt(new Date());
       const nextTabs = data.tabs ?? [];
@@ -939,9 +948,79 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     window.setTimeout(() => clearSwipeRow(session.messageId), 260);
   }
 
+  const emptyBodyText =
+    bodyStatus === "loading" ? "Loading message…" : bodyStatus || "No message body available.";
+
+  // fetchMessageBody pulls one message's body, which the list no longer
+  // carries. Shares attachmentQuery with the attachment endpoints because
+  // /api/mail/body takes the identical messageId+mailbox pair.
+  async function fetchMessageBody(item: InboxEmail): Promise<{ body: string; bodyMode?: "html" | "plain" }> {
+    const data = await getJSON<{ body?: string; bodyMode?: "html" | "plain" }>(
+      `/api/mail/body?${attachmentQuery(item)}`
+    );
+    return { body: data.body ?? "", bodyMode: data.bodyMode || undefined };
+  }
+
+  // Fetch the opened message's body.
+  //
+  // Runs for PGP mail too, and must. A signed message whose verification fails
+  // deliberately falls through to the server's copy rather than costing the
+  // reader the message (see read/body.ts), so that copy has to be here. For a
+  // client-protected encrypted message the server has no plaintext and returns
+  // an empty body — exactly what the inbox list used to carry — and the sibling
+  // decrypt effect above supplies the real one.
+  useEffect(() => {
+    const message = selected;
+    if (!message || message.body !== undefined) {
+      return;
+    }
+
+    let cancelled = false;
+    setBodyStatus("loading");
+    (async () => {
+      try {
+        const { body, bodyMode } = await fetchMessageBody(message);
+        if (cancelled) return;
+        setBodyStatus("");
+        setSelected((current) =>
+          current && current.messageId === message.messageId ? { ...current, body, bodyMode } : current
+        );
+      } catch (e) {
+        if (cancelled) return;
+        setBodyStatus(toErrorMessage(e, "could not load this message"));
+        // Settle body so this does not re-run. Reopening retries anyway: the
+        // list item it selects from carries no body of its own.
+        setSelected((current) =>
+          current && current.messageId === message.messageId ? { ...current, body: "" } : current
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Depends on `selected` itself rather than on selected?.messageId: the
+    // guard above already makes a re-run on this effect's own result a no-op,
+    // so keying on the object costs nothing and stays correct if a future path
+    // ever re-selects the same id with a bodyless record.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, listedMailbox]);
+
   async function openEmailDetails(item: InboxEmail) {
     if (isDraftMailbox && onOpenDraft) {
-      const draft = displayBody(item, decrypted[decryptedKey(item.messageId)]);
+      // This path never calls setSelected, so the body effect above does not
+      // cover it — a draft opened straight into the composer fetches its own.
+      // Every caller is a bare `void openEmailDetails(item)`, so a rejection
+      // here would surface as an unhandled one and nothing else.
+      let withBody = item;
+      if (item.body === undefined) {
+        try {
+          withBody = { ...item, ...(await fetchMessageBody(item)) };
+        } catch (e) {
+          setActionError(toErrorMessage(e, "could not load this draft"));
+          return;
+        }
+      }
+      const draft = displayBody(withBody, decrypted[decryptedKey(item.messageId)]);
       onOpenDraft({
         sentTo: item.sentTo,
         cc: item.cc,
@@ -974,6 +1053,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     setShowImagesFor(null);
     setShowRawEmail(false);
     setActionError("");
+    setBodyStatus("");
     setAttachments([]);
     setAttachmentsError("");
     if (item.hasAttachments) {
@@ -1722,19 +1802,23 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
                 </div>
               ) : null}
               <div className="email-reader-body-wrap">
+                {/* What stands in for an absent body. "No message body
+                    available." is only right when the server answered and had
+                    nothing; a fetch still running or a fetch that failed are
+                    different facts and must not read as an empty message. */}
                 {showRawEmail ? (
                   <pre
                     key="raw"
                     className="email-reader-body-block"
                   >
-                    {displayBody(selected, decrypted[decryptedKey(selected.messageId)]).body || "No message body available."}
+                    {displayBody(selected, decrypted[decryptedKey(selected.messageId)]).body || emptyBodyText}
                   </pre>
                 ) : null}
                 {!showRawEmail ? (() => {
                   // Body and mode come from one place, together. See
                   // read/body.ts for why picking them separately is the bug.
                   const { body, mode } = displayBody(selected, decrypted[decryptedKey(selected.messageId)]);
-                  const shown = body || "No message body available.";
+                  const shown = body || emptyBodyText;
 
                   if (mode === "html" && body) {
                     return (
