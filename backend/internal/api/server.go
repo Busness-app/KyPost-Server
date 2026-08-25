@@ -543,6 +543,7 @@ func (s *Server) routesContacts(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/contacts/{id}", s.withAuth(s.handleContactByID))
 	mux.HandleFunc("GET /api/contacts/sync", withDeviceAuth(s.handleContactsSync))
 	mux.HandleFunc("POST /api/contacts/sync", withDeviceAuth(s.handleContactsSync))
+	mux.HandleFunc("GET /api/client/version", withDeviceAuth(s.handleClientVersion))
 	mux.HandleFunc("POST /api/contacts/{id}/photo", withUploadDeadline(s.withAuth(s.handleContactPhoto)))
 	mux.HandleFunc("GET /api/contacts/{id}/photo", s.withMailAuth(s.handleContactPhoto))
 	mux.HandleFunc("DELETE /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"kypost-server/backend/internal/ghrelease"
@@ -81,5 +82,35 @@ func (s *Server) checkForLinuxClientUpdate(ctx context.Context) {
 	s.setLinuxClientStatus(linuxClientStatus{
 		latestVersion: latest,
 		checkedAt:     time.Now().UTC(),
+	})
+}
+
+// handleClientVersion reports the newest published Linux client release to a
+// paired device, which compares it against its own compiled-in version. It
+// never performs network I/O: the value comes from the hourly monitor's
+// cache, so a client opening its About screen cannot make this server call
+// GitHub.
+//
+// Device-authenticated rather than public. The body carries nothing per-user,
+// but this client is always paired by the time it asks, so there is no reason
+// to add an anonymous route to reach it.
+func (s *Server) handleClientVersion(w http.ResponseWriter, r *http.Request) {
+	_, _, ok, retryAfter := s.deviceAuthFromRequest(r)
+	if !ok {
+		writeDeviceAuthFailure(w, retryAfter)
+		return
+	}
+	status := s.getLinuxClientStatus()
+	checkedAt := ""
+	if !status.checkedAt.IsZero() {
+		checkedAt = status.checkedAt.Format(time.RFC3339)
+	}
+	// latestVersion is empty until the first check completes, when nothing has
+	// soaked yet, or when the repository has no releases. The client renders
+	// an empty value as "no information", never as an error.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"latestVersion": status.latestVersion,
+		"checkedAt":     checkedAt,
+		"error":         status.checkErr,
 	})
 }
