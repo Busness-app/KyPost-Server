@@ -29,17 +29,25 @@ RATE_LIMIT_PER_MINUTE = "10"  # display only; keep equal to PUSH_RATE_LIMITER.si
 # Set it if you open REGISTRATION_ENABLED. The per-minute limiter buckets per
 # key, and with registration open anyone can mint another key from another
 # address — so the minute limit bounds how fast one caller sends and nothing at
-# all about what the relay spends against YOUR Firebase quota in a day. This is
-# the only setting that bounds that number.
+# all about how much the relay sends in a day. This is the only setting that
+# bounds that number.
+#
+# Not a bill: FCM and APNs are free, and the quotas they impose are send-RATE
+# limits, not daily caps. What a runaway day actually spends is YOUR Cloudflare
+# account — whose free-plan daily KV and Durable Object limits refuse operations
+# outright until 00:00 UTC, and which on a paid plan is the invoice. This
+# counter cannot see any of those limits, so set it below them, not at them.
 #
 # It is a single shared pool across every key. "0" closes the relay to sends;
-# unset is unmetered. Pick it from your provider quota with headroom, e.g. a
-# relay serving ~50 self-hosters at a few hundred notifications a day each.
+# unset is unmetered. Size it from expected load with headroom, e.g. a relay
+# serving ~50 self-hosters at a few hundred notifications a day each.
 # RELAY_DAILY_BUDGET = "50000"
 
 # Public self-registration (POST /register). Set to "true" ONLY if you intend to
 # run an unauthenticated key-minting endpoint on the public internet: anyone who
-# can reach this Worker can then mint a key and spend your FCM quota. Left "false"
+# can reach this Worker can then mint a key and send through it on your
+# Cloudflare account. Each call also spends KV writes, which the free plan caps
+# per day and then refuses until 00:00 UTC. Left "false"
 # here so a copied-unchanged config is closed; there is no admin API to mint keys
 # with instead, so flip this on deliberately. When open, self-hosted servers mint their
 # own key with no maintainer involvement, and per-IP request rate is capped by the

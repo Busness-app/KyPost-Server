@@ -470,8 +470,9 @@ export function resolveLimit(raw: string | undefined, fallback: number): number 
 //
 // The cost: a caller who stays under the per-minute cap can sustain it
 // indefinitely, so the minute limit bounds burst rate but not daily volume
-// against someone else's FCM quota. That residual is why the fail-closed
-// behaviour below is not negotiable.
+// against someone else's infrastructure — the relay operator's Cloudflare
+// account first, and their provider's send-rate quota after it. That residual
+// is why the fail-closed behaviour below is not negotiable.
 //
 // The daily half of that residual is now covered — by checkDailyBudget, built
 // the way this note prescribed (a Durable Object counter, no KV write
@@ -516,7 +517,7 @@ export async function checkMinuteLimit(
     // binding as an outage that should not take delivery down with it, but the
     // minute tier is the only tier enforced (see the note above), so this branch is
     // the difference between a rate-limited relay and an unbounded send primitive
-    // against someone else's FCM quota, traced only by this log line.
+    // pointed at someone else's infrastructure, traced only by this log line.
     //
     // Callers surface it as 429 with a Retry-After: the request is refused not
     // because the caller misbehaved but because the relay cannot currently tell
@@ -558,8 +559,22 @@ export function secondsUntilUTCMidnight(now: number = Date.now()): number {
  * It is AGGREGATE, not per-key. The per-minute limiters bucket per key and per
  * registering IP, and with public registration open neither is a scarce
  * resource: an actor who wants a second bucket registers a second key from a
- * second address. What is scarce is the operator's FCM/APNs quota, which every
- * key spends from together — so the ceiling on it is counted together.
+ * second address. So the ceiling has to be counted together, or extra keys buy
+ * extra headroom and the limit means nothing.
+ *
+ * What that ceiling protects is worth naming precisely, because it is easy to
+ * assume it is a bill and it is not. FCM and APNs are free: there is no
+ * provider invoice, and the send quotas they do impose are per-project RATE
+ * limits rather than a daily cap. The resources actually being spent are the
+ * operator's — the Cloudflare account underneath, where free-plan daily limits
+ * on KV and Durable Object operations refuse further operations outright until
+ * 00:00 UTC, and on a paid plan become the invoice — plus the provider's
+ * goodwill, since an open relay driven hard is indistinguishable from an abuse
+ * source.
+ *
+ * This counter is blind to every one of those Cloudflare limits. It bounds what
+ * the relay chooses to send; it cannot see what Cloudflare is willing to serve.
+ * Sizing it below the plan's own ceilings is the operator's job.
  *
  * Unset RELAY_DAILY_BUDGET means unmetered, which is what every existing
  * deployment gets. An operator opts into the ceiling; nobody wakes up to find
@@ -905,10 +920,12 @@ export function registrationEnabled(env: CommonEnv): boolean {
  * inside the registration path would be worse than the gap.
  *
  * What IS bounded, as of RELAY_DAILY_BUDGET (see checkDailyBudget), is the thing
- * the accumulation was worth doing: the relay's total spend against the
- * operator's provider quota is now one shared daily counter, so extra keys no
- * longer buy extra budget. The remaining exposure from key accumulation is
- * denial-of-service against that shared pool, not unbounded provider cost.
+ * the accumulation was worth doing: the relay's total daily sends are now one
+ * shared counter, so extra keys no longer buy extra budget. The remaining
+ * exposure from key accumulation is denial-of-service against that shared pool,
+ * rather than unbounded sending. Note what that does NOT cover — registration
+ * itself spends Cloudflare KV writes per call, and no counter here can see that
+ * limit approaching.
  *
  * The CGNAT collision has no mitigation here at all. An operator running a relay
  * for users who may share an address should keep REGISTRATION_ENABLED off and
