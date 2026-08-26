@@ -248,3 +248,48 @@ func TestMergeAdoptsKeyAndItsProvenanceTogether(t *testing.T) {
 			survivor.PGPKey, survivor.PGPKeyFingerprint, survivor.PGPKeySource)
 	}
 }
+
+// The name guard compares identity, not formatting. A real address book carries
+// the same person as "Doe, Jane" and "Jane Doe"; under a literal comparison the
+// single reordered variant vetoed the merge for the whole component.
+func TestNormalizeName_IgnoresOrderAndPunctuation(t *testing.T) {
+	same := [][2]string{
+		{"Beacher, Matthew", "Matthew Beacher"},
+		{"Jesse Booker Report", "Booker Jesse Report"},
+		{"  Jane   Doe ", "Doe Jane"},
+	}
+	for _, p := range same {
+		a := normalizeName(Contact{FormattedName: p[0]})
+		b := normalizeName(Contact{FormattedName: p[1]})
+		if a != b || a == "" {
+			t.Errorf("normalizeName(%q)=%q, normalizeName(%q)=%q; want equal and non-empty", p[0], a, p[1], b)
+		}
+	}
+	if normalizeName(Contact{FormattedName: "Jane Doe"}) == normalizeName(Contact{FormattedName: "John Doe"}) {
+		t.Error("distinct names must not collapse")
+	}
+}
+
+// One reordered or comma-formatted variant must not veto a merge for a whole
+// component that is otherwise the same person on the same phone number.
+func TestGroupShouldMerge_NameVariantDoesNotVetoComponent(t *testing.T) {
+	phone := []ContactValue{{Value: "610-440-4025"}}
+	members := []Contact{
+		{UID: "a", FormattedName: "Beacher, Matthew", Phones: phone},
+		{UID: "b", FormattedName: "Matthew Beacher", Phones: phone},
+		{UID: "c", FormattedName: "Matthew Beacher", Phones: phone},
+	}
+	if !groupShouldMerge(members) {
+		t.Error("groupShouldMerge = false, want true for one person spelled two ways")
+	}
+
+	// The guard still protects genuinely different people bridged by a value.
+	distinct := []Contact{
+		{UID: "a", FormattedName: "Alice Adams", Phones: phone},
+		{UID: "b", FormattedName: "Bob Barker", Phones: phone},
+		{UID: "c", FormattedName: "Carol Chase", Phones: phone},
+	}
+	if groupShouldMerge(distinct) {
+		t.Error("groupShouldMerge = true, want false for three different people on a shared line")
+	}
+}
