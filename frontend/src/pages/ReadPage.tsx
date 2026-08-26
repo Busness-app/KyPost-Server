@@ -21,7 +21,6 @@ import type {
   DecryptedView,
   AttachmentInfo,
   ReadPageProps,
-  InboxResponse,
   InboxAction,
   InboxActionResponse,
   KeywordActionResponse,
@@ -38,6 +37,8 @@ import {
   SWIPE_MAX_OFFSET_RATIO,
   SWIPE_HAPTICS_STORAGE_KEY
 } from "./read/types";
+import type { InboxDeltaResponse } from "./read/inboxDelta";
+import { applyInboxDelta, messageIDsIn, withoutMessages } from "./read/inboxDelta";
 import { formatBytes, formatTimestamp, formatInboxListTime, formatUpdatedLabel } from "./read/format";
 import {
   ensureSubjectPrefix,
@@ -52,7 +53,21 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   const mailbox = (searchParams.get("mailbox") || "").trim();
   const isInboxMailbox = mailbox.length === 0;
   const [tabs, setTabs] = useState<string[]>([]);
-  const [byTab, setByTab] = useState<Record<string, InboxEmail[]>>({});
+  const [byTab, setByTabState] = useState<Record<string, InboxEmail[]>>({});
+  // byTabRef mirrors byTab synchronously, because loadInbox has to fold a delta
+  // into the CURRENT window and it runs from an interval closure that captured
+  // some earlier render's byTab. Reading the state variable there merges the
+  // delta into a stale window and resurrects deleted mail.
+  const byTabRef = useRef<Record<string, InboxEmail[]>>({});
+  function setByTab(
+    next:
+      | Record<string, InboxEmail[]>
+      | ((current: Record<string, InboxEmail[]>) => Record<string, InboxEmail[]>)
+  ) {
+    const value = typeof next === "function" ? next(byTabRef.current) : next;
+    byTabRef.current = value;
+    setByTabState(value);
+  }
   const [activeTab, setActiveTab] = useState<string>("");
   const [selected, setSelected] = useState<InboxEmail | null>(null);
   // Locally decrypted bodies for client-protected accounts, keyed by message
@@ -364,6 +379,9 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   }
 
   const loadIdRef = useRef(0);
+  // The cursor from the last inbox response, per mailbox — reset alongside the
+  // rest of the window when the mailbox changes.
+  const cursorRef = useRef(0);
   async function loadInbox() {
     const loadId = ++loadIdRef.current;
     setLoading(true);
@@ -374,26 +392,42 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       // never the body, so shipping 500 bodies to display one measured 13.3 MiB
       // against 184 KiB for the same window. The opened message fetches its own
       // body from /api/mail/body.
-      const data = await getJSON<InboxResponse>(`/api/inbox?limit=500&bodies=0${mailboxQuery}`);
+      //
+      // since= selects the cursor protocol, which is the difference between a
+      // reload that costs a cheap overview fetch and one that costs a full
+      // FETCH of every body in the mailbox. Without it the server takes its
+      // cache-first path, and that path only counts a window warm when it holds
+      // at least `limit` entries — so at limit=500 every mailbox under 500
+      // messages missed the cache on every single load, including the one this
+      // page fires after each delete and every 15 seconds besides.
+      const data = await getJSON<InboxDeltaResponse>(
+        `/api/inbox?limit=500&bodies=0&since=${cursorRef.current}${mailboxQuery}`
+      );
       if (loadId !== loadIdRef.current) return;
       setLastLoadedAt(new Date());
+      cursorRef.current = data.cursor ?? cursorRef.current;
       const nextTabs = data.tabs ?? [];
-      const nextByTab = data.byTab ?? {};
       setTabs(nextTabs);
-      setByTab(nextByTab);
       setActiveTab((current) => {
         if (current && nextTabs.includes(current)) return current;
         return nextTabs[0] ?? "";
       });
-      setSwipeRows({});
-      setSwipeRemovedIds([]);
+
+      // A delta describes changes; a snapshot IS the window. Only the snapshot
+      // may clear swipe state, because a delta can land mid-dismiss and
+      // un-hide a row whose action is still in flight.
+      const nextByTab = data.delta ? applyInboxDelta(byTabRef.current, data) : data.byTab ?? {};
+      setByTab(nextByTab);
+      const surviving = messageIDsIn(nextByTab);
+      if (!data.delta) {
+        setSwipeRows({});
+        setSwipeRemovedIds([]);
+      } else {
+        setSwipeRemovedIds((current) => current.filter((id) => surviving.has(id)));
+      }
       setSelectedMessageIds((current) => {
         if (current.length === 0) return current;
-        const nextIDSet = new Set<string>();
-        Object.values(nextByTab).forEach((items) => {
-          items.forEach((item) => nextIDSet.add(item.messageId));
-        });
-        return current.filter((id) => nextIDSet.has(id));
+        return current.filter((id) => surviving.has(id));
       });
     } catch (e) {
       if (loadId !== loadIdRef.current) return;
@@ -403,6 +437,10 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
       setByTab({});
       setActiveTab("");
       setSelectedMessageIds([]);
+      // The window is gone, so the cursor that described it is meaningless —
+      // the next load must ask for a full snapshot rather than a delta against
+      // state this client no longer holds.
+      cursorRef.current = 0;
     } finally {
       if (loadId === loadIdRef.current) setLoading(false);
     }
@@ -421,6 +459,10 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     setSwipeRows({});
     setSwipeRemovedIds([]);
     setError("");
+    // A cursor describes one mailbox's window. Carrying it across a mailbox
+    // switch would ask the server to diff the new folder against the old
+    // folder's state, so the first load in any mailbox is a full snapshot.
+    cursorRef.current = 0;
     // Belt alongside the mailbox-qualified key: nothing cached for the folder
     // we are leaving can describe a message in the one we are entering. The
     // composite key is the load-bearing fix — this keeps the map from growing
@@ -659,7 +701,14 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         });
       } else {
         setSelectedMessageIds((current) => current.filter((id) => !messageIds.includes(id)));
-        await loadInbox();
+        // The server has already accepted the move. Dropping the rows now is
+        // what makes delete feel immediate — awaiting the reload first left
+        // them on screen, and the action bar disabled, for the whole round
+        // trip. loadInbox still runs (and bumps loadIdRef, discarding any
+        // poll that was in flight before the delete), it just no longer
+        // stands between the click and the row leaving.
+        setByTab((current) => withoutMessages(current, messageIds));
+        void loadInbox();
       }
       if (options?.closeModal) {
         setSelected(null);
