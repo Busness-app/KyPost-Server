@@ -55,7 +55,7 @@ export function PairingPanel({ onDevicesMayHaveChanged, onStatus }: PairingPanel
   const [ttlMs, setTtlMs] = useState(DEFAULT_PAIRING_TTL_SECONDS * 1000);
   const [clockMs, setClockMs] = useState<number>(() => Date.now());
   const [refreshBusy, setRefreshBusy] = useState(false);
-  const [desktopBusy, setDesktopBusy] = useState(false);
+  const [pairBusy, setPairBusy] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
 
   function applyPairingStatus(next: PairingStatusResponse | null) {
@@ -158,11 +158,11 @@ export function PairingPanel({ onDevicesMayHaveChanged, onStatus }: PairingPanel
     };
   }, [pairingStatus]);
 
-  async function pairDesktopApp() {
+  async function pairThisDevice() {
     // Desktop apps pair over the same native flow as mobile (sub/hash relay
     // auth) — the desktop-pair code exchange has no server-side register
     // endpoint yet, and the desktop app doesn't need a web session.
-    setDesktopBusy(true);
+    setPairBusy(true);
     try {
       // Fetch a fresh pairing token — they expire quickly, so a stale
       // pairingStatus from panel open may already be dead.
@@ -196,7 +196,7 @@ export function PairingPanel({ onDevicesMayHaveChanged, onStatus }: PairingPanel
     } catch (error: unknown) {
       onStatus(`Failed to initiate desktop pairing: ${toErrorMessage(error, "unknown error")}`);
     } finally {
-      setDesktopBusy(false);
+      setPairBusy(false);
     }
   }
 
@@ -264,8 +264,8 @@ export function PairingPanel({ onDevicesMayHaveChanged, onStatus }: PairingPanel
           <button type="button" className="sec-action-quiet" onClick={() => void refreshPairingStatus()}>
             New code
           </button>
-          <button type="button" onClick={() => void pairDesktopApp()} disabled={desktopBusy}>
-            {desktopBusy ? "Pairing..." : "Pair Desktop App"}
+          <button type="button" onClick={() => void pairThisDevice()} disabled={pairBusy}>
+            {pairBusy ? "Pairing..." : "Pair this device"}
           </button>
         </div>
       </div>
