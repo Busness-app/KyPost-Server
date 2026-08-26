@@ -28,6 +28,13 @@ export type InboxEmail = {
   pgpVerified?: boolean;
   pgpSignerFingerprint?: string;
   pgpDecryptError?: string;
+  /**
+   * Only ever set on a `since=` delta response: "new" means the entry carries a
+   * body and the client should insert it, "updated" means flags or label moved
+   * and the body is deliberately absent because the client already has it.
+   * Absent entirely on a full snapshot. See applyInboxDelta.
+   */
+  changeType?: "new" | "updated";
 };
 
 // DecryptedView is one locally-decrypted message: the plaintext body plus
