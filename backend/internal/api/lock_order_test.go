@@ -26,13 +26,14 @@ import (
 // reads the struct and fails when one is missing, rather than trusting the next
 // person to remember.
 var lockRank = map[string]int{
-	"cfgMu":      1,
-	"sessMu":     2,
-	"pairingMu":  3,
-	"userMu":     4,
-	"ollamaMu":   5,
-	"serverMu":   6,
-	"pinProbeMu": 7,
+	"cfgMu":         1,
+	"sessMu":        2,
+	"pairingMu":     3,
+	"userMu":        4,
+	"ollamaMu":      5,
+	"serverMu":      6,
+	"pinProbeMu":    7,
+	"linuxClientMu": 8,
 }
 
 // TestEveryServerMutexIsRanked closes the hole that made the ordering check

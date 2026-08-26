@@ -41,8 +41,8 @@ import (
 
 // Server holds the HTTP surface and its process-wide state.
 //
-// LOCK ORDER: cfgMu before sessMu before pairingMu before userMu before ollamaMu before serverMu. Never the
-// reverse. Enforced by TestLockOrderIsRespected, which reads this package's
+// LOCK ORDER: cfgMu before sessMu before pairingMu before userMu before ollamaMu before serverMu before
+// linuxClientMu. Never the reverse. Enforced by TestLockOrderIsRespected, which reads this package's
 // source and fails on a function that takes one while holding a higher-ranked
 // one — directly, or through any call chain inside this package. Adding a mutex
 // here means adding it to lockRank in lock_order_test.go; one that is missing
@@ -175,6 +175,9 @@ type Server struct {
 	ollamaStatus ollamaVersionStatus
 	serverMu     sync.Mutex
 	serverStatus serverVersionStatus
+
+	linuxClientMu     sync.Mutex
+	linuxClientStatus linuxClientStatus
 
 	// Per-user resources, lazily created and cached. userMu also guards the
 	// subscriberID -> userID index used by the unauthenticated native
@@ -540,6 +543,7 @@ func (s *Server) routesContacts(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/contacts/{id}", s.withAuth(s.handleContactByID))
 	mux.HandleFunc("GET /api/contacts/sync", withDeviceAuth(s.handleContactsSync))
 	mux.HandleFunc("POST /api/contacts/sync", withDeviceAuth(s.handleContactsSync))
+	mux.HandleFunc("GET /api/client/version", withDeviceAuth(s.handleClientVersion))
 	mux.HandleFunc("POST /api/contacts/{id}/photo", withUploadDeadline(s.withAuth(s.handleContactPhoto)))
 	mux.HandleFunc("GET /api/contacts/{id}/photo", s.withMailAuth(s.handleContactPhoto))
 	mux.HandleFunc("DELETE /api/contacts/{id}/photo", s.withAuth(s.handleContactPhoto))
