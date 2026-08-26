@@ -130,7 +130,11 @@ CREATE TABLE IF NOT EXISTS native_devices (
 	-- from additiveColumns below, which is the path that actually matters.
 	enrollment_public_key TEXT NOT NULL DEFAULT '',
 	enrollment_key_at     TEXT NOT NULL DEFAULT '',
-	encryption_enrolled   INTEGER NOT NULL DEFAULT 0
+	encryption_enrolled   INTEGER NOT NULL DEFAULT 0,
+	-- WebPush (RFC 8291) subscription keys, UnifiedPush only. Same story as the
+	-- enrollment columns above: additiveColumns is the path that matters.
+	p256dh    TEXT NOT NULL DEFAULT '',
+	auth      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS native_devices_push ON native_devices(push_token, platform);
 
@@ -213,6 +217,11 @@ var additiveColumns = []struct{ table, column, ddl string }{
 	{"native_devices", "enrollment_public_key", "TEXT NOT NULL DEFAULT ''"},
 	{"native_devices", "enrollment_key_at", "TEXT NOT NULL DEFAULT ''"},
 	{"native_devices", "encryption_enrolled", "INTEGER NOT NULL DEFAULT 0"},
+	// A UnifiedPush device paired before the WebPush key exchange existed
+	// decodes as "" — which is the truth: it sent no keys, so it keeps
+	// receiving the unencrypted payload its client build can read.
+	{"native_devices", "p256dh", "TEXT NOT NULL DEFAULT ''"},
+	{"native_devices", "auth", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func applyAdditiveColumns(db *sql.DB) error {

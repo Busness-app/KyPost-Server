@@ -7,25 +7,42 @@ import (
 )
 
 func TestMFATransportEligible(t *testing.T) {
+	// Any non-empty pair stands in for real key material here: eligibility
+	// turns on whether the device supplied keys, and ValidateWebPushKeys has
+	// already refused a malformed pair at registration.
+	const p256dh, auth = "a-public-point", "an-auth-secret"
+
 	tests := []struct {
 		name      string
 		transport string
+		p256dh    string
+		auth      string
 		want      bool
 	}{
-		{"fcm", "fcm", true},
-		{"apns", "apns", true},
-		{"unifiedpush excluded", "unifiedpush", false},
-		{"case and spacing are not an escape", "  UnifiedPush  ", false},
+		{name: "fcm", transport: "fcm", want: true},
+		{name: "apns", transport: "apns", want: true},
 		// An empty transport is a legacy row written before the column existed.
 		// normalizeNativeTransport would have derived one at registration, so
 		// treating blank as eligible keeps those pairings working.
-		{"legacy blank transport", "", true},
+		{name: "legacy blank transport", transport: "", want: true},
+
+		// The rule follows the channel's actual confidentiality, not the
+		// transport's name: an encrypted UnifiedPush device may carry the
+		// sign-in IP, user agent and match digits; a keyless one may not,
+		// because for it the payload is still cleartext on a public broker.
+		{name: "unifiedpush with keys", transport: "unifiedpush", p256dh: p256dh, auth: auth, want: true},
+		{name: "unifiedpush without keys", transport: "unifiedpush", want: false},
+		{name: "unifiedpush with only p256dh", transport: "unifiedpush", p256dh: p256dh, want: false},
+		{name: "unifiedpush with only auth", transport: "unifiedpush", auth: auth, want: false},
+		{name: "case and spacing are not an escape", transport: "  UnifiedPush  ", want: false},
+		{name: "case and spacing do not lose eligibility either", transport: "  UnifiedPush  ", p256dh: p256dh, auth: auth, want: true},
+		{name: "whitespace-only keys are not keys", transport: "unifiedpush", p256dh: "  ", auth: "\t", want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := MFATransportEligible(state.NativeDevice{Transport: tt.transport})
+			got := MFATransportEligible(state.NativeDevice{Transport: tt.transport, P256DH: tt.p256dh, Auth: tt.auth})
 			if got != tt.want {
-				t.Fatalf("MFATransportEligible(%q) = %v, want %v", tt.transport, got, tt.want)
+				t.Fatalf("MFATransportEligible(%q, keys=%t) = %v, want %v", tt.transport, tt.p256dh != "" && tt.auth != "", got, tt.want)
 			}
 		})
 	}

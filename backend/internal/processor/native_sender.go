@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	webpush "github.com/SherClockHolmes/webpush-go"
+
 	"kypost-server/backend/internal/config"
 	"kypost-server/backend/internal/fsutil"
 	"kypost-server/backend/internal/logging"
@@ -24,6 +26,15 @@ import (
 )
 
 var ErrNativeDeviceStale = errors.New("native device token is stale")
+
+const (
+	// unifiedPushTTLSeconds bounds how long a distributor holds an undelivered
+	// notification. Five minutes: a mail alert that arrives later is noise.
+	unifiedPushTTLSeconds = 300
+	// webPushSubscriber is the VAPID "sub" claim, matching SendWebPush's
+	// existing convention — distributors do not act on it.
+	webPushSubscriber = "mailto:noreply@localhost"
+)
 
 type NativePushMessage struct {
 	Title string
@@ -227,6 +238,12 @@ func registerWithRelay(relayURL string, client *http.Client) (string, error) {
 // (registration-time DNS can be rebound to a private address afterward).
 type UnifiedPushSender struct {
 	client *http.Client
+	// VAPID identity, shared with browser Web Push. Here it only signs the
+	// Authorization JWT; most distributors do not check it. Empty
+	// vapidPrivateKey means the key could not be loaded, and Send falls back to
+	// the unencrypted POST rather than dropping the notification.
+	vapidPublicKey  string
+	vapidPrivateKey string
 }
 
 // isPrivateOrReservedIP reports whether ip must never be reached via a
@@ -302,8 +319,23 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 // NewUnifiedPushSender constructs a direct HTTPS client for UnifiedPush endpoints,
 // with dial-time SSRF protection (see safeDialContext) and redirects disabled
 // (a redirect target bypasses the pre-dial check otherwise).
-func NewUnifiedPushSender() *UnifiedPushSender {
+func NewUnifiedPushSender(log *logging.Logger, vapidPublicKey, vapidPrivateKeyPath string) *UnifiedPushSender {
+	// Never fail construction: a server that cannot read its VAPID key must
+	// still deliver notifications, unencrypted, rather than deliver none.
+	privateKey := ""
+	if strings.TrimSpace(vapidPrivateKeyPath) != "" {
+		loaded, err := config.LoadVAPIDPrivateKey(vapidPrivateKeyPath)
+		if err != nil {
+			if log != nil {
+				log.Error("unifiedpush: VAPID private key unreadable, payloads will be sent unencrypted", "path", vapidPrivateKeyPath, "error", err.Error())
+			}
+		} else {
+			privateKey = loaded
+		}
+	}
 	return &UnifiedPushSender{
+		vapidPublicKey:  strings.TrimSpace(vapidPublicKey),
+		vapidPrivateKey: privateKey,
 		client: &http.Client{
 			Timeout:   15 * time.Second,
 			Transport: &http.Transport{DialContext: safeDialContext},
@@ -339,6 +371,39 @@ func (s *UnifiedPushSender) Send(ctx context.Context, device state.NativeDevice,
 		return fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
+	// RFC 8291 when the device gave us key material and we hold a VAPID key;
+	// otherwise the historical cleartext POST, so a device registered by an
+	// older client keeps receiving notifications instead of silently none.
+	if device.P256DH != "" && device.Auth != "" && s.vapidPrivateKey != "" {
+		return s.sendEncrypted(ctx, endpointURL, device, body)
+	}
+	return s.sendPlaintext(ctx, endpointURL, body)
+}
+
+// sendEncrypted POSTs an RFC 8291 (aes128gcm) payload the connector can open.
+// It hands webpush-go this sender's own client, not the bare *http.Client
+// webpush-go would otherwise build: the endpoint URL is user-supplied, so
+// losing safeDialContext and the redirect refusal here would reopen the SSRF
+// hole UnifiedPushSender exists to close.
+func (s *UnifiedPushSender) sendEncrypted(ctx context.Context, endpointURL string, device state.NativeDevice, body []byte) error {
+	resp, err := webpush.SendNotificationWithContext(ctx, body, &webpush.Subscription{
+		Endpoint: endpointURL,
+		Keys:     webpush.Keys{Auth: device.Auth, P256dh: device.P256DH},
+	}, &webpush.Options{
+		Subscriber:      webPushSubscriber,
+		VAPIDPublicKey:  s.vapidPublicKey,
+		VAPIDPrivateKey: s.vapidPrivateKey,
+		TTL:             unifiedPushTTLSeconds,
+		HTTPClient:      s.client,
+	})
+	if err != nil {
+		return fmt.Errorf("encrypted POST failed: %w", err)
+	}
+	defer resp.Body.Close()
+	return interpretUnifiedPushResponse(resp)
+}
+
+func (s *UnifiedPushSender) sendPlaintext(ctx context.Context, endpointURL string, body []byte) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -350,7 +415,14 @@ func (s *UnifiedPushSender) Send(ctx context.Context, device state.NativeDevice,
 		return fmt.Errorf("POST failed: %w", err)
 	}
 	defer resp.Body.Close()
+	return interpretUnifiedPushResponse(resp)
+}
 
+// interpretUnifiedPushResponse maps the endpoint's status to this package's
+// error vocabulary. Shared by both paths on purpose: stale detection that
+// differed between them would leave dead endpoints on the encrypted path
+// being retried forever.
+func interpretUnifiedPushResponse(resp *http.Response) error {
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	trimmed := strings.TrimSpace(string(respBody))
 
@@ -420,12 +492,14 @@ type NativePushDispatcher struct {
 }
 
 // NewNativePushDispatcher constructs a dispatcher with FCM (PUSH_RELAY_*),
-// APNs (APNS_RELAY_*), and UnifiedPush senders. Relay senders may be nil if not configured.
-func NewNativePushDispatcher(log *logging.Logger) *NativePushDispatcher {
+// APNs (APNS_RELAY_*), and UnifiedPush senders. Relay senders may be nil if not
+// configured. The VAPID pair is the browser-push one (cfg.Notifications), reused
+// here to encrypt UnifiedPush payloads — see NewUnifiedPushSender.
+func NewNativePushDispatcher(log *logging.Logger, vapidPublicKey, vapidPrivateKeyPath string) *NativePushDispatcher {
 	return &NativePushDispatcher{
 		fcmSender:         newRelaySenderFromEnvWithPrefix(log, "PUSH_RELAY"),
 		apnsSender:        newRelaySenderFromEnvWithPrefix(log, "APNS_RELAY"),
-		unifiedPushSender: NewUnifiedPushSender(),
+		unifiedPushSender: NewUnifiedPushSender(log, vapidPublicKey, vapidPrivateKeyPath),
 	}
 }
 

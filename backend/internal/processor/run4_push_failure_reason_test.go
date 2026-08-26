@@ -165,7 +165,7 @@ func TestSendNativePushRecordsOnlyACoarseReasonOnHealth(t *testing.T) {
 
 	t.Setenv("PUSH_RELAY_URL", ts.URL)
 	t.Setenv("PUSH_RELAY_KEY", "test-api-key")
-	dispatcher := NewNativePushDispatcher(nil)
+	dispatcher := NewNativePushDispatcher(nil, "", "")
 	dispatcher.fcmSender.client = ts.Client()
 
 	store, err := state.New(t.TempDir())

@@ -410,8 +410,14 @@ type nativeRegisterRequest struct {
 	DeviceID     string `json:"deviceId,omitempty"`
 	Platform     string `json:"platform,omitempty"`
 	Transport    string `json:"transport,omitempty"`
-	DeviceName   string `json:"deviceName,omitempty"`
-	AppVersion   string `json:"appVersion,omitempty"`
+	// P256DH and Auth are the WebPush (RFC 8291) subscription keys the client's
+	// UnifiedPush connector generated for its endpoint. Sent only when
+	// Transport is "unifiedpush"; without them the payload has to cross the
+	// distributor's broker in the clear.
+	P256DH     string `json:"p256dh,omitempty"`
+	Auth       string `json:"auth,omitempty"`
+	DeviceName string `json:"deviceName,omitempty"`
+	AppVersion string `json:"appVersion,omitempty"`
 	// EncryptionEnrolled is the device's own answer to "can I still open my
 	// enrollment envelope". A POINTER because absent and false mean different
 	// things: an older client that does not send it has no opinion and must not
@@ -472,11 +478,25 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 	//
 	// The reason is deliberately not echoed: it distinguished a nonexistent
 	// host from one that resolved into RFC1918, and named the address.
+	// webPushP256DH/webPushAuth stay empty for every other transport, so an FCM
+	// device that sends key material anyway never carries a stray auth secret —
+	// which is a notification-forgery capability, not inert metadata.
+	webPushP256DH, webPushAuth := "", ""
 	if transport == "unifiedpush" {
 		if err := processor.ValidateUnifiedPushEndpointURL(deviceToken); err != nil {
 			http.Error(w, "invalid unifiedpush deviceToken", http.StatusBadRequest)
 			return
 		}
+		// Refused here rather than tolerated, because key material that cannot
+		// encrypt fails at send time instead — one dispatch at a time, far from
+		// the request that introduced it.
+		if err := processor.ValidateWebPushKeys(req.P256DH, req.Auth); err != nil {
+			s.logger.Info("unifiedpush webpush keys refused", "error", err.Error())
+			http.Error(w, "invalid unifiedpush webpush keys", http.StatusBadRequest)
+			return
+		}
+		webPushP256DH = strings.TrimSpace(req.P256DH)
+		webPushAuth = strings.TrimSpace(req.Auth)
 	}
 	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(claims.Sub)), []byte(subscriberID)) != 1 {
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
@@ -586,6 +606,8 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		DeviceID:    strings.TrimSpace(req.DeviceID),
 		Platform:    platform,
 		Transport:   transport,
+		P256DH:      webPushP256DH,
+		Auth:        webPushAuth,
 		PushToken:   deviceToken,
 		DeviceName:  clampField(req.DeviceName, maxDeviceTextLen),
 		AppVersion:  clampField(req.AppVersion, maxDeviceTextLen),
