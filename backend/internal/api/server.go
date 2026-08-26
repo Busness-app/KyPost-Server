@@ -318,7 +318,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		pairingSecret:            pairingSecret,
 		singleUse:                newSingleUseTokens(),
 		serverBaseURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("SERVER_BASE_URL")), "/"),
-		nativePushDispatcher:     processor.NewNativePushDispatcher(logger),
+		nativePushDispatcher:     processor.NewNativePushDispatcher(logger, cfg.Notifications.PublicKey, cfg.Notifications.PrivateKeyPath),
 		pickupStore:              pgpmail.NewPickupStore(filepath.Join(stateDir, "pickup"), pickupStoreKeyPath),
 		userStores:               map[string]*state.Store{},
 		userContacts:             map[string]*contacts.Store{},

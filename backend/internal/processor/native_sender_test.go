@@ -166,7 +166,7 @@ func TestNewRelaySenderFromEnvAutoRegisterPersistsAndReuses(t *testing.T) {
 func TestDispatcherLegacyPlatformRoutingWithoutExplicitTransport(t *testing.T) {
 	fcm := &RelaySender{}
 	apns := &RelaySender{}
-	d := &NativePushDispatcher{fcmSender: fcm, apnsSender: apns, unifiedPushSender: NewUnifiedPushSender()}
+	d := &NativePushDispatcher{fcmSender: fcm, apnsSender: apns, unifiedPushSender: NewUnifiedPushSender(nil, "", "")}
 
 	cases := []struct {
 		platform string
@@ -223,7 +223,7 @@ func TestUnifiedPushSenderSendSuccess(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	sender := NewUnifiedPushSender()
+	sender := NewUnifiedPushSender(nil, "", "")
 	sender.client = ts.Client()
 
 	err := sender.Send(context.Background(), state.NativeDevice{PushToken: ts.URL + "/topic"}, NativePushMessage{Title: "Title", Body: "Body", Data: map[string]string{"type": "mail"}})
@@ -245,7 +245,7 @@ func TestUnifiedPushSenderReturnsStaleError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	sender := NewUnifiedPushSender()
+	sender := NewUnifiedPushSender(nil, "", "")
 	sender.client = ts.Client()
 
 	err := sender.Send(context.Background(), state.NativeDevice{PushToken: ts.URL + "/topic"}, NativePushMessage{Title: "Title", Body: "Body"})
@@ -304,7 +304,7 @@ func TestDispatcherSendRoutesCorrectly(t *testing.T) {
 	d := &NativePushDispatcher{
 		fcmSender:         nil, // Not configured; will error if used
 		apnsSender:        nil,
-		unifiedPushSender: NewUnifiedPushSender(),
+		unifiedPushSender: NewUnifiedPushSender(nil, "", ""),
 	}
 	d.unifiedPushSender.client = upTS.Client()
 
@@ -388,7 +388,7 @@ func TestValidateUnifiedPushEndpointURL(t *testing.T) {
 // Send must reject non-https endpoints even if a device record somehow ended
 // up with one (defense in depth alongside registration-time validation).
 func TestUnifiedPushSenderSendRejectsNonHTTPS(t *testing.T) {
-	sender := NewUnifiedPushSender()
+	sender := NewUnifiedPushSender(nil, "", "")
 	err := sender.Send(context.Background(), state.NativeDevice{PushToken: "http://example.com/topic"}, NativePushMessage{Title: "Test"})
 	if err == nil {
 		t.Fatal("Send() with http:// endpoint should error")
@@ -400,7 +400,7 @@ func TestUnifiedPushSenderSendRejectsNonHTTPS(t *testing.T) {
 // production dial path (safeDialContext) is actually wired in and not just
 // bypassed by tests that swap in ts.Client().
 func TestUnifiedPushSenderRefusesPrivateAddressAtDialTime(t *testing.T) {
-	sender := NewUnifiedPushSender()
+	sender := NewUnifiedPushSender(nil, "", "")
 	// A loopback listener the sender must refuse to connect to via its real
 	// (non-test-overridden) transport, proving safeDialContext is active.
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

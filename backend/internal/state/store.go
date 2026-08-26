@@ -84,6 +84,13 @@ type NativeDevice struct {
 	// Transport specifies the push delivery transport: "fcm", "apns", or "unifiedpush".
 	// Empty/absent means derive from Platform: "ios"/"macos" -> "apns", else "fcm".
 	Transport string `json:"transport,omitempty"`
+	// P256DH and Auth are the WebPush (RFC 8291) subscription keys the
+	// UnifiedPush connector generated for this endpoint. Present only for
+	// Transport == "unifiedpush"; without them the payload would have to go to
+	// the distributor's broker in the clear, and the connector drops anything it
+	// cannot decrypt. Mirrors NotificationSubscription's fields for browser push.
+	P256DH string `json:"p256dh,omitempty"`
+	Auth   string `json:"auth,omitempty"`
 	// EnrollmentPublicKey is this device's EC P-256 public key for encrypted-mail
 	// enrollment, published by the device under its own pairing credential. A
 	// public key is not a capability: it lets a browser seal TO this device and
@@ -112,6 +119,10 @@ type NativeDevice struct {
 // an API response.
 func (d NativeDevice) Redacted() NativeDevice {
 	d.SecretHash = ""
+	// The WebPush auth secret is a forgery capability: with it and the endpoint
+	// URL, anyone can encrypt a notification this device will accept. P256DH is
+	// the device's own public key and stays.
+	d.Auth = ""
 	return d
 }
 
@@ -905,14 +916,14 @@ func (s *Store) RemoveNotificationSubscription(endpoint string) (bool, error) {
 
 const deviceColumns = `device_id, platform, push_token, device_name, app_version,
 	user_agent, registered_at, updated_at, user_id, mfa_approver, transport, secret_hash,
-	enrollment_public_key, enrollment_key_at, encryption_enrolled`
+	enrollment_public_key, enrollment_key_at, encryption_enrolled, p256dh, auth`
 
 func scanDevice(rows *sql.Rows) (NativeDevice, error) {
 	var d NativeDevice
 	var approver, enrolled int
 	err := rows.Scan(&d.DeviceID, &d.Platform, &d.PushToken, &d.DeviceName, &d.AppVersion,
 		&d.UserAgent, &d.RegisteredAt, &d.UpdatedAt, &d.UserID, &approver, &d.Transport, &d.SecretHash,
-		&d.EnrollmentPublicKey, &d.EnrollmentKeyAt, &enrolled)
+		&d.EnrollmentPublicKey, &d.EnrollmentKeyAt, &enrolled, &d.P256DH, &d.Auth)
 	d.MFAApprover = approver == 1
 	d.EncryptionEnrolled = enrolled == 1
 	return d, err
@@ -921,7 +932,7 @@ func scanDevice(rows *sql.Rows) (NativeDevice, error) {
 func insertDevice(e execer, d NativeDevice, seq int) error {
 	_, err := e.Exec(
 		`INSERT INTO native_devices(`+deviceColumns+`, seq)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(device_id) DO UPDATE SET
 		   platform = excluded.platform, push_token = excluded.push_token,
 		   device_name = excluded.device_name, app_version = excluded.app_version,
@@ -931,10 +942,12 @@ func insertDevice(e execer, d NativeDevice, seq int) error {
 		   secret_hash = excluded.secret_hash,
 		   enrollment_public_key = excluded.enrollment_public_key,
 		   enrollment_key_at = excluded.enrollment_key_at,
-		   encryption_enrolled = excluded.encryption_enrolled`,
+		   encryption_enrolled = excluded.encryption_enrolled,
+		   p256dh = excluded.p256dh, auth = excluded.auth`,
 		d.DeviceID, d.Platform, d.PushToken, d.DeviceName, d.AppVersion, d.UserAgent,
 		d.RegisteredAt, d.UpdatedAt, d.UserID, boolToInt(d.MFAApprover), d.Transport, d.SecretHash,
-		d.EnrollmentPublicKey, d.EnrollmentKeyAt, boolToInt(d.EncryptionEnrolled), seq)
+		d.EnrollmentPublicKey, d.EnrollmentKeyAt, boolToInt(d.EncryptionEnrolled),
+		d.P256DH, d.Auth, seq)
 	return err
 }
 

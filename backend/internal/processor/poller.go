@@ -146,7 +146,7 @@ func New(cfg config.Config, log *logging.Logger, globalStore *state.Store, users
 		health:               healthSvc,
 		classifier:           classifierClient,
 		redaction:            re,
-		nativePushDispatcher: NewNativePushDispatcher(log),
+		nativePushDispatcher: NewNativePushDispatcher(log, cfg.Notifications.PublicKey, cfg.Notifications.PrivateKeyPath),
 		wkdStore:             wkdStore,
 		stateDir:             stateDir,
 		configDir:            configDir,
