@@ -112,6 +112,40 @@ func TestLinuxClientStatusRecordsCheckFailure(t *testing.T) {
 	}
 }
 
+// A transient GitHub failure must not clobber a previously cached release: a
+// failed check did not check anything, so its timestamp would be a lie and
+// dropping latestVersion would make the client see a fresh false->true
+// transition (and a second toast) the moment the next hourly check succeeds.
+func TestLinuxClientStatusFailureAfterSuccessPreservesCache(t *testing.T) {
+	srv := newTestServer(t)
+	priorCheckedAt := time.Now().UTC().Add(-30 * time.Minute)
+	srv.setLinuxClientStatus(linuxClientStatus{
+		latestVersion: "0.3.0",
+		checkedAt:     priorCheckedAt,
+	})
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer gh.Close()
+	orig := linuxClientReleasesURL
+	linuxClientReleasesURL = gh.URL
+	defer func() { linuxClientReleasesURL = orig }()
+
+	srv.checkForLinuxClientUpdate(context.Background())
+
+	got := srv.getLinuxClientStatus()
+	if got.latestVersion != "0.3.0" {
+		t.Fatalf("latestVersion = %q, want cached 0.3.0 preserved across the failed check", got.latestVersion)
+	}
+	if !got.checkedAt.Equal(priorCheckedAt) {
+		t.Fatalf("checkedAt = %v, want the prior success's timestamp %v preserved (a failed check checked nothing)", got.checkedAt, priorCheckedAt)
+	}
+	if got.checkErr == "" {
+		t.Fatal("a failed release check must still be recorded")
+	}
+}
+
 // testUserID returns the fixture user's ID, the same way authRequest does
 // (server_native_test.go:101).
 func testUserID(t *testing.T, s *Server) string {
@@ -141,6 +175,41 @@ func TestClientVersionEndpointServesCache(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		LatestVersion string `json:"latestVersion"`
+		CheckedAt     string `json:"checkedAt"`
+		Error         string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.LatestVersion != "0.3.0" || got.CheckedAt == "" || got.Error != "" {
+		t.Fatalf("unexpected body: %+v", got)
+	}
+}
+
+// TestClientVersionEndpointRoutesThroughRealMux drives the endpoint through
+// the server's real route table (not a hand-wired withDeviceAuth call) so it
+// fails if the GET /api/client/version registration in server.go is ever
+// dropped or its method/path changed — same pattern as
+// TestContactSelfEndpointRoutesThroughRealMux.
+func TestClientVersionEndpointRoutesThroughRealMux(t *testing.T) {
+	srv := newTestServer(t)
+	srv.setLinuxClientStatus(linuxClientStatus{
+		latestVersion: "0.3.0",
+		checkedAt:     time.Now().UTC(),
+	})
+
+	id, secret := pairNativeDevice(t, srv, testUserID(t, srv), "device-e1-mux")
+	req := httptest.NewRequest(http.MethodGet, "/api/client/version", nil)
+	req.Header.Set("X-Kypost-Device-Id", id)
+	req.Header.Set("X-Kypost-Device-Secret", secret)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (route should reach the handler); body=%s", rec.Code, rec.Body.String())
 	}
 	var got struct {
 		LatestVersion string `json:"latestVersion"`

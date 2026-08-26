@@ -70,9 +70,17 @@ func (s *Server) checkForLinuxClientUpdate(ctx context.Context) {
 	latest, err := ghrelease.Latest(checkCtx, linuxClientReleasesURL, linuxClientReleaseMinAge)
 	if err != nil {
 		s.logger.Error("linux client release check failed", "error", err.Error())
+		// A failed check did not check anything, so it must not clobber the
+		// last known-good latestVersion or checkedAt: doing so would drop a
+		// live "an update is available" back to "no information" with a
+		// fresh timestamp, and the next successful tick would then look like
+		// a brand-new false->true transition to the client, firing a second
+		// toast mid-session for one GitHub blip.
+		prev := s.getLinuxClientStatus()
 		s.setLinuxClientStatus(linuxClientStatus{
-			checkedAt: time.Now().UTC(),
-			checkErr:  "failed to check for updates",
+			latestVersion: prev.latestVersion,
+			checkedAt:     prev.checkedAt,
+			checkErr:      "failed to check for updates",
 		})
 		return
 	}
