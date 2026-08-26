@@ -9,14 +9,14 @@ require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/emersion/go-msgauth v0.7.0
-	github.com/emersion/go-vcard v0.0.0-20230815062825-8fda7d206ec9
+	github.com/emersion/go-vcard v0.1.0
 	github.com/emersion/go-webdav v0.7.0
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/inbucket/html2text v1.0.0
 	github.com/jhillyerd/enmime/v2 v2.4.1
 	golang.org/x/oauth2 v0.36.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.56.0
+	modernc.org/sqlite v1.57.0
 )
 
 require (
