@@ -41,16 +41,23 @@ func approverDevices(store *state.Store) ([]state.NativeDevice, error) {
 // MFATransportEligible reports whether a device's push transport may carry an
 // MFA challenge.
 //
-// UnifiedPush is excluded: a challenge carries sign-in metadata (IP address,
-// user agent, and the match digits themselves), and that must not traverse an
-// unencrypted public broker such as ntfy.sh until end-to-end encryption exists.
-// The devices stay fully usable for mail notifications.
+// A challenge carries sign-in metadata — IP address, user agent, and the match
+// digits themselves — so the test is whether the payload is confidential in
+// transit, not what the transport is called. FCM and APNs reach the device
+// through the relay. UnifiedPush crosses a public broker such as ntfy.sh, so it
+// qualifies only when the device supplied WebPush keys and the payload is
+// therefore encrypted under RFC 8291 (see processor.UnifiedPushSender). A
+// UnifiedPush device with no key material still receives cleartext and stays
+// excluded, while remaining fully usable for mail notifications.
 //
 // This catches more than it looks like: normalizeNativeTransport maps platform
 // "linux" to the unifiedpush transport, so a Linux client that does not name a
-// transport explicitly is excluded here too.
+// transport explicitly is judged by the same rule.
 func MFATransportEligible(d state.NativeDevice) bool {
-	return strings.ToLower(strings.TrimSpace(d.Transport)) != "unifiedpush"
+	if strings.ToLower(strings.TrimSpace(d.Transport)) != "unifiedpush" {
+		return true
+	}
+	return strings.TrimSpace(d.P256DH) != "" && strings.TrimSpace(d.Auth) != ""
 }
 
 // mfaApproverDevices returns the devices that can actually be sent a challenge —
