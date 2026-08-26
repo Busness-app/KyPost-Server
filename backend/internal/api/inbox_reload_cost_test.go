@@ -50,15 +50,6 @@ func inboxTestOverviews(n int) []imapadapter.Overview {
 	return out
 }
 
-func testUserID(t *testing.T, srv *Server) string {
-	t.Helper()
-	all, err := srv.users.List()
-	if err != nil || len(all) == 0 {
-		t.Fatalf("no test user available: %v", err)
-	}
-	return all[0].ID
-}
-
 // The cache-first path cannot warm a mailbox smaller than the requested limit,
 // so it re-fetches the whole window every time. Documented rather than fixed:
 // the cache has no way to tell "small mailbox" from "partially cached window".
