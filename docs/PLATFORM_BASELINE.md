@@ -206,9 +206,11 @@ Two modes, account-wide (`backend/internal/state/store.go:39-42`):
 
 **Every client MUST implement `pull`.** It is the mode that works with no
 Firebase, no relay, and no third-party infrastructure in the notification path
-— it is what the F-Droid build uses, it is what a self-hoster who does not want
-notification metadata leaving their server uses, and it is the fallback when the
-relay is unavailable.
+— it is what a self-hoster who does not want notification metadata leaving their
+server uses, and it is the fallback when the relay is unavailable. Note that
+`deliveryMode` is account-wide, not per-device: flipping it to `pull` moves
+every one of that user's devices, which is why a Firebase-free build reaches for
+UnifiedPush rather than for `pull` alone.
 
 Server-side notes a client should know:
 
@@ -219,6 +221,39 @@ Server-side notes a client should know:
 - `deliveryMode` is delivered at registration (§1) and also on the pairing and
   preferences endpoints (`server_notifications.go:383,656,685,883`).
   `PUT /api/notifications/native/mode` changes it.
+
+### UnifiedPush: the WebPush key exchange is REQUIRED
+
+A device registering with `transport: "unifiedpush"` SHOULD send the WebPush
+(RFC 8291) subscription keys its connector generated for the endpoint, as two
+extra fields on the registration request:
+
+| Field | Value |
+| --- | --- |
+| `p256dh` | the uncompressed P-256 public point, 65 bytes, base64 |
+| `auth` | the 16-byte auth secret, base64 |
+
+Both or neither. A partial pair is rejected with `400`
+(`processor.ValidateWebPushKeys`), as is a `p256dh` that is not a point on the
+curve. Padded and unpadded, standard and URL alphabets are all accepted — the
+check mirrors what the sender would later accept, so validation can never refuse
+material that would have worked.
+
+Two things follow from sending them, and neither is optional in practice:
+
+1. **The payload is encrypted.** With keys stored, the server sends aes128gcm
+   ciphertext (`processor.UnifiedPushSender`). Without them it falls back to the
+   plaintext JSON POST it has always sent, so an older client keeps working —
+   but the notification's title and body then cross the distributor's broker in
+   the clear. A public broker is a third party; treat the fallback as a
+   compatibility shim, not a supported configuration.
+2. **Push-MFA depends on it.** `api.MFATransportEligible` allows an MFA
+   challenge over UnifiedPush only for a device that supplied keys. A challenge
+   carries the sign-in IP, the user agent and the match digits, so a keyless
+   UnifiedPush device is excluded and its user cannot approve logins from it.
+
+The VAPID identity is the one already used for browser Web Push; here it only
+signs the `Authorization` JWT, which most distributors do not check.
 
 **The known gap:** a device that registered in `push` mode and is waiting on FCM
 does not learn about a server-side flip to `pull` — the change does not reach
