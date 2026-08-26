@@ -23,7 +23,7 @@ func ensureFolderThenRun(d *goimap.Dialer, folder string, try func(folder string
 	return try(folder)
 }
 
-func (c *APIClient) saveMessage(ctx context.Context, draft DraftMessage, targets []string, flags []string, failureVerb string) error {
+func (c *APIClient) saveMessage(ctx context.Context, draft DraftMessage, use string, flags []string, failureVerb string) error {
 	c.opMu.Lock()
 	defer c.opMu.Unlock()
 
@@ -53,27 +53,25 @@ func (c *APIClient) saveMessage(ctx context.Context, draft DraftMessage, targets
 		}.Build()
 	}
 
-	var lastErr error
-	for _, folder := range targets {
-		err := ensureFolderThenRun(d, folder, func(folder string) error {
-			return d.Append(folder, flags, time.Now(), raw)
-		})
-		if err == nil {
-			return nil
-		}
-		lastErr = err
+	// The account's own Drafts/Sent folder, as the server names it. The list of
+	// spellings this replaced could not reach past its first entry: the helper
+	// behind it created the missing folder and reported success, so a server
+	// with INBOX.Sent got a second, top-level Sent that only this application
+	// ever wrote to.
+	folder, err := c.specialFolderLocked(d, use)
+	if err != nil {
+		return fmt.Errorf("failed to %s: %w", failureVerb, err)
 	}
-	if lastErr != nil {
-		return fmt.Errorf("failed to %s: %w", failureVerb, lastErr)
+	if err := d.Append(folder, flags, time.Now(), raw); err != nil {
+		return fmt.Errorf("failed to %s: %w", failureVerb, err)
 	}
-	return fmt.Errorf("failed to %s", failureVerb)
+	return nil
 }
 
 func (c *APIClient) SaveDraft(ctx context.Context, draft DraftMessage) error {
-	return c.saveMessage(ctx, draft, []string{"Drafts", "INBOX/Drafts", "INBOX.Drafts"}, []string{"\\Draft"}, "save draft")
+	return c.saveMessage(ctx, draft, useDrafts, []string{"\\Draft"}, "save draft")
 }
 
 func (c *APIClient) SaveSent(ctx context.Context, draft DraftMessage) error {
-	targets := []string{"Sent", "INBOX/Sent", "INBOX.Sent", "Sent Items", "INBOX/Sent Items", "INBOX.Sent Items"}
-	return c.saveMessage(ctx, draft, targets, []string{"\\Seen"}, "save sent mail")
+	return c.saveMessage(ctx, draft, useSent, []string{"\\Seen"}, "save sent mail")
 }

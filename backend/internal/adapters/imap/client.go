@@ -514,6 +514,13 @@ type APIClient struct {
 	// config location so one client can be built per user's credential file.
 	configPath    string
 	configKeyPath string
+
+	// folders caches the server's mailbox list — names, hierarchy delimiter and
+	// RFC 6154 special-use attributes — so message actions resolve the real
+	// trash/junk/archive folder without a LIST per message. Guarded by opMu,
+	// dropped by invalidateFolderIndexLocked whenever this client changes the
+	// folder tree.
+	folders *folderIndex
 }
 
 type storedIMAPConfig struct {
@@ -1374,9 +1381,33 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action, mai
 		})
 	}
 
+	// moveToSpecial routes to the folder the SERVER says serves this purpose,
+	// which is the whole point: the previous candidate lists ("Trash",
+	// "INBOX/Trash", "INBOX.Trash") were unreachable past their first entry,
+	// because the helper behind them created the missing folder and returned
+	// success. A server whose trash was INBOX.Trash therefore got a brand-new
+	// top-level Trash that nothing else on the account looks at.
+	moveToSpecial := func(use string) error {
+		folder, err := c.specialFolderLocked(d, use)
+		if err != nil {
+			return err
+		}
+		return d.MoveEmail(uid, folder)
+	}
+
+	// Does `mailbox` already name the account's trash? Asked of the resolved
+	// folder rather than a hardcoded list of spellings, so it stays true for a
+	// server that calls it something else entirely.
 	isTrashMailbox := func(name string) bool {
-		clean := strings.TrimSpace(strings.ToLower(name))
-		return clean == "trash" || clean == "inbox/trash" || clean == "inbox.trash"
+		clean := strings.TrimSpace(name)
+		if clean == "" {
+			return false
+		}
+		// Deliberately the non-creating lookup: this only decides whether the
+		// message is ALREADY in the trash, and an account with no trash folder
+		// should not acquire one because something asked a question about it.
+		trash, ok := c.existingSpecialFolderLocked(d, useTrash)
+		return ok && strings.EqualFold(clean, trash)
 	}
 
 	switch action {
@@ -1399,22 +1430,21 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action, mai
 				}
 			}
 		}
-		archiveTargets := []string{fmt.Sprintf("Archive/%d", year), fmt.Sprintf("Archive.%d", year)}
-		var lastErr error
-		for _, folder := range archiveTargets {
-			if err := moveToFolder(folder); err == nil {
-				return nil
-			} else {
-				lastErr = err
-			}
+		// The year lives under the account's own archive folder, spelled with
+		// the server's own hierarchy delimiter — the pair of "Archive/%d" and
+		// "Archive.%d" candidates was guessing at that delimiter, and only ever
+		// reached the first guess.
+		folder, err := c.childOfSpecialFolderLocked(d, useArchive, strconv.Itoa(year))
+		if err != nil {
+			return fmt.Errorf("imap move uid %d to yearly archive: %w", uid, err)
 		}
-		if lastErr != nil {
-			return fmt.Errorf("imap move uid %d to yearly archive: %w", uid, lastErr)
+		if err := d.MoveEmail(uid, folder); err != nil {
+			return fmt.Errorf("imap move uid %d to %q: %w", uid, folder, err)
 		}
 		return nil
 	case "spam":
-		if err := moveToFolder("Spam"); err != nil {
-			return fmt.Errorf("imap move uid %d to Spam: %w", uid, err)
+		if err := moveToSpecial(useJunk); err != nil {
+			return fmt.Errorf("imap move uid %d to the junk folder: %w", uid, err)
 		}
 		return nil
 	case "delete":
@@ -1424,17 +1454,8 @@ func (c *APIClient) ApplyInboxAction(ctx context.Context, messageID, action, mai
 			}
 			return nil
 		}
-		trashTargets := []string{"Trash", "INBOX/Trash", "INBOX.Trash"}
-		var lastErr error
-		for _, folder := range trashTargets {
-			if err := moveToFolder(folder); err == nil {
-				return nil
-			} else {
-				lastErr = err
-			}
-		}
-		if lastErr != nil {
-			return fmt.Errorf("imap move uid %d to Trash: %w", uid, lastErr)
+		if err := moveToSpecial(useTrash); err != nil {
+			return fmt.Errorf("imap move uid %d to the trash folder: %w", uid, err)
 		}
 		return nil
 	case "move":

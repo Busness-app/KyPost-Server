@@ -259,6 +259,7 @@ func (c *APIClient) CreateFolder(ctx context.Context, parent, name string) (stri
 		if containsMailboxPath(folders, name) {
 			return name, nil
 		}
+		c.invalidateFolderIndexLocked()
 		if err := d.CreateFolder(name); err != nil {
 			return "", fmt.Errorf("imap create folder %q: %w", name, err)
 		}
@@ -271,6 +272,7 @@ func (c *APIClient) CreateFolder(ctx context.Context, parent, name string) (stri
 		if containsMailboxPath(folders, candidate) {
 			return candidate, nil
 		}
+		c.invalidateFolderIndexLocked()
 		if err := d.CreateFolder(candidate); err == nil {
 			return candidate, nil
 		} else {
@@ -342,6 +344,7 @@ func (c *APIClient) DeleteFolder(ctx context.Context, folder string) error {
 	if err := d.SelectFolder(parent); err != nil {
 		return fmt.Errorf("imap select parent folder %q: %w", parent, err)
 	}
+	c.invalidateFolderIndexLocked()
 	if err := d.DeleteFolder(folder); err != nil {
 		return fmt.Errorf("imap delete folder %q: %w", folder, err)
 	}
@@ -405,6 +408,7 @@ func (c *APIClient) RenameFolder(ctx context.Context, folder, name string) (stri
 	if containsMailboxPath(folders, newPath) {
 		return "", fmt.Errorf("folder %q already exists", newPath)
 	}
+	c.invalidateFolderIndexLocked()
 	if err := d.RenameFolder(folder, newPath); err != nil {
 		return "", fmt.Errorf("imap rename folder %q to %q: %w", folder, newPath, err)
 	}

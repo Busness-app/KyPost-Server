@@ -273,6 +273,21 @@ func buildInboxTabScaffold(allowedKeywords []string) ([]string, map[string][]inb
 // 5000 was reachable only by hand and bought nothing but buffered message bodies.
 const maxInboxLimit = 500
 
+// inboxCursorFromQuery reads the two different questions `since` answers.
+// Conflating them was a bug. Sending `since` AT ALL selects the cursor protocol
+// (window diffing, a cursor in the response); whether the RESPONSE is a partial
+// delta depends on the cursor's VALUE. since=0 means "I have nothing, send the
+// lot" and comes back as a full window — see serveInbox's response.
+//
+// Its own function because the web client depends on since=0 selecting the
+// cursor protocol: that first request is how it obtains a cursor at all, and
+// without one it falls back to the cache-first path forever — which cannot warm
+// a mailbox holding fewer than `limit` messages, so every reload re-FETCHes
+// every body. Silent, and only visible as "the inbox is slow".
+func inboxCursorFromQuery(r *http.Request) (since int64, cursorSync bool) {
+	return parseNonNegativeInt64Query(r, "since"), strings.TrimSpace(r.URL.Query().Get("since")) != ""
+}
+
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 	// Clamped to what the client actually asks for. The cold path fetches every
 	// message body in ONE FETCH with no size pre-filter — unlike ListUnreadInbox
@@ -287,13 +302,7 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	mailbox := strings.TrimSpace(r.URL.Query().Get("mailbox"))
-	// Two different questions, and conflating them was a bug. Sending `since`
-	// at all selects the cursor protocol (window diffing, a cursor in the
-	// response); whether the RESPONSE is a partial delta depends on the cursor's
-	// VALUE. since=0 means "I have nothing, send the lot" and comes back as a
-	// full window — see serveInbox's response.
-	cursorSync := strings.TrimSpace(r.URL.Query().Get("since")) != ""
-	since := parseNonNegativeInt64Query(r, "since")
+	since, cursorSync := inboxCursorFromQuery(r)
 	// bodies=0 asks for the list without message bodies, which is the whole
 	// screen minus ~99% of its bytes: a 500-message window of ordinary HTML
 	// mail measures 13.3 MiB with bodies and 184 KiB without, and the list
