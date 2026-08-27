@@ -437,6 +437,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			// screen, and knowing it proves nothing on its own — approving
 			// still needs a paired device's credentials.
 			resp["matchDigits"] = ch.MatchDigits
+			// The credential /api/auth/mfa/push/finish requires. This response
+			// is the only place it appears; it is deliberately kept out of the
+			// notification payload, which every hop of the relay path reads.
+			resp["finishSecret"] = ch.FinishSecret
 		}
 		if pushRetryAfter > 0 {
 			// So the UI can say "you have requested too many approvals, try again
@@ -1008,6 +1012,10 @@ func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
 		if err != nil {
 			var lockErr *mailLockedOutError
 			if errors.As(err, &lockErr) {
+				if lockErr.kdfBusy {
+					writeKDFBusy(w)
+					return
+				}
 				w.Header().Set("Retry-After", strconv.Itoa(int(lockErr.retryAfter.Seconds())+1))
 				writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many failed attempts, try again later"})
 				return

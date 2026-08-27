@@ -108,7 +108,7 @@ func TestResolvePushWithMatchLocksOnFirstWrongDigits(t *testing.T) {
 	}
 
 	// Locked is not approved: no session may be minted from it.
-	if _, err := store.ConsumePushApproval(ch.ID); !errors.Is(err, ErrPushNotApproved) {
+	if _, err := store.ConsumePushApproval(ch.ID, ch.FinishSecret); !errors.Is(err, ErrPushNotApproved) {
 		t.Fatalf("ConsumePushApproval on locked = %v, want ErrPushNotApproved", err)
 	}
 }

@@ -27,6 +27,13 @@ const minGzipBytes = 1024
 // Range requests, both of which transparent re-encoding invalidates.
 type gzipWriter struct{ http.ResponseWriter }
 
+// Unwrap lets http.ResponseController reach the underlying connection's
+// SetReadDeadline/SetWriteDeadline through this wrapper. Without it the
+// controller sees only Header/Write/WriteHeader and returns ErrNotSupported,
+// which silently turns withUploadDeadline into a no-op for every client that
+// offers gzip — that is, every browser.
+func (g gzipWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
+
 func withGzip(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Added even when this response will not be compressed: the decision is

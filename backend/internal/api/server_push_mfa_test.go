@@ -123,6 +123,16 @@ func loginChallenge(t *testing.T, srv *Server, username, password string) (chall
 	return resp.ChallengeID, resp.Methods
 }
 
+// finishPush redeems an approved challenge the way the browser does: with the
+// finishSecret the login response handed it, read here off the live challenge.
+// That the response actually carries the secret, and that a caller without it
+// is refused, is TestPushFinishRequiresTheBrowsersSecret.
+func finishPush(srv *Server, challengeID string) *httptest.ResponseRecorder {
+	ch, _ := srv.mfaChallenges.Get(challengeID)
+	return doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
+		map[string]string{"challengeId": challengeID, "finishSecret": ch.FinishSecret})
+}
+
 func methodsContain(methods []string, want string) bool {
 	for _, m := range methods {
 		if m == want {
@@ -213,8 +223,7 @@ func TestPushApprovalLifecycle(t *testing.T) {
 				t.Fatalf("expected approved after response")
 			}
 
-			finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
-				map[string]string{"challengeId": challengeID})
+			finishRec := finishPush(srv, challengeID)
 			if finishRec.Code != http.StatusOK {
 				t.Fatalf("finish: status=%d body=%s", finishRec.Code, finishRec.Body.String())
 			}
@@ -232,8 +241,7 @@ func TestPushApprovalLifecycle(t *testing.T) {
 			if pollPush(srv, challengeID) != "denied" {
 				t.Fatalf("expected denied")
 			}
-			finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
-				map[string]string{"challengeId": challengeID})
+			finishRec := finishPush(srv, challengeID)
 			if finishRec.Code != http.StatusConflict {
 				t.Fatalf("finish after deny: status=%d, want 409", finishRec.Code)
 			}
@@ -472,12 +480,73 @@ func TestPushFinishRejectsAfterAdminClearsMFA(t *testing.T) {
 	}
 
 	// The already-approved challenge must no longer be redeemable.
-	finishRec := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
-		map[string]string{"challengeId": challengeID})
+	finishRec := finishPush(srv, challengeID)
 	if finishRec.Code != http.StatusUnauthorized {
 		t.Fatalf("finish after clear-mfa: status=%d, want 401, body=%s", finishRec.Code, finishRec.Body.String())
 	}
 	if cookies := finishRec.Result().Cookies(); findCookie(cookies, "kypost_session") != nil {
 		t.Fatalf("expected no session cookie minted after clear-mfa, got %+v", cookies)
+	}
+}
+
+// TestPushFinishRequiresTheBrowsersSecret pins the trust boundary the relay
+// crosses. challengeId rides the notification, so the relay operator, Google
+// and Apple all read it; if that alone redeemed an approval, any of them could
+// poll until the real user tapped Approve and then call /finish first — riding
+// a genuine approval, so number matching never comes into it. The credential is
+// finishSecret, which the login response hands the browser and which
+// dispatchPushChallenge is never even passed.
+func TestPushFinishRequiresTheBrowsersSecret(t *testing.T) {
+	srv := newTestServer(t)
+	const username, password = "tess", "pw-tess-testpassword"
+	u, err := srv.users.Create(context.Background(), username, password, users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	enrollTOTP(t, srv, u.ID)
+	deviceID, deviceSecret := pairApproverDevice(t, srv, u.ID, "dev-tess")
+	enablePush(t, srv, u.ID)
+
+	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": username, "password": password})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var login struct {
+		ChallengeID  string `json:"challengeId"`
+		FinishSecret string `json:"finishSecret"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &login); err != nil {
+		t.Fatalf("unmarshal login: %v", err)
+	}
+	if login.FinishSecret == "" || login.FinishSecret == login.ChallengeID {
+		t.Fatalf("login response must carry a finishSecret distinct from the challenge id, got %s", rec.Body.String())
+	}
+
+	if r := respondPush(srv, login.ChallengeID, deviceID, deviceSecret, true); r.Code != http.StatusOK {
+		t.Fatalf("respond approve: status=%d body=%s", r.Code, r.Body.String())
+	}
+
+	// Whoever read the challenge id out of the notification: no secret, and a
+	// guessed one. Neither may mint a session, and neither may burn the
+	// approval the real browser is about to redeem.
+	for _, secret := range []string{"", "not-the-secret"} {
+		bad := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
+			map[string]string{"challengeId": login.ChallengeID, "finishSecret": secret})
+		if bad.Code != http.StatusUnauthorized {
+			t.Fatalf("finish with secret %q: status=%d, want 401, body=%s", secret, bad.Code, bad.Body.String())
+		}
+		if cookies := bad.Result().Cookies(); findCookie(cookies, "kypost_session") != nil {
+			t.Fatalf("finish with secret %q minted a session cookie", secret)
+		}
+	}
+
+	good := doJSON(srv, srv.handlePushFinish, http.MethodPost, "/api/auth/mfa/push/finish",
+		map[string]string{"challengeId": login.ChallengeID, "finishSecret": login.FinishSecret})
+	if good.Code != http.StatusOK {
+		t.Fatalf("finish with the browser's own secret: status=%d body=%s", good.Code, good.Body.String())
+	}
+	if findCookie(good.Result().Cookies(), "kypost_session") == nil {
+		t.Fatalf("expected a session cookie for the browser that started the sign-in")
 	}
 }
