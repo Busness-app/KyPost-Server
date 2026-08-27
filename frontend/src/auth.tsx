@@ -12,6 +12,10 @@ export type AuthState = {
   ssoUsername?: string;
   ssoEmail?: string;
   ssoLinkedAt?: number;
+  // The subject outlives the credential: revocation keeps ssoSub so directory
+  // sync can still address the account. Read this, not ssoSub, to decide
+  // whether the link can sign anyone in.
+  ssoLinkRevoked?: boolean;
 };
 
 export const AuthContext = createContext<AuthState>({ authenticated: false });

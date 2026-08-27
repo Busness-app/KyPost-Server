@@ -706,7 +706,8 @@ Auth:
 Single Sign-On (OpenID Connect):
 
 - `GET /api/auth/sso-config` — public `{enabled, issuerUrl}` that gates the sign-in button. Never returns the client secret.
-- `GET /api/auth/oidc/login` (alias `/auth/sso/login`) — starts the authorization-code flow. `?link=true` links the provider identity to the *caller's own* session and requires one.
+- `GET /api/auth/oidc/login` (alias `/auth/sso/login`) — starts the authorization-code flow for signing in.
+- `POST /api/settings/sso/link` — links the provider identity to the *caller's own* account. Requires the account password (and the two-factor code, when one is enrolled) re-entered now, because a linked identity is a way to sign in.
 - `GET /api/auth/oidc/callback` (alias `/auth/sso/callback`) — verifies the ID token, then signs in, auto-provisions, or links by `sub`.
 - `POST /api/settings/sso/unlink`
 - `GET|PUT /api/admin/sso` (admin only. The provider configuration.)
@@ -843,7 +844,6 @@ Notifications (all scoped to the signed-in user):
 - `PUT /api/notifications/native/devices/{deviceId}/mfa` (allow a device to approve sign-ins)
 - `GET /api/notifications/native/pull` (app-pull delivery mode)
 - `POST /api/notifications/native/unpair`
-- `POST /api/notifications/desktop/pair` (see [docs/Desktop_Pairing.md](docs/Desktop_Pairing.md))
 
 Logs (admin only):
 
@@ -994,6 +994,8 @@ inside the container. On systems without systemd, schedule
 
 - Check the logs with `docker compose logs -f kypost-server`.
 - Confirm that the model pull completed for your `OLLAMA_MODEL`.
+- `ollama-model.log` in `/kypost/logs` holds the model installer's own output,
+  including its pull retries; `ollama.log` holds the Ollama runtime's.
 - If necessary, restart with `docker compose restart`.
 
 ### IMAP connection issues
@@ -1032,7 +1034,7 @@ inside the container. On systems without systemd, schedule
 - `scripts/`: container entrypoint, supervisord orchestration, Ollama model management, host-side update helpers
 - `push-relay-shared/`: shared Cloudflare Worker logic for the push relays — API-key issuance, rate limiting, device-token ownership, and the `RelayCoordinator` Durable Object
 - `worker/`, `worker-apns/`: the FCM and APNs deployments of that relay. Each holds only its provider's `handleSend` plus its wrangler config; everything else is imported from `push-relay-shared/`
-- `docs/`: the contracts the client repos implement against — [PLATFORM_BASELINE.md](docs/PLATFORM_BASELINE.md) (what a client must implement to call itself a KyPost client), [E2E_PGP.md](docs/E2E_PGP.md), [Desktop_Pairing.md](docs/Desktop_Pairing.md), [WKD_Publishing.md](docs/WKD_Publishing.md), [WEBMAIL_HANDOFF.md](docs/WEBMAIL_HANDOFF.md), [INBOX_PAYLOAD_HANDOFF.md](docs/INBOX_PAYLOAD_HANDOFF.md) — plus the operator guide [Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md)
+- `docs/`: the contracts the client repos implement against — [PLATFORM_BASELINE.md](docs/PLATFORM_BASELINE.md) (what a client must implement to call itself a KyPost client), [E2E_PGP.md](docs/E2E_PGP.md), [WKD_Publishing.md](docs/WKD_Publishing.md), [WEBMAIL_HANDOFF.md](docs/WEBMAIL_HANDOFF.md), [INBOX_PAYLOAD_HANDOFF.md](docs/INBOX_PAYLOAD_HANDOFF.md) — plus the operator guide [Reverse_Proxy_Networking.md](docs/Reverse_Proxy_Networking.md)
 - `share/`: host-side Ollama model blob cache, bind-mounted into the container. Never committed
 - `testdata/`, `fonts/`: test fixtures and the bundled webfonts
 - `Dockerfile`: single image build (backend, frontend, Ollama runtime)

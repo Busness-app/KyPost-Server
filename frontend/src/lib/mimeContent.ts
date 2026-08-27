@@ -14,9 +14,10 @@
  *
  * Mirrors the server implementation (backend/internal/pgpmail/mime.go) rather
  * than inventing a second set of rules: same first-part-wins selection, same
- * text/rfc822-headers skip, same depth cap. Change one, change both — a
- * client-protected account and a server-side one must not render the same
- * message differently.
+ * text/rfc822-headers skip, same depth cap. That parser renders nothing now
+ * that server-side decryption is retired, but it is still the reference this
+ * one is checked against: change one, change both, and add the case to
+ * testdata/mime-corpus.json, which both test suites execute.
  */
 
 /** Which MIME part the body was taken from. Matches the server's wire values. */
@@ -150,7 +151,11 @@ function decodePart(body: string, encoding: string, charset?: string): string {
         return body;
       }
     case "quoted-printable": {
-      const qp = body.replace(/=\r?\n/g, "");
+      // Whitespace at the end of an encoded line is transport padding (RFC 2045
+      // 6.7 rule 3) and is dropped before the soft line breaks are joined —
+      // mime/quotedprintable does the same, and keeping it here made the two
+      // decoders return different bytes for one signed part.
+      const qp = body.replace(/[ \t]+(?=\r?\n|$)/g, "").replace(/=\r?\n/g, "");
       const bytes: number[] = [];
       for (let i = 0; i < qp.length; ) {
         if (

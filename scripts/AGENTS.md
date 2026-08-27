@@ -49,6 +49,7 @@ All files under `scripts/`.
 - `go test ./internal/app/ -run BootstrapAdmin` covers the seeding contract: a usable admin account, `600` on both secret files, idempotency across restarts, and the `users.json`-already-exists upgrade path
 - `sh -n scripts/crash-exit.sh` parses; `docker compose config -q` fails without `KYPOST_BIND` and succeeds with it
 - `bash -n scripts/update-host.sh scripts/install-auto-update.sh` parses and `bash scripts/update-host.test.sh` covers no-op and health-failure rollback without Docker; do not run the installer in CI because it enables user lingering via `loginctl` and installs live units under `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user`
+- `bash scripts/supervisord.test.sh` parses `supervisord.conf` and fails if two supervised streams share a log file; supervisord rotates each program's streams independently, so a shared path discards one side's lines
 - `bash scripts/test-relays.sh` runs every relay test; it must report a nonzero file count, since finding nothing is a failure, not a pass
 - On a fresh install `bootstrap.sh` must produce a valid `admin.env` with a non-empty scrypt hash owned by `kypost`; on an install with `users.json` or `admin.env` present it must leave both untouched
 

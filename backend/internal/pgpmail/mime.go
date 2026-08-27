@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/textproto"
 	"strings"
 
@@ -437,6 +438,11 @@ const (
 // protected-headers legacy-display part) are skipped. Anything unrecognized
 // degrades gracefully to an attachment rather than erroring, so the message
 // still renders.
+//
+// Nothing in production calls this: server-side decryption is retired
+// (api.decryptPGPPayload never opens a key), so frontend/src/lib/mimeContent.ts
+// is the only parser that renders mail. This is the reference that corpus holds
+// it to — see mime_corpus_test.go.
 func ParseContent(content []byte) (body, mode string, attachments []mailmsg.Attachment, err error) {
 	if int64(len(content)) > mailmsg.MaxInboundMessageBytes {
 		return "", "", nil, mailmsg.ErrMessageTooLarge
@@ -456,11 +462,7 @@ func ParseContent(content []byte) (body, mode string, attachments []mailmsg.Atta
 
 	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") || params["boundary"] == "" {
-		if strings.EqualFold(header.Get("Content-Transfer-Encoding"), "base64") {
-			if decoded, decErr := decodeBase64Body(rest); decErr == nil {
-				rest = decoded
-			}
-		}
+		rest = decodeBody(rest, header.Get("Content-Transfer-Encoding"))
 		return string(rest), bodyMode(header.Get("Content-Type")), nil, nil
 	}
 
@@ -513,8 +515,13 @@ func parseMultipart(r io.Reader, boundary string, depth int, body, mode *string,
 		}
 
 		partType := part.Header.Get("Content-Type")
-		if mediaType, params, mtErr := mime.ParseMediaType(partType); mtErr == nil &&
-			strings.HasPrefix(mediaType, "multipart/") && params["boundary"] != "" {
+		// Media types are case-insensitive (RFC 2045 5.1) and the browser
+		// mirror lowercases before comparing, so classify on the parsed media
+		// type — never on the raw header. Comparing the raw header with
+		// HasPrefix made "TEXT/PLAIN" an attachment here and the display body
+		// there, and let "text/plainish" win as the body here and nowhere else.
+		partMedia, params, mtErr := mime.ParseMediaType(partType)
+		if mtErr == nil && strings.HasPrefix(partMedia, "multipart/") && params["boundary"] != "" {
 			if err := parseMultipart(part, params["boundary"], depth+1, body, mode, attachments); err != nil {
 				return err
 			}
@@ -528,16 +535,12 @@ func parseMultipart(r io.Reader, boundary string, depth int, body, mode *string,
 			}
 			return fmt.Errorf("pgpmail: read part body: %w", err)
 		}
-		if strings.EqualFold(part.Header.Get("Content-Transfer-Encoding"), "base64") {
-			if decoded, decErr := decodeBase64Body(partBody); decErr == nil {
-				partBody = decoded
-			}
-		}
+		partBody = decodeBody(partBody, part.Header.Get("Content-Transfer-Encoding"))
 
 		// The protected-headers legacy-display part carries only a human-
 		// readable Subject line for non-aware clients; never show it as body
 		// or attachment.
-		if strings.HasPrefix(partType, "text/rfc822-headers") {
+		if strings.EqualFold(partMedia, "text/rfc822-headers") {
 			continue
 		}
 		// A text part without a filename is a body candidate (or, in a
@@ -546,7 +549,7 @@ func parseMultipart(r io.Reader, boundary string, depth int, body, mode *string,
 		// misfiled as attachments. A text part *with* a filename is a genuine
 		// text attachment (e.g. note.txt) and falls through below.
 		filename := partFileName(part)
-		if filename == "" && (strings.HasPrefix(partType, "text/plain") || strings.HasPrefix(partType, "text/html") || partType == "") {
+		if filename == "" && (strings.EqualFold(partMedia, "text/plain") || strings.EqualFold(partMedia, "text/html") || partType == "") {
 			if *body == "" {
 				*body = string(partBody)
 				// The winning part's own type decides the render mode. Taken
@@ -570,6 +573,24 @@ func parseMultipart(r io.Reader, boundary string, depth int, body, mode *string,
 	return nil
 }
 
-func decodeBase64Body(body []byte) ([]byte, error) {
-	return io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(body)))
+// decodeBody reverses a part's Content-Transfer-Encoding, decoding exactly what
+// the browser mirror decodes (decodePart in mimeContent.ts). Malformed input
+// keeps the raw bytes rather than losing the part, which is what the browser
+// does too. mime/multipart decodes quoted-printable parts itself and drops the
+// header, so only the single-part path reaches that case here.
+func decodeBody(body []byte, encoding string) []byte {
+	var r io.Reader
+	switch {
+	case strings.EqualFold(encoding, "base64"):
+		r = base64.NewDecoder(base64.StdEncoding, bytes.NewReader(body))
+	case strings.EqualFold(encoding, "quoted-printable"):
+		r = quotedprintable.NewReader(bytes.NewReader(body))
+	default:
+		return body
+	}
+	decoded, err := io.ReadAll(r)
+	if err != nil {
+		return body
+	}
+	return decoded
 }
