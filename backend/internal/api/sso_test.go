@@ -48,19 +48,34 @@ func setupSSOTestServer(t *testing.T) (*Server, *ssotest.IdP) {
 func runSSOFlow(t *testing.T, srv *Server, idp *ssotest.IdP, sessionCookie *http.Cookie, link bool) *httptest.ResponseRecorder {
 	t.Helper()
 
-	path := "/api/auth/oidc/login"
+	// A link starts at the gated POST — the public GET cannot begin one — so the
+	// helper pays the step-up the real Security page pays.
+	var rec *httptest.ResponseRecorder
+	authorizeURL := ""
 	if link {
-		path += "?link=true"
-	}
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.Host = ssoTestHost
-	if sessionCookie != nil {
-		req.AddCookie(sessionCookie)
-	}
-	srv.handleSSOLogin(rec, req)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("handleSSOLogin status = %d (%s), want 302", rec.Code, strings.TrimSpace(rec.Body.String()))
+		rec = startSSOLink(t, srv, sessionCookie, linkTestPassword, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("handleSSOLinkStart status = %d (%s), want 200", rec.Code, strings.TrimSpace(rec.Body.String()))
+		}
+		var body struct {
+			AuthorizeURL string `json:"authorizeUrl"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode link start response: %v", err)
+		}
+		authorizeURL = body.AuthorizeURL
+	} else {
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil)
+		req.Host = ssoTestHost
+		if sessionCookie != nil {
+			req.AddCookie(sessionCookie)
+		}
+		srv.handleSSOLogin(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("handleSSOLogin status = %d (%s), want 302", rec.Code, strings.TrimSpace(rec.Body.String()))
+		}
+		authorizeURL = rec.Header().Get("Location")
 	}
 
 	var stateCookie *http.Cookie
@@ -70,20 +85,20 @@ func runSSOFlow(t *testing.T, srv *Server, idp *ssotest.IdP, sessionCookie *http
 		}
 	}
 	if stateCookie == nil {
-		t.Fatal("handleSSOLogin did not set the SSO state cookie")
+		t.Fatal("the SSO flow did not set the state cookie")
 	}
 
-	code, state := idp.Authorize(t, rec.Header().Get("Location"))
+	code, state := idp.Authorize(t, authorizeURL)
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet,
+	cbReq := httptest.NewRequest(http.MethodGet,
 		fmt.Sprintf("/api/auth/oidc/callback?code=%s&state=%s", code, state), nil)
-	req.Host = ssoTestHost
-	req.AddCookie(stateCookie)
+	cbReq.Host = ssoTestHost
+	cbReq.AddCookie(stateCookie)
 	if sessionCookie != nil {
-		req.AddCookie(sessionCookie)
+		cbReq.AddCookie(sessionCookie)
 	}
-	srv.handleSSOCallback(rec, req)
+	srv.handleSSOCallback(rec, cbReq)
 	return rec
 }
 
@@ -288,13 +303,10 @@ func TestSSOLinkRequiresAnAuthenticatedSession(t *testing.T) {
 		t.Fatalf("a forged state cookie linked SSO identity %q to the victim's account", after.SSOSub)
 	}
 
-	// Link mode must also be refused outright when nobody is signed in.
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login?link=true", nil)
-	req.Host = ssoTestHost
-	srv.handleSSOLogin(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("link login without a session: status = %d, want 401", rec.Code)
+	// Starting a link with nobody signed in is refused at the only route that
+	// can start one. The public GET no longer has a link mode at all.
+	if got := startSSOLink(t, srv, nil, "victim-password-123", ""); got.Code != http.StatusUnauthorized {
+		t.Errorf("link start without a session: status = %d, want 401", got.Code)
 	}
 }
 
@@ -302,10 +314,11 @@ func TestSSOLinkRequiresAnAuthenticatedSession(t *testing.T) {
 func TestSSOLinkBindsTheCallersOwnAccount(t *testing.T) {
 	srv, idp := setupSSOTestServer(t)
 
-	u, err := srv.users.Create(context.Background(), "linker", "linker-password-123", users.RoleUser)
+	u, err := srv.users.Create(context.Background(), "linker", linkTestPassword, users.RoleUser)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
+	clearMustChangePassword(t, srv, u.ID)
 	rec := httptest.NewRecorder()
 	if err := srv.startSession(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", nil), u.ID); err != nil {
 		t.Fatalf("startSession: %v", err)
@@ -584,6 +597,7 @@ func TestSSOLinkCookieIsBoundToItsOwnSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create attacker: %v", err)
 	}
+	clearMustChangePassword(t, srv, attacker.ID)
 	victim, err := srv.users.Create(context.Background(), "victim2", "victim-password-123", users.RoleAdmin)
 	if err != nil {
 		t.Fatalf("create victim: %v", err)
@@ -602,14 +616,20 @@ func TestSSOLinkCookieIsBoundToItsOwnSession(t *testing.T) {
 		return c
 	}
 
-	// The attacker starts a link flow in their own session...
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login?link=true", nil)
-	req.Host = ssoTestHost
-	req.AddCookie(session(attacker.ID))
-	srv.handleSSOLogin(rec, req)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("link login status = %d: %s", rec.Code, rec.Body.String())
+	// The attacker starts a link flow in their own session, paying the step-up
+	// with their OWN credential — which they have, so the gate does not stop
+	// them here. What must stop them is the tag: the cookie it mints is useless
+	// in anyone else's session.
+	attackerSession := session(attacker.ID)
+	rec := startSSOLink(t, srv, attackerSession, "attacker-password-123", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("link start status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		AuthorizeURL string `json:"authorizeUrl"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode link start response: %v", err)
 	}
 	var stateCookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
@@ -620,16 +640,16 @@ func TestSSOLinkCookieIsBoundToItsOwnSession(t *testing.T) {
 	if stateCookie == nil {
 		t.Fatal("no state cookie")
 	}
-	code, state := idp.Authorize(t, rec.Header().Get("Location"))
+	code, state := idp.Authorize(t, body.AuthorizeURL)
 
 	// ...then plants that state cookie in the victim's browser.
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet,
+	cbReq := httptest.NewRequest(http.MethodGet,
 		fmt.Sprintf("/api/auth/oidc/callback?code=%s&state=%s", code, state), nil)
-	req.Host = ssoTestHost
-	req.AddCookie(stateCookie)
-	req.AddCookie(session(victim.ID))
-	srv.handleSSOCallback(rec, req)
+	cbReq.Host = ssoTestHost
+	cbReq.AddCookie(stateCookie)
+	cbReq.AddCookie(session(victim.ID))
+	srv.handleSSOCallback(rec, cbReq)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for a link cookie from another session", rec.Code)
@@ -679,4 +699,99 @@ func TestSSORedirectURIFollowsConfiguredBaseURL(t *testing.T) {
 	if got := loc.Query().Get("redirect_uri"); got != want {
 		t.Errorf("authorization request redirect_uri = %q, want %q", got, want)
 	}
+}
+
+// startSSOLink posts the step-up that authorizes one link, the way the Security
+// page does. Exported through the handler rather than minting a ticket directly,
+// so a test cannot pass by proving something the browser never proves.
+func startSSOLink(t *testing.T, srv *Server, sessionCookie *http.Cookie, password, code string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"password": password, "code": code})
+	if err != nil {
+		t.Fatalf("marshal link request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/sso/link", bytes.NewReader(body))
+	req.Host = ssoTestHost
+	if sessionCookie != nil {
+		req.AddCookie(sessionCookie)
+		srv.sessMu.RLock()
+		sess, ok := srv.sessions[sessionCookie.Value]
+		srv.sessMu.RUnlock()
+		if ok {
+			req.Header.Set("X-CSRF-Token", sess.CSRFToken)
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.withAuth(srv.handleSSOLinkStart)(rec, req)
+	return rec
+}
+
+// requestWithSession builds the minimal request ssoSessionTag needs, so a test
+// can derive the tag a given session cookie would produce.
+func requestWithSession(sessionCookie *http.Cookie) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	if sessionCookie != nil {
+		req.AddCookie(sessionCookie)
+	}
+	return req
+}
+
+// linkModeFromStateCookie returns the mode field a link start wrote, so a test
+// can replay the same ticket.
+func linkModeFromStateCookie(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	for _, c := range rec.Result().Cookies() {
+		if c.Name != ssoCookieName {
+			continue
+		}
+		parts := strings.Split(c.Value, "|")
+		if len(parts) < 4 {
+			t.Fatalf("state cookie has %d fields, want 4", len(parts))
+		}
+		return parts[3]
+	}
+	t.Fatal("no SSO state cookie")
+	return ""
+}
+
+// runSSOFlowWithMode drives the provider round trip against a state cookie this
+// test wrote itself, which is what an attacker holding the session can do.
+func runSSOFlowWithMode(t *testing.T, srv *Server, idp *ssotest.IdP, sessionCookie *http.Cookie, mode string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil)
+	req.Host = ssoTestHost
+	srv.handleSSOLogin(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("handleSSOLogin status = %d, want 302", rec.Code)
+	}
+	var stateCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == ssoCookieName {
+			stateCookie = c
+		}
+	}
+	if stateCookie == nil {
+		t.Fatal("handleSSOLogin did not set the SSO state cookie")
+	}
+	// Same state/verifier/nonce, attacker-chosen mode.
+	parts := strings.Split(stateCookie.Value, "|")
+	if len(parts) < 4 {
+		t.Fatalf("state cookie has %d fields, want 4", len(parts))
+	}
+	stateCookie.Value = strings.Join([]string{parts[0], parts[1], parts[2], mode}, "|")
+
+	code, state := idp.Authorize(t, rec.Header().Get("Location"))
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/auth/oidc/callback?code=%s&state=%s", code, state), nil)
+	req.Host = ssoTestHost
+	req.AddCookie(stateCookie)
+	if sessionCookie != nil {
+		req.AddCookie(sessionCookie)
+	}
+	srv.handleSSOCallback(rec, req)
+	return rec
 }

@@ -187,9 +187,12 @@ func TestConcurrentAddDecisionLosesNothing(t *testing.T) {
 	}
 }
 
-// TestConcurrentPairingCodeConsumedOnce pins single-use redemption against a
-// race. Validate-then-delete as two statements would let both callers win.
-func TestConcurrentPairingCodeConsumedOnce(t *testing.T) {
+// TestConcurrentUpdateNotifyLatchFiresOnce pins the one-email-per-version latch
+// against a race between the api and daemon processes. It is also what pins the
+// DSN's _txlock=immediate: read-then-write inside one transaction is exactly the
+// shape a DEFERRED BEGIN cannot upgrade under contention, and busy_timeout does
+// not retry that failure.
+func TestConcurrentUpdateNotifyLatchFiresOnce(t *testing.T) {
 	dir := t.TempDir()
 	a, err := New(dir)
 	if err != nil {
@@ -202,29 +205,25 @@ func TestConcurrentPairingCodeConsumedOnce(t *testing.T) {
 	}
 	defer b.Close()
 
-	if err := a.SetDesktopPairingCode("SHARED", time.Hour); err != nil {
-		t.Fatalf("SetDesktopPairingCode: %v", err)
-	}
-
-	var wins int32
+	var notified int32
 	var wg sync.WaitGroup
 	for _, s := range []*Store{a, b} {
 		wg.Add(1)
 		go func(store *Store) {
 			defer wg.Done()
-			ok, err := store.ConsumeDesktopPairingCode("SHARED")
+			notify, err := store.SetServerUpdateNotified("0.9.9")
 			if err != nil {
-				t.Errorf("ConsumeDesktopPairingCode: %v", err)
+				t.Errorf("SetServerUpdateNotified: %v", err)
 				return
 			}
-			if ok {
-				atomic.AddInt32(&wins, 1)
+			if notify {
+				atomic.AddInt32(&notified, 1)
 			}
 		}(s)
 	}
 	wg.Wait()
 
-	if wins != 1 {
-		t.Fatalf("%d callers consumed the same pairing code; it must be redeemable exactly once", wins)
+	if notified != 1 {
+		t.Fatalf("%d callers were told to notify for one version; the latch must fire exactly once", notified)
 	}
 }

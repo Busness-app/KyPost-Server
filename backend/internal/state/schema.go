@@ -165,18 +165,6 @@ CREATE TABLE IF NOT EXISTS deferrals (
 	last_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS deferrals_first_at ON deferrals(first_at);
-
-CREATE TABLE IF NOT EXISTS desktop_pairing_codes (
-	code       TEXT PRIMARY KEY,
-	expires_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS desktop_pairing_attempts (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	code       TEXT NOT NULL DEFAULT '',
-	attempt_at TEXT NOT NULL DEFAULT '',
-	success    INTEGER NOT NULL DEFAULT 0
-);
 `
 
 func openDB(path string) (*sql.DB, error) {

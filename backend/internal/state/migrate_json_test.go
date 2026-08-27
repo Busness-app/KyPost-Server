@@ -15,7 +15,6 @@ import (
 func TestMigrationImportsEveryFieldFromJSON(t *testing.T) {
 	dir := t.TempDir()
 	seenAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 
 	sf := stateFile{
 		LastCheckpoint: "42",
@@ -35,8 +34,6 @@ func TestMigrationImportsEveryFieldFromJSON(t *testing.T) {
 		AICreditsExhausted:          true,
 		AICreditsExhaustedAt:        seenAt,
 		OllamaUpdateNotifiedVersion: "0.32.3",
-		DesktopPairingCodes:         map[string]string{"CODE1": future},
-		DesktopPairingAttempts:      []PairingAttempt{{Code: "hash", AttemptAt: seenAt, Success: true}},
 	}
 	writeJSON(t, filepath.Join(dir, "state.json"), sf)
 	writeJSON(t, filepath.Join(dir, "decisions.json"), []Decision{
@@ -86,12 +83,6 @@ func TestMigrationImportsEveryFieldFromJSON(t *testing.T) {
 	}
 	if notify, _ := s.SetOllamaUpdateNotified("0.32.3"); notify {
 		t.Error("SetOllamaUpdateNotified re-notified for a version already recorded before migration")
-	}
-	if !s.ValidateDesktopPairingCode("CODE1") {
-		t.Error("unexpired pairing code did not survive migration")
-	}
-	if attempts := s.ListDesktopPairingAttempts(); len(attempts) != 1 || !attempts[0].Success {
-		t.Errorf("pairing attempts = %+v", attempts)
 	}
 	if ds := s.Decisions(0); len(ds) != 2 {
 		t.Errorf("decisions = %d, want 2", len(ds))

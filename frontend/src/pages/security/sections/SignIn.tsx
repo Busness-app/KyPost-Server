@@ -71,6 +71,8 @@ export function SignIn({
   const [showDisable, setShowDisable] = useState(false);
   const [regeneratePassword, setRegeneratePassword] = useState("");
   const [showRegenerate, setShowRegenerate] = useState(false);
+  const [linkPassword, setLinkPassword] = useState("");
+  const [linkCode, setLinkCode] = useState("");
 
   useEffect(() => {
     getJSON<{ enabled: boolean; issuerUrl: string }>("/api/auth/sso-config")
@@ -80,6 +82,30 @@ export function SignIn({
       })
       .catch((error: unknown) => setSSOConfigError(toErrorMessage(error, "unknown error")));
   }, []);
+
+  // Linking is a POST, not a link, because the server gates it on a re-entered
+  // credential (and the second factor, when one is enrolled) before it will
+  // authorize the redirect — a session alone used to be enough to bind a
+  // directory identity to this account. The server answers with the provider
+  // URL to navigate to; it cannot redirect us itself from a fetch.
+  async function submitLinkSSO(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setMessage("");
+    try {
+      const credential = await deriveCredential("", linkPassword);
+      const res = await postJSON<{ authorizeUrl: string }>("/api/settings/sso/link", {
+        code: linkCode.trim(),
+        ...credentialFields(credential)
+      });
+      setLinkPassword("");
+      setLinkCode("");
+      window.location.href = res.authorizeUrl;
+    } catch (err) {
+      setMessage(toErrorMessage(err, "Failed to start SSO linking. Check your password."));
+      setBusy(false);
+    }
+  }
 
   async function unlinkSSO() {
     if (!confirm("Are you sure you want to unlink your SSO account?")) return;
@@ -286,23 +312,45 @@ export function SignIn({
                 <p className="sec-muted" style={{ marginBottom: "0.75rem" }}>
                   Connect your central KySignOn / Authentik identity for 1-click single sign-on.
                 </p>
-                <div className="sec-actions">
-                  <a
-                    href="/api/auth/oidc/login?link=true"
-                    className="button"
-                    style={{
-                      display: "inline-block",
-                      background: "#4deeea",
-                      color: "#0d0f14",
-                      fontWeight: 600,
-                      textDecoration: "none",
-                      borderRadius: "4px",
-                      padding: "0.5rem 1rem",
-                    }}
-                  >
-                    Link SSO Identity
-                  </a>
-                </div>
+                <form onSubmit={submitLinkSSO}>
+                  <div>Confirm your password</div>
+                  <input
+                    type="password"
+                    value={linkPassword}
+                    onChange={(e) => setLinkPassword(e.target.value)}
+                    autoComplete="current-password"
+                    required
+                  />
+                  {status?.totpEnabled ? (
+                    <>
+                      <div>Two-factor code</div>
+                      <input
+                        type="text"
+                        value={linkCode}
+                        onChange={(e) => setLinkCode(e.target.value)}
+                        autoComplete="one-time-code"
+                        inputMode="numeric"
+                        required
+                      />
+                    </>
+                  ) : null}
+                  <div className="sec-actions">
+                    <button
+                      type="submit"
+                      className="button"
+                      disabled={busy}
+                      style={{
+                        background: "#4deeea",
+                        color: "#0d0f14",
+                        fontWeight: 600,
+                        borderRadius: "4px",
+                        padding: "0.5rem 1rem",
+                      }}
+                    >
+                      Link SSO Identity
+                    </button>
+                  </div>
+                </form>
               </div>
             )}
           </div>

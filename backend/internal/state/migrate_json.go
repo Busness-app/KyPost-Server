@@ -158,29 +158,6 @@ func importStateFile(tx *sql.Tx, sf stateFile) error {
 			return err
 		}
 	}
-
-	// Expired codes were pruned on load before; keep that, so migration does
-	// not resurrect a code the old code would have dropped.
-	now := time.Now().UTC()
-	for code, expiresAt := range sf.DesktopPairingCodes {
-		t, err := time.Parse(time.RFC3339, expiresAt)
-		if err != nil || !t.After(now) {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO desktop_pairing_codes(code, expires_at) VALUES(?, ?)
-			 ON CONFLICT(code) DO NOTHING`, code, expiresAt); err != nil {
-			return err
-		}
-	}
-
-	for _, a := range sf.DesktopPairingAttempts {
-		if _, err := tx.Exec(
-			`INSERT INTO desktop_pairing_attempts(code, attempt_at, success) VALUES(?, ?, ?)`,
-			a.Code, a.AttemptAt, boolToInt(a.Success)); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 

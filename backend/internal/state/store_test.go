@@ -585,33 +585,6 @@ func TestDecisionsSortByInstantNotString(t *testing.T) {
 	}
 }
 
-// TestValidateDesktopPairingCodeDoesNotHalfDeleteExpired pins that
-// validating an expired code is a pure read: it must not leave the in-memory
-// map disagreeing with disk.
-func TestValidateDesktopPairingCodeDoesNotHalfDeleteExpired(t *testing.T) {
-	dir := t.TempDir()
-	s, err := New(dir)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if err := s.SetDesktopPairingCode("code-abc", time.Millisecond); err != nil {
-		t.Fatalf("SetDesktopPairingCode: %v", err)
-	}
-	time.Sleep(5 * time.Millisecond)
-	if s.ValidateDesktopPairingCode("code-abc") {
-		t.Fatal("expired code validated as good")
-	}
-	// A second reader (fresh Store over the same dir) must see exactly what
-	// the first one saw — no silent divergence between memory and disk.
-	s2, err := New(dir)
-	if err != nil {
-		t.Fatalf("New (second): %v", err)
-	}
-	if s2.ValidateDesktopPairingCode("code-abc") {
-		t.Fatal("expired code validated as good on reload")
-	}
-}
-
 // TestSeenAndCheckpointReportReadFailures is the regression test for
 // log-and-return-the-zero-value.
 //

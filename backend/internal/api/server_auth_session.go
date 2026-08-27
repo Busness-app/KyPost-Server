@@ -47,6 +47,16 @@ type Session struct {
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 	CSRFToken string
+	// SSOLinkGrantedAt is when this session last proved its credential and
+	// second factor at handleSSOLinkStart. It authorizes exactly one SSO link
+	// and is cleared when that link is written, so it cannot be replayed.
+	//
+	// Server-side deliberately. The obvious alternative — a signed ticket in the
+	// state cookie — has to be unforgeable precisely BECAUSE the cookie is
+	// attacker-writable: whoever holds the session controls their own cookie
+	// jar. A fact recorded on the session cannot be written by the caller at
+	// all, so there is nothing to forge and no token to leak.
+	SSOLinkGrantedAt time.Time
 }
 
 const (

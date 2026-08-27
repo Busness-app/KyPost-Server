@@ -745,17 +745,26 @@ func (s *Server) sweepDeviceIndex() int {
 }
 
 // revokeAllUserCredentials cuts off every way this account can currently
-// authenticate. There are three, not two:
+// authenticate. There are four, not two:
 //
-//  1. web sessions       (revokeUserSessions)
-//  2. paired devices     (revokeUserDevices)
-//  3. CardDAV Basic Auth (davCredentials)
+//  1. web sessions          (revokeUserSessions)
+//  2. paired devices        (revokeUserDevices)
+//  3. CardDAV Basic Auth    (davCredentials)
+//  4. a linked SSO identity (users.UnlinkSSO)
 //
 // The third was missed by every admin revocation path, because withDAVBasicAuth
 // consults its verified-credential cache BEFORE it looks the account up and
 // checks u.Active. A deactivated account therefore kept full read/write on its
 // contacts over CardDAV for up to davCredentialTTL — bounded at 90s, but
 // silently.
+//
+// The fourth was missed for the same shape of reason: handleSSOCallback
+// resolves a sign-in purely through GetBySSOSub plus an Active check, so a
+// stored subject is a credential and nothing here touched it. An attacker who
+// bound their own directory identity to a hijacked session's account kept a
+// working front door through the victim's password change, through an admin
+// reset, and through clear-MFA. A reactivated account has to re-link, exactly
+// as it has to re-pair its devices and re-create its CardDAV password.
 //
 // One function rather than three lines repeated in
 // deactivate/reset-password/clear-MFA, so a fourth credential type is added only
@@ -790,6 +799,16 @@ func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken s
 	if err := os.Remove(s.userCardDAVAuthPath(u.ID)); err != nil && !os.IsNotExist(err) {
 		s.logger.Error("failed to revoke carddav credential", "user_id", u.ID, "error", err.Error())
 		errs = append(errs, fmt.Errorf("remove CardDAV credential: %w", err))
+	}
+	// Drop the linked SSO identity. UnlinkSSO re-reads users.json inside the
+	// store's file lock, so it cannot clobber a write that landed after the
+	// caller's copy of u was taken — the password change is exactly that case.
+	// An account with no link is already in the state this asks for, so the
+	// write is simply a no-op; ErrNotFound means the record is gone, which is
+	// nothing left to revoke.
+	if err := s.users.UnlinkSSO(u.ID); err != nil && !errors.Is(err, users.ErrNotFound) {
+		s.logger.Error("failed to revoke sso link", "user_id", u.ID, "error", err.Error())
+		errs = append(errs, fmt.Errorf("unlink SSO identity: %w", err))
 	}
 	// Rotate the subscriber ID last, once the devices are gone.
 	//

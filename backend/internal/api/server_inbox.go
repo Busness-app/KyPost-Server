@@ -826,6 +826,16 @@ func (s *Server) handleInboxFolders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxInboxActionIDs bounds one batch action request.
+//
+// The 1 MiB body limit is not a bound on work: a message id is a handful of
+// bytes, so a single body carries tens of thousands of them, and each one is a
+// separate IMAP command issued serially against the account's one cached
+// client. meterAccountWrite bounds how many requests an account makes, not how
+// much upstream work one request performs. A client with more than this to act
+// on pages it, exactly as the mobile-sync push does.
+const maxInboxActionIDs = 500
+
 func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
 	mailClient, err := s.mailFor(r)
 	if err != nil {
@@ -905,6 +915,13 @@ func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "at least one messageId is required", http.StatusBadRequest)
 		return
 	}
+	if len(uniqueIDs) > maxInboxActionIDs {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+			"error":         "too many messageIds in one request",
+			"maxMessageIds": maxInboxActionIDs,
+		})
+		return
+	}
 
 	type inboxActionFailure struct {
 		MessageID string `json:"messageId"`
@@ -913,6 +930,14 @@ func (s *Server) handleInboxActions(w http.ResponseWriter, r *http.Request) {
 	failures := make([]inboxActionFailure, 0)
 	processed := 0
 	for _, messageID := range uniqueIDs {
+		// A cancelled request must stop taking the client's operation lock.
+		// The adapter's own ctx check only fails the one call, which this
+		// loop records as a per-message failure and carries on, so without
+		// this the whole batch still contends with the poller for a caller
+		// that has already gone away.
+		if r.Context().Err() != nil {
+			break
+		}
 		// label/unlabel bypass ApplyInboxAction's switch entirely (it has no
 		// concept of a keyword parameter) and call the dedicated keyword
 		// methods directly, keeping ApplyInboxAction's folder-fallback logic

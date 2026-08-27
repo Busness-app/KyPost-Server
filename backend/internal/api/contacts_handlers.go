@@ -355,6 +355,13 @@ func (s *Server) handleContactsBulkDelete(w http.ResponseWriter, r *http.Request
 		http.Error(w, "at least one id is required", http.StatusBadRequest)
 		return
 	}
+	if len(uniqueIDs) > maxContactsBulkDeleteIDs {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+			"error":  "too many ids in one request",
+			"maxIds": maxContactsBulkDeleteIDs,
+		})
+		return
+	}
 
 	type bulkDeleteFailure struct {
 		ID    string `json:"id"`
@@ -362,21 +369,33 @@ func (s *Server) handleContactsBulkDelete(w http.ResponseWriter, r *http.Request
 	}
 	ac, _ := authFromContext(r)
 	failures := make([]bulkDeleteFailure, 0)
-	processed := 0
+
+	// Collect first, write once — the same reason handleContactsSync batches:
+	// store.Delete takes the file lock, re-reads contacts.json and rewrites the
+	// whole file with an fsync, so this loop used to be one full-file rewrite
+	// per id, blocking every other reader of the address book throughout.
+	ops := make([]contacts.BatchOp, 0, len(uniqueIDs))
+	suppress := make([]string, 0)
 	for _, uid := range uniqueIDs {
 		emails, err := discoveryCreatedEmails(store, uid)
 		if err != nil {
 			failures = append(failures, bulkDeleteFailure{ID: uid, Error: err.Error()})
 			continue
 		}
-		if _, err := store.Delete(uid); err != nil {
-			failures = append(failures, bulkDeleteFailure{ID: uid, Error: err.Error()})
-			continue
+		ops = append(ops, contacts.BatchOp{Delete: true, UID: uid})
+		suppress = append(suppress, emails...)
+	}
+	processed := len(ops)
+	if err := store.ApplyBatch(ops); err != nil {
+		// All or nothing: nothing was deleted, so every id in the batch failed.
+		for _, op := range ops {
+			failures = append(failures, bulkDeleteFailure{ID: op.UID, Error: err.Error()})
 		}
-		processed++
-		if len(emails) > 0 {
-			s.suppressDiscoveryOnDelete(ac.UserID, emails)
-		}
+		processed = 0
+		suppress = nil
+	}
+	if len(suppress) > 0 {
+		s.suppressDiscoveryOnDelete(ac.UserID, suppress)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -508,6 +527,12 @@ type contactsSyncPushRequest struct {
 // bounds the size of the single transaction that replaced it. A client with more
 // than this to push pages it.
 const maxContactsSyncChanges = 500
+
+// maxContactsBulkDeleteIDs bounds one bulk delete from the web UI. Same figure
+// and same reason as maxContactsSyncChanges — it sizes a single ApplyBatch
+// transaction — but its own constant because the two endpoints have separate
+// clients that page off separate limits.
+const maxContactsBulkDeleteIDs = maxContactsSyncChanges
 
 func (s *Server) handleContactsSync(w http.ResponseWriter, r *http.Request) {
 	userID, _, ok, retryAfter := s.deviceAuthFromRequest(r)
