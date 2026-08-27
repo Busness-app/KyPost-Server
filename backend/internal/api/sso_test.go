@@ -861,24 +861,6 @@ func requestWithSession(sessionCookie *http.Cookie) *http.Request {
 	return req
 }
 
-// linkModeFromStateCookie returns the mode field a link start wrote, so a test
-// can replay the same ticket.
-func linkModeFromStateCookie(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	for _, c := range rec.Result().Cookies() {
-		if c.Name != ssoCookieName {
-			continue
-		}
-		parts := strings.Split(c.Value, "|")
-		if len(parts) < 4 {
-			t.Fatalf("state cookie has %d fields, want 4", len(parts))
-		}
-		return parts[3]
-	}
-	t.Fatal("no SSO state cookie")
-	return ""
-}
-
 // runSSOFlowWithMode drives the provider round trip against a state cookie this
 // test wrote itself, which is what an attacker holding the session can do.
 func runSSOFlowWithMode(t *testing.T, srv *Server, idp *ssotest.IdP, sessionCookie *http.Cookie, mode string) *httptest.ResponseRecorder {
