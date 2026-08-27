@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,11 @@ const (
 	maxDeviceTextLen   = 256
 	maxUserAgentLen    = 512
 )
+
+// Every character an FCM or APNs device token can contain, and nothing that is
+// URL syntax. Mirrors TOKEN_CHARSET in push-relay-shared/push-relay-common.ts;
+// UnifiedPush endpoints are URLs and are validated by their own check instead.
+var nativePushTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
 
 // clampField trims s and cuts it to max bytes. Used on stored metadata (user
 // agent, device name, app version) where over-length is not worth refusing the
@@ -497,6 +503,14 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		}
 		webPushP256DH = strings.TrimSpace(req.P256DH)
 		webPushAuth = strings.TrimSpace(req.Auth)
+	} else if !nativePushTokenPattern.MatchString(deviceToken) {
+		// FCM and APNs tokens are opaque identifiers, and the APNs relay puts
+		// one in a URL path (/3/device/<token>), where `../../3/device/<victim>`
+		// would address someone else's device. The relay refuses that itself;
+		// this keeps a token that can only be a forgery attempt out of the store
+		// in the first place, including from a relay deployment that is behind.
+		http.Error(w, "invalid deviceToken", http.StatusBadRequest)
+		return
 	}
 	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(claims.Sub)), []byte(subscriberID)) != 1 {
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)

@@ -24,114 +24,6 @@ func attachmentRequestParams(r *http.Request) (mailbox string, uid int, err erro
 	return mailbox, uid, nil
 }
 
-// isArmoredPGPMessage delegates to the IMAP adapter's check rather than
-// spelling the prefix out again. This file used to carry its own copy with a
-// comment claiming the two were "kept the same" — they were not: the adapter's
-// test is anchored at byte 0 (gopenpgp's regexp is ^-anchored) while this one
-// trimmed leading whitespace first, so a part could be ciphertext here and not
-// there. Two spellings of "is this ciphertext" is how the listing and the
-// download came to disagree; there is now one.
-//
-// It is also byte-wise. The previous form converted the whole attachment to a
-// string to look at its first 27 bytes, which for a 25 MiB part is a 25 MiB
-// copy on every list and every download.
-func isArmoredPGPMessage(content []byte) bool {
-	return imapadapter.IsArmoredPGPMessage(content)
-}
-
-// looksLikeEncryptedEnvelope reports whether a message's outer parts have the
-// shape of PGP/MIME: every part is one an envelope could contain.
-//
-// This deliberately does NOT count parts. It used to require exactly one, which
-// never matched a real encrypted message: enmime files the ciphertext under
-// both Attachments and Inlines (it carries an inline disposition AND a
-// filename), goimap concatenates the two, so the same part arrives here twice.
-// The listing therefore only looked inside encrypted mail in tests, where the
-// fake supplied a single part. Pinned by TestLooksLikeEncryptedEnvelope.
-//
-// Requiring EVERY part to be envelope-typed is what keeps an ordinary message
-// carrying an encrypted file out: document.pgp next to report.xlsx has a part
-// no envelope could contain, so it is left alone and its attachments are served
-// as themselves. This matches imap.pgpEnvelopePayload, the CANDIDATE half of
-// the inbox listing's test — change one, change both, or a message shows a
-// padlock in the list and refuses to open its attachments.
-//
-// Deliberately NOT the other half. The inbox listing confirms a candidate
-// against the message's real root Content-Type (imap/pgp_root_header.go),
-// because the padlock and the classification skip are decided from it and a
-// forged shape must not earn either. Here the confirmation is on CONTENT
-// instead, further down: a false positive is fetched and then rejected by
-// isArmoredPGPMessage, and if it somehow were not, the payload is a blob this
-// server cannot decrypt and the path falls back to the outer parts. Both roads
-// end at "serve what is actually there", so paying for a second header fetch on
-// every attachment listing would buy nothing.
-//
-// A cheap prefilter on metadata already in hand. Without it, confirming a
-// message is encrypted would mean fetching its first part on every attachment
-// listing — doubling the IMAP work for the ordinary unencrypted message, which
-// is nearly all of them. A false positive here costs one fetch and is then
-// rejected on content by isArmoredPGPMessage; a false negative just leaves
-// today's behavior.
-func looksLikeEncryptedEnvelope(infos []imapadapter.AttachmentInfo) bool {
-	if len(infos) == 0 {
-		return false
-	}
-	for _, info := range infos {
-		if !imapadapter.IsPGPEnvelopePartType(info.MimeType) {
-			return false
-		}
-	}
-	return true
-}
-
-// messageIsEncryptedEnvelope asks the same question serveAttachmentList asks,
-// so the download path cannot decide a message is encrypted when the listing
-// decided it was not. A listing failure answers false: serving the bytes the
-// reader asked for is the safe direction when the message's shape is unknown.
-func (s *Server) messageIsEncryptedEnvelope(r *http.Request, mailClient imapadapter.Client, mailbox string, uid int) bool {
-	infos, err := mailClient.ListAttachments(r.Context(), mailbox, uid)
-	if err != nil {
-		s.logger.Error("attachment envelope check failed", "mailbox", mailbox, "uid", strconv.Itoa(uid), "error", err.Error())
-		return false
-	}
-	return looksLikeEncryptedEnvelope(infos)
-}
-
-// pgpInnerAttachments decrypts an armored payload and returns the attachments
-// inside it. Reports false when this server cannot open it — no auth context,
-// no key, a client-protected account (whose ciphertext is the browser's to
-// unwrap), or a decrypt failure. Every one of those falls back to serving the
-// outer parts, which is what happened before.
-func (s *Server) pgpInnerAttachments(r *http.Request, armored []byte) ([]mailmsg.Attachment, bool) {
-	ac, ok := authFromContext(r)
-	if !ok {
-		return nil, false
-	}
-	// No sender address, so no signer keys are offered and the signature verdict
-	// comes back false. That is correct here: this path reads only Attachments,
-	// and a verdict nothing consumes must not be computed from an unbound key set.
-	result := s.decryptPGPPayload(ac.UserID, string(armored), "")
-	if result.KeepPayload || result.DecryptError != "" {
-		return nil, false
-	}
-	return result.Attachments, true
-}
-
-// attachmentInfos renders decrypted attachments in the wire shape
-// ListAttachments produces, so both paths answer identically.
-func attachmentInfos(attachments []mailmsg.Attachment) []imapadapter.AttachmentInfo {
-	infos := make([]imapadapter.AttachmentInfo, 0, len(attachments))
-	for i, a := range attachments {
-		infos = append(infos, imapadapter.AttachmentInfo{
-			Index:    i,
-			Name:     a.Name,
-			MimeType: a.MimeType,
-			Size:     len(a.Content),
-		})
-	}
-	return infos
-}
-
 // handleMailAttachmentList returns attachment metadata for one message.
 // GET /api/mail/attachments?sub=&hash=&mailbox=&messageId=
 func (s *Server) handleMailAttachmentList(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +39,10 @@ func (s *Server) handleMailAttachmentList(w http.ResponseWriter, r *http.Request
 	s.serveAttachmentList(w, r, mailClient)
 }
 
+// Both endpoints serve the message's outer MIME parts and nothing else, so each
+// request costs exactly one IMAP fetch. A PGP/MIME message's outer part is the
+// armored ciphertext: the server holds no key it will open under either
+// protection mode, so the browser unwraps it and indexes what is inside.
 func (s *Server) serveAttachmentList(w http.ResponseWriter, r *http.Request, mailClient imapadapter.Client) {
 	mailbox, uid, err := attachmentRequestParams(r)
 	if err != nil {
@@ -158,16 +54,6 @@ func (s *Server) serveAttachmentList(w http.ResponseWriter, r *http.Request, mai
 		s.logger.Error("attachment list failed", "mailbox", mailbox, "uid", strconv.Itoa(uid), "error", err.Error())
 		http.Error(w, "failed to list attachments", http.StatusBadGateway)
 		return
-	}
-	// An encrypted message's outer parts are all ciphertext (the same armored
-	// part, usually listed twice — see looksLikeEncryptedEnvelope); the files
-	// the reader asked for are inside it.
-	if looksLikeEncryptedEnvelope(infos) {
-		if _, content, ferr := mailClient.GetAttachment(r.Context(), mailbox, uid, 0); ferr == nil && isArmoredPGPMessage(content) {
-			if inner, ok := s.pgpInnerAttachments(r, content); ok {
-				infos = attachmentInfos(inner)
-			}
-		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "attachments": infos})
 }
@@ -199,38 +85,6 @@ func (s *Server) serveAttachmentDownload(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	info, content, err := mailClient.GetAttachment(r.Context(), mailbox, uid, index)
-
-	// The index the reader clicked addresses whatever serveAttachmentList
-	// showed them. For an encrypted message that is the DECRYPTED list, so the
-	// index has to be resolved inside the ciphertext: index 0 would otherwise
-	// land on the armored payload itself and anything past the outer parts
-	// would miss entirely. Both mean the same thing here.
-	//
-	// Probing part 0 only in those two cases keeps the ordinary unencrypted
-	// download at the single fetch it has always been.
-	probe := content
-	if errors.Is(err, imapadapter.ErrAttachmentNotFound) {
-		_, probe, _ = mailClient.GetAttachment(r.Context(), mailbox, uid, 0)
-	}
-	// Armored content is not on its own permission to decrypt and re-index.
-	// An ordinary message can carry an encrypted FILE — archive.pgp among a
-	// report and a spreadsheet — and that file is what the reader asked for,
-	// listed at this very index. Treating it as an envelope would hand back
-	// some unrelated attachment from inside it, or a 404, for a file the list
-	// says exists. The message must be an envelope by the same test the
-	// listing used, or the bytes are served as themselves.
-	if isArmoredPGPMessage(probe) && s.messageIsEncryptedEnvelope(r, mailClient, mailbox, uid) {
-		if inner, ok := s.pgpInnerAttachments(r, probe); ok {
-			if index >= len(inner) {
-				http.Error(w, "attachment not found", http.StatusNotFound)
-				return
-			}
-			a := inner[index]
-			info = imapadapter.AttachmentInfo{Index: index, Name: a.Name, MimeType: a.MimeType, Size: len(a.Content)}
-			content, err = a.Content, nil
-		}
-	}
-
 	if errors.Is(err, imapadapter.ErrAttachmentNotFound) {
 		http.Error(w, "attachment not found", http.StatusNotFound)
 		return

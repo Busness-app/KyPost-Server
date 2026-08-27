@@ -339,17 +339,20 @@ func (s *Server) handlePushPoll(w http.ResponseWriter, r *http.Request) {
 
 // handlePushFinish mints the session for an approved push challenge, consuming
 // (deleting) the challenge atomically. Not approved => 409; missing/expired =>
-// 401. Authenticated solely by possession of the challengeId (no session cookie),
-// exactly like the TOTP finish path.
+// 401. No session cookie, like the TOTP finish path — but the challengeId is
+// NOT the credential here: it rides the notification through the relay and
+// Google or Apple, so the credential is finishSecret, which the login response
+// gave to this browser alone (see mfa.Challenge.FinishSecret).
 func (s *Server) handlePushFinish(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ChallengeID string `json:"challengeId"`
+		ChallengeID  string `json:"challengeId"`
+		FinishSecret string `json:"finishSecret"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	userID, err := s.mfaChallenges.ConsumePushApproval(strings.TrimSpace(req.ChallengeID))
+	userID, err := s.mfaChallenges.ConsumePushApproval(strings.TrimSpace(req.ChallengeID), strings.TrimSpace(req.FinishSecret))
 	if err != nil {
 		if errors.Is(err, mfa.ErrPushNotApproved) {
 			http.Error(w, "challenge not approved", http.StatusConflict)

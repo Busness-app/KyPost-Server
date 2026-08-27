@@ -182,3 +182,50 @@ it("shows only one status region when a login that requires a password change is
   expect(statusRegions[0].textContent).toContain("at least 14 characters");
   expect(screen.queryByText(/password change required/i)).toBeNull();
 });
+
+// The challenge id rides the push notification, so every hop of the relay path
+// reads it; the server therefore redeems an approval on the finishSecret it
+// hands this browser instead (see mfa.Challenge.FinishSecret). If this page
+// ever stops echoing that secret, push sign-in fails at the last step with the
+// phone already tapped — so pin the request body, not just the happy path.
+it("redeems an approved push challenge with the login response's finishSecret", async () => {
+  const finishBodies: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/api/auth/captcha-config")) {
+        return Promise.resolve(jsonResponse(404, { error: "not found" }));
+      }
+      if (url.startsWith("/api/auth/login")) {
+        return Promise.resolve(
+          jsonResponse(200, {
+            mfaRequired: true,
+            challengeId: "chal-1",
+            methods: ["push", "totp"],
+            matchDigits: "42",
+            finishSecret: "the-browsers-own-secret"
+          })
+        );
+      }
+      if (url.startsWith("/api/auth/mfa/push/poll")) {
+        return Promise.resolve(jsonResponse(200, { status: "approved" }));
+      }
+      if (url.startsWith("/api/auth/mfa/push/finish")) {
+        finishBodies.push(String(init?.body ?? ""));
+        return Promise.resolve(jsonResponse(200, { ok: true }));
+      }
+      return Promise.resolve(jsonResponse(200, {}));
+    })
+  );
+  const user = userEvent.setup();
+  renderLoginPage();
+
+  await submit(user);
+
+  await waitFor(() => expect(finishBodies).toHaveLength(1), { timeout: 5000 });
+  expect(JSON.parse(finishBodies[0])).toEqual({
+    challengeId: "chal-1",
+    finishSecret: "the-browsers-own-secret"
+  });
+});

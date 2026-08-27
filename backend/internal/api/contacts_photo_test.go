@@ -50,3 +50,39 @@ func TestContactPhotoGetAcceptsDeviceCredentials(t *testing.T) {
 		t.Fatalf("status = %d, want %d (device auth should reach the handler); body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
+
+// The photo URL is /api/contacts/{uid}/photo with no cache buster, so an
+// immutable response pinned a replaced (or deleted) photo on screen for a
+// year — an explicit reload included. Revalidation must stay possible.
+func TestContactPhotoGetRevalidates(t *testing.T) {
+	srv := newTestServer(t)
+	const userID = "user-1"
+
+	store, err := srv.userContactsStore(userID)
+	if err != nil {
+		t.Fatalf("userContactsStore: %v", err)
+	}
+	ref, err := srv.storeContactPhoto(userID, testPNG(t, 7))
+	if err != nil {
+		t.Fatalf("storeContactPhoto: %v", err)
+	}
+	c, err := store.Upsert(contacts.Contact{FormattedName: "Photo Test", PhotoRef: ref})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.handleContactPhotoGet(rec, httptest.NewRequest(http.MethodGet, "/api/contacts/"+c.UID+"/photo", nil), userID, c)
+	if got := rec.Header().Get("Cache-Control"); got != "private, no-cache" {
+		t.Fatalf("Cache-Control = %q, want %q", got, "private, no-cache")
+	}
+
+	// no-cache is not no-store: the conditional request still gets a 304.
+	rec2 := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/contacts/"+c.UID+"/photo", nil)
+	req.Header.Set("If-Modified-Since", rec.Header().Get("Last-Modified"))
+	srv.handleContactPhotoGet(rec2, req, userID, c)
+	if rec2.Code != http.StatusNotModified {
+		t.Fatalf("conditional GET status = %d, want %d", rec2.Code, http.StatusNotModified)
+	}
+}

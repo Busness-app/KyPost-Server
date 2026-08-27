@@ -5,6 +5,7 @@ package mfa
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"sync"
@@ -90,6 +91,20 @@ type Challenge struct {
 	// budget is one: the first wrong number locks push for this challenge (see
 	// maxMatchAttempts).
 	MatchAttempts int
+
+	// FinishSecret is what proves a caller of ConsumePushApproval is the
+	// browser that started this sign-in. It is handed to that browser in the
+	// login response and to nobody else.
+	//
+	// The ID cannot serve: it travels in the push payload, so the relay
+	// operator and FCM/APNs all read it, and an approved challenge redeemed on
+	// the ID alone mints a full session. Whoever holds the notification only
+	// has to poll until the real user taps Approve and then call /finish first.
+	// Number matching does not cover this — the attacker never answers it, they
+	// ride the genuine user's correct approval. The secret never enters the
+	// payload, so no hop of the notification path can redeem the approval it
+	// carries.
+	FinishSecret string
 }
 
 // Store is a concurrency-safe in-memory challenge map.
@@ -140,10 +155,15 @@ func (s *Store) Len() int {
 	return len(s.m)
 }
 
-// Create mints a new challenge for userID with a fresh random ID.
+// Create mints a new challenge for userID with a fresh random ID and a fresh
+// random FinishSecret.
 func (s *Store) Create(userID string) (Challenge, error) {
 	idBytes := make([]byte, 24)
 	if _, err := rand.Read(idBytes); err != nil {
+		return Challenge{}, err
+	}
+	secretBytes := make([]byte, 24)
+	if _, err := rand.Read(secretBytes); err != nil {
 		return Challenge{}, err
 	}
 	matchDigits, decoyDigits, err := newNumberMatch()
@@ -152,12 +172,13 @@ func (s *Store) Create(userID string) (Challenge, error) {
 	}
 	now := time.Now()
 	ch := Challenge{
-		ID:          hex.EncodeToString(idBytes),
-		UserID:      userID,
-		CreatedAt:   now,
-		ExpiresAt:   now.Add(challengeTTL),
-		MatchDigits: matchDigits,
-		DecoyDigits: decoyDigits,
+		ID:           hex.EncodeToString(idBytes),
+		UserID:       userID,
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(challengeTTL),
+		MatchDigits:  matchDigits,
+		DecoyDigits:  decoyDigits,
+		FinishSecret: hex.EncodeToString(secretBytes),
 	}
 	s.mu.Lock()
 	s.m[ch.ID] = ch
@@ -319,16 +340,24 @@ func (s *Store) PushStatus(id string) (string, bool) {
 	return ch.PushStatus, true
 }
 
-// ConsumePushApproval atomically verifies the challenge is approved and, if so,
-// deletes it (single-use, mirroring the TOTP path) and returns its UserID.
-// Returns ErrChallengeNotFound if missing/expired, ErrPushNotApproved if the
-// challenge is still pending or was denied.
-func (s *Store) ConsumePushApproval(id string) (string, error) {
+// ConsumePushApproval atomically verifies the challenge is approved and that
+// the caller holds its FinishSecret and, if so, deletes it (single-use,
+// mirroring the TOTP path) and returns its UserID. Returns ErrChallengeNotFound
+// if missing/expired, ErrPushNotApproved if the challenge is still pending or
+// was denied.
+//
+// A wrong secret reports ErrChallengeNotFound and leaves the challenge intact:
+// it is not this caller's challenge to resolve, and the browser that owns it
+// must still be able to redeem its own approval.
+func (s *Store) ConsumePushApproval(id, secret string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ch, ok := s.m[id]
 	if !ok || time.Now().After(ch.ExpiresAt) {
 		delete(s.m, id)
+		return "", ErrChallengeNotFound
+	}
+	if subtle.ConstantTimeCompare([]byte(secret), []byte(ch.FinishSecret)) != 1 {
 		return "", ErrChallengeNotFound
 	}
 	if ch.PushStatus != PushApproved {

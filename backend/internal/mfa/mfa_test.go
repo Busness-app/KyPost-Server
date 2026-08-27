@@ -199,7 +199,7 @@ func TestPushChallengeLifecycle(t *testing.T) {
 		t.Fatalf("second ResolvePushWithMatch = %q err=%v, want approved+ErrChallengeAlreadyResolved", status2, err)
 	}
 
-	userID, err := st.ConsumePushApproval(ch.ID)
+	userID, err := st.ConsumePushApproval(ch.ID, ch.FinishSecret)
 	if err != nil || userID != "user-1" {
 		t.Fatalf("ConsumePushApproval = %q err=%v, want user-1", userID, err)
 	}
@@ -218,7 +218,7 @@ func TestPushConsumeRequiresApproval(t *testing.T) {
 	if status, ok := st.PushStatus(ch.ID); !ok || status != PushDenied {
 		t.Fatalf("status = %q ok=%v, want denied", status, ok)
 	}
-	if _, err := st.ConsumePushApproval(ch.ID); !errors.Is(err, ErrPushNotApproved) {
+	if _, err := st.ConsumePushApproval(ch.ID, ch.FinishSecret); !errors.Is(err, ErrPushNotApproved) {
 		t.Fatalf("ConsumePushApproval on denied = %v, want ErrPushNotApproved", err)
 	}
 }
@@ -321,5 +321,29 @@ func TestSupersedeUnansweredPushKeepsAnswersAndTheNewChallenge(t *testing.T) {
 		if _, ok := s.Get(id); !ok {
 			t.Fatalf("%s challenge must survive superseding", name)
 		}
+	}
+}
+
+// TestPushConsumeRequiresTheFinishSecret pins that the challenge id alone never
+// redeems an approval. The id travels in the push payload — the relay operator
+// and the platform push service both read it — so possession of it proves only
+// that the caller was somewhere on the notification path.
+func TestPushConsumeRequiresTheFinishSecret(t *testing.T) {
+	st := NewStore()
+	ch, _ := st.Create("user-3")
+	if ch.FinishSecret == "" || ch.FinishSecret == ch.ID {
+		t.Fatalf("Create must mint a FinishSecret distinct from the id, got %q", ch.FinishSecret)
+	}
+	if _, err := st.ResolvePushWithMatch(ch.ID, "dev-1", true, ch.MatchDigits); err != nil {
+		t.Fatalf("ResolvePushWithMatch approve: %v", err)
+	}
+	for _, secret := range []string{"", ch.ID, "wrong"} {
+		if _, err := st.ConsumePushApproval(ch.ID, secret); !errors.Is(err, ErrChallengeNotFound) {
+			t.Fatalf("ConsumePushApproval with %q = %v, want ErrChallengeNotFound", secret, err)
+		}
+	}
+	// And none of those attempts may have burned the browser's own approval.
+	if userID, err := st.ConsumePushApproval(ch.ID, ch.FinishSecret); err != nil || userID != "user-3" {
+		t.Fatalf("ConsumePushApproval with the real secret = %q err=%v, want user-3", userID, err)
 	}
 }
