@@ -363,7 +363,7 @@ Update it in the same change that breaks or adds a contract above.
 | Enrollment code, 14 chars / 70 bits | 0.3.0 | 0.3.0 | 0.3.3 | ✅ | ✅ |
 | Device credential headers | 0.3.0 | n/a | 0.3.3 | ✅ | ✅ |
 | `pull` delivery mode | 0.3.0 | n/a | 0.3.3 | ✅ | ✅ |
-| Contact sync, 500-change batching | 0.3.0 | n/a | 0.3.3 | unverified | ❌ sends one request |
+| Contact sync, 500-change batching | 0.3.0 | n/a | ❌ sends one request | unverified | 0.4.0 |
 | `bodies=0` + `/api/mail/body` | 0.4.0 | 0.4.0 | not adopted | not adopted | not adopted |
 
 The Apple client is unreleased; `0.4.0` is the version it will first ship as,
@@ -399,9 +399,17 @@ to that repo root):
 - Enrollment display grouping (`4-3-4-3`) — `DeviceEnrollmentCode.swift:92-105`, corrected 2026-08-27; it was two groups of seven before that
 - Device credential headers — `KyPost/Data/Networking/RelayAuth.swift`
 - Delivery modes, `push`/`pull` — `KyPost/Domain/Push/PullPollingScheduler.swift`
-- Contact sync, **no** 500-change batching — `KyPost/Domain/Repositories/ContactSyncRepository.swift:175`
-  sends the whole queued array in one request, so a first sync of a large
-  address book gets a 413 at the worst possible moment.
+- Contact sync, 500-change batching — `KyPost/Domain/Repositories/ContactSyncRepository.swift`
+  pages at the limit, holding `baseCursor` still across pages and reconciling
+  after each one. Added 2026-08-27; it sent one unbounded request before that.
+
+**Android does not batch this either**, contrary to the `0.3.3` this row
+carried until 2026-08-27. `ContactSyncRepository.kt:67` pushes the whole
+pending list in one request, there is no `chunked`/`windowed` anywhere in its
+contacts path, and `ContactSyncClient.kt` maps 413 through the generic
+`Retryable` branch — so an address book over the limit does not fail once and
+stop, it retries forever. The Apple client is currently the only one that
+pages.
 
 `unverified` remains honest for the one row still marked that way: only the
 contact-sync pull path was read, and the push-path 500-change batching limit
