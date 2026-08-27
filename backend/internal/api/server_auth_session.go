@@ -756,6 +756,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"ssoUsername":        u.SSOUsername,
 		"ssoEmail":           u.SSOEmail,
 		"ssoLinkedAt":        u.SSOLinkedAt,
+		"ssoLinkRevoked":     u.SSOLinkRevoked(),
 	})
 }
 

@@ -449,6 +449,82 @@ func TestSyncWebhook(t *testing.T) {
 	}
 }
 
+// Deactivation revokes the SSO link, and every event here is addressed by the
+// directory's user id — which IS the SSO subject. So revocation must not erase
+// the subject: an account that cannot be found is an account the directory can
+// never reactivate, and applySyncEvent answers 200 for a subject it does not
+// know, so the directory stops retrying and never learns.
+func TestSyncWebhookCanReactivateAfterRevocation(t *testing.T) {
+	srv := newTestServer(t)
+	srv.pairingSecret = "super-secret-pairing-key"
+
+	user := map[string]any{
+		"id": "sso-sub-rehired", "username": "rehired_user",
+		"role": "user", "active": true, "email": "rehired@urlxl.com",
+	}
+	if rec := postSync(t, srv, syncEvent("user.created", user)); rec.Code != http.StatusOK {
+		t.Fatalf("user.created status = %d: %s", rec.Code, rec.Body.String())
+	}
+	created, err := srv.users.GetBySSOSub("sso-sub-rehired")
+	if err != nil {
+		t.Fatalf("GetBySSOSub after create: %v", err)
+	}
+
+	suspended := map[string]any{
+		"id": "sso-sub-rehired", "username": "rehired_user",
+		"role": "user", "active": false, "email": "rehired@urlxl.com",
+	}
+	if rec := postSync(t, srv, syncEvent("user.updated", suspended)); rec.Code != http.StatusOK {
+		t.Fatalf("suspend status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if u, _ := srv.users.Get(created.ID); u.Active {
+		t.Fatal("the account is still active after user.updated{active:false}")
+	}
+	// The address the next event will arrive on still resolves.
+	if _, err := srv.users.GetBySSOSub("sso-sub-rehired"); err != nil {
+		t.Fatalf("revocation lost the subject the directory addresses: %v", err)
+	}
+
+	// The directory rehires them. This is the event that used to be answered
+	// 200 while doing nothing at all.
+	if rec := postSync(t, srv, syncEvent("user.updated", user)); rec.Code != http.StatusOK {
+		t.Fatalf("reactivate status = %d: %s", rec.Code, rec.Body.String())
+	}
+	back, err := srv.users.Get(created.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !back.Active {
+		t.Fatal("user.updated{active:true} reported success without reactivating the account")
+	}
+
+	// A role change is addressed the same way, and stops applying for the same
+	// reason if the subject is gone.
+	promoted := map[string]any{
+		"id": "sso-sub-rehired", "username": "rehired_user",
+		"role": "admin", "active": true, "email": "rehired@urlxl.com",
+	}
+	if rec := postSync(t, srv, syncEvent("user.updated", promoted)); rec.Code != http.StatusOK {
+		t.Fatalf("promote status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if u, _ := srv.users.Get(created.ID); u.Role != users.RoleAdmin {
+		t.Fatalf("role = %q after promotion, want admin", u.Role)
+	}
+
+	// And a second user.created for the same directory id stays idempotent
+	// rather than colliding on the username or provisioning a duplicate.
+	before, err := srv.users.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if rec := postSync(t, srv, syncEvent("user.created", user)); rec.Code != http.StatusOK {
+		t.Fatalf("repeat user.created status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if now, err := srv.users.List(); err != nil || len(now) != len(before) {
+		t.Fatalf("account count %d -> %d on a repeat create (err=%v)", len(before), len(now), err)
+	}
+}
+
 // A 200 {"ok":true} that hides a failed write tells the directory the removal
 // landed and stops it retrying.
 func TestSyncWebhookReportsFailures(t *testing.T) {

@@ -750,7 +750,7 @@ func (s *Server) sweepDeviceIndex() int {
 //  1. web sessions          (revokeUserSessions)
 //  2. paired devices        (revokeUserDevices)
 //  3. CardDAV Basic Auth    (davCredentials)
-//  4. a linked SSO identity (users.UnlinkSSO)
+//  4. a linked SSO identity (users.RevokeSSOLink)
 //
 // The third was missed by every admin revocation path, because withDAVBasicAuth
 // consults its verified-credential cache BEFORE it looks the account up and
@@ -765,6 +765,10 @@ func (s *Server) sweepDeviceIndex() int {
 // working front door through the victim's password change, through an admin
 // reset, and through clear-MFA. A reactivated account has to re-link, exactly
 // as it has to re-pair its devices and re-create its CardDAV password.
+//
+// The fourth is also the only one revoked by FLAG rather than by erasure, and
+// the only one that is sometimes skipped. Both follow from the subject being
+// two things at once — see users.User.SSOLinkRevokedAt and HasLocalCredential.
 //
 // One function rather than three lines repeated in
 // deactivate/reset-password/clear-MFA, so a fourth credential type is added only
@@ -800,15 +804,26 @@ func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken s
 		s.logger.Error("failed to revoke carddav credential", "user_id", u.ID, "error", err.Error())
 		errs = append(errs, fmt.Errorf("remove CardDAV credential: %w", err))
 	}
-	// Drop the linked SSO identity. UnlinkSSO re-reads users.json inside the
-	// store's file lock, so it cannot clobber a write that landed after the
-	// caller's copy of u was taken — the password change is exactly that case.
-	// An account with no link is already in the state this asks for, so the
-	// write is simply a no-op; ErrNotFound means the record is gone, which is
-	// nothing left to revoke.
-	if err := s.users.UnlinkSSO(u.ID); err != nil && !errors.Is(err, users.ErrNotFound) {
-		s.logger.Error("failed to revoke sso link", "user_id", u.ID, "error", err.Error())
-		errs = append(errs, fmt.Errorf("unlink SSO identity: %w", err))
+	// Cut off the linked SSO identity — by flag, and only for an account that
+	// has a credential of its own to fall back on.
+	//
+	// RevokeSSOLink re-reads users.json inside the store's file lock, so it
+	// cannot clobber a write that landed after the caller's copy of u was taken
+	// — the password change is exactly that case. That copy is still the right
+	// thing to read HasLocalCredential from: SetPassword runs before this, so a
+	// stale read can only say "no credential" for an account that has just been
+	// given one, and skipping is the safe direction of that error.
+	//
+	// An unlinked or already-revoked account is a no-op; ErrNotFound means the
+	// record is gone, which is nothing left to revoke.
+	if u.HasLocalCredential() {
+		if err := s.users.RevokeSSOLink(u.ID); err != nil && !errors.Is(err, users.ErrNotFound) {
+			s.logger.Error("failed to revoke sso link", "user_id", u.ID, "error", err.Error())
+			errs = append(errs, fmt.Errorf("revoke SSO link: %w", err))
+		}
+	} else if u.SSOSub != "" {
+		s.logger.Info("kept sso link: account has no other credential",
+			"user_id", u.ID)
 	}
 	// Rotate the subscriber ID last, once the devices are gone.
 	//

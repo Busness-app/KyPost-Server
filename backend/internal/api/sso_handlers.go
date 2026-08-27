@@ -171,10 +171,11 @@ func (s *Server) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 //
 // The redirect flow has no request body to carry a credential in, which is why
 // the gate lives here: this POST proves the credential and the second factor,
-// then mints a single-use HMAC ticket into the state cookie. The cookie alone
-// could not be the proof — an attacker holding the session controls their own
-// cookie jar and can write a self-consistent one — so the callback re-verifies
-// the ticket's signature, purpose, expiry and subject before it writes.
+// then records the grant on the session itself (Session.SSOLinkGrantedAt) for
+// the callback to spend. Nothing about the authorization travels in the state
+// cookie, deliberately — an attacker holding the session controls their own
+// cookie jar and could write any self-consistent value into it, so a fact the
+// caller cannot write at all is the only thing worth checking.
 func (s *Server) handleSSOLinkStart(w http.ResponseWriter, r *http.Request) {
 	ac, ok := authFromContext(r)
 	if !ok {
@@ -195,15 +196,26 @@ func (s *Server) handleSSOLinkStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	u, err := s.users.Get(ac.UserID)
+	if err != nil {
+		http.Error(w, "user unavailable", http.StatusInternalServerError)
+		return
+	}
+	// An auto-provisioned account stores no password and no derived secret, so
+	// there is no credential for the step-up below to check and it could only
+	// ever answer "invalid credentials" — an account cannot re-link its way out
+	// of a problem it never had a second credential to prove itself with. Say so
+	// plainly. That such an account can never pass this gate is also why nothing
+	// revokes its link: see users.User.HasLocalCredential.
+	if !u.HasLocalCredential() {
+		http.Error(w, "set an account password before linking or re-linking an SSO identity",
+			http.StatusConflict)
+		return
+	}
 	// Credential first, then the second factor, each on its own counter and the
 	// success recorded only once both hold — handleAuthStepUp explains why
 	// clearing between the two would leave the second factor unthrottled.
 	if !s.confirmAccountCredentialNoRecord(w, r, ac.UserID, req.Password, req.AuthSecret) {
-		return
-	}
-	u, err := s.users.Get(ac.UserID)
-	if err != nil {
-		http.Error(w, "user unavailable", http.StatusInternalServerError)
 		return
 	}
 	if u.TOTPEnabled && !s.confirmSecondFactor(w, r, u, strings.TrimSpace(req.Code)) {
@@ -384,11 +396,12 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 
 // linkSSOIdentity binds a verified identity to the caller's own account.
 //
-// Reaching here means the callback has already verified and spent the
-// single-use ticket handleSSOLinkStart minted, so the caller proved the account
+// Reaching here means the callback has already spent the single-use grant
+// handleSSOLinkStart recorded on the session, so the caller proved the account
 // credential and the second factor — a session alone does not authorize this
-// write. revokeAllUserCredentials cuts the link too, so a victim's password
-// change ends a link that should never have been made.
+// write. revokeAllUserCredentials revokes the link too, so a victim's password
+// change ends a link that should never have been made; LinkSSO clears that
+// revocation, because this step-up is exactly the proof it was waiting for.
 func (s *Server) linkSSOIdentity(w http.ResponseWriter, r *http.Request, userID string, claims *sso.SSOTokenClaims) {
 	// One subject, one account. Without this an identity already linked
 	// elsewhere could be attached a second time, and GetBySSOSub would then
@@ -420,6 +433,15 @@ func (s *Server) linkSSOIdentity(w http.ResponseWriter, r *http.Request, userID 
 func (s *Server) resolveSSOUser(w http.ResponseWriter, settings sso.SSOSettings, claims *sso.SSOTokenClaims) (users.User, error) {
 	user, err := s.users.GetBySSOSub(claims.Sub)
 	if err == nil {
+		// The account still knows this subject — that is how directory sync
+		// addresses it — but a revocation said it is no longer a credential.
+		// Refuse here rather than falling through to auto-provision, which
+		// would hand the same subject a second, empty account.
+		if user.SSOLinkRevoked() {
+			http.Error(w, "Access denied: this SSO link was revoked. "+
+				"Sign in locally and link it again from Settings.", http.StatusForbidden)
+			return users.User{}, errors.New("sso link revoked")
+		}
 		return user, nil
 	}
 	if !errors.Is(err, users.ErrNotFound) {
