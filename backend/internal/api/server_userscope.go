@@ -165,15 +165,30 @@ var errIMAPNotConfigured = errors.New("imap configuration is required")
 var errMailUnauthorized = errors.New("unauthorized")
 
 // mailLockedOutError is returned by resolveMailAuthContext instead of
-// errMailUnauthorized when device-secret auth failed because the deviceID is
-// locked out (see s.deviceLockout) rather than because the credentials were
-// wrong. resolveMailAuthContext holds no ResponseWriter, so it hands its one
-// caller (withMailAuth) this typed sentinel to answer 429 with Retry-After.
+// errMailUnauthorized when device-secret auth failed for a reason that is
+// "come back later" rather than "the credentials were wrong": the deviceID is
+// locked out (see s.deviceLockout), or the secret was never compared because
+// the derivation slots were saturated. resolveMailAuthContext holds no
+// ResponseWriter, so it hands its one caller (withMailAuth) this typed sentinel
+// to write the response.
+//
+// kdfBusy separates the two, because they are not the same answer: a lockout is
+// 429 "too many failed attempts", which is a statement about this caller, while
+// a shed derivation is 503 writeKDFBusy — the server is out of capacity and the
+// caller did nothing wrong. Telling a phone syncing mail that it has failed too
+// many attempts, when its secret was never even compared, is the same lie in a
+// softer status code.
 type mailLockedOutError struct {
 	retryAfter time.Duration
+	kdfBusy    bool
 }
 
-func (e *mailLockedOutError) Error() string { return "device locked out" }
+func (e *mailLockedOutError) Error() string {
+	if e.kdfBusy {
+		return "credential verification is busy"
+	}
+	return "device locked out"
+}
 
 func (s *Server) userConfigDir(userID string) string {
 	return filepath.Join(s.configDir, "users", safeUserPathComponent(userID))
@@ -449,6 +464,13 @@ func (s *Server) resolveMailAuthContext(r *http.Request) (AuthContext, error) {
 	}
 	userID, _, ok, retryAfter := s.deviceAuthFromRequest(r)
 	if !ok {
+		if retryAfter == retryAfterKDFBusy {
+			// A shed secret check is "come back later" too — nothing was
+			// examined and no strike was spent — so it must not fall through to
+			// the 401 that tells a client its credential is dead. Same answer
+			// the direct call sites give through writeDeviceAuthFailure.
+			return AuthContext{}, &mailLockedOutError{retryAfter: kdfMaxQueueWait(), kdfBusy: true}
+		}
 		if retryAfter > 0 {
 			return AuthContext{}, &mailLockedOutError{retryAfter: retryAfter}
 		}

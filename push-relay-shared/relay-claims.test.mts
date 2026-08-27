@@ -359,6 +359,40 @@ test("/send fields are type-checked, not coerced", async () => {
   }
 });
 
+test("a device token carrying URL syntax is refused before any claim or send", async () => {
+  // worker-apns interpolates the token into APNs' /3/device/<token> path, and
+  // WHATWG URL parsing removes dot-segments: `../../3/device/<victim>` addresses
+  // the victim while the claim pins the sha256 of the literal string, so token
+  // ownership never sees the token that was actually delivered to. readSendPayload
+  // runs before claimTokenForSend in both Workers, so 400 here is 400 before a claim.
+  for (const token of [
+    "../../3/device/VICTIMTOKEN",
+    "%2e%2e/%2e%2e/3/device/VICTIMTOKEN",
+    "abc/../def",
+    "abc?apns-topic=x",
+    "abc#frag",
+    "abc def",
+    "https://evil.example/3/device/VICTIMTOKEN",
+  ]) {
+    const refused = await readSendPayload(sendRequest(JSON.stringify({ token, title: "t", body: "b" })));
+    assert.equal(refused.ok, false, `accepted ${token}`);
+    assert.equal(refused.status, 400);
+    assert.equal(refused.error, "invalid token");
+  }
+
+  // Both transports the shared reader serves still pass: an APNs hex token and
+  // an FCM registration token (`<instance id>:APA91b<base64url>`).
+  for (const token of [
+    "a".repeat(64),
+    "3f2b9c1d".repeat(8),
+    "fMEQEXaMPLe_iD-1:APA91bH-tok3n_wIth.Dots-and_Underscores",
+  ]) {
+    const accepted = await readSendPayload(sendRequest(JSON.stringify({ token, title: "t", body: "b" })));
+    assert.equal(accepted.ok, true, `refused ${token}`);
+    assert.equal(accepted.value.token, token);
+  }
+});
+
 test("/send text fields are clamped rather than refused, and unknown fields are ignored", async () => {
   // A title is a sender and a body is a subject: both arrive from whoever
   // emailed the self-hoster, so a long one must clip, not drop the push. The

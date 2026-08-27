@@ -1,12 +1,16 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"kypost-server/backend/internal/users"
 )
 
 func TestDeviceCredentialsFromRequest_Headers(t *testing.T) {
@@ -435,5 +439,112 @@ func TestServerCapsHeaderBytes(t *testing.T) {
 	}
 	if srv.httpServer.MaxHeaderBytes > 128<<10 {
 		t.Fatalf("MaxHeaderBytes = %d, larger than any legitimate request here", srv.httpServer.MaxHeaderBytes)
+	}
+}
+
+// holdEveryKDFSlot fills the process-wide derivation semaphore for the rest of
+// the test, so the next scrypt verification sheds with users.ErrKDFBusy instead
+// of running. Same mechanism as users' own withSaturatedKDF; that one writes to
+// the unexported slot channel, so from here the slots are held through the
+// exported users.WithKDFSlot. The queue tolerance is shrunk once the slots are
+// held, so a shed costs milliseconds rather than the production two seconds.
+func holdEveryKDFSlot(t *testing.T) {
+	t.Helper()
+	release := make(chan struct{})
+	holding := make(chan struct{}, users.MaxConcurrentKDF)
+	var wg sync.WaitGroup
+	for i := 0; i < users.MaxConcurrentKDF; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := users.WithKDFSlot(context.Background(), func(context.Context) {
+				holding <- struct{}{}
+				<-release
+			})
+			if err != nil {
+				t.Errorf("could not take a derivation slot to saturate: %v", err)
+				holding <- struct{}{}
+			}
+		}()
+	}
+	for i := 0; i < users.MaxConcurrentKDF; i++ {
+		<-holding
+	}
+	previousWait := users.KDFMaxQueueWait
+	users.KDFMaxQueueWait = 50 * time.Millisecond
+	t.Cleanup(func() {
+		users.KDFMaxQueueWait = previousWait
+		close(release)
+		wg.Wait()
+	})
+}
+
+// TestDeviceAuthKDFBusyIsBusyNotBadCredentials is F-01-4.
+//
+// A device paired before HashDeviceSecret holds an scrypt secret hash, so
+// verifying it takes a derivation slot and can be SHED. The shed branch
+// returned like a wrong secret: the strike tryAttempt had just reserved was
+// spent, and retryAfter=0 made writeDeviceAuthFailure answer 401 "invalid
+// device credentials". That is the failure users.ErrKDFBusy exists to prevent
+// — a load spike reported as a dead credential, and four of them locking the
+// phone out for deviceLockoutFor while its secret was never once examined.
+func TestDeviceAuthKDFBusyIsBusyNotBadCredentials(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	deviceID, deviceSecret := pairNativeDevice(t, srv, all[0].ID, "device-kdf-shed")
+
+	holdEveryKDFSlot(t)
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, deviceRequest(deviceID, deviceSecret))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d: a shed derivation is the server being out of "+
+			"capacity, not the device's credentials being wrong", rec.Code, http.StatusServiceUnavailable)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("expected a Retry-After header on the 503, so a client knows when to come back")
+	}
+
+	lockKey := srv.deviceLockoutKey(deviceID, deviceRequest(deviceID, deviceSecret))
+	srv.deviceLockout.mu.Lock()
+	entry, tracked := srv.deviceLockout.entries[lockKey]
+	failures := 0
+	if tracked {
+		failures = entry.failures
+	}
+	srv.deviceLockout.mu.Unlock()
+	if failures != 0 {
+		t.Fatalf("the shed attempt spent %d lockout strike(s); no credential was examined, "+
+			"so deviceMaxFailures shed requests would lock a valid device out", failures)
+	}
+}
+
+// The withMailAuth wrapper renders the same shed itself, through
+// mailLockedOutError, rather than through writeDeviceAuthFailure — and mail
+// sync is the request a phone makes constantly, so it is the one most likely to
+// meet a saturated queue. It must not answer 429 "too many failed attempts"
+// either: nothing was attempted.
+func TestMailAuthKDFBusyIsBusyNotLockedOut(t *testing.T) {
+	srv := newTestServer(t)
+	all, err := srv.users.List()
+	if err != nil || len(all) == 0 {
+		t.Fatalf("no test user available: %v", err)
+	}
+	deviceID, deviceSecret := pairNativeDevice(t, srv, all[0].ID, "device-kdf-shed-mail")
+
+	holdEveryKDFSlot(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/inbox", nil)
+	setDeviceHeaders(req, deviceID, deviceSecret)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d (body=%s)", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("expected a Retry-After header on the 503, so a client knows when to come back")
 	}
 }
