@@ -359,7 +359,7 @@ Update it in the same change that breaks or adds a contract above.
 | Contract | Server | Browser | Android | Linux (Qt) | Apple (macOS/iOS) |
 | --- | --- | --- | --- | --- | --- |
 | Pairing URI, unknown-param tolerance | 0.3.0 | 0.3.0 | 0.3.3 | 0.2.0 | 0.4.0 |
-| `pin=` published / honoured | 0.3.0 | 0.3.0 | 0.3.3 | ❌ TOFU instead | ❌ TOFU instead |
+| `pin=` published / honoured | 0.3.0 | 0.3.0 | 0.3.3 | ❌ TOFU instead | 0.4.0 |
 | Enrollment code, 14 chars / 70 bits | 0.3.0 | 0.3.0 | 0.3.3 | ✅ | ✅ |
 | Device credential headers | 0.3.0 | n/a | 0.3.3 | ✅ | ✅ |
 | `pull` delivery mode | 0.3.0 | n/a | 0.3.3 | ✅ | ✅ |
@@ -392,9 +392,13 @@ Apple evidence, verified against `kypost-for-Mac` at `26230d3` (paths relative
 to that repo root):
 
 - Pairing URI, unknown-param tolerance — `KyPost/Presentation/Shared/Navigation/DeepLinkHandler.swift:72-111`
-- `pin=` **not** honoured — same parser; it reads `sub`, `srv`, `pt`, `reg`. The
-  pinning machinery exists and fails closed (`KyPost/Data/Networking/PinnedSessionDelegate.swift:146`),
-  but it is armed from the pairing handshake, not from the link.
+- `pin=` honoured — `KyPost/Data/Networking/SpkiPin.swift` normalises the
+  published `sha256/<base64>` to the lowercase hex the delegate compares, and
+  `DeviceRegistrationService` arms it on the transport **before** the
+  registration POST, since that request is what discloses the pairing token. A
+  malformed pin is refused rather than silently downgraded to TOFU, matching
+  Android. Added 2026-08-27; it read four parameters and ignored this one
+  before that.
 - Enrollment code: 14 chars / Crockford / 120 s buckets — `KyPost/Domain/Security/DeviceEnrollmentCode.swift`
 - Enrollment display grouping (`4-3-4-3`) — `DeviceEnrollmentCode.swift:92-105`, corrected 2026-08-27; it was two groups of seven before that
 - Device credential headers — `KyPost/Data/Networking/RelayAuth.swift`
