@@ -50,33 +50,25 @@ func runSSOFlow(t *testing.T, srv *Server, idp *ssotest.IdP, sessionCookie *http
 
 	// A link starts at the gated POST — the public GET cannot begin one — so the
 	// helper pays the step-up the real Security page pays.
-	var rec *httptest.ResponseRecorder
-	authorizeURL := ""
 	if link {
-		rec = startSSOLink(t, srv, sessionCookie, linkTestPassword, "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("handleSSOLinkStart status = %d (%s), want 200", rec.Code, strings.TrimSpace(rec.Body.String()))
+		start := startSSOLink(t, srv, sessionCookie, linkTestPassword, "")
+		if start.Code != http.StatusOK {
+			t.Fatalf("handleSSOLinkStart status = %d (%s), want 200", start.Code, strings.TrimSpace(start.Body.String()))
 		}
-		var body struct {
-			AuthorizeURL string `json:"authorizeUrl"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("decode link start response: %v", err)
-		}
-		authorizeURL = body.AuthorizeURL
-	} else {
-		rec = httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil)
-		req.Host = ssoTestHost
-		if sessionCookie != nil {
-			req.AddCookie(sessionCookie)
-		}
-		srv.handleSSOLogin(rec, req)
-		if rec.Code != http.StatusFound {
-			t.Fatalf("handleSSOLogin status = %d (%s), want 302", rec.Code, strings.TrimSpace(rec.Body.String()))
-		}
-		authorizeURL = rec.Header().Get("Location")
+		return redeemSSOLink(t, srv, idp, sessionCookie, start)
 	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/oidc/login", nil)
+	req.Host = ssoTestHost
+	if sessionCookie != nil {
+		req.AddCookie(sessionCookie)
+	}
+	srv.handleSSOLogin(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("handleSSOLogin status = %d (%s), want 302", rec.Code, strings.TrimSpace(rec.Body.String()))
+	}
+	authorizeURL := rec.Header().Get("Location")
 
 	var stateCookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
@@ -197,12 +189,18 @@ func TestSSOLoginAndCallback(t *testing.T) {
 		t.Errorf("unexpected provisioned user: %+v, err: %v", u, err)
 	}
 
+	// Unlinking needs somewhere to sign in from afterwards; an auto-provisioned
+	// account has nowhere until it sets a password. See
+	// TestUnlinkRefusesWhenTheLinkIsTheOnlyCredential.
+	if _, err := srv.users.SetPassword(context.Background(), u.ID, "a-local-password-123", false); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/settings/sso/unlink", nil)
 	req.AddCookie(sessCookie)
 	srv.handleSSOUnlink(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("handleSSOUnlink status = %d", rec.Code)
+		t.Fatalf("handleSSOUnlink status = %d: %s", rec.Code, strings.TrimSpace(rec.Body.String()))
 	}
 	if u, _ = srv.users.Get(u.ID); u.SSOSub != "" {
 		t.Errorf("expected SSOSub cleared after unlink, got: %s", u.SSOSub)
@@ -469,6 +467,14 @@ func TestSyncWebhookCanReactivateAfterRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBySSOSub after create: %v", err)
 	}
+	// A password of their own, or revokeAllUserCredentialsExcept takes the
+	// HasLocalCredential skip and RevokeSSOLink is never reached — which would
+	// make everything below assert sync round-trips on a link that was never
+	// revoked, passing even if revocation went back to erasing the subject.
+	if _, err := srv.users.SetPassword(context.Background(), created.ID, "a-local-password-123", false); err != nil {
+		t.Fatalf("SetPassword: %v", err)
+	}
+	clearMustChangePassword(t, srv, created.ID)
 
 	suspended := map[string]any{
 		"id": "sso-sub-rehired", "username": "rehired_user",
@@ -477,10 +483,19 @@ func TestSyncWebhookCanReactivateAfterRevocation(t *testing.T) {
 	if rec := postSync(t, srv, syncEvent("user.updated", suspended)); rec.Code != http.StatusOK {
 		t.Fatalf("suspend status = %d: %s", rec.Code, rec.Body.String())
 	}
-	if u, _ := srv.users.Get(created.ID); u.Active {
+	suspendedUser, err := srv.users.Get(created.ID)
+	if err != nil {
+		t.Fatalf("reload suspended: %v", err)
+	}
+	if suspendedUser.Active {
 		t.Fatal("the account is still active after user.updated{active:false}")
 	}
-	// The address the next event will arrive on still resolves.
+	// The revocation actually ran — otherwise the rest of this test proves
+	// nothing about what revocation does to the subject.
+	if !suspendedUser.SSOLinkRevoked() {
+		t.Fatalf("deactivation did not revoke the link: %+v", suspendedUser)
+	}
+	// And the address the next event will arrive on still resolves.
 	if _, err := srv.users.GetBySSOSub("sso-sub-rehired"); err != nil {
 		t.Fatalf("revocation lost the subject the directory addresses: %v", err)
 	}
@@ -775,6 +790,40 @@ func TestSSORedirectURIFollowsConfiguredBaseURL(t *testing.T) {
 	if got := loc.Query().Get("redirect_uri"); got != want {
 		t.Errorf("authorization request redirect_uri = %q, want %q", got, want)
 	}
+}
+
+// redeemSSOLink drives the provider round trip for the flow a startSSOLink
+// response actually began, carrying that flow's own state cookie through — the
+// grant is bound to it, so this is the only way a link completes.
+func redeemSSOLink(t *testing.T, srv *Server, idp *ssotest.IdP, sessionCookie *http.Cookie, start *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+	t.Helper()
+	var body struct {
+		AuthorizeURL string `json:"authorizeUrl"`
+	}
+	if err := json.Unmarshal(start.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode link start response: %v", err)
+	}
+	var stateCookie *http.Cookie
+	for _, c := range start.Result().Cookies() {
+		if c.Name == ssoCookieName {
+			stateCookie = c
+		}
+	}
+	if stateCookie == nil {
+		t.Fatal("the link start did not set the state cookie")
+	}
+
+	code, state := idp.Authorize(t, body.AuthorizeURL)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/auth/oidc/callback?code=%s&state=%s", code, state), nil)
+	req.Host = ssoTestHost
+	req.AddCookie(stateCookie)
+	if sessionCookie != nil {
+		req.AddCookie(sessionCookie)
+	}
+	srv.handleSSOCallback(rec, req)
+	return rec
 }
 
 // startSSOLink posts the step-up that authorizes one link, the way the Security

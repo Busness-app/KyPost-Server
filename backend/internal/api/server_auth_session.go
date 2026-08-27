@@ -57,6 +57,15 @@ type Session struct {
 	// jar. A fact recorded on the session cannot be written by the caller at
 	// all, so there is nothing to forge and no token to leak.
 	SSOLinkGrantedAt time.Time
+	// SSOLinkState is the state token of the ONE flow SSOLinkGrantedAt
+	// authorizes. Without it the grant authorizes any link-mode callback that
+	// arrives in the window, and the state cookie is unsigned and
+	// caller-written — so someone holding the session could start their own
+	// plain sign-in flow, relabel its cookie link-mode, and spend a grant the
+	// real user minted seconds earlier, binding their own subject. The state is
+	// minted into the victim's cookie and never shown to anyone else, so
+	// requiring it back is what ties the grant to the flow it paid for.
+	SSOLinkState string
 }
 
 const (
