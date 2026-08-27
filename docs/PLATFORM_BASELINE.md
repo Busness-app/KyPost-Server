@@ -356,15 +356,19 @@ bodies** — including the uppercased `KYPOST://` form, which some parsers miss
 Platforms align to 0.4.0 at launch and drift afterwards against this table.
 Update it in the same change that breaks or adds a contract above.
 
-| Contract | Server | Browser | Android | Linux (Qt) |
-| --- | --- | --- | --- | --- |
-| Pairing URI, unknown-param tolerance | 0.3.0 | 0.3.0 | 0.3.3 | 0.2.0 |
-| `pin=` published / honoured | 0.3.0 | 0.3.0 | 0.3.3 | ❌ TOFU instead |
-| Enrollment code, 14 chars / 70 bits | 0.3.0 | 0.3.0 | 0.3.3 | ✅ |
-| Device credential headers | 0.3.0 | n/a | 0.3.3 | ✅ |
-| `pull` delivery mode | 0.3.0 | n/a | 0.3.3 | ✅ |
-| Contact sync, 500-change batching | 0.3.0 | n/a | 0.3.3 | unverified |
-| `bodies=0` + `/api/mail/body` | 0.4.0 | 0.4.0 | not adopted | not adopted |
+| Contract | Server | Browser | Android | Linux (Qt) | Apple (macOS/iOS) |
+| --- | --- | --- | --- | --- | --- |
+| Pairing URI, unknown-param tolerance | 0.3.0 | 0.3.0 | 0.3.3 | 0.2.0 | 0.4.0 |
+| `pin=` published / honoured | 0.3.0 | 0.3.0 | 0.3.3 | ❌ TOFU instead | ❌ TOFU instead |
+| Enrollment code, 14 chars / 70 bits | 0.3.0 | 0.3.0 | 0.3.3 | ✅ | ✅ |
+| Device credential headers | 0.3.0 | n/a | 0.3.3 | ✅ | ✅ |
+| `pull` delivery mode | 0.3.0 | n/a | 0.3.3 | ✅ | ✅ |
+| Contact sync, 500-change batching | 0.3.0 | n/a | 0.3.3 | unverified | ❌ sends one request |
+| `bodies=0` + `/api/mail/body` | 0.4.0 | 0.4.0 | not adopted | not adopted | not adopted |
+
+The Apple client is unreleased; `0.4.0` is the version it will first ship as,
+set in `MARKETING_VERSION`. It is one target building both macOS and iOS, so
+there is no useful way to split the column.
 
 > Linux was reported ungrouped on 2026-08-25. That report was wrong: it read
 > `Settings.qml`'s raw property binding without following
@@ -375,7 +379,7 @@ Linux evidence, verified against the client tree at `e1a1a9c` (paths relative
 to the `kypost-Linux` repo root):
 
 - Pairing URI, unknown-param tolerance — `app/pairing/PairingController.cpp:130-148`
-- `pin=` honoured — `core/net/NativeRegistrationClient.h:62-70`, `core/net/CertificatePinSink.cpp`
+- `pin=` **not** honoured — `app/pairing/PairingController.cpp:141-144` reads `sub`, `srv`, `pt`, `reg` and stops. `core/net/CertificatePinSink.cpp` captures a pin from the registration reply's own handshake, which is TOFU done carefully; it is not the published pin.
 - Enrollment code: 14 chars / Crockford / 65-byte key — `core/pgp/DeviceEnrollmentCrypto.cpp:17,127,144-158`
 - Enrollment display grouping (`4-3-4-3`) — `core/pgp/DeviceEnrollmentCrypto.cpp:156-162`, `app/pgp/PgpEnrollmentController.cpp:107`
 - Enrollment bucket size 120 s — `app/pgp/PgpEnrollmentController.cpp:108`
@@ -383,6 +387,21 @@ to the `kypost-Linux` repo root):
 - Device credential headers — `core/net/RelayAuth.h:22-23`
 - Contact sync — `core/net/ContactSyncClient.cpp:215`
 - Delivery modes, `push`/`pull` — `app/pairing/PairingController.h:129-130`
+
+Apple evidence, verified against `kypost-for-Mac` at `26230d3` (paths relative
+to that repo root):
+
+- Pairing URI, unknown-param tolerance — `KyPost/Presentation/Shared/Navigation/DeepLinkHandler.swift:72-111`
+- `pin=` **not** honoured — same parser; it reads `sub`, `srv`, `pt`, `reg`. The
+  pinning machinery exists and fails closed (`KyPost/Data/Networking/PinnedSessionDelegate.swift:146`),
+  but it is armed from the pairing handshake, not from the link.
+- Enrollment code: 14 chars / Crockford / 120 s buckets — `KyPost/Domain/Security/DeviceEnrollmentCode.swift`
+- Enrollment display grouping (`4-3-4-3`) — `DeviceEnrollmentCode.swift:92-105`, corrected 2026-08-27; it was two groups of seven before that
+- Device credential headers — `KyPost/Data/Networking/RelayAuth.swift`
+- Delivery modes, `push`/`pull` — `KyPost/Domain/Push/PullPollingScheduler.swift`
+- Contact sync, **no** 500-change batching — `KyPost/Domain/Repositories/ContactSyncRepository.swift:175`
+  sends the whole queued array in one request, so a first sync of a large
+  address book gets a 413 at the worst possible moment.
 
 `unverified` remains honest for the one row still marked that way: only the
 contact-sync pull path was read, and the push-path 500-change batching limit
