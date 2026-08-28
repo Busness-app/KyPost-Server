@@ -1,5 +1,15 @@
 # UnifiedPush server-side encryption (RFC 8291)
 
+> **Status: IMPLEMENTED 2026-08-26**, on branch `feat/unifiedpush-rfc8291`.
+> Two deviations from the plan below, both forced by drift since it was written:
+> the state store moved to SQLite, so `P256DH`/`Auth` needed two columns via
+> `additiveColumns` rather than two struct fields; and `Redacted()` now clears
+> `Auth`, which this design did not consider — with the endpoint URL it is a
+> notification-forgery capability. Decision 3 ("MFA exclusion out of scope") was
+> subsequently reversed by the user: `MFATransportEligible` now allows a
+> UnifiedPush device that supplied keys, since the reason for the blanket
+> exclusion was the plaintext payload this change removes.
+
 ## Problem
 
 UnifiedPush does not provide transport encryption itself — the app server must
