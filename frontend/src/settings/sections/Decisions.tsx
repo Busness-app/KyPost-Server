@@ -1,7 +1,5 @@
 import { useEffect, useState } from "react";
 import { getJSON } from "../../api/client";
-import { usePagination } from "../../hooks/usePagination";
-import { PageTabs } from "../../components/PageTabs";
 
 type Decision = {
   messageId: string;
@@ -30,7 +28,7 @@ export function Decisions() {
   const [decisionsError, setDecisionsError] = useState("");
 
   useEffect(() => {
-    getJSON<Decision[]>("/api/decisions?limit=500")
+    getJSON<Decision[]>("/api/decisions?limit=10")
       .then((data) => {
         setDecisions(data ?? []);
         setDecisionsLoaded(true);
@@ -41,8 +39,6 @@ export function Decisions() {
         setDecisionsLoaded(true);
       });
   }, []);
-
-  const { currentPage, setCurrentPage, totalPages, pageItems: pageDecisions } = usePagination(decisions, 20);
 
   return (
     <div>
@@ -70,7 +66,7 @@ export function Decisions() {
                     </tr>
                   </thead>
                   <tbody>
-                    {pageDecisions.map((decision) => (
+                    {decisions.map((decision) => (
                       <tr key={`${decision.messageId}-${decision.atUtc}`} style={{ borderBottom: "1px solid var(--border-color)" }}>
                         <td style={{ padding: "8px", fontSize: "0.9em" }}>{new Date(decision.atUtc).toLocaleString()}</td>
                         <td style={{ padding: "8px", fontSize: "0.9em" }}>{decision.sender}</td>
@@ -83,13 +79,6 @@ export function Decisions() {
                   </tbody>
                 </table>
               </div>
-              <PageTabs
-                totalPages={totalPages}
-                currentPage={currentPage}
-                onSelect={setCurrentPage}
-                classPrefix="tuning"
-                ariaLabel="Decision pages"
-              />
             </>
           )}
         </>
