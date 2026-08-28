@@ -160,8 +160,8 @@ export function PairingPanel({ onDevicesMayHaveChanged, onStatus }: PairingPanel
 
   async function pairThisDevice() {
     // Desktop apps pair over the same native flow as mobile (sub/hash relay
-    // auth) — the desktop-pair code exchange has no server-side register
-    // endpoint yet, and the desktop app doesn't need a web session.
+    // auth): one pairing contract for every client, and the desktop app needs
+    // no web session.
     setPairBusy(true);
     try {
       // Fetch a fresh pairing token — they expire quickly, so a stale

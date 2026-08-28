@@ -303,8 +303,10 @@ func (s *Server) handleContactPhotoGet(w http.ResponseWriter, r *http.Request, u
 		http.Error(w, "failed to read photo", http.StatusInternalServerError)
 		return
 	}
-	// Safe to cache aggressively: the filename is content-hashed, so any
-	// change in bytes produces a different PhotoRef/URL.
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	// The URL is not content-addressed — only the on-disk filename is — so a
+	// replaced or deleted photo reuses this exact URL. no-cache still lets the
+	// browser keep the bytes; it just has to revalidate, which ServeFile
+	// answers from Last-Modified with a 304.
+	w.Header().Set("Cache-Control", "private, no-cache")
 	http.ServeFile(w, r, path)
 }

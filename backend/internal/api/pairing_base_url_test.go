@@ -72,34 +72,3 @@ func TestPairingEndpointsIgnoreTheRequestHost(t *testing.T) {
 		t.Errorf("configured = %v with both halves set, want true", out["configured"])
 	}
 }
-
-// Desktop pairing refuses outright rather than minting a code with nowhere to
-// redeem it: the code is a credential and issuance is capped at five per hour,
-// so handing back an unusable one spends a real slot.
-func TestDesktopPairingRefusesWithoutAConfiguredBaseURL(t *testing.T) {
-	srv := newTestServer(t)
-	all, _ := srv.users.List()
-	owner := all[0]
-	srv.serverBaseURL = ""
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/notifications/desktop/pair", nil)
-	req.Host = "attacker.example"
-	authRequestAs(srv, req, owner.ID)
-	srv.withAuth(srv.handleDesktopPair)(rec, req)
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
-	}
-	if body := rec.Body.String(); !json.Valid(rec.Body.Bytes()) || body == "" {
-		t.Fatalf("refusal body is not usable JSON: %q", body)
-	}
-
-	store, err := srv.userStore(owner.ID)
-	if err != nil {
-		t.Fatalf("userStore: %v", err)
-	}
-	if attempts := store.ListDesktopPairingAttempts(); len(attempts) != 0 {
-		t.Errorf("a refused request still recorded %d issuance attempt(s)", len(attempts))
-	}
-}

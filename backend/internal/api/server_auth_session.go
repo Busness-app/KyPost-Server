@@ -47,6 +47,25 @@ type Session struct {
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 	CSRFToken string
+	// SSOLinkGrantedAt is when this session last proved its credential and
+	// second factor at handleSSOLinkStart. It authorizes exactly one SSO link
+	// and is cleared when that link is written, so it cannot be replayed.
+	//
+	// Server-side deliberately. The obvious alternative — a signed ticket in the
+	// state cookie — has to be unforgeable precisely BECAUSE the cookie is
+	// attacker-writable: whoever holds the session controls their own cookie
+	// jar. A fact recorded on the session cannot be written by the caller at
+	// all, so there is nothing to forge and no token to leak.
+	SSOLinkGrantedAt time.Time
+	// SSOLinkState is the state token of the ONE flow SSOLinkGrantedAt
+	// authorizes. Without it the grant authorizes any link-mode callback that
+	// arrives in the window, and the state cookie is unsigned and
+	// caller-written — so someone holding the session could start their own
+	// plain sign-in flow, relabel its cookie link-mode, and spend a grant the
+	// real user minted seconds earlier, binding their own subject. The state is
+	// minted into the victim's cookie and never shown to anyone else, so
+	// requiring it back is what ties the grant to the flow it paid for.
+	SSOLinkState string
 }
 
 const (
@@ -427,6 +446,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			// screen, and knowing it proves nothing on its own — approving
 			// still needs a paired device's credentials.
 			resp["matchDigits"] = ch.MatchDigits
+			// The credential /api/auth/mfa/push/finish requires. This response
+			// is the only place it appears; it is deliberately kept out of the
+			// notification payload, which every hop of the relay path reads.
+			resp["finishSecret"] = ch.FinishSecret
 		}
 		if pushRetryAfter > 0 {
 			// So the UI can say "you have requested too many approvals, try again
@@ -746,6 +769,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"ssoUsername":        u.SSOUsername,
 		"ssoEmail":           u.SSOEmail,
 		"ssoLinkedAt":        u.SSOLinkedAt,
+		"ssoLinkRevoked":     u.SSOLinkRevoked(),
 	})
 }
 
@@ -997,6 +1021,10 @@ func (s *Server) withMailAuth(next http.HandlerFunc) http.HandlerFunc {
 		if err != nil {
 			var lockErr *mailLockedOutError
 			if errors.As(err, &lockErr) {
+				if lockErr.kdfBusy {
+					writeKDFBusy(w)
+					return
+				}
 				w.Header().Set("Retry-After", strconv.Itoa(int(lockErr.retryAfter.Seconds())+1))
 				writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many failed attempts, try again later"})
 				return

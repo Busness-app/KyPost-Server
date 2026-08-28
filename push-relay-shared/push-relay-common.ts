@@ -134,6 +134,20 @@ export const MAX_JSON_BODY_BYTES = 4 * 1024;
  * delivering a clipped one. Same reasoning as MAX_LABEL_LENGTH.
  */
 export const MAX_TOKEN_LENGTH = 512;
+
+/**
+ * Every character a real device token can contain, and nothing that is URL
+ * syntax. worker-apns interpolates the token into APNs' `/3/device/<token>`
+ * path, where `../../3/device/<victim>` normalizes to the victim's path while
+ * `claimTokenForSend` pins the sha256 of the LITERAL string — so ownership
+ * never sees the token actually addressed. Rejected, never sanitized: a
+ * normalized token would no longer hash to the claim it was checked against.
+ *
+ * The set is the union of the two transports that reach /send: APNs tokens are
+ * hex, FCM registration tokens are `<id>:<base64url>`. UnifiedPush endpoints are
+ * URLs but never arrive here — the Go sender POSTs those directly.
+ */
+export const TOKEN_CHARSET = /^[A-Za-z0-9_.:-]+$/;
 export const MAX_TITLE_LENGTH = 256;
 export const MAX_NOTIFICATION_BODY_LENGTH = 1024;
 export const MAX_DATA_ENTRIES = 16;
@@ -845,7 +859,7 @@ export async function readSendPayload(request: Request): Promise<BodyResult<Send
   if (!token) {
     return { ok: false, status: 400, error: "missing token" };
   }
-  if (token.length > MAX_TOKEN_LENGTH) {
+  if (token.length > MAX_TOKEN_LENGTH || !TOKEN_CHARSET.test(token)) {
     return { ok: false, status: 400, error: "invalid token" };
   }
 

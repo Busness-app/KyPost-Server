@@ -3,17 +3,19 @@
     "Shared MIME corpus, executed by BOTH backend/internal/pgpmail (Go) and",
     "frontend/src/lib/mimeContent.test.ts (TypeScript).",
     "",
-    "Two independent parsers exist because the server never sees a",
-    "client-protected account's plaintext, so the browser must re-implement what",
-    "the server does. They are required to agree byte-for-byte on which part is",
-    "the display body, because buildPGPDeliveries encrypts ONE plaintext to every",
-    "To/CC key in a single call: recipients on different custody modes receive",
-    "identical ciphertext under ONE signature. A disagreement therefore makes one",
-    "signature authenticate two different messages, which is exactly what the",
-    "'signature verified' badge exists to deny.",
+    "Two parsers exist because the server never sees a client-protected",
+    "account's plaintext, so the browser must re-implement what the server does.",
+    "Only the browser's renders mail today: server-side decryption is retired, so",
+    "pgpmail.ParseContent is the reference this corpus holds it to rather than a",
+    "second live reading. It was one, and the danger is why the corpus exists:",
+    "buildPGPDeliveries encrypts ONE plaintext to every To/CC key in a single",
+    "call, so recipients on different custody modes received identical ciphertext",
+    "under ONE signature, and a disagreement made that one signature authenticate",
+    "two different messages.",
     "",
-    "Audit run-10 found two such disagreements. Add a case here whenever either",
-    "parser changes; a divergence must fail a test rather than ship."
+    "Audit run-10 found two such disagreements; run-11 found two more. Add a case",
+    "here whenever either parser changes; a divergence must fail a test rather",
+    "than ship."
   ],
   "cases": [
     {
@@ -115,6 +117,48 @@
       "expectBody": "",
       "expectMode": "plain",
       "expectGoParseError": true
+    },
+    {
+      "name": "an uppercase TEXT/PLAIN part is the display body",
+      "why": "run-11 finding F-01-8. Go selected body candidates with a case-SENSITIVE strings.HasPrefix on the raw Content-Type, while the browser lowercases the media type first, so this part was an attachment server-side and the body browser-side. RFC 2045 media types are case-insensitive.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: TEXT/PLAIN\r\n\r\nUPPERCASE-IS-STILL-TEXT\r\n--B--\r\n",
+      "expectBody": "UPPERCASE-IS-STILL-TEXT",
+      "expectMode": "plain"
+    },
+    {
+      "name": "an uppercase TEXT/HTML part is the display body in html mode",
+      "why": "run-11 finding F-01-8. Same case-sensitivity bug, and it also cost the mode: Go's bodyMode already folds case, but the part never reached it.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: TEXT/HTML; charset=UTF-8\r\n\r\n<p>Hi</p>\r\n--B--\r\n",
+      "expectBody": "<p>Hi</p>",
+      "expectMode": "html"
+    },
+    {
+      "name": "a text/plainish part is not a body candidate",
+      "why": "run-11 finding F-01-8. Go matched the raw header with HasPrefix, so a made-up subtype that merely STARTS with text/plain won as the body, while the browser compared the whole media type and skipped it — one signature, two readings.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plainish\r\n\r\nPREFIX-DECOY\r\n--B\r\nContent-Type: text/plain\r\n\r\nTHE-REAL-BODY\r\n--B--\r\n",
+      "expectBody": "THE-REAL-BODY",
+      "expectMode": "plain"
+    },
+    {
+      "name": "quoted-printable is decoded in a multipart part",
+      "why": "run-11 finding F-01-8. Go decoded only base64, so the browser showed the text and the server showed the escapes.",
+      "mime": "Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nCaf=C3=A9 =\r\nnext\r\n--B--\r\n",
+      "expectBody": "Café next",
+      "expectMode": "plain"
+    },
+    {
+      "name": "quoted-printable is decoded in a single-part entity",
+      "why": "run-11 finding F-01-8. The non-multipart branch decoded only base64 too.",
+      "mime": "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nCaf=C3=A9 wrapped =\r\nhere\r\n",
+      "expectBody": "Café wrapped here\r\n",
+      "expectMode": "plain"
+    },
+    {
+      "name": "trailing whitespace on a quoted-printable line is transport padding",
+      "why": "run-11 finding F-01-8. RFC 2045 3 drops whitespace at the end of an encoded line; mime/quotedprintable does, and the browser kept it, so the two decoders disagreed on the decoded bytes.",
+      "mime": "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\npadded   \r\nnext\r\n",
+      "expectBody": "padded\r\nnext\r\n",
+      "expectMode": "plain"
     }
   ]
 }

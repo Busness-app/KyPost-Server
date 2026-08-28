@@ -430,6 +430,7 @@ func (s *Server) routesAuth(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/sso/login", withPublicRoute(s.handleSSOLogin))
 	mux.HandleFunc("GET /api/auth/oidc/callback", withPublicRoute(s.handleSSOCallback))
 	mux.HandleFunc("GET /auth/sso/callback", withPublicRoute(s.handleSSOCallback))
+	mux.HandleFunc("POST /api/settings/sso/link", s.withAuth(s.handleSSOLinkStart))
 	mux.HandleFunc("POST /api/settings/sso/unlink", s.withAuth(s.handleSSOUnlink))
 	// Pre-login, unauthenticated: tells the browser how to derive its auth
 	// secret so the password never has to be transmitted. See login_params.go
@@ -665,7 +666,6 @@ func (s *Server) routesNotifications(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/notifications/native/deregister", withDeviceAuth(s.handleNotificationNativeDeregister))
 	mux.HandleFunc("PUT /api/notifications/native/mode", s.withAuth(s.handleNotificationNativeMode))
 	mux.HandleFunc("GET /api/notifications/native/pull", withDeviceAuth(s.handleNotificationNativePull))
-	mux.HandleFunc("POST /api/notifications/desktop/pair", s.withAuth(s.handleDesktopPair))
 }
 
 // routesRules registers the filter-rule builder and the Sieve editor.

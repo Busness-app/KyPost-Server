@@ -64,6 +64,9 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
   // right. Without it the person tapping Approve cannot distinguish their own
   // login from an attacker's, which is the whole MFA-fatigue attack.
   const [mfaMatchDigits, setMfaMatchDigits] = useState("");
+  // Credential for /api/auth/mfa/push/finish. The challenge id travels in the
+  // notification, so it is not a secret; this is, and it never leaves this tab.
+  const [mfaFinishSecret, setMfaFinishSecret] = useState("");
   const [captchaConfig, setCaptchaConfig] = useState<CaptchaConfig | null>(null);
   const [ssoConfig, setSSOConfig] = useState<SSOConfig | null>(null);
   const [captchaToken, setCaptchaToken] = useState("");
@@ -138,6 +141,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         challengeId?: string;
         methods?: string[];
         matchDigits?: string;
+        finishSecret?: string;
         pushRetryAfterSeconds?: number;
       }>("/api/auth/login", {
         username,
@@ -150,6 +154,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
         const methods = res.methods ?? [];
         setMfaChallengeId(res.challengeId);
         setMfaMatchDigits(res.matchDigits ?? "");
+        setMfaFinishSecret(res.finishSecret ?? "");
         setMfaMethods(methods);
         setMfaMode(methods.includes("push") ? "push" : "totp");
         setMfaCode("");
@@ -197,6 +202,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
       await onAuthChanged();
       setMfaChallengeId("");
       setMfaMatchDigits("");
+      setMfaFinishSecret("");
       setMfaCode("");
       finishSignIn(Boolean(res.mustChangePassword));
     } catch {
@@ -223,7 +229,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
           clearInterval(interval);
           const fin = await postJSON<{ ok: boolean; mustChangePassword?: boolean }>(
             "/api/auth/mfa/push/finish",
-            { challengeId: mfaChallengeId }
+            { challengeId: mfaChallengeId, finishSecret: mfaFinishSecret }
           );
           if (cancelled) {
             return;
@@ -234,6 +240,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
           }
           setMfaChallengeId("");
           setMfaMatchDigits("");
+          setMfaFinishSecret("");
           finishSignIn(Boolean(fin.mustChangePassword));
         } else if (res.status === "denied" || res.status === "expired" || res.status === "locked") {
           clearInterval(interval);
@@ -266,7 +273,7 @@ export function LoginPage({ auth, onAuthChanged, mode = "login" }: LoginPageProp
     // finishSignIn/onAuthChanged are stable enough for this flow; re-running on
     // challenge/mode/method changes is what matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mfaChallengeId, mfaMode, mfaMethods]);
+  }, [mfaChallengeId, mfaFinishSecret, mfaMode, mfaMethods]);
 
   // One of four states, each with its own heading and lede, so the card always
   // says which gate you are at instead of carrying one generic title.

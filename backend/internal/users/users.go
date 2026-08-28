@@ -75,6 +75,17 @@ type User struct {
 	SSOUsername string `json:"ssoUsername,omitempty"`
 	SSOEmail    string `json:"ssoEmail,omitempty"`
 	SSOLinkedAt int64  `json:"ssoLinkedAt,omitempty"`
+	// SSOLinkRevokedAt marks the link as no longer a credential without
+	// forgetting which directory identity it names.
+	//
+	// SSOSub does two jobs at once: it is the proof handleSSOCallback signs a
+	// caller in on, and it is the address the directory-sync webhook resolves
+	// its events through. Erasing it to revoke the first destroys the second —
+	// a later user.updated{active:true} for that same subject finds nothing and
+	// the account can never be reactivated. So revocation sets this instead:
+	// GetBySSOSub still resolves, and the login path refuses. Re-authorizing
+	// the link clears it. See SSOLinkRevoked.
+	SSOLinkRevokedAt int64 `json:"ssoLinkRevokedAt,omitempty"`
 
 	// Login credential derivation.
 	//
@@ -321,10 +332,16 @@ type Public struct {
 	SSOUsername        string `json:"ssoUsername,omitempty"`
 	SSOEmail           string `json:"ssoEmail,omitempty"`
 	SSOLinkedAt        int64  `json:"ssoLinkedAt,omitempty"`
-	PGPFingerprint     string `json:"pgpFingerprint,omitempty"`
-	PGPKeyID           string `json:"pgpKeyId,omitempty"`
-	PGPKeySource       string `json:"pgpKeySource,omitempty"`
-	PGPKeyCreatedAt    string `json:"pgpKeyCreatedAt,omitempty"`
+	// SSOLinkRevoked ships alongside the subject rather than blanking it,
+	// because "linked" and "can sign in with it" stopped being the same thing:
+	// revocation keeps the subject so directory sync can still address the
+	// account. A viewer shown the subject with no flag would read a revoked
+	// link as live. See User.SSOLinkRevokedAt.
+	SSOLinkRevoked  bool   `json:"ssoLinkRevoked,omitempty"`
+	PGPFingerprint  string `json:"pgpFingerprint,omitempty"`
+	PGPKeyID        string `json:"pgpKeyId,omitempty"`
+	PGPKeySource    string `json:"pgpKeySource,omitempty"`
+	PGPKeyCreatedAt string `json:"pgpKeyCreatedAt,omitempty"`
 	// PGPKeyProtection tells the client whether it must unwrap the private
 	// key itself ("client") or whether this is a legacy server-held key
 	// ("server") the UI should prompt the user to migrate.
@@ -346,6 +363,7 @@ func (u User) Public() Public {
 		SSOUsername:        u.SSOUsername,
 		SSOEmail:           u.SSOEmail,
 		SSOLinkedAt:        u.SSOLinkedAt,
+		SSOLinkRevoked:     u.SSOLinkRevoked(),
 		PGPFingerprint:     u.PGPFingerprint,
 		PGPKeyID:           u.PGPKeyID,
 		PGPKeySource:       u.PGPKeySource,
@@ -1022,6 +1040,11 @@ func (s *Store) LinkSSO(userID, ssoSub, ssoUsername, ssoEmail string) error {
 				f.Users[i].SSOUsername = strings.TrimSpace(ssoUsername)
 				f.Users[i].SSOEmail = strings.TrimSpace(ssoEmail)
 				f.Users[i].SSOLinkedAt = time.Now().UTC().Unix()
+				// Authorizing a link is what un-revokes one. The write reaches
+				// here only from linkSSOIdentity, which the callback runs only
+				// after spending a step-up grant, so this is the user proving
+				// the account credential and asking for the link back.
+				f.Users[i].SSOLinkRevokedAt = 0
 				f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 				found = true
 				break
@@ -1031,6 +1054,33 @@ func (s *Store) LinkSSO(userID, ssoSub, ssoUsername, ssoEmail string) error {
 			return ErrNotFound
 		}
 		return s.writeFileUnlocked(f)
+	})
+}
+
+// RevokeSSOLink stops a linked identity being a credential, keeping the subject
+// so the directory-sync webhook can still address the account. Revoking an
+// unlinked or already-revoked account is a no-op. See User.SSOLinkRevokedAt.
+func (s *Store) RevokeSSOLink(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return fsutil.WithFileLock(s.path, func() error {
+		f, err := s.readFileUnlocked()
+		if err != nil {
+			return err
+		}
+		for i := range f.Users {
+			if f.Users[i].ID != userID {
+				continue
+			}
+			if f.Users[i].SSOSub == "" || f.Users[i].SSOLinkRevokedAt != 0 {
+				return nil // nothing linked, or already revoked
+			}
+			f.Users[i].SSOLinkRevokedAt = time.Now().UTC().Unix()
+			f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			return s.writeFileUnlocked(f)
+		}
+		return ErrNotFound
 	})
 }
 
@@ -1051,6 +1101,7 @@ func (s *Store) UnlinkSSO(userID string) error {
 				f.Users[i].SSOUsername = ""
 				f.Users[i].SSOEmail = ""
 				f.Users[i].SSOLinkedAt = 0
+				f.Users[i].SSOLinkRevokedAt = 0
 				f.Users[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 				found = true
 				break
@@ -2161,6 +2212,23 @@ func ValidateAuthSecret(secret string) error {
 // rather than a transmitted password.
 func (u User) UsesDerivedAuth() bool {
 	return u.AuthDerivation == AuthDerivationPBKDF2
+}
+
+// SSOLinkRevoked reports whether this account's linked identity has been cut off
+// as a credential. The subject is still stored — it is how directory sync
+// addresses the account — but no login may be resolved through it until the user
+// re-authorizes the link.
+func (u User) SSOLinkRevoked() bool {
+	return u.SSOSub != "" && u.SSOLinkRevokedAt != 0
+}
+
+// HasLocalCredential reports whether this account stores a password or derived
+// auth secret of its own. An auto-provisioned SSO account has neither: its link
+// is not a bypass of some other credential, it is the only one. Nothing may
+// revoke that link, because there is no way back in afterwards — a re-link needs
+// a step-up, and a step-up needs the credential this account does not have.
+func (u User) HasLocalCredential() bool {
+	return u.PasswordHash != ""
 }
 
 // VerifyAuthSecret checks a client-derived auth secret against u's stored hash.

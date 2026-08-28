@@ -10,16 +10,18 @@ import (
 // The Go half of the shared MIME corpus. The TypeScript half is
 // frontend/src/lib/mimeContent.test.ts, and both read the SAME file.
 //
-// Two independent MIME parsers exist because the server never sees a
-// client-protected account's plaintext. They must agree on which part is the
-// display body: buildPGPDeliveries encrypts one plaintext to every To/CC key in
-// a single call, so recipients on different custody modes get identical
-// ciphertext under ONE signature. When the parsers disagree, that one signature
-// authenticates two different messages — which is the property the "signature
-// verified" badge exists to deny. Audit run-10 found two such disagreements.
+// Two parsers exist because the server never sees a client-protected account's
+// plaintext. Only the browser's renders mail today — server-side decryption is
+// retired, api.decryptPGPPayload never opens a key — so ParseContent is the
+// reference the corpus holds it to rather than a second live reading. It was
+// one: buildPGPDeliveries encrypts ONE plaintext to every To/CC key in a single
+// call, so recipients on different custody modes got identical ciphertext under
+// ONE signature, and a disagreement made that signature authenticate two
+// different messages. Audit run-10 found two such disagreements; run-11 found
+// two more (media-type case, quoted-printable).
 //
-// If this test and its TypeScript counterpart ever report different bodies for
-// the same case, that is a wire-level trust bug, not a test discrepancy.
+// A case that passes here and fails in the TypeScript suite is a divergence,
+// not a test discrepancy: fix the parser, never the expectation.
 
 type mimeCorpusCase struct {
 	Name       string `json:"name"`

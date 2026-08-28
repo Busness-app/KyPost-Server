@@ -1,9 +1,7 @@
 package state
 
 import (
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,12 +23,6 @@ import (
 type Store struct {
 	baseDir string
 	db      *sql.DB
-}
-
-type PairingAttempt struct {
-	Code      string `json:"code"`      // the pairing code that was attempted
-	AttemptAt string `json:"attemptAt"` // RFC3339 timestamp
-	Success   bool   `json:"success"`   // whether the attempt succeeded
 }
 
 // Native notification delivery modes. "push" (the default) sends via the
@@ -149,8 +141,6 @@ type stateFile struct {
 	AICreditsExhausted          bool                       `json:"aiCreditsExhausted,omitempty"`
 	AICreditsExhaustedAt        string                     `json:"aiCreditsExhaustedAt,omitempty"`
 	OllamaUpdateNotifiedVersion string                     `json:"ollamaUpdateNotifiedVersion,omitempty"`
-	DesktopPairingCodes         map[string]string          `json:"desktopPairingCodes,omitempty"`
-	DesktopPairingAttempts      []PairingAttempt           `json:"desktopPairingAttempts,omitempty"`
 }
 
 // New opens (creating if needed) the account's state database, applies the
@@ -1393,147 +1383,4 @@ func (s *Store) setUpdateNotified(key, latestVersion string) (notify bool, err e
 		return setMeta(tx, key, latestVersion)
 	})
 	return newlySeen, err
-}
-
-// ---- desktop pairing -------------------------------------------------------
-
-// hashPairingCode returns a hex SHA-256 of a pairing code, for the audit log.
-// Not a password hash and does not need to be: the input is 128 bits of
-// crypto/rand, so there is nothing to brute force.
-func hashPairingCode(code string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(code)))
-	return hex.EncodeToString(sum[:])
-}
-
-// MaxDesktopPairingCodesPerHour bounds how many desktop pairing codes one
-// account may mint per hour.
-const MaxDesktopPairingCodesPerHour = 5
-
-func (s *Store) SetDesktopPairingCode(code string, ttl time.Duration) error {
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	}
-	expiresAt := time.Now().UTC().Add(ttl).Format(time.RFC3339)
-	_, err := s.db.Exec(
-		`INSERT INTO desktop_pairing_codes(code, expires_at) VALUES(?, ?)
-		 ON CONFLICT(code) DO UPDATE SET expires_at = excluded.expires_at`,
-		strings.TrimSpace(code), expiresAt)
-	return err
-}
-
-// ValidateDesktopPairingCode reports whether a code exists and is unexpired.
-// A pure read: it does not prune, since pruning here would be a write on a
-// read path and ConsumeDesktopPairingCode is what removes codes.
-func (s *Store) ValidateDesktopPairingCode(code string) bool {
-	var expiresAtStr string
-	err := s.db.QueryRow(
-		`SELECT expires_at FROM desktop_pairing_codes WHERE code = ?`, strings.TrimSpace(code)).Scan(&expiresAtStr)
-	if err != nil {
-		return false
-	}
-	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
-	if err != nil {
-		return false
-	}
-	return time.Now().UTC().Before(expiresAt)
-}
-
-// ConsumeDesktopPairingCode validates and removes a code in one transaction,
-// which is what makes "redeemable exactly once" hold against a concurrent
-// redemption of the same code. A code that was present is deleted whether or
-// not it had expired.
-func (s *Store) ConsumeDesktopPairingCode(code string) (bool, error) {
-	cleaned := strings.TrimSpace(code)
-	consumed := false
-	err := s.tx(func(tx *sql.Tx) error {
-		var expiresAtStr string
-		err := tx.QueryRow(`SELECT expires_at FROM desktop_pairing_codes WHERE code = ?`, cleaned).Scan(&expiresAtStr)
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM desktop_pairing_codes WHERE code = ?`, cleaned); err != nil {
-			return err
-		}
-		expiresAt, parseErr := time.Parse(time.RFC3339, expiresAtStr)
-		consumed = parseErr == nil && time.Now().UTC().Before(expiresAt)
-		return nil
-	})
-	return consumed, err
-}
-
-// ListDesktopPairingAttempts returns the attempt audit log, oldest first.
-func (s *Store) ListDesktopPairingAttempts() []PairingAttempt {
-	rows, err := s.db.Query(`SELECT code, attempt_at, success FROM desktop_pairing_attempts ORDER BY id`)
-	if err != nil {
-		slog.Error("state read failed", "field", "pairingAttempts", "dir", s.baseDir, "error", err.Error())
-		return []PairingAttempt{}
-	}
-	defer rows.Close()
-	out := []PairingAttempt{}
-	for rows.Next() {
-		var a PairingAttempt
-		var success int
-		if err := rows.Scan(&a.Code, &a.AttemptAt, &success); err != nil {
-			return out
-		}
-		a.Success = success == 1
-		out = append(out, a)
-	}
-	return out
-}
-
-// CheckDesktopPairingRateLimit reports whether this account may mint another
-// pairing code, and how many it has left this hour.
-//
-// It counts EVERY attempt in the window, not just failures: the only caller
-// records a success on issuance, so counting failures alone made the limit
-// apply to nothing.
-func (s *Store) CheckDesktopPairingRateLimit() (bool, int, error) {
-	oneHourAgo := time.Now().UTC().Add(-time.Hour)
-	rows, err := s.db.Query(`SELECT attempt_at FROM desktop_pairing_attempts`)
-	if err != nil {
-		return false, 0, err
-	}
-	defer rows.Close()
-	recent := 0
-	for rows.Next() {
-		var at string
-		if err := rows.Scan(&at); err != nil {
-			return false, 0, err
-		}
-		t, err := time.Parse(time.RFC3339, at)
-		if err != nil {
-			continue
-		}
-		if t.After(oneHourAgo) {
-			recent++
-		}
-	}
-	remaining := MaxDesktopPairingCodesPerHour - recent
-	if remaining < 0 {
-		remaining = 0
-	}
-	return recent < MaxDesktopPairingCodesPerHour, remaining, nil
-}
-
-// RecordDesktopPairingAttempt appends one attempt to the audit log, trimmed to
-// the newest 100.
-//
-// code is HASHED, never stored: it is a credential the moment a redeem handler
-// exists, and this log is persisted.
-func (s *Store) RecordDesktopPairingAttempt(code string, success bool) error {
-	return s.tx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec(
-			`INSERT INTO desktop_pairing_attempts(code, attempt_at, success) VALUES(?, ?, ?)`,
-			hashPairingCode(code), time.Now().UTC().Format(time.RFC3339), boolToInt(success)); err != nil {
-			return err
-		}
-		_, err := tx.Exec(
-			`DELETE FROM desktop_pairing_attempts WHERE id NOT IN (
-			   SELECT id FROM desktop_pairing_attempts ORDER BY id DESC LIMIT 100)`)
-		return err
-	})
 }

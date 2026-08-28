@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"kypost-server/backend/internal/sso"
 	"kypost-server/backend/internal/users"
@@ -20,6 +22,12 @@ const ssoCookieName = "kypost_sso_state"
 // resolved from the caller's authenticated session at callback time, never
 // from the cookie. See handleSSOCallback.
 const ssoModeLink = "link"
+
+// ssoLinkGrantTTL bounds how long a step-up authorizes one link. It matches the
+// state cookie's own five-minute life: the round trip to the provider has to fit
+// inside both, and a grant outliving the flow it was minted for would be a
+// re-authentication that quietly keeps authorizing.
+const ssoLinkGrantTTL = 5 * time.Minute
 
 // ssoSessionTag fingerprints the caller's session token.
 //
@@ -102,7 +110,9 @@ func (s *Server) ssoRedirectURI() string {
 	return strings.TrimRight(s.serverBaseURL, "/") + "/api/auth/oidc/callback"
 }
 
-// ssoProvider discovers and policy-checks the configured provider for one request.
+// ssoProvider returns the discovered, policy-checked provider for these
+// settings. sso.NewProvider caches the discovery behind the settings that
+// produced it, so this is a network call only on a cold or expired entry.
 func (s *Server) ssoProvider(r *http.Request, settings sso.SSOSettings) (*sso.Provider, string, error) {
 	redirectURI := s.ssoRedirectURI()
 	if redirectURI == "" {
@@ -110,6 +120,27 @@ func (s *Server) ssoProvider(r *http.Request, settings sso.SSOSettings) (*sso.Pr
 	}
 	p, err := sso.NewProvider(r.Context(), settings, redirectURI)
 	return p, redirectURI, err
+}
+
+// ssoRateLimited meters a public SSO route per IP, on the same bucket the
+// pre-login handshake uses, and answers 429 when the caller is over it.
+//
+// Both routes it guards are public, unauthenticated and reach an OUTBOUND
+// request to the operator's identity provider — discovery at the login route,
+// the token exchange at the callback — and there is no global rate-limiting
+// middleware in front of either. sso.NewProvider caches discovery, so a flood
+// no longer reflects one request per request received, but a cold cache, a
+// settings change or an IdP that is down all put the fetch back on the request
+// path. A real sign-in spends one token per leg.
+func (s *Server) ssoRateLimited(w http.ResponseWriter, r *http.Request) bool {
+	if s.loginParamsLimiter == nil {
+		return false
+	}
+	if ok, _ := s.loginParamsLimiter.allow(lockoutKeyForIP(clientIP(r))); ok {
+		return false
+	}
+	http.Error(w, "too many sign-in attempts right now, try again shortly", http.StatusTooManyRequests)
+	return true
 }
 
 // handleSSOLogin initiates an OpenID Connect authorization code flow with PKCE.
@@ -120,24 +151,123 @@ func (s *Server) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mode := ""
-	if r.URL.Query().Get("link") == "true" {
-		if _, ok := s.currentUser(r); !ok {
-			http.Error(w, "sign in before linking an SSO identity", http.StatusUnauthorized)
-			return
-		}
-		mode = ssoModeLink + ":" + ssoSessionTag(r)
+	if s.ssoRateLimited(w, r) {
+		return
 	}
 
+	// No link mode here. Starting a link requires a step-up this public GET
+	// cannot perform, so it is minted by handleSSOLinkStart instead. A client
+	// still asking for the retired parameter is told, rather than quietly given
+	// a sign-in: with AutoProvision on, an unlinked subject falling through to
+	// this path is provisioned a NEW account and handed a session for it, so
+	// the user meaning to link ends up signed in as somebody else entirely.
+	if r.URL.Query().Has("link") {
+		http.Error(w, "linking moved to POST /api/settings/sso/link, which requires the account credential",
+			http.StatusBadRequest)
+		return
+	}
+
+	authorizeURL, _, ok := s.startSSOFlow(w, r, settings, "")
+	if !ok {
+		return // startSSOFlow wrote the response
+	}
+	http.Redirect(w, r, authorizeURL, http.StatusFound)
+}
+
+// handleSSOLinkStart begins a link flow, and is the only thing that can.
+//
+// Linking creates a credential: handleSSOCallback signs a caller in from the
+// stored sub and an Active check, nothing more. A session cookie is a bearer
+// token, so gating the write on the session alone meant a hijacked session
+// bound the attacker's directory identity to the victim's account with no
+// password and no second factor — the durable-mutation standard every other
+// self-service write is held to (see pgp_stepup.go and handleAuthStepUp).
+//
+// The redirect flow has no request body to carry a credential in, which is why
+// the gate lives here: this POST proves the credential and the second factor,
+// then records the grant on the session itself (Session.SSOLinkGrantedAt) for
+// the callback to spend. Nothing about the authorization travels in the state
+// cookie, deliberately — an attacker holding the session controls their own
+// cookie jar and could write any self-consistent value into it, so a fact the
+// caller cannot write at all is the only thing worth checking.
+func (s *Server) handleSSOLinkStart(w http.ResponseWriter, r *http.Request) {
+	ac, ok := authFromContext(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	settings := s.ssoStore.Load()
+	if !settings.Enabled || settings.IssuerURL == "" || settings.ClientID == "" {
+		http.Error(w, "Single Sign-On is not configured or disabled", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		Password   string `json:"password"`
+		AuthSecret string `json:"authSecret,omitempty"`
+		Code       string `json:"code,omitempty"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	u, err := s.users.Get(ac.UserID)
+	if err != nil {
+		http.Error(w, "user unavailable", http.StatusInternalServerError)
+		return
+	}
+	// An auto-provisioned account stores no password and no derived secret, so
+	// there is no credential for the step-up below to check and it could only
+	// ever answer "invalid credentials" — an account cannot re-link its way out
+	// of a problem it never had a second credential to prove itself with. Say so
+	// plainly. That such an account can never pass this gate is also why nothing
+	// revokes its link: see users.User.HasLocalCredential.
+	if !u.HasLocalCredential() {
+		http.Error(w, "set an account password before linking or re-linking an SSO identity",
+			http.StatusConflict)
+		return
+	}
+	// Credential first, then the second factor, each on its own counter and the
+	// success recorded only once both hold — handleAuthStepUp explains why
+	// clearing between the two would leave the second factor unthrottled.
+	if !s.confirmAccountCredentialNoRecord(w, r, ac.UserID, req.Password, req.AuthSecret) {
+		return
+	}
+	if u.TOTPEnabled && !s.confirmSecondFactor(w, r, u, strings.TrimSpace(req.Code)) {
+		return
+	}
+	s.passwordChangeLockout.recordSuccess(stepUpLockoutKey(ac.UserID, r))
+	s.mfaLockout.recordSuccess(ac.UserID)
+
+	// The flow is built BEFORE the grant, so a failure here — discovery, PKCE,
+	// the token generator — leaves no live grant behind for the next link-mode
+	// callback to spend.
+	authorizeURL, state, ok := s.startSSOFlow(w, r, settings, ssoModeLink+":"+ssoSessionTag(r))
+	if !ok {
+		return // startSSOFlow wrote the response
+	}
+	if !s.grantSSOLink(r, state) {
+		http.Error(w, "failed to authorize the link", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authorizeUrl": authorizeURL})
+}
+
+// startSSOFlow generates the PKCE/state/nonce triple and stores it in the state
+// cookie under mode, reporting the provider URL to send the caller to and the
+// state that identifies this flow. It writes only the cookie, and on failure the
+// error response; the caller decides between a redirect and a JSON body, and
+// handleSSOLinkStart needs the state to bind its grant to this flow and nothing
+// else.
+func (s *Server) startSSOFlow(w http.ResponseWriter, r *http.Request, settings sso.SSOSettings, mode string) (authorizeURL, flowState string, ok bool) {
 	verifier, challenge, err := sso.GeneratePKCE()
 	if err != nil {
 		http.Error(w, "failed to generate PKCE challenge", http.StatusInternalServerError)
-		return
+		return "", "", false
 	}
 	state, err := sso.RandomToken(16)
 	if err != nil {
 		http.Error(w, "failed to generate SSO state", http.StatusInternalServerError)
-		return
+		return "", "", false
 	}
 	// The nonce is echoed into the ID token and checked at callback, which is
 	// what stops a token minted for some other session of this same client
@@ -145,13 +275,13 @@ func (s *Server) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 	nonce, err := sso.RandomToken(16)
 	if err != nil {
 		http.Error(w, "failed to generate SSO nonce", http.StatusInternalServerError)
-		return
+		return "", "", false
 	}
 
 	provider, _, err := s.ssoProvider(r, settings)
 	if err != nil {
 		s.ssoFailure(w, "start", err)
-		return
+		return "", "", false
 	}
 
 	// Cookie value: state|verifier|nonce|mode.
@@ -170,7 +300,7 @@ func (s *Server) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   300, // 5 minutes
 	})
 
-	http.Redirect(w, r, provider.AuthCodeURL(state, nonce, challenge), http.StatusFound)
+	return provider.AuthCodeURL(state, nonce, challenge), state, true
 }
 
 // handleSSOCallback processes the authorization code callback from the OIDC IdP.
@@ -217,17 +347,41 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Link mode targets the session making this request, and nothing else.
 	linkUserID := ""
-	if tag, isLink := strings.CutPrefix(mode, ssoModeLink+":"); isLink {
+	if rest, isLink := strings.CutPrefix(mode, ssoModeLink+":"); isLink {
 		auth, ok := s.currentUser(r)
 		if !ok {
 			http.Error(w, "sign in before linking an SSO identity", http.StatusUnauthorized)
 			return
 		}
-		if !hmac.Equal([]byte(tag), []byte(ssoSessionTag(r))) {
+		if !hmac.Equal([]byte(rest), []byte(ssoSessionTag(r))) {
 			http.Error(w, "this SSO link was started by a different session", http.StatusBadRequest)
 			return
 		}
+		// The tag proves only that SOME request in this session wrote the
+		// cookie, and an attacker holding the session can write it themselves —
+		// so it is not the authorization. The grant is: handleSSOLinkStart
+		// records it on the session only after the credential and the second
+		// factor, the caller cannot write it, and consuming it here means one
+		// step-up authorizes exactly one link.
+		if !s.consumeSSOLinkGrant(r, expectedState) {
+			// Metered, unlike the checks above it. Those refuse a malformed
+			// request; this one refuses a well-formed attempt to spend somebody
+			// else's step-up, and answering it for free is an oracle for when
+			// one is live.
+			if s.ssoRateLimited(w, r) {
+				return
+			}
+			http.Error(w, "this SSO link was not authorized; start it from the Security page", http.StatusForbidden)
+			return
+		}
 		linkUserID = auth.UserID
+	}
+
+	// Spent here only once the request is well-formed enough to be worth an
+	// outbound call: the checks above cost nothing, and charging junk for them
+	// would be a way to deny a NAT its own sign-ins.
+	if s.ssoRateLimited(w, r) {
+		return
 	}
 
 	provider, _, err := s.ssoProvider(r, settings)
@@ -266,6 +420,13 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 // linkSSOIdentity binds a verified identity to the caller's own account.
+//
+// Reaching here means the callback has already spent the single-use grant
+// handleSSOLinkStart recorded on the session, so the caller proved the account
+// credential and the second factor — a session alone does not authorize this
+// write. revokeAllUserCredentials revokes the link too, so a victim's password
+// change ends a link that should never have been made; LinkSSO clears that
+// revocation, because this step-up is exactly the proof it was waiting for.
 func (s *Server) linkSSOIdentity(w http.ResponseWriter, r *http.Request, userID string, claims *sso.SSOTokenClaims) {
 	// One subject, one account. Without this an identity already linked
 	// elsewhere could be attached a second time, and GetBySSOSub would then
@@ -297,6 +458,15 @@ func (s *Server) linkSSOIdentity(w http.ResponseWriter, r *http.Request, userID 
 func (s *Server) resolveSSOUser(w http.ResponseWriter, settings sso.SSOSettings, claims *sso.SSOTokenClaims) (users.User, error) {
 	user, err := s.users.GetBySSOSub(claims.Sub)
 	if err == nil {
+		// The account still knows this subject — that is how directory sync
+		// addresses it — but a revocation said it is no longer a credential.
+		// Refuse here rather than falling through to auto-provision, which
+		// would hand the same subject a second, empty account.
+		if user.SSOLinkRevoked() {
+			http.Error(w, "Access denied: this SSO link was revoked. "+
+				"Sign in locally and link it again from Settings.", http.StatusForbidden)
+			return users.User{}, errors.New("sso link revoked")
+		}
 		return user, nil
 	}
 	if !errors.Is(err, users.ErrNotFound) {
@@ -379,10 +549,77 @@ func (s *Server) handleSSOUnlink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Same rule as revocation, at the one path a user can reach by clicking:
+	// an auto-provisioned account's link is not a fourth credential, it is the
+	// only one. Unlinking it locks the account out, and with AutoProvision on
+	// the next SSO sign-in provisions a SECOND, empty account under a suffixed
+	// username and orphans the mailbox. ErrLastActiveAdmin does not cover it —
+	// that guards deactivation, not unlink — so a sole SSO admin could take
+	// admin access off the instance with no way back.
+	u, err := s.users.Get(auth.UserID)
+	if err != nil {
+		http.Error(w, "user unavailable", http.StatusInternalServerError)
+		return
+	}
+	if u.SSOSub != "" && !u.HasLocalCredential() {
+		http.Error(w, "set an account password before unlinking your SSO identity; it is currently the only way you can sign in",
+			http.StatusConflict)
+		return
+	}
+
 	if err := s.users.UnlinkSSO(auth.UserID); err != nil {
 		http.Error(w, "failed to unlink SSO identity: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// grantSSOLink records on the caller's own session that they have just proved
+// their credential and second factor, authorizing one link — the one started by
+// the flow that minted state. See Session.SSOLinkState.
+func (s *Server) grantSSOLink(r *http.Request, state string) bool {
+	c, err := r.Cookie("kypost_session")
+	if err != nil || c.Value == "" {
+		return false
+	}
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	sess, ok := s.sessions[c.Value]
+	if !ok {
+		return false
+	}
+	sess.SSOLinkGrantedAt = time.Now()
+	sess.SSOLinkState = state
+	s.sessions[c.Value] = sess
+	return true
+}
+
+// consumeSSOLinkGrant reports whether this session may write a link for the
+// flow identified by state, clearing the grant either way so neither a second
+// callback nor a wrong guess can reuse it.
+func (s *Server) consumeSSOLinkGrant(r *http.Request, state string) bool {
+	c, err := r.Cookie("kypost_session")
+	if err != nil || c.Value == "" {
+		return false
+	}
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	sess, ok := s.sessions[c.Value]
+	if !ok || sess.SSOLinkGrantedAt.IsZero() {
+		return false
+	}
+	// Cleared before the verdict, not after it: a grant that a wrong state just
+	// failed against is a grant someone else is trying to spend, and leaving it
+	// live for the rest of the TTL is the whole hole. The user re-runs the
+	// step-up, which costs them one form and costs the attacker the password.
+	granted, want := sess.SSOLinkGrantedAt, sess.SSOLinkState
+	sess.SSOLinkGrantedAt = time.Time{}
+	sess.SSOLinkState = ""
+	s.sessions[c.Value] = sess
+
+	if want == "" || !hmac.Equal([]byte(want), []byte(state)) {
+		return false
+	}
+	return time.Since(granted) < ssoLinkGrantTTL
 }

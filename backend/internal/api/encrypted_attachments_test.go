@@ -228,25 +228,77 @@ func TestServeAttachmentListLeavesAnEncryptedFileAlone(t *testing.T) {
 	}
 }
 
-func TestLooksLikeEncryptedEnvelope(t *testing.T) {
-	octet := func(name string) imapadapter.AttachmentInfo {
-		return imapadapter.AttachmentInfo{Name: name, MimeType: "application/octet-stream"}
-	}
+// countingMailClient counts what each attachment request costs. Both
+// ListAttachments and GetAttachment are a full message download and MIME parse
+// (imap.fetchAttachments), so a second call is a second copy of the whole
+// message.
+type countingMailClient struct {
+	imapadapter.Client
+	listCalls int
+	getCalls  int
+}
 
-	// The real shape: the same ciphertext part listed twice.
-	if !looksLikeEncryptedEnvelope([]imapadapter.AttachmentInfo{octet("encrypted.asc"), octet("encrypted.asc")}) {
-		t.Error("a real PGP/MIME message's doubled ciphertext part was not recognised")
-	}
-	if !looksLikeEncryptedEnvelope([]imapadapter.AttachmentInfo{octet("encrypted.asc")}) {
-		t.Error("a single-part envelope was not recognised")
-	}
-	if looksLikeEncryptedEnvelope(nil) {
-		t.Error("a message with no parts was called an envelope")
-	}
-	if looksLikeEncryptedEnvelope([]imapadapter.AttachmentInfo{
-		octet("archive.pgp"),
-		{Name: "report.xlsx", MimeType: "application/vnd.ms-excel"},
-	}) {
-		t.Error("a message carrying an encrypted file was called an envelope")
-	}
+func (c *countingMailClient) ListAttachments(ctx context.Context, mailbox string, uid int) ([]imapadapter.AttachmentInfo, error) {
+	c.listCalls++
+	return c.Client.ListAttachments(ctx, mailbox, uid)
+}
+
+func (c *countingMailClient) GetAttachment(ctx context.Context, mailbox string, uid, index int) (imapadapter.AttachmentInfo, []byte, error) {
+	c.getCalls++
+	return c.Client.GetAttachment(ctx, mailbox, uid, index)
+}
+
+// A PGP/MIME message is the case that used to cost two fetches: the listing
+// probed part 0 and the download re-checked the message's shape, both only to
+// feed a server-side decrypt that no longer exists. Pass-through is one fetch.
+func TestEncryptedAttachmentRequestsCostOneFetch(t *testing.T) {
+	srv := newTestServer(t)
+	userID, identity := testUserWithServerKey(t, srv)
+
+	t.Run("list", func(t *testing.T) {
+		fake := &countingMailClient{Client: encryptedMessageFake(t, identity)}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/mail/attachments?mailbox=Sent&messageId=7", nil)
+		req = req.WithContext(context.WithValue(req.Context(), authContextKey{}, AuthContext{UserID: userID}))
+		srv.serveAttachmentList(rec, req, fake)
+
+		if rec.Code != 200 {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		if fake.listCalls != 1 || fake.getCalls != 0 {
+			t.Fatalf("listing fetched %d lists and %d parts, want 1 and 0", fake.listCalls, fake.getCalls)
+		}
+	})
+
+	t.Run("download", func(t *testing.T) {
+		fake := &countingMailClient{Client: encryptedMessageFake(t, identity)}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/mail/attachment?mailbox=Sent&messageId=7&index=0", nil)
+		req = req.WithContext(context.WithValue(req.Context(), authContextKey{}, AuthContext{UserID: userID}))
+		srv.serveAttachmentDownload(rec, req, fake)
+
+		if rec.Code != 200 {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		if fake.getCalls != 1 || fake.listCalls != 0 {
+			t.Fatalf("download fetched %d parts and %d lists, want 1 and 0", fake.getCalls, fake.listCalls)
+		}
+	})
+
+	// An out-of-range index used to buy a second fetch too, probing part 0 on
+	// the way to the 404 it always returned.
+	t.Run("missing index", func(t *testing.T) {
+		fake := &countingMailClient{Client: encryptedMessageFake(t, identity)}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/mail/attachment?mailbox=Sent&messageId=7&index=9", nil)
+		req = req.WithContext(context.WithValue(req.Context(), authContextKey{}, AuthContext{UserID: userID}))
+		srv.serveAttachmentDownload(rec, req, fake)
+
+		if rec.Code != 404 {
+			t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+		if fake.getCalls != 1 || fake.listCalls != 0 {
+			t.Fatalf("missing index fetched %d parts and %d lists, want 1 and 0", fake.getCalls, fake.listCalls)
+		}
+	})
 }

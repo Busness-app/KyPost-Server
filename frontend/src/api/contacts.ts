@@ -242,8 +242,22 @@ type BulkDeleteResult = {
   failed: BulkDeleteFailure[];
 };
 
-export function bulkDeleteContacts(ids: string[]): Promise<BulkDeleteResult> {
-  return postJSON<BulkDeleteResult>("/api/contacts/bulk-delete", { ids });
+// Must not exceed maxContactsBulkDeleteIDs in backend/internal/api/contacts_handlers.go,
+// which answers 413 above it. Each request is one full rewrite of contacts.json under the
+// store lock, so the batches go one at a time rather than concurrently.
+const BULK_DELETE_BATCH = 500;
+
+export async function bulkDeleteContacts(ids: string[]): Promise<BulkDeleteResult> {
+  const result: BulkDeleteResult = { ok: true, processed: 0, failed: [] };
+  for (let i = 0; i < ids.length; i += BULK_DELETE_BATCH) {
+    const batch = await postJSON<BulkDeleteResult>("/api/contacts/bulk-delete", {
+      ids: ids.slice(i, i + BULK_DELETE_BATCH),
+    });
+    result.ok = result.ok && batch.ok;
+    result.processed += batch.processed;
+    result.failed.push(...batch.failed);
+  }
+  return result;
 }
 
 export function exportContactsUrl(format: "vcard" | "csv"): string {

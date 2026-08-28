@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,11 @@ const (
 	maxDeviceTextLen   = 256
 	maxUserAgentLen    = 512
 )
+
+// Every character an FCM or APNs device token can contain, and nothing that is
+// URL syntax. Mirrors TOKEN_CHARSET in push-relay-shared/push-relay-common.ts;
+// UnifiedPush endpoints are URLs and are validated by their own check instead.
+var nativePushTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
 
 // clampField trims s and cuts it to max bytes. Used on stored metadata (user
 // agent, device name, app version) where over-length is not worth refusing the
@@ -497,6 +503,14 @@ func (s *Server) handleNotificationNativeRegister(w http.ResponseWriter, r *http
 		}
 		webPushP256DH = strings.TrimSpace(req.P256DH)
 		webPushAuth = strings.TrimSpace(req.Auth)
+	} else if !nativePushTokenPattern.MatchString(deviceToken) {
+		// FCM and APNs tokens are opaque identifiers, and the APNs relay puts
+		// one in a URL path (/3/device/<token>), where `../../3/device/<victim>`
+		// would address someone else's device. The relay refuses that itself;
+		// this keeps a token that can only be a forgery attempt out of the store
+		// in the first place, including from a relay deployment that is behind.
+		http.Error(w, "invalid deviceToken", http.StatusBadRequest)
+		return
 	}
 	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(claims.Sub)), []byte(subscriberID)) != 1 {
 		http.Error(w, "invalid or expired pairing token", http.StatusUnauthorized)
@@ -905,84 +919,6 @@ func (s *Server) handleNotificationNativePull(w http.ResponseWriter, r *http.Req
 		"deliveryMode":  store.NativeDeliveryMode(),
 		"cursor":        cursor,
 		"notifications": notifications,
-	})
-}
-
-func (s *Server) handleDesktopPair(w http.ResponseWriter, r *http.Request) {
-	ac, okAuth := authFromContext(r)
-	if !okAuth {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
-		return
-	}
-
-	// Before minting anything: a pairing code with no address to redeem it at
-	// is a live credential the caller cannot use, and it still spends one of
-	// the five per hour. Refuse instead, naming what the operator must set.
-	serverBaseURL := s.pairingBaseURL()
-	if serverBaseURL == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"error": "desktop pairing is not configured on the server; set SERVER_BASE_URL",
-		})
-		return
-	}
-
-	store, err := s.userStore(ac.UserID)
-	if err != nil {
-		http.Error(w, "failed to open user state", http.StatusInternalServerError)
-		return
-	}
-
-	// Check rate limit: max 5 failed attempts per hour
-	allowed, remaining, err := store.CheckDesktopPairingRateLimit()
-	if err != nil {
-		s.logger.Error("rate limit check failed", "user_id", ac.UserID, "error", err.Error())
-		http.Error(w, "failed to check rate limit", http.StatusInternalServerError)
-		return
-	}
-	if !allowed {
-		s.logger.Error("desktop pairing rate limit exceeded", "user_id", ac.UserID)
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{
-			"error": "rate limit exceeded: too many pairing attempts. Try again later.",
-		})
-		return
-	}
-
-	// Generate 16 bytes (128 bits) of cryptographically secure random data
-	codeBytes := make([]byte, 16)
-	if _, err := rand.Read(codeBytes); err != nil {
-		http.Error(w, "failed to generate pairing code", http.StatusInternalServerError)
-		return
-	}
-
-	// Return as 32-character hex string (no formatting, delivered via API/QR only)
-	pairingCode := strings.ToUpper(hex.EncodeToString(codeBytes))
-
-	// Store pairing code with 5-minute expiration
-	if err := store.SetDesktopPairingCode(pairingCode, 5*time.Minute); err != nil {
-		s.logger.Error("failed to store desktop pairing code", "user_id", ac.UserID, "error", err.Error())
-		http.Error(w, "failed to create pairing code", http.StatusInternalServerError)
-		return
-	}
-
-	// Record successful pairing initiation
-	_ = store.RecordDesktopPairingAttempt(pairingCode, true)
-
-	// No part of the code goes in the log. This used to emit pairingCode[:8]
-	// labelled "code_hash", which it was not — it was the first 32 bits of the
-	// raw credential, in a file that is not treated as secret. The user id and
-	// timestamp are what an operator actually correlates on; the attempt log
-	// keeps a real hash if a redemption ever needs matching to an issuance.
-	s.logger.Info("desktop pairing initiated", "user_id", ac.UserID)
-
-	registerEndpoint := strings.TrimRight(serverBaseURL, "/") + "/api/notifications/desktop/register"
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":               true,
-		"pairingCode":      pairingCode,
-		"ttlSeconds":       300,
-		"rateLimit":        remaining,
-		"serverBaseUrl":    serverBaseURL,
-		"registerEndpoint": registerEndpoint,
 	})
 }
 

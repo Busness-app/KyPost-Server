@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -308,14 +309,109 @@ type Provider struct {
 	issuer   string
 }
 
-// NewProvider performs OIDC discovery and builds a verifier for it.
+// Discovery is cached, keyed on the settings that produced it.
+//
+// oidc.NewProvider issues a network GET to the issuer's
+// .well-known/openid-configuration every time it is called, and it was called
+// once per request by four PUBLIC routes — so any unauthenticated GET to
+// /api/auth/oidc/login cost the operator's identity provider one request and
+// this process one socket held for up to the client timeout, with nothing in
+// front of it. The cached Provider also carries go-oidc's remote key set, so a
+// callback no longer re-fetches the JWKS either.
+//
+// A settings change IS the invalidation: the key covers every field
+// NewProvider reads, so different settings are a different entry and the old
+// one is never consulted again. The TTL covers the other direction — a
+// provider that rotates its own endpoints while nothing here changed.
+const (
+	providerCacheTTL     = 5 * time.Minute
+	providerCacheEntries = 8
+)
+
+type cachedProvider struct {
+	provider *Provider
+	expires  time.Time
+}
+
+var (
+	providerCacheMu sync.Mutex
+	providerCache   = map[string]cachedProvider{}
+)
+
+// providerCacheKey fingerprints everything NewProvider reads. Hashed rather
+// than concatenated because the client secret is one of those things, and a map
+// key is exactly the sort of value that turns up in a heap dump. Each part is
+// length-prefixed so no two settings can join into the same string.
+func providerCacheKey(cfg SSOSettings, redirectURI string) string {
+	h := sha256.New()
+	for _, part := range []string{
+		cfg.IssuerURL,
+		cfg.ClientID,
+		cfg.ClientSecret,
+		redirectURI,
+		strconv.FormatBool(cfg.AllowInsecureIssuer),
+	} {
+		fmt.Fprintf(h, "%d:%s", len(part), part)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func cachedProviderFor(key string) *Provider {
+	providerCacheMu.Lock()
+	defer providerCacheMu.Unlock()
+	entry, ok := providerCache[key]
+	if !ok || time.Now().After(entry.expires) {
+		return nil
+	}
+	return entry.provider
+}
+
+func cacheProvider(key string, p *Provider) {
+	providerCacheMu.Lock()
+	defer providerCacheMu.Unlock()
+	now := time.Now()
+	for k, entry := range providerCache {
+		if now.After(entry.expires) {
+			delete(providerCache, k)
+		}
+	}
+	// The keys are admin-configured, so this is tidiness rather than a bound on
+	// an attacker. Past the ceiling, start over: an install has one issuer, and
+	// a handful of stale entries are not worth an eviction policy.
+	if len(providerCache) >= providerCacheEntries {
+		clear(providerCache)
+	}
+	providerCache[key] = cachedProvider{provider: p, expires: now.Add(providerCacheTTL)}
+}
+
+// NewProvider returns the discovered, policy-checked provider for these
+// settings, performing discovery only when the cache above cannot answer.
+//
+// Failures are deliberately not cached: a provider that was down a second ago
+// may be up now, and pinning an outage for the TTL would make a restarted IdP
+// look broken for minutes. What bounds the cost of a failing issuer is the
+// per-IP rate limit on the public routes, not this.
+func NewProvider(ctx context.Context, cfg SSOSettings, redirectURI string) (*Provider, error) {
+	key := providerCacheKey(cfg, redirectURI)
+	if p := cachedProviderFor(key); p != nil {
+		return p, nil
+	}
+	p, err := discoverProvider(ctx, cfg, redirectURI)
+	if err != nil {
+		return nil, err
+	}
+	cacheProvider(key, p)
+	return p, nil
+}
+
+// discoverProvider performs OIDC discovery and builds a verifier for it.
 //
 // oidc.NewProvider refuses a discovery document whose own `issuer` is not the
 // URL we asked, which is the check that makes trusting the endpoints it names
 // meaningful. Every endpoint is then held to the same transport policy as the
 // issuer, so a discovery document cannot downgrade the token endpoint to
 // cleartext and collect the client secret.
-func NewProvider(ctx context.Context, cfg SSOSettings, redirectURI string) (*Provider, error) {
+func discoverProvider(ctx context.Context, cfg SSOSettings, redirectURI string) (*Provider, error) {
 	if err := ValidateIssuerURL(cfg.IssuerURL, cfg.AllowInsecureIssuer); err != nil {
 		return nil, err
 	}

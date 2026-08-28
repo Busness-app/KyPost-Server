@@ -65,6 +65,13 @@ func (s *Server) deviceLockoutKey(deviceID string, r *http.Request) string {
 	return deviceID + "\x00" + lockoutKeyForIP(clientIP(r))
 }
 
+// retryAfterKDFBusy is the retryAfter deviceAuthFromRequest returns when the
+// device secret was never compared because the derivation slots were saturated.
+// Negative so it can never read as a lockout cooldown — every caller tests
+// retryAfter > 0 for that — and so writeDeviceAuthFailure can answer
+// writeKDFBusy's 503, which is what every other shed path in this package does.
+const retryAfterKDFBusy = -1 * time.Second
+
 // deviceAuthFromRequest resolves and authenticates the paired device calling
 // r: it extracts deviceId/deviceSecret from headers, finds which user owns
 // deviceId, loads that user's live NativeDevice record by ID, and verifies
@@ -73,14 +80,16 @@ func (s *Server) deviceLockoutKey(deviceID string, r *http.Request) string {
 // existed but has since been removed (unpaired) — that last case is what
 // makes removing a device an immediate, real revocation.
 //
-// retryAfter is nonzero exactly when deviceID is currently locked out after
-// deviceMaxFailures failed attempts (see s.deviceLockout); callers must
-// distinguish this ("come back later") from an ordinary ok=false ("bad
-// credentials") and answer 429 rather than 401 — see writeDeviceAuthFailure.
-// Every failure branch below that follows the lockout check pays toward that
-// deviceID's strike count; a correct secret against a deactivated account
-// does not, since the secret itself was valid and brute-forcing it is not
-// what happened.
+// retryAfter is positive exactly when deviceID is currently locked out after
+// deviceMaxFailures failed attempts (see s.deviceLockout), and
+// retryAfterKDFBusy when the secret was never checked because the derivation
+// slots were saturated; callers must distinguish both ("come back later") from
+// an ordinary ok=false ("bad credentials") and answer 429 or 503 rather than
+// 401 — see writeDeviceAuthFailure. Every failure branch below that follows the
+// lockout check pays toward that deviceID's strike count; a correct secret
+// against a deactivated account does not, since the secret itself was valid and
+// brute-forcing it is not what happened, and neither does a shed one, since no
+// secret was examined at all.
 //
 // The lockout is spent only once the deviceID has been resolved to a device
 // that actually exists. Reserving a strike first — which is what this did —
@@ -116,12 +125,18 @@ func (s *Server) deviceAuthFromRequest(r *http.Request) (userID string, device s
 		return "", state.NativeDevice{}, false, wait
 	}
 	// A legacy (pre-HashDeviceSecret) device secret still verifies through
-	// scrypt, so this can shed. Both outcomes deny the request here; the
-	// difference is that a shed one must not be cached as a failure, which is
-	// what cancelAttempt below already arranges for the other correct-secret
-	// paths.
+	// scrypt, so this can shed. An error means the secret was never COMPARED —
+	// users.ErrKDFBusy, or this request's context going away — while a stored
+	// hash that is malformed rather than merely wrong comes back (false, nil)
+	// and is an ordinary credential failure. So a shed refunds its strike and
+	// answers busy, exactly as every other derivation call site here does;
+	// counting it would lock a phone out of mail sync over a load spike.
 	okSecret, err := users.VerifyDeviceSecret(r.Context(), dev.SecretHash, deviceSecret)
-	if err != nil || !okSecret {
+	if err != nil {
+		s.deviceLockout.cancelAttempt(lockoutKey)
+		return "", state.NativeDevice{}, false, retryAfterKDFBusy
+	}
+	if !okSecret {
 		return "", state.NativeDevice{}, false, 0
 	}
 	// Deactivation must revoke device access immediately, exactly as
@@ -188,14 +203,19 @@ func (s *Server) meterDeviceWrite(w http.ResponseWriter, r *http.Request, userID
 }
 
 // writeDeviceAuthFailure writes the HTTP response for a failed
-// deviceAuthFromRequest call: 429 with a Retry-After header when retryAfter
-// is nonzero (the deviceID is locked out), 401 otherwise (missing/unknown/
-// wrong credentials). Shared by every handler that authenticates directly
-// via deviceAuthFromRequest and writes to w itself; server_userscope.go's
-// resolveMailAuthContext doesn't have a ResponseWriter at that point, so it
-// signals the same distinction via a sentinel error instead (see
-// mailLockedOutError in server_userscope.go).
+// deviceAuthFromRequest call: 503 with Retry-After when the secret could not be
+// checked at all (retryAfterKDFBusy), 429 with a Retry-After header when
+// retryAfter is positive (the deviceID is locked out), 401 otherwise
+// (missing/unknown/wrong credentials). Shared by every handler that
+// authenticates directly via deviceAuthFromRequest and writes to w itself;
+// server_userscope.go's resolveMailAuthContext doesn't have a ResponseWriter at
+// that point, so it signals the same distinctions via a sentinel error instead
+// (see mailLockedOutError in server_userscope.go).
 func writeDeviceAuthFailure(w http.ResponseWriter, retryAfter time.Duration) {
+	if retryAfter == retryAfterKDFBusy {
+		writeKDFBusy(w)
+		return
+	}
 	if retryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 		http.Error(w, "too many failed attempts, try again later", http.StatusTooManyRequests)
