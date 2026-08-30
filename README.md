@@ -10,7 +10,7 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 
 - Single-container Docker runtime. supervisord manages the processes.
 - Multi-user with two roles. Admins manage users and system settings. Each user connects their own IMAP mailbox.
-- IMAP inbox reader with folder management and drag-and-drop move actions
+- IMAP inbox reader with background body preloading, folder management, and drag-and-drop move actions
 - Automatic keyword labels for unread mail. KyPost polls each active user's mailbox separately, and each account has its OWN label list — copied from the instance defaults when the account is created, then theirs to change. Labels are a sorting hint a determined sender can influence — see [Classification flow](#architecture).
 - Filter Rules: a GUI condition and action builder plus a raw Sieve script editor. A run-now panel applies the rules on demand.
 - Compose flow with SMTP send and IMAP draft save
@@ -756,7 +756,7 @@ IMAP and inbox:
 
 - `GET|POST|DELETE /api/imap/config`
 - `POST /api/imap/test`
-- `GET /api/inbox?limit=500&mailbox=<name>`. Add `bodies=0` to get the list without message bodies — 13.3 MiB against 3.1 KiB for a 500-message window, since the rows render no body. Bodies then come one at a time from `GET /api/mail/body`. See [docs/INBOX_PAYLOAD_HANDOFF.md](docs/INBOX_PAYLOAD_HANDOFF.md).
+- `GET /api/inbox?limit=500&mailbox=<name>`. Add `bodies=0` to get the list without message bodies — 13.3 MiB against 3.1 KiB for a 500-message window, since the rows render no body. The web UI then preloads the current 20-message page one body at a time from `GET /api/mail/body`, so the list renders first and opening a displayed message normally needs no wait. See [docs/INBOX_PAYLOAD_HANDOFF.md](docs/INBOX_PAYLOAD_HANDOFF.md).
 - `POST /api/inbox/actions`
 - `GET|POST|PUT|DELETE /api/inbox/folders`
 - `GET /api/mail/search`

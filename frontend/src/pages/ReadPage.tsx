@@ -83,6 +83,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   // an empty pane must not read as "this message has no text" when the fetch
   // is what failed.
   const [bodyStatus, setBodyStatus] = useState("");
+  const bodyCacheRef = useRef(new Map<string, Promise<{ body: string; bodyMode?: "html" | "plain" }>>());
   const [attachments, setAttachments] = useState<AttachmentInfo[]>([]);
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
   const [attachmentsError, setAttachmentsError] = useState("");
@@ -470,6 +471,7 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     // Belt alongside the mailbox-qualified key: nothing cached for the folder
     // we are leaving can describe a message in the one we are entering.
     setDecrypted({});
+    bodyCacheRef.current.clear();
     void loadInbox();
     const timer = setInterval(() => void loadInbox(), 15_000);
     return () => clearInterval(timer);
@@ -1004,11 +1006,42 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
   // carries. Shares attachmentQuery with the attachment endpoints because
   // /api/mail/body takes the identical messageId+mailbox pair.
   async function fetchMessageBody(item: InboxEmail): Promise<{ body: string; bodyMode?: "html" | "plain" }> {
-    const data = await getJSON<{ body?: string; bodyMode?: "html" | "plain" }>(
+    const key = decryptedKey(item.messageId);
+    const cached = bodyCacheRef.current.get(key);
+    if (cached) return cached;
+
+    const request = getJSON<{ body?: string; bodyMode?: "html" | "plain" }>(
       `/api/mail/body?${attachmentQuery(item)}`
-    );
-    return { body: data.body ?? "", bodyMode: data.bodyMode || undefined };
+    )
+      .then((data) => ({ body: data.body ?? "", bodyMode: data.bodyMode || undefined }))
+      .catch((error: unknown) => {
+        bodyCacheRef.current.delete(key);
+        throw error;
+      });
+    bodyCacheRef.current.set(key, request);
+    return request;
   }
+
+  // Warm the bodies a user can open from the current page after its metadata
+  // has rendered. Keep this serial: the backend shares one locked IMAP client,
+  // so a 20-request fan-out only builds a queue that an immediate click cannot
+  // jump. A click still calls fetchMessageBody directly and either shares the
+  // current request or starts its own behind that one.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      for (const message of pageRows) {
+        if (cancelled) return;
+        if (message.body === undefined) await fetchMessageBody(message).catch(() => undefined);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // fetchMessageBody is a component-local cache wrapper whose inputs are
+    // fully represented by the page rows and mailbox.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageRows, listedMailbox]);
 
   // Fetch the opened message's body.
   //

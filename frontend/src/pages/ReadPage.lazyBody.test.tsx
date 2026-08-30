@@ -6,8 +6,8 @@ import { MemoryRouter } from "react-router";
 // The inbox list stopped carrying message bodies: 500 of them to render one
 // measured 13.3 MiB per load against 184 KiB without, and the SPA re-requests
 // that window every 15 seconds. These tests pin the two halves of the trade —
-// the list must ask for no bodies, and the opened message must go and get its
-// own — because either half alone is a broken reader.
+// the list must ask for no bodies, then warm the displayed messages after the
+// metadata renders without fetching the same body again when it is opened.
 
 const getJSON = vi.fn();
 const postJSON = vi.fn();
@@ -114,10 +114,10 @@ describe("the inbox list no longer carries message bodies", () => {
     }
   });
 
-  it("does not fetch any body until a message is opened", async () => {
+  it("preloads displayed message bodies after the inbox is loaded", async () => {
     renderReadPage();
     await screen.findByText("Weekly Digest");
-    expect(bodyRequests()).toEqual([]);
+    await waitFor(() => expect(bodyRequests()).toEqual(["/api/mail/body?messageId=41"]));
   });
 
   it("fetches the opened message's body and renders it", async () => {
@@ -141,6 +141,40 @@ describe("the inbox list no longer carries message bodies", () => {
 
     await waitFor(() => expect(readerBodyHtml()).toContain("Hello"));
     expect(bodyRequests()).toContain("/api/mail/body?messageId=77");
+  });
+});
+
+describe("body preload scheduling", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("warms serially so opening a later row does not sit behind the whole page", async () => {
+    const resolvers: Array<() => void> = [];
+    getJSON.mockImplementation((url: string) => {
+      if (url.startsWith("/api/inbox")) {
+        const messages = Array.from({ length: 20 }, (_, index) => ({
+          ...listed,
+          messageId: String(index + 1),
+          subject: `Message ${index + 1}`
+        }));
+        return Promise.resolve({ tabs: ["Primary"], byTab: { Primary: messages } });
+      }
+      if (url.startsWith("/api/mail/body")) {
+        return new Promise((resolve) => resolvers.push(() => resolve({ body: "loaded", bodyMode: "plain" })));
+      }
+      return Promise.resolve({});
+    });
+
+    const user = userEvent.setup();
+    renderReadPage();
+    await screen.findByText("Message 20");
+    await waitFor(() => expect(bodyRequests()).toEqual(["/api/mail/body?messageId=1"]));
+
+    await user.click(screen.getByText("Message 20"));
+    await waitFor(() => expect(bodyRequests()).toEqual([
+      "/api/mail/body?messageId=1",
+      "/api/mail/body?messageId=20"
+    ]));
+    expect(resolvers).toHaveLength(2);
   });
 });
 
