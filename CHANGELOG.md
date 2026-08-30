@@ -14,6 +14,12 @@ non-prerelease version.
 
 ### Added
 
+- **Displayed inbox messages now open faster.** Once inbox metadata has
+  rendered, the web UI preloads bodies for the current 20-message page and
+  reuses those requests when a message is opened. The initial list still omits
+  bodies, preserving its small, fast payload, and failed preloads remain
+  retryable.
+
 - **The pairing QR now publishes a certificate pin.** The pairing request is
   the one call that carries the pairing token, the push endpoint and the WebPush
   keys, and until now the app sent all of it inside a trust-on-first-use window —
