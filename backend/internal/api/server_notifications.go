@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -338,7 +339,11 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
-	store, err := s.userStore(ac.UserID)
+	s.writeNotificationPairing(w, ac.UserID)
+}
+
+func (s *Server) writeNotificationPairing(w http.ResponseWriter, userID string) {
+	store, err := s.userStore(userID)
 	if err != nil {
 		http.Error(w, "failed to open user state", http.StatusInternalServerError)
 		return
@@ -351,7 +356,7 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 	// Keep the unauthenticated register endpoint's subscriber -> user index
 	// warm so a device pairing right after this call resolves immediately.
 	s.userMu.Lock()
-	s.subIndex[subscriberID] = ac.UserID
+	s.subIndex[subscriberID] = userID
 	s.userMu.Unlock()
 	// Both halves are required, and an unconfigured server mints no token:
 	// PAIRING_SECRET is what signs it, SERVER_BASE_URL is where the device
@@ -405,6 +410,11 @@ func (s *Server) handleNotificationPairing(w http.ResponseWriter, r *http.Reques
 		}
 		resp["pairingToken"] = token
 		resp["pairingExpiresAt"] = expiresAt.UTC().Format(time.RFC3339)
+		query := url.Values{"sub": {subscriberID}, "srv": {serverBaseURL}, "reg": {registerEndpoint}, "pt": {token}}
+		if tlsPin != "" {
+			query.Set("pin", tlsPin)
+		}
+		resp["deepLink"] = "kypost://native-pair?" + query.Encode()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
