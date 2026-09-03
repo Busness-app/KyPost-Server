@@ -86,6 +86,8 @@ export type AttachmentInfo = {
 
 export type ReadPageProps = {
   onOpenDraft?: (payload: { sentTo?: string; cc?: string; bcc?: string; subject?: string; body?: string }) => void;
+  /** Empty-state call to action. Absent hides the button. */
+  onCompose?: () => void;
 };
 
 export type InboxResponse = {

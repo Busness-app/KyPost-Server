@@ -15,6 +15,7 @@ import { getJSON, postJSON, toErrorMessage } from "../api/client";
 import { usePagination } from "../hooks/usePagination";
 import { useDialogOpen } from "../hooks/useDialogOpen";
 import { PageTabs } from "../components/PageTabs";
+import { ArchiveIcon, CheckIcon, PrintIcon, TrashIcon, WarningIcon } from "./read/icons";
 
 import type {
   InboxEmail,
@@ -48,7 +49,7 @@ import {
   buildReplyAllRecipients
 } from "./read/compose";
 
-export function ReadPage({ onOpenDraft }: ReadPageProps) {
+export function ReadPage({ onOpenDraft, onCompose }: ReadPageProps) {
   const [searchParams, setSearchParams] = useSearchParams();
   const mailbox = (searchParams.get("mailbox") || "").trim();
   const isInboxMailbox = mailbox.length === 0;
@@ -612,35 +613,35 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
     {
       key: "delete",
       label: "Delete",
-      icon: "🗑",
+      icon: <TrashIcon />,
       onClick: () => applyInboxAction("delete", selectedMessageIds),
       disabled: selectedMessageIds.length === 0 || actionLoading
     },
     {
       key: "archive",
       label: "Archive",
-      icon: "📥",
+      icon: <ArchiveIcon />,
       onClick: () => applyInboxAction("archive", selectedMessageIds),
       disabled: selectedMessageIds.length === 0 || actionLoading
     },
     {
       key: "spam",
       label: "Spam",
-      icon: "⚠",
+      icon: <WarningIcon />,
       onClick: () => applyInboxAction("spam", selectedMessageIds),
       disabled: selectedMessageIds.length === 0 || actionLoading
     },
     {
       key: "read",
       label: "Read",
-      icon: "✓",
+      icon: <CheckIcon />,
       onClick: () => applyInboxAction("read", selectedMessageIds),
       disabled: selectedMessageIds.length === 0 || actionLoading
     },
     {
       key: "print",
       label: "Print",
-      icon: "🖨",
+      icon: <PrintIcon />,
       onClick: () => printEmails(selectedInTab),
       disabled: selectedInTab.length === 0 || actionLoading
     }
@@ -1473,10 +1474,16 @@ export function ReadPage({ onOpenDraft }: ReadPageProps) {
         </div>
       ) : null}
 
-      {visibleRows.length === 0 ? (
+      {visibleRows.length === 0 && !loading ? (
         <div className="inbox-list-region">
           <div className="inbox-empty-state">
-            <p>{isInboxMailbox ? "No emails in this tab yet." : "No emails yet."}</p>
+            <img src="/apple-touch-icon.png" alt="" width="96" height="96" />
+            <p>{isInboxMailbox ? "Nothing here yet. New mail lands in this tab as it arrives." : "No emails yet."}</p>
+            {onCompose ? (
+              <button type="button" onClick={onCompose}>
+                Write an email
+              </button>
+            ) : null}
           </div>
         </div>
       ) : (

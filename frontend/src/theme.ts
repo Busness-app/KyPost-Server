@@ -39,7 +39,7 @@ type ThemeVars = {
   linkBorder: string;
 };
 
-const themes: Record<ThemeName, ThemeVars> = {
+export const themes: Record<ThemeName, ThemeVars> = {
   "Dark Matter": {
     bg: "#1a1a1e",
     panel: "#252530",

@@ -1,40 +1,41 @@
 import { useState } from "react";
-import { applyTheme, getStoredTheme, THEME_OPTIONS, type ThemeName } from "../../theme";
+import { applyTheme, getStoredTheme, THEME_OPTIONS, themes, type ThemeName } from "../../theme";
 
-type AppearanceProps = {
-  // The only genuine coupling to a caller: ConfigPage mirrors this into its
-  // page-level status banner. Optional so a caller with no such banner can
-  // still render this with zero props.
-  onStatus?: (status: string) => void;
-};
-
-export function Appearance({ onStatus }: AppearanceProps = {}) {
+/**
+ * One swatch per theme, painted in that theme's own colours, applied on
+ * click. A dropdown named fifteen themes and showed none of them.
+ */
+export function Appearance() {
   const [selectedTheme, setSelectedTheme] = useState<ThemeName>(getStoredTheme());
 
-  function saveTheme() {
-    applyTheme(selectedTheme);
-    onStatus?.(`Theme set to ${selectedTheme}.`);
+  function choose(theme: ThemeName) {
+    setSelectedTheme(theme);
+    applyTheme(theme);
   }
 
   return (
-    <div className="config-card">
-      <h3>Appearance</h3>
-      <p className="config-muted">Theme is stored in this browser only.</p>
-      <div className="config-grid config-grid-two">
-        <label>
-          <div>Theme</div>
-          <select value={selectedTheme} onChange={(event) => setSelectedTheme(event.target.value as ThemeName)}>
-            {THEME_OPTIONS.map((theme) => (
-              <option key={theme} value={theme}>
-                {theme}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <div className="config-actions">
-        <button type="button" onClick={saveTheme}>Apply Theme</button>
-      </div>
+    <div className="theme-grid">
+      {THEME_OPTIONS.map((theme) => {
+        const c = themes[theme];
+        return (
+          <button
+            key={theme}
+            type="button"
+            aria-pressed={theme === selectedTheme}
+            className="theme-swatch"
+            onClick={() => choose(theme)}
+          >
+            <span
+              className="theme-swatch-preview"
+              style={{ background: `linear-gradient(90deg, ${c.sidebarStart} 30%, ${c.bg} 30%)` }}
+            >
+              <i style={{ background: c.accent }} />
+              <i style={{ background: c.inkStrong, opacity: 0.55 }} />
+            </span>
+            <span className="theme-swatch-name">{theme}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
