@@ -1025,6 +1025,7 @@ inside the container. On systems without systemd, schedule
 
 ### PWA installation on Firefox
 
+- The install button lives on the **Get the apps** page (sidebar, under Settings), alongside links to the native clients.
 - Firefox can omit the install prompt event that Chromium browsers emit.
 - KyPost still provides a service worker and a manifest. The installation flow differs by browser.
 

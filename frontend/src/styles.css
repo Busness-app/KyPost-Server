@@ -100,7 +100,21 @@ body {
 }
 
 .sidebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin-bottom: 16px;
+}
+
+.sidebar-app-logo {
+  border-radius: 12px;
+}
+
+.sidebar-wordmark {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink-strong);
 }
 
 .sidebar nav {
@@ -111,9 +125,10 @@ body {
   margin-top: auto;
   padding-top: 16px;
   border-top: 1px solid var(--line);
-  font-size: 0.72rem;
-  opacity: 0.5;
+  font-size: 0.75rem;
+  color: var(--ink);
   text-align: center;
+  white-space: nowrap;
 }
 
 .sidebar-footer p {
@@ -139,15 +154,15 @@ body {
 .sidebar nav {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 4px;
 }
 
 .sidebar a {
   text-decoration: none;
   color: var(--ink-strong);
-  border: 1px solid var(--link-border);
+  border: 1px solid transparent;
   border-radius: 10px;
-  padding: 10px;
+  padding: 9px 10px;
   transition: all 180ms ease;
 }
 
@@ -189,7 +204,7 @@ body {
 .sidebar .nav-heading {
   width: 100%;
   text-align: left;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   background: transparent;
   color: var(--ink-strong);
   border-radius: 10px;
@@ -203,7 +218,7 @@ body {
 
 .sidebar .nav-group {
   display: grid;
-  gap: 10px;
+  gap: 4px;
   padding-left: 10px;
 }
 
@@ -211,11 +226,11 @@ body {
    subgroup is invisible to them and only the spacing above applies. */
 .sidebar .nav-subgroup {
   display: grid;
-  gap: 10px;
+  gap: 4px;
 }
 
-/* Separates a group that is not one of the settings panels — the PWA install
-   action — from the panel groups above it, so it does not read as belonging to
+/* Separates a group that is not one of the settings panels — the apps link —
+   from the panel groups above it, so it does not read as belonging to
    whichever heading happens to come last. */
 .sidebar .nav-subgroup-detached {
   margin-top: 0.5rem;
@@ -267,6 +282,26 @@ body {
   padding: 10px 8px;
 }
 
+/* Quiet by default: these sit beside every folder row, so a filled accent
+   button on each one outshouted the folders themselves. */
+.sidebar .inbox-expand-button,
+.sidebar .sidebar-folder-menu-button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink);
+  opacity: 0.7;
+}
+
+.sidebar .inbox-expand-button:hover,
+.sidebar .sidebar-folder-menu-button:hover,
+.sidebar .inbox-expand-button:focus-visible,
+.sidebar .sidebar-folder-menu-button:focus-visible {
+  opacity: 1;
+  color: var(--ink-strong);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 .sidebar-folder-menu {
   position: absolute;
   right: 0;
@@ -304,7 +339,7 @@ body {
 }
 
 .sidebar .nav-group span {
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 10px;
   padding: 10px;
   font-size: 0.9rem;
@@ -314,7 +349,7 @@ body {
 .sidebar .nav-link-button {
   width: 100%;
   text-align: left;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   background: transparent;
   color: var(--ink-strong);
   border-radius: 10px;
@@ -372,7 +407,15 @@ body {
   background: color-mix(in srgb, var(--panel) 88%, var(--bg));
   display: grid;
   place-items: center;
+  align-content: center;
+  gap: 12px;
+  text-align: center;
   padding: 16px;
+}
+
+.inbox-empty-state img {
+  border-radius: 20px;
+  opacity: 0.85;
 }
 
 .inbox-empty-state p {
@@ -434,6 +477,7 @@ body {
 }
 
 .inbox-action-icon {
+  display: inline-flex;
   font-size: 0.95rem;
   line-height: 1;
 }
@@ -1047,6 +1091,128 @@ pre {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent-soft) 48%, var(--panel));
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ink-strong) 15%, transparent);
+}
+
+.apps-grid {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.apps-grid .app-card {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-card h3 {
+  margin: 0 0 4px;
+}
+
+.app-card .config-muted {
+  flex: 1;
+}
+
+.app-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.app-channel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--panel));
+  color: var(--ink-strong);
+  font: inherit;
+  font-size: 0.9rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.app-channel:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.app-channel:disabled,
+.app-channel-soon {
+  border: 1px dashed color-mix(in srgb, var(--ink) 55%, transparent);
+  background: transparent;
+  color: var(--ink);
+  cursor: default;
+}
+
+.app-install-hint {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.app-channel small {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.8;
+}
+
+.theme-grid {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.theme-swatch {
+  display: block;
+  width: 100%;
+  padding: 6px;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink-strong);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-swatch:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.theme-swatch[aria-pressed="true"] {
+  border-color: var(--accent);
+}
+
+.theme-swatch-preview {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  height: 84px;
+  padding: 12px 12px 12px 42%;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+.theme-swatch-preview i {
+  display: block;
+  height: 8px;
+  border-radius: 4px;
+}
+
+.theme-swatch-preview i:first-child {
+  width: 40%;
+}
+
+.theme-swatch-name {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.85rem;
 }
 
 .config-card {
@@ -4211,6 +4377,8 @@ pre {
     padding: 7px 8px;
     font-size: 0.78rem;
     border-radius: 8px;
+    /* Wrapped chips need an edge; the desktop base rule has none. */
+    border-color: var(--line);
   }
 
   .inbox-expand-button,

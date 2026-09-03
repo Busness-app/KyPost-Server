@@ -65,6 +65,7 @@ async function loadQuill(): Promise<typeof Quill> {
 // Every page below is a separate chunk. Only LoginPage is eager: it is what an
 // unauthenticated visitor lands on, so putting it behind a second round trip
 // would slow down the one route that has to be fast.
+const AppsPage = lazy(() => import("./pages/AppsPage").then((m) => ({ default: m.AppsPage })));
 const ContactsPage = lazy(() => import("./pages/ContactsPage").then((m) => ({ default: m.ContactsPage })));
 const ReadPage = lazy(() => import("./pages/ReadPage").then((m) => ({ default: m.ReadPage })));
 const SecurityPage = lazy(() => import("./pages/SecurityPage").then((m) => ({ default: m.SecurityPage })));
@@ -94,7 +95,11 @@ export function App() {
   const [renameFolderLoading, setRenameFolderLoading] = useState("");
   const [deleteFolderError, setDeleteFolderError] = useState("");
   const [dragOverFolder, setDragOverFolder] = useState("");
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Open when the page loads inside a panel, so a reload or a deep link does
+  // not hide the group the user is standing in.
+  const [settingsOpen, setSettingsOpen] = useState(() =>
+    ["/settings", "/admin", "/apps"].some((prefix) => location.pathname.startsWith(prefix))
+  );
   const [pwaInstallPrompt, setPwaInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [pwaInstalled, setPwaInstalled] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
@@ -157,8 +162,8 @@ export function App() {
     if (!secretHold) {
       return;
     }
-    // Links only. The buttons inside this nav (Settings disclosure, Install
-    // PWA, Logout) either do not navigate or are a deliberate exit, and
+    // Links only. The buttons inside this nav (Settings disclosure, Logout)
+    // either do not navigate or are a deliberate exit, and
     // trapping someone signing out would be worse than the loss it prevents.
     if (!(event.target as HTMLElement).closest("a")) {
       return;
@@ -293,13 +298,15 @@ export function App() {
   }
 
   async function installPwa() {
-    if (!pwaInstallPrompt) {
+    const prompt = pwaInstallPrompt;
+    if (!prompt) {
       return;
     }
-
-    await pwaInstallPrompt.prompt();
-    const choice = await pwaInstallPrompt.userChoice;
+    // Consume first: the event's prompt() may be called once, and a second
+    // click while the dialog is up would throw.
     setPwaInstallPrompt(null);
+    await prompt.prompt();
+    const choice = await prompt.userChoice;
     if (choice.outcome === "accepted") {
       setPwaInstalled(true);
     }
@@ -1105,7 +1112,8 @@ export function App() {
     <div className="shell">
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <img className="sidebar-app-logo" src="/ky.png" alt="KyPost" style={{ width: "100%", maxWidth: 180, display: "block", margin: "0 auto 0.75rem" }} />
+          <img className="sidebar-app-logo" src="/apple-touch-icon.png" alt="" width="48" height="48" />
+          <span className="sidebar-wordmark">KyPost</span>
         </div>
         <button type="button" className="new-email-button" onClick={openComposeWindow}>
           New Email
@@ -1306,25 +1314,12 @@ export function App() {
                   ))}
                 </div>
               ))}
-              {/* Its own group, below a rule. It is not admin-only and never
-                  was, but sitting bare after the last group it fell under the
-                  "Admin" heading for an admin and read as an admin action. It
-                  is a browser action available to everyone, so it is separated
-                  from the panels rather than trailing them. */}
+              {/* Its own group, below a rule: it is not a settings panel and
+                  must not read as one, nor as an Admin item for an admin. */}
               <div className="nav-subgroup nav-subgroup-detached">
-                {!pwaInstalled ? (
-                  <button
-                    type="button"
-                    className="nav-link-button"
-                    onClick={() => void installPwa()}
-                    disabled={!pwaInstallPrompt}
-                    title={pwaInstallPrompt ? "Install this site as a PWA" : "Wait for browser install support"}
-                  >
-                    Install PWA
-                  </button>
-                ) : (
-                  <span title="This site is already installed as a PWA">PWA Installed</span>
-                )}
+                <Link to="/apps" className={location.pathname === "/apps" ? "sidebar-link-active" : ""}>
+                  Get the apps
+                </Link>
               </div>
             </div>
           ) : null}
@@ -1337,7 +1332,7 @@ export function App() {
         <div className="sidebar-footer">
           <p>
             <button type="button" className="license-link" onClick={() => setLicenseOpen(true)}>
-              &copy; {new Date().getFullYear()} &ndash; Licensed Under the MIT License
+              &copy; {new Date().getFullYear()} &middot; MIT License
             </button>
           </p>
         </div>
@@ -1351,7 +1346,7 @@ export function App() {
             <Route path="/" element={<Navigate to={auth.authenticated ? "/read" : "/login"} replace />} />
           <Route path="/login" element={<LoginPage auth={auth} onAuthChanged={refreshAuth} />} />
           <Route path="/password" element={protect(<LoginPage auth={auth} onAuthChanged={refreshAuth} mode="password" />)} />
-              <Route path="/read" element={protect(<ReadPage onOpenDraft={openDraftInCompose} />)} />
+              <Route path="/read" element={protect(<ReadPage onOpenDraft={openDraftInCompose} onCompose={openComposeWindow} />)} />
           {/* Retired settings paths. They redirect rather than 404: they appear
               in docs and bookmarks, and in service workers cached inside
               installed PWAs, which can send a notification tap here long after
@@ -1386,6 +1381,12 @@ export function App() {
             )}
           />
           <Route path="/contacts" element={protect(<ContactsPage />)} />
+          <Route
+            path="/apps"
+            element={protect(
+              <AppsPage pwa={{ installed: pwaInstalled, canInstall: pwaInstallPrompt !== null, install: () => void installPwa() }} />
+            )}
+          />
           {/* The admin panels. protect(..., true) redirects non-admins to
               /read; the server enforces every one of these regardless. */}
           <Route path="/admin/server" element={protect(<ServerPanel />, true)} />
