@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 
 	"golang.org/x/crypto/scrypt"
 )

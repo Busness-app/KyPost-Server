@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/retry"
+	"github.com/Busness-app/kypost-server/backend/internal/retry"
 )
 
 // TestPushRetryDelayGrowsWithTheAttempt pins the backoff to what its own doc

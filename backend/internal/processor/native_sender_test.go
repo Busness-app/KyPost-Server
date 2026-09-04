@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 func TestRelaySenderSendSuccess(t *testing.T) {

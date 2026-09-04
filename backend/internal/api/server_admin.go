@@ -6,13 +6,14 @@ import (
 	"bufio"
 	"errors"
 	"io"
-	"kypost-server/backend/internal/config"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Busness-app/kypost-server/backend/internal/config"
 )
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

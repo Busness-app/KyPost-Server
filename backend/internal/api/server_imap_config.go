@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/cryptutil"
-	"kypost-server/backend/internal/fsutil"
-	"kypost-server/backend/internal/mailmsg"
 	"net/http"
+
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 
 	"os"
 	"path/filepath"

@@ -10,14 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/health"
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/pgpmail"
-	"kypost-server/backend/internal/sso"
-	"kypost-server/backend/internal/state"
-	"kypost-server/backend/internal/users"
-	"kypost-server/backend/internal/wkdpublish"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/health"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/sso"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/wkdpublish"
 )
 
 func newTestServer(t *testing.T) *Server {

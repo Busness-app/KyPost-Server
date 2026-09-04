@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/mfa"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/mfa"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // pairApproverDevice registers a native device for userID and returns the

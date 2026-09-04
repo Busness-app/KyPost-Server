@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/adapters/classifier"
-	"kypost-server/backend/internal/ollamaupdate"
+	"github.com/Busness-app/kypost-server/backend/internal/adapters/classifier"
+	"github.com/Busness-app/kypost-server/backend/internal/ollamaupdate"
 )
 
 func TestHandleOllamaVersionBeforeFirstCheck(t *testing.T) {

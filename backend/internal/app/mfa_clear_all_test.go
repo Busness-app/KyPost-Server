@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"testing"
 
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // requirePermissionEnforcement skips tests that rely on POSIX permission

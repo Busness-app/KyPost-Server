@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	"kypost-server/backend/internal/pgpmail"
 )
 
 // zBase32 is the alphabet from the Z-Base-32 encoding used by WKD.

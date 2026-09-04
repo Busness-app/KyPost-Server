@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/pgpmail"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 const sealedBlob = `{"v":1,"iv":"aXZpdml2aXY=","ciphertext":"Y2lwaGVydGV4dA=="}`

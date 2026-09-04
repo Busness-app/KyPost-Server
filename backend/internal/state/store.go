@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 )
 
 // Store is one account's state, backed by SQLite.

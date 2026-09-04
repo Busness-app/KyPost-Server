@@ -5,11 +5,11 @@ import (
 	"encoding/base64"
 	"testing"
 
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/pgpmail"
 )
 
 // autocryptTestKey returns a fresh armored public key + fingerprint for addr.

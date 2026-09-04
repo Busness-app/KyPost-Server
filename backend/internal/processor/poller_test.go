@@ -8,19 +8,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"kypost-server/backend/internal/cryptutil"
 	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/rules"
-	"kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
+
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/rules"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 // TestMailCacheEntriesFromMessages covers the pure conversion tickUser uses

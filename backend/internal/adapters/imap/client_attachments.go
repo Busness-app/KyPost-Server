@@ -5,9 +5,10 @@ package imap
 import (
 	"context"
 	"fmt"
-	"kypost-server/backend/internal/mailmsg"
 	"strconv"
 	"strings"
+
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 
 	goimap "github.com/BrianLeishman/go-imap"
 )

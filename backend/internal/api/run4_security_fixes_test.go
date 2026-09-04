@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // run-4 finding H5: the two JSON rule write paths call rules.ValidateMatchShape,

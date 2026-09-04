@@ -3,7 +3,7 @@ package api
 import (
 	"testing"
 
-	"kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 func TestMFATransportEligible(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/pgpdiscovery"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
 )
 
 // Update must serialize the whole read-modify-write, not just the read and

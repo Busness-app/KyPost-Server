@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 // TestContactCreateBackfillsPGPKeyFingerprint drives POST /api/contacts with

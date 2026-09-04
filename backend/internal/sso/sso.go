@@ -32,7 +32,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 )
 
 // SSOSettings holds the OpenID Connect SSO configuration.

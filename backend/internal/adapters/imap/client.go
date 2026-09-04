@@ -14,13 +14,13 @@ import (
 	"sync"
 	"time"
 
-	"kypost-server/backend/internal/cryptutil"
-	"kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 
 	goimap "github.com/BrianLeishman/go-imap"
 	pgpcrypto "github.com/ProtonMail/gopenpgp/v3/crypto"
 
-	"kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
 )
 
 type Message struct {

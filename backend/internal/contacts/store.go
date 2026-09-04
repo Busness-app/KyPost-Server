@@ -12,7 +12,7 @@ import (
 
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 )
 
 // defaultTombstoneRetention is how long a deleted contact's tombstone is kept

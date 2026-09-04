@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
 )
 
 // trustedProxyNets is the set of peer addresses whose X-Forwarded-* headers may

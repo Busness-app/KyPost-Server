@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
 )
 
 // EvalInput is the message data a rule's Match tree is evaluated against.

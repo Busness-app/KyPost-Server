@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/pgpmail"
-	"kypost-server/backend/internal/users"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // handlePGPPayload returns the raw OpenPGP payload for one message, so a

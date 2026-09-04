@@ -11,15 +11,15 @@ import (
 	"testing"
 	"time"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/health"
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/mailcache"
-	"kypost-server/backend/internal/rules"
-	"kypost-server/backend/internal/sendas"
-	"kypost-server/backend/internal/state"
-	"kypost-server/backend/internal/users"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/health"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/mailcache"
+	"github.com/Busness-app/kypost-server/backend/internal/rules"
+	"github.com/Busness-app/kypost-server/backend/internal/sendas"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // Full-tick tests.

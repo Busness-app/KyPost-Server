@@ -17,7 +17,7 @@ import (
 	opgperrors "github.com/ProtonMail/go-crypto/openpgp/errors"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 
-	"kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 )
 
 // envelopeHeaderOrder lists the outer RFC 5322 headers preserved verbatim on a

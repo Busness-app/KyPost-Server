@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // TestConfigPutRequiresAdmin is a regression test: PUT /api/config used to be

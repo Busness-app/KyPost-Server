@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // totpCodeForTest independently computes a 6-digit TOTP for a base32 secret at

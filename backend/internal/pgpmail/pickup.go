@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"kypost-server/backend/internal/cryptutil"
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 )
 
 // PickupRecord is one queued message a recipient without a known PGP key

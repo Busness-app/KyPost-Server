@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/mailcache"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/mailcache"
 )
 
 // TestServeInboxBodiesOff covers every path that can produce a list row —

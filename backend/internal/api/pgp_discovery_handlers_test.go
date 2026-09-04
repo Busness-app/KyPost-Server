@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/pgpdiscovery"
-	"kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 type discoverySettingsResp struct {

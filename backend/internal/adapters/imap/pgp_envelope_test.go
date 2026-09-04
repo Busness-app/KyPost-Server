@@ -7,7 +7,7 @@ import (
 	goimap "github.com/BrianLeishman/go-imap"
 	"github.com/jhillyerd/enmime/v2"
 
-	"kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 const armoredCiphertext = "-----BEGIN PGP MESSAGE-----\r\n\r\nhQIMA0\r\n-----END PGP MESSAGE-----"

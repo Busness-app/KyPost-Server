@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	"kypost-server/backend/internal/pgpmail"
 )
 
 // keyserverBaseURL is a var (not const) so tests can point it at a local

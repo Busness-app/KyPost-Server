@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 func davAuthedRequest(ac AuthContext, method, target string, body *bytes.Reader) *http.Request {

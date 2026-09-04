@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Busness-app/kypost-server/backend/internal/pgpautocrypt"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	"kypost-server/backend/internal/pgpautocrypt"
-	"kypost-server/backend/internal/pgpdiscovery"
 )
 
 // generateArmoredKey makes a throwaway key carrying email as its UID.

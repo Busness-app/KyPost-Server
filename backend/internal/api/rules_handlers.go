@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/rules"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/rules"
 )
 
 // maxRulesPerUser bounds how many filter rules one account may accumulate.

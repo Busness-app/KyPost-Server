@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // The Security page hands out key fingerprints, the paired-device list and a

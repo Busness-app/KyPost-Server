@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/pgpdiscovery"
-	"kypost-server/backend/internal/sendas"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
+	"github.com/Busness-app/kypost-server/backend/internal/sendas"
 )
 
 // run-4 finding H2 follow-up: publishableAddressesAt now serves a key over WKD

@@ -8,7 +8,7 @@ import (
 
 	goimap "github.com/BrianLeishman/go-imap"
 
-	"kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 )
 
 // FetchRawMessage issues a raw UID FETCH for BODY.PEEK[] against uid in the

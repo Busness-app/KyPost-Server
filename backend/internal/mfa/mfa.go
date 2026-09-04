@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"kypost-server/backend/internal/cryptutil"
+	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
 )
 
 // MaxTOTPAttempts is the number of failed second-factor attempts tolerated on

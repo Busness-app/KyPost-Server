@@ -8,11 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/fsutil"
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/state"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // migrateLegacySingleUserData copies the pre-multi-user global files into

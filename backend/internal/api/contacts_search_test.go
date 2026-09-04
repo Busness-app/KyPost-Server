@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // TestContactsSearchRequiresAuth confirms GET /api/contacts/search is gated

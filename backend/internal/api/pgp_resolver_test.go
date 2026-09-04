@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/pgpdiscovery"
-	"kypost-server/backend/internal/pgpmail"
 )
 
 func TestResolveUsesWKDAndPinsContact(t *testing.T) {

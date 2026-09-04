@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/sso"
-	"kypost-server/backend/internal/sso/ssotest"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/sso"
+	"github.com/Busness-app/kypost-server/backend/internal/sso/ssotest"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 const ssoTestHost = "localhost:5866"

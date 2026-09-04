@@ -5,14 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"kypost-server/backend/internal/users"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
+
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 func TestKeyserverLookupReturnsKey(t *testing.T) {

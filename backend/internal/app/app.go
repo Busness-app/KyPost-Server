@@ -16,16 +16,16 @@ import (
 	"syscall"
 	"time"
 
-	"kypost-server/backend/internal/adapters/classifier"
-	"kypost-server/backend/internal/api"
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/fsutil"
-	"kypost-server/backend/internal/health"
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/processor"
-	"kypost-server/backend/internal/state"
-	"kypost-server/backend/internal/users"
-	"kypost-server/backend/internal/wkdpublish"
+	"github.com/Busness-app/kypost-server/backend/internal/adapters/classifier"
+	"github.com/Busness-app/kypost-server/backend/internal/api"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/health"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/processor"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/wkdpublish"
 )
 
 // Run dispatches the process mode and blocks until shutdown for long-running modes.

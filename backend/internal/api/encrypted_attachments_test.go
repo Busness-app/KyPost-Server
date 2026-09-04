@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/pgpmail"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 // A PGP/MIME message carries exactly one MIME attachment — the armored

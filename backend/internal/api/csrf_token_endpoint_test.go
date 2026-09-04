@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // The service worker's pushsubscriptionchange handler must send the

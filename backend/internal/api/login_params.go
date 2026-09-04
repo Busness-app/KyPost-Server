@@ -17,7 +17,7 @@ import (
 	"net/http"
 	"strings"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // clientLoginIterations is the PBKDF2 work factor this server asks new clients

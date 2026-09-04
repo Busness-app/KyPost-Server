@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
 )
 
 // run-4 LOW-10: contact photos had no quota and no reclamation. DELETE

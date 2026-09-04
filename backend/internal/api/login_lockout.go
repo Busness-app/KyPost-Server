@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // loginMaxFailures/loginLockoutFor implement a three-strikes, 15-minute cooldown

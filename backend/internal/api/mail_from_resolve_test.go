@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/sendas"
+	"github.com/Busness-app/kypost-server/backend/internal/sendas"
 )
 
 // failIfCalled returns an aliasStoreFn that fails the test if it's ever

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 )
 
 func TestParseRawMessageRecord(t *testing.T) {

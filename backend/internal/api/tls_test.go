@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // writeKeypair generates a self-signed certificate for cn and writes it to

@@ -3,13 +3,15 @@ package api
 
 import (
 	"errors"
-	"kypost-server/backend/internal/mailmsg"
 	"mime"
 	"net/http"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+
 	"strconv"
 	"strings"
+
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
 )
 
 // attachmentRequestParams reads the shared mailbox/messageId query params of

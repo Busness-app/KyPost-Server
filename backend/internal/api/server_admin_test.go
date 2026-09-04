@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 // TestTailLinesOversizedLine is the regression guard for the admin log viewer

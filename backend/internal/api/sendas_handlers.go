@@ -8,8 +8,8 @@ import (
 	"net/mail"
 	"strings"
 
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/sendas"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/sendas"
 )
 
 // maxSendAsAliasesPerUser bounds how many alias records (pending + verified)

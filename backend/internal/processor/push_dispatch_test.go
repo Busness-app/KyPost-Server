@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/health"
-	"kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/health"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 // TestSendNativePushToDevicesFiltersToGivenList verifies that only the

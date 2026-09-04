@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/captcha"
-	"kypost-server/backend/internal/cryptutil"
-	"kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/captcha"
+	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
 )
 
 // powSweepInterval is a var rather than an inline literal (like

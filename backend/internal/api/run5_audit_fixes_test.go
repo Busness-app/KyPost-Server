@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/state"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // --- login lockout keying ---------------------------------------------------

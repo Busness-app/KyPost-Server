@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"kypost-server/backend/internal/captcha"
+	"github.com/Busness-app/kypost-server/backend/internal/captcha"
 )
 
 // buildContentSecurityPolicy returns the app-wide CSP for the CAPTCHA provider

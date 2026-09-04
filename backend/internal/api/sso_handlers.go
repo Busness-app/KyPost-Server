@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/sso"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/sso"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 const ssoCookieName = "kypost_sso_state"

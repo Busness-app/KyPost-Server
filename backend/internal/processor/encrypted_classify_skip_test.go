@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/state"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 // An encrypted message has no body to classify — ListUnreadInbox only sets

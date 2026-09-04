@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // Device-authenticated halves of the enrollment ceremony. Both resolve the

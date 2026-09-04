@@ -11,9 +11,9 @@ import (
 
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 // signedOnlyFixture builds a real RFC 3156 signed message from sender, and

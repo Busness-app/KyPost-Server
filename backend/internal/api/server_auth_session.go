@@ -18,10 +18,10 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/captcha"
-	"kypost-server/backend/internal/mfa"
-	"kypost-server/backend/internal/totp"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/captcha"
+	"github.com/Busness-app/kypost-server/backend/internal/mfa"
+	"github.com/Busness-app/kypost-server/backend/internal/totp"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // Session tracks who a live session token belongs to.

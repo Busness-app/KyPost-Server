@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 )
 
 // maxWindowEntries bounds how many entries a single mailbox window retains,

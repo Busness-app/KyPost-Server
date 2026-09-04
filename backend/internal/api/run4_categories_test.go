@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/groups"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/groups"
 )
 
 // run-4 M9. The store-level batch is covered in internal/groups; these pin the

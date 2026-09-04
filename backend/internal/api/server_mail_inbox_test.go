@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/mailcache"
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/pgpmail"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/mailcache"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 // fakeMailClient is a configurable imapadapter.Client for exercising

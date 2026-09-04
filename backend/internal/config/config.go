@@ -15,7 +15,7 @@ import (
 	"strings"
 	"syscall"
 
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 
 	"gopkg.in/yaml.v3"
 )
