@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // TestConfigGETIsScopedForNonAdmins is run-8 finding F15.

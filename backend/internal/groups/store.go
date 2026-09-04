@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 )
 
 // Store is one user's contact-group list, persisted as groups.json alongside

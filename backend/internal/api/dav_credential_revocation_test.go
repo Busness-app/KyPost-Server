@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // Clearing the map is only half of revocation. A request that read the

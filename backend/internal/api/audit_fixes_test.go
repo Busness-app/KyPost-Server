@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // Finding 1: a paired device must stop authenticating once its owning account

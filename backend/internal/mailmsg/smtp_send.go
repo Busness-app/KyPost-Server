@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/cryptutil"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
 )
 
 // IMAPConfigPayload is a user's stored IMAP/SMTP mail credentials, encrypted

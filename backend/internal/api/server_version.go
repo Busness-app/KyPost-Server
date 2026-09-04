@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"kypost-server/backend/internal/ghrelease"
+	"github.com/Busness-app/kypost-server/backend/internal/ghrelease"
 )
 
 // serverVersion is the KyPost-Server release this binary was built from, and

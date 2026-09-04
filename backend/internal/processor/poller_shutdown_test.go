@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
 )
 
 // Shutdown must actually reach the work, not just the loop that schedules it.

@@ -18,11 +18,11 @@ import (
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/fsutil"
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/netguard"
-	"kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/netguard"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 var ErrNativeDeviceStale = errors.New("native device token is stale")

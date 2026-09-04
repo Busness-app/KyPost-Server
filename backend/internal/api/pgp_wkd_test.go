@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	"kypost-server/backend/internal/pgpmail"
 )
 
 func TestWKDHashLocalPart(t *testing.T) {

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/pgpmail"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // maxSealedPickupBytes bounds one browser-sealed pickup blob. Matches the

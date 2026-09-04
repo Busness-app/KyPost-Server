@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/netguard"
+	"github.com/Busness-app/kypost-server/backend/internal/netguard"
 )
 
 // isPrivateOrReservedIP defers to netguard, which is the single definition

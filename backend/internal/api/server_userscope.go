@@ -12,18 +12,18 @@ import (
 	"sync"
 	"time"
 
-	"kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/fsutil"
-	"kypost-server/backend/internal/groups"
-	"kypost-server/backend/internal/mailcache"
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/rules"
-	"kypost-server/backend/internal/sendas"
-	"kypost-server/backend/internal/state"
-	"kypost-server/backend/internal/users"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/groups"
+	"github.com/Busness-app/kypost-server/backend/internal/mailcache"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/rules"
+	"github.com/Busness-app/kypost-server/backend/internal/sendas"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // getOrCreateUserStore returns the cached per-user store, constructing and

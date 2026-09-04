@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/health"
-	"kypost-server/backend/internal/state"
-	"kypost-server/backend/internal/wkdpublish"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/health"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/wkdpublish"
 )
 
 // freeTCPPort asks the OS for a currently-unused TCP port by briefly binding

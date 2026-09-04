@@ -4,8 +4,8 @@ import (
 	"encoding/base64"
 	"strings"
 
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	"kypost-server/backend/internal/pgpdiscovery"
 )
 
 // buildAutocryptHeader returns the value for an outbound "Autocrypt:" header

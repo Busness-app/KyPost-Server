@@ -9,17 +9,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/pgpdiscovery"
-	"kypost-server/backend/internal/pgpmail"
-	"kypost-server/backend/internal/sendas"
-	"kypost-server/backend/internal/users"
 	"net/http"
 	"net/mail"
 	"strconv"
 	"strings"
+
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/sendas"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // maxRecipientsPerSend bounds one outbound message's recipient count, well

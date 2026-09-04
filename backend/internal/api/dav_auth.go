@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // davCredentialTTL bounds how long a verified Basic Auth credential is

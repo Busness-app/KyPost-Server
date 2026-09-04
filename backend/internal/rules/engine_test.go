@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
 )
 
 func TestEvaluate_AllofMatchesAllConditions(t *testing.T) {

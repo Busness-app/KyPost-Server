@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
 )
 
 // contactsSearchDefaultLimit and contactsSearchMaxLimit bound the number of

@@ -6,7 +6,7 @@ import (
 	"io"
 	"net/http"
 
-	"kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 type pgpIdentityResponse struct {

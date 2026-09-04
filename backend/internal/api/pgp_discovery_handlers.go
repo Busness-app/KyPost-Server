@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"kypost-server/backend/internal/pgpdiscovery"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
 )
 
 // handlePGPDiscoverySettings serves the per-user PGP key-discovery

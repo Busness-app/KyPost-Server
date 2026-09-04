@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/mailcache"
-	"kypost-server/backend/internal/state"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/mailcache"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 // phishStubClient records the label applications flagAppImpersonation makes and

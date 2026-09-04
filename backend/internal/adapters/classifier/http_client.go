@@ -21,10 +21,10 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/retry"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/retry"
 
-	"kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
 )
 
 const diagnosticLogMaxSize = 16 * 1024 * 1024

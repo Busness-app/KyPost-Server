@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // handleReviewPairing is an explicit Play-review escape hatch. A trailing * in the configured

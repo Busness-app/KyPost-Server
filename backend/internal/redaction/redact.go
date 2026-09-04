@@ -3,7 +3,7 @@ package redaction
 import (
 	"regexp"
 
-	"kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
 )
 
 type compiledPattern struct {

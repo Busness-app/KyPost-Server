@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/sso/ssotest"
+	"github.com/Busness-app/kypost-server/backend/internal/sso/ssotest"
 )
 
 const testClientID = "kypost-test"

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/pgpmail"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // These tests cover the end-to-end PGP contract at the HTTP boundary rather

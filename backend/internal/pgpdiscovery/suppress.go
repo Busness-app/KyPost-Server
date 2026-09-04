@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 )
 
 // Discovery-suppression reasons.

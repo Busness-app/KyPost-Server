@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 // POST /api/pgp/identity/client must answer with the SAME identity shape as

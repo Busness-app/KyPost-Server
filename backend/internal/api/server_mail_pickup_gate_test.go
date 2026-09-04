@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/pgpdiscovery"
 )
 
 // newPickupGateServer builds a server with a configured mail account, one

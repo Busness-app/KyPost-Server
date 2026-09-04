@@ -25,9 +25,9 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/processor"
-	"kypost-server/backend/internal/state"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/processor"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 type notificationSubscriptionPayload struct {

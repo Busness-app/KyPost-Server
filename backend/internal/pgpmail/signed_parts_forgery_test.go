@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 )
 
 // buildThreePartSigned wraps a genuine two-part signed message in a third part

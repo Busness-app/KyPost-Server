@@ -113,7 +113,7 @@ jobs:
       # users, pgpmail, contacts, state, rules, mailmsg, adapters, and
       # utility packages. These can safely run together and complete in ~4-5 minutes.
       - name: go test -race (all packages except api)
-        run: go list ./... | grep -v "^kypost-server/backend/internal/api$" | xargs go test -race -count=1 -timeout=20m
+        run: go list ./... | grep -v "^github.com/Busness-app/kypost-server/backend/internal/api$" | xargs go test -race -count=1 -timeout=20m
 
   frontend:
     name: ci-frontend

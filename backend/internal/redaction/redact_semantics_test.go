@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
 )
 
 // Patterns are applied in sequence over the running result, so an earlier

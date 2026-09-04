@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/mailmsg"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 )
 
 func attachmentFake() *fakeMailClient {

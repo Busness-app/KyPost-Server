@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 func contactWithName(name string) contacts.Contact {

@@ -10,6 +10,12 @@ image. `:stable` is moved to that image only after its build attestation has
 been published *and* verified, and only when the release is the newest published
 non-prerelease version.
 
+## Unreleased
+
+### Changed
+
+- The backend now uses its public GitHub module path so other modules can import it.
+
 ## 0.3.0 — 2026-08-25
 
 ### Added

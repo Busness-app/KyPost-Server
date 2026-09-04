@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"kypost-server/backend/internal/cryptutil"
+	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
 )
 
 // The daemon reads the same IMAP config file the API writes, and used to accept

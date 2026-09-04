@@ -5,8 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"kypost-server/backend/internal/mailmsg"
 	"time"
+
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 
 	goimap "github.com/BrianLeishman/go-imap"
 )

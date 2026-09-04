@@ -11,7 +11,7 @@ import (
 	"context"
 	"time"
 
-	"kypost-server/backend/internal/ghrelease"
+	"github.com/Busness-app/kypost-server/backend/internal/ghrelease"
 )
 
 // releasesURLOverrideForTest lets tests point LatestVersion at a local

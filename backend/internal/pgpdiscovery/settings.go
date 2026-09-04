@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 )
 
 type Settings struct {

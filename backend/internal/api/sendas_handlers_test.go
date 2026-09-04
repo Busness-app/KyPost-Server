@@ -18,7 +18,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 func writeUnreachableSMTPIMAPConfig(t *testing.T, srv *Server, userID, username string) {

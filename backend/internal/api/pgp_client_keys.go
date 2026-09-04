@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/pgpmail"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // maxWrappedKeyBytes bounds the opaque client-wrapped envelope. A wrapped

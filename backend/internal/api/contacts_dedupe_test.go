@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
 )
 
 // TestContactsDedupeEndpoint drives POST /api/contacts/dedupe end-to-end: it

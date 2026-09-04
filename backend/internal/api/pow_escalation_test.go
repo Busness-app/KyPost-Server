@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/captcha"
+	"github.com/Busness-app/kypost-server/backend/internal/captcha"
 )
 
 func TestPoWEscalationStartsCheap(t *testing.T) {

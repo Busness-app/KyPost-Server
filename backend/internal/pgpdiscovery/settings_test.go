@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"kypost-server/backend/internal/pgpdiscovery"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
 )
 
 func TestLoadDefaultsAdvertiseAutocryptOn(t *testing.T) {

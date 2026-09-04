@@ -4,10 +4,10 @@ import (
 	"net/mail"
 	"strings"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/pgpmail"
-	"kypost-server/backend/internal/users"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // pgpDecryptResult is the subset of fields both imapadapter.MessageContent

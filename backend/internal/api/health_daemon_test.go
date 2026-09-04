@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/health"
+	"github.com/Busness-app/kypost-server/backend/internal/health"
 )
 
 // /api/health serves the API process's health, and under supervisord the poll

@@ -13,10 +13,10 @@ import (
 	"strconv"
 	"strings"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/pgpmail"
-	"kypost-server/backend/internal/sendas"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/sendas"
 )
 
 // maxClientCiphertextBytes bounds one browser-supplied PGP/MIME ciphertext.

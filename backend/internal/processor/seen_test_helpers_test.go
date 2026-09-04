@@ -3,7 +3,7 @@ package processor
 import (
 	"testing"
 
-	"kypost-server/backend/internal/state"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 // seenForTest is store.Seen with the error asserted away, so the many call sites

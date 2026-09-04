@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // TestMutatingRoutesAreMeteredPerAccount is run-8 finding F5's general half.

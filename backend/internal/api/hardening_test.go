@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
 )
 
 // The JSON contact path accepted unbounded arrays while the vCard path that

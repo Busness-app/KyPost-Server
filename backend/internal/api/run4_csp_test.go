@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/captcha"
+	"github.com/Busness-app/kypost-server/backend/internal/captcha"
 )
 
 // run-4 hardening note 1: the CSP listed cdn.jsdelivr.net in script-src and

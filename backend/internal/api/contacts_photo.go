@@ -16,8 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 )
 
 const maxContactPhotoBytes = 5 << 20 // 5MB

@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"strings"
 
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpautocrypt"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpdiscovery"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/pgpautocrypt"
-	"kypost-server/backend/internal/pgpdiscovery"
-	"kypost-server/backend/internal/pgpmail"
 )
 
 // harvestAction records what harvestPinAutocryptKey did, for logging/tests.

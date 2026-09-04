@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"kypost-server/backend/internal/sso"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/sso"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // SyncUserPayload represents a user object in a KySignOn replication event.

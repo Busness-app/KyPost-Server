@@ -4,7 +4,7 @@ import (
 	"log"
 	"os"
 
-	"kypost-server/backend/internal/app"
+	"github.com/Busness-app/kypost-server/backend/internal/app"
 )
 
 func main() {

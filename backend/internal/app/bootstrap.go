@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/fsutil"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // bootstrapPasswordFile is where a generated first-run admin password is left

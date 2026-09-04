@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"kypost-server/backend/internal/ghrelease"
+	"github.com/Busness-app/kypost-server/backend/internal/ghrelease"
 )
 
 // linuxClientReleasesURL is the LIST endpoint for the Linux client's own

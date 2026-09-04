@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // handlePGPBootstrap returns everything a client needs to bring its PGP

@@ -16,8 +16,8 @@ import (
 	"github.com/ProtonMail/gopenpgp/v3/constants"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/pgpautocrypt"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpautocrypt"
 )
 
 // withLoweredMaxInboundMessageBytes temporarily lowers the shared inbound

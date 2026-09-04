@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/mailcache"
-	"kypost-server/backend/internal/mailmsg"
-	"kypost-server/backend/internal/state"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/mailcache"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/state"
 )
 
 // Anti-phishing Tier A: a pure, deterministic check for mail that impersonates

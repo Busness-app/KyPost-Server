@@ -1,4 +1,4 @@
-module kypost-server/backend
+module github.com/Busness-app/kypost-server/backend
 
 go 1.26.6
 

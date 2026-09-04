@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // newTestUsers returns the bootstrap admin plus a fresh non-admin user.

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"kypost-server/backend/internal/mailmsg"
+	"github.com/Busness-app/kypost-server/backend/internal/mailmsg"
 )
 
 // The signed part ExtractSignedParts returns must be byte-identical to the

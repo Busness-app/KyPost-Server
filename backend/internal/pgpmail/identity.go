@@ -13,7 +13,7 @@ import (
 	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 	"github.com/ProtonMail/gopenpgp/v3/crypto"
 
-	"kypost-server/backend/internal/cryptutil"
+	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
 )
 
 // Identity holds one OpenPGP keypair loaded in memory: a user's own private

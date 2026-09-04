@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"kypost-server/backend/internal/users"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // trustProxyCIDRsForTest points trustedProxyNets at the given CIDRs for the

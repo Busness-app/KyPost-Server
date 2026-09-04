@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/pgpmail"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/pgpmail"
 )
 
 func TestPGPQRTokenAndKeyRoundTrip(t *testing.T) {

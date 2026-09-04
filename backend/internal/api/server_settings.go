@@ -9,17 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"kypost-server/backend/internal/adapters/classifier"
-	imapadapter "kypost-server/backend/internal/adapters/imap"
-	"kypost-server/backend/internal/config"
-	"kypost-server/backend/internal/fsutil"
-	"kypost-server/backend/internal/redaction"
-	"kypost-server/backend/internal/users"
 	"net/http"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Busness-app/kypost-server/backend/internal/adapters/classifier"
+	imapadapter "github.com/Busness-app/kypost-server/backend/internal/adapters/imap"
+	"github.com/Busness-app/kypost-server/backend/internal/config"
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/redaction"
+	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

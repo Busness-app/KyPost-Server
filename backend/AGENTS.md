@@ -11,6 +11,7 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 ## Local Contracts
 
 - Go 1.26.6 (must match the `golang:` builder tag in `Dockerfile`); direct dependencies: `go-imap`, `yaml.v3`, `webpush-go`, `golang.org/x/crypto`, `emersion/go-webdav` (CardDAV protocol handling, `carddav` subpackage; transitively pulls `emersion/go-vcard`)
+- Module path: `github.com/Busness-app/kypost-server/backend`
 - Entry point: `cmd/main.go` → `app.Run(os.Args)`
 - All business logic lives under `internal/`; `cmd/` contains only the entry point
 - Binary output: `kypost-server`, deployed to `/app/bin/kypost-server` in the container

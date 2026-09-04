@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"kypost-server/backend/internal/logging"
-	"kypost-server/backend/internal/wkdpublish"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
+	"github.com/Busness-app/kypost-server/backend/internal/wkdpublish"
 )
 
 // verifiedDomains is Store.VerifiedDomains with its read error asserted away.

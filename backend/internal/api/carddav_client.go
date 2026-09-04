@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"kypost-server/backend/internal/contacts"
-	"kypost-server/backend/internal/groups"
+	"github.com/Busness-app/kypost-server/backend/internal/contacts"
+	"github.com/Busness-app/kypost-server/backend/internal/groups"
 
 	"github.com/emersion/go-vcard"
 	"github.com/emersion/go-webdav"
