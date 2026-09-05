@@ -12,7 +12,7 @@ non-prerelease version.
 
 ## Unreleased
 
-- Allow sealed backups when the optional TUNING_FILE override is absent, as in the default container layout; existing external overrides and missing required keys remain refused.
+- Allow sealed backups when the optional TUNING_FILE override inside a collected root is absent, as in the default container layout; all external overrides and missing required keys remain refused.
 
 ### Added
 

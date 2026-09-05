@@ -126,6 +126,7 @@ func TestCollectOptionalTuningOverride(t *testing.T) {
 		wantErr           bool
 	}{
 		{name: "missing compose default"},
+		{name: "missing external override", external: true, wantErr: true},
 		{name: "present collected override", present: true},
 		{name: "present external override", present: true, external: true, wantErr: true},
 	} {
