@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Busness-app/kypost-server/backend/internal/mfa"
 )
 
 // newTestStore returns a Store backed by a fresh temp dir, already seeded
@@ -171,8 +173,8 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 	}
 
 	// Confirm enables and stores recovery hashes.
-	h1, _ := HashPassword(context.Background(), "aaaa-bbbb-cccc")
-	h2, _ := HashPassword(context.Background(), "dddd-eeee-ffff")
+	h1 := mfa.RecoveryCodeDigest("aaaa-bbbb-cccc")
+	h2 := mfa.RecoveryCodeDigest("dddd-eeee-ffff")
 	if _, err := store.EnableTOTP(u.ID, "sealed-secret-json", "2026-07-09T00:00:00Z", []string{h1, h2}); err != nil {
 		t.Fatalf("EnableTOTP: %v", err)
 	}

@@ -14,10 +14,10 @@ import (
 )
 
 // davCredentialTTL bounds how long a verified Basic Auth credential is
-// trusted before re-checking scrypt. Native CardDAV clients (macOS/iOS
-// Contacts, Nextcloud) commonly re-authenticate on every PROPFIND/REPORT
-// within a sync session; without this cache each of those would pay
-// scrypt's cost (N=16384) again.
+// trusted before re-checking against the password KDF. Native CardDAV clients
+// (macOS/iOS Contacts, Nextcloud) commonly re-authenticate on every
+// PROPFIND/REPORT within a sync session; without this cache each of those
+// would pay the password KDF's cost again.
 const davCredentialTTL = 90 * time.Second
 
 type davCredentialCacheEntry struct {
@@ -47,8 +47,8 @@ func newDAVCredentialCache() davCredentialCache {
 
 // davCredentialCacheKey folds the username the same way GetByUsername resolves
 // it, so the two spellings of one account share one cache entry rather than
-// silently paying scrypt again per spelling — and so nothing here re-learns the
-// lesson handleLogin's lockout key did (see users.NormalizeUsername).
+// silently paying the password KDF again per spelling — and so nothing here
+// re-learns the lesson handleLogin's lockout key did (see users.NormalizeUsername).
 func davCredentialCacheKey(username, password string) string {
 	sum := sha256.Sum256([]byte(users.NormalizeUsername(username) + "\x00" + password))
 	return hex.EncodeToString(sum[:])
@@ -119,10 +119,10 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		}
 
 		// Per-IP lockout: unlike login, every failed DAV attempt below pays a
-		// full scrypt verification, so an uncapped attacker is a CPU-exhaustion
-		// vector even though guessing the server-generated password is
-		// hopeless. Checked before the credential cache so a locked-out IP is
-		// refused outright.
+		// full password KDF verification, so an uncapped attacker is a
+		// CPU-exhaustion vector even though guessing the server-generated
+		// password is hopeless. Checked before the credential cache so a
+		// locked-out IP is refused outright.
 		lockKey := lockoutKeyForIP(clientIP(r))
 		if allowed, retryAfter := s.davLockout.tryAttempt(lockKey); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
@@ -141,7 +141,7 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// Active==true just before the deactivation can still `put` just
 			// after that clear — so the cache alone left a deactivated account
 			// with full CardDAV read/write for up to davCredentialTTL. This is a
-			// map lookup and a scrypt-free field read; the scrypt verification
+			// map lookup and a KDF-free field read; the password KDF verification
 			// the cache exists to skip is still skipped.
 			u, err := s.users.Get(ac.UserID)
 			if err != nil || !u.Active {
@@ -168,7 +168,7 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 
 		u, err := s.users.GetByUsername(username)
 		if err != nil || !u.Active {
-			// Pay the same scrypt cost a real password check would, so
+			// Pay the same password KDF cost a real password check would, so
 			// response timing doesn't reveal whether the username exists —
 			// mirrors equalizeLoginTiming's use on the login endpoint. Under
 			// the shared KDF slot: this is unauthenticated, and 128 MiB per
@@ -184,7 +184,7 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		passFile, exists, err := s.readDAVPassword(u.ID)
 		if err != nil || !exists {
 			// No CardDAV app-password configured for this account: still pay
-			// the scrypt cost so this path isn't distinguishable by timing
+			// the password KDF cost so this path isn't distinguishable by timing
 			// from a wrong-password attempt against a configured account.
 			if err := equalizeLoginTiming(r.Context(), password); err != nil {
 				s.davLockout.cancelAttempt(lockKey)

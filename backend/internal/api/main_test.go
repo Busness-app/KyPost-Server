@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/password"
 	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
@@ -17,9 +18,13 @@ import (
 // package variable in internal/users, so writing it once before any test starts
 // is safe and writing it from inside a test is a data race.
 //
+// Argon2id gets the same treatment for the same reason: the library's minimum
+// band (8 MiB, t=1) is still real work, and this package mints one on nearly
+// every request that touches auth.
+//
 // Production strength is pinned elsewhere: users' TestHashPasswordUsesCurrentCost
-// asserts the scryptN constant and the written hash prefix directly, in a package
-// that does not apply this override.
+// asserts the written hash prefix directly, in a package that does not apply
+// this override.
 // Lowering that cost is also what makes the instance-wide login budget
 // meaningless here, so the two overrides belong together. The budget meters
 // SECONDS OF DERIVATION, and a second measured in this binary is a cheap hash
@@ -30,8 +35,10 @@ import (
 // bucket itself stays entirely real, so a test that drains it still gets a 429.
 func TestMain(m *testing.M) {
 	restore := users.SetHashCostForTest(users.MinVerifiableScryptN)
+	restoreParams := users.SetHashParamsForTest(password.Params{Memory: 8 * 1024, Time: 1, Threads: 1})
 	loginKDFBilledSeconds = func(time.Duration) float64 { return loginKDFReserveSeconds }
 	code := m.Run()
+	restoreParams()
 	restore()
 	os.Exit(code)
 }
@@ -58,6 +65,7 @@ func TestMain(m *testing.M) {
 func withProductionHashCost(t *testing.T) {
 	t.Helper()
 	t.Cleanup(users.SetHashCostForTest(users.ProductionScryptN))
+	t.Cleanup(users.SetHashParamsForTest(password.DefaultParams()))
 }
 
 // TestProductionBillsTheMeasuredTime pins the cost oracle this binary does NOT

@@ -12,48 +12,46 @@ import (
 	"golang.org/x/crypto/scrypt"
 )
 
-// TestHashPasswordUsesCurrentCost pins the cost parameters new hashes are
-// written with. 16384 was scrypt's 2009 interactive figure — the floor of
-// current guidance, not a target.
+// TestHashPasswordUsesCurrentCost pins the format new hashes are written in:
+// Argon2id, and it must verify.
 func TestHashPasswordUsesCurrentCost(t *testing.T) {
 	hash, err := HashPassword(context.Background(), "correct-horse-battery-staple")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
-	if !strings.HasPrefix(hash, "scrypt$131072$8$1$") {
-		t.Errorf("hash prefix = %q, want scrypt$131072$8$1$ (N=2^17)", hash[:min(len(hash), 24)])
+	if !strings.HasPrefix(hash, "$argon2id$") {
+		t.Errorf("hash prefix = %q, want $argon2id$", hash[:min(len(hash), 24)])
 	}
-	if scryptN != 1<<17 {
-		t.Errorf("scryptN = %d, want %d", scryptN, 1<<17)
-	}
-	// And it must still verify.
-	if ok, _ := verifyScryptHash(context.Background(), hash, "correct-horse-battery-staple"); !ok {
+	if ok, _ := VerifySecretHash(context.Background(), hash, "correct-horse-battery-staple"); !ok {
 		t.Error("a freshly written hash does not verify")
 	}
 }
 
-// TestNeedsRehashOnlyUpgrades is the safety property: this must never report
-// true for a hash stored at a HIGHER cost, or an operator who deliberately
-// raised it would have their accounts silently weakened on next login.
+// TestNeedsRehashOnlyUpgrades is the safety property: every scrypt hash is
+// retired regardless of the cost it was stored at, but an Argon2id hash at or
+// above the current cost must never report true, or an operator who
+// deliberately raised it would have their accounts silently weakened on next
+// login.
 func TestNeedsRehashOnlyUpgrades(t *testing.T) {
 	cases := []struct {
 		name    string
 		encoded string
 		want    bool
 	}{
-		{"old N", "scrypt$16384$8$1$c2FsdA==$aGFzaA==", true},
-		{"old r", "scrypt$131072$4$1$c2FsdA==$aGFzaA==", true},
-		{"old p", "scrypt$131072$8$0$c2FsdA==$aGFzaA==", true},
-		{"current", "scrypt$131072$8$1$c2FsdA==$aGFzaA==", false},
+		// Every scrypt hash is retired, regardless of the cost it carries.
+		{"scrypt old N", "scrypt$16384$8$1$c2FsdA==$aGFzaA==", true},
+		{"scrypt current cost", "scrypt$131072$8$1$c2FsdA==$aGFzaA==", true},
+		{"scrypt stronger than default", "scrypt$1048576$8$1$c2FsdA==$aGFzaA==", true},
+		// Argon2id follows the currently configured cost (production default:
+		// 64 MiB, t=3, p=4).
+		{"argon2id below current", "$argon2id$v=19$m=8192,t=1,p=1$c2FsdA==$aGFzaA==", true},
+		{"argon2id at current", "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA==$aGFzaA==", false},
 		// Deliberately stronger than the current default: leave it alone.
-		{"stronger N", "scrypt$1048576$8$1$c2FsdA==$aGFzaA==", false},
-		{"stronger r", "scrypt$131072$16$1$c2FsdA==$aGFzaA==", false},
+		{"argon2id stronger", "$argon2id$v=19$m=131072,t=5,p=4$c2FsdA==$aGFzaA==", false},
 		// Not ours to rehash.
 		{"foreign format", "argon2id$v=19$m=65536,t=3,p=4$abc$def", false},
 		{"garbage", "not-a-hash", false},
 		{"empty", "", false},
-		{"wrong field count", "scrypt$131072$8$1$c2FsdA==", false},
-		{"non-numeric N", "scrypt$abc$8$1$c2FsdA==$aGFzaA==", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

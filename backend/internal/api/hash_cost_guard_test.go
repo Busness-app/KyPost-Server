@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Busness-app/ky-primitives/password"
 	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
@@ -82,6 +83,17 @@ func TestSetHashCostForTestRefusesBelowVerifiableFloor(t *testing.T) {
 			users.SetHashCostForTest(n)
 		}()
 	}
+}
+
+// TestSetHashParamsForTestRefusesOutsideBand pins the panic that stops a test
+// cost from minting Argon2id hashes the library itself would refuse to verify.
+func TestSetHashParamsForTestRefusesOutsideBand(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("SetHashParamsForTest accepted 1 KiB; it would mint unverifiable hashes")
+		}
+	}()
+	users.SetHashParamsForTest(password.Params{Memory: 1024, Time: 1, Threads: 1})
 }
 
 // TestProductionHashCostHelperRestoresTheTestCost proves withProductionHashCost

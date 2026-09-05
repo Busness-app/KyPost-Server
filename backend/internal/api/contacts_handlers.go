@@ -406,7 +406,7 @@ func (s *Server) handleContactsBulkDelete(w http.ResponseWriter, r *http.Request
 }
 
 // davPasswordFile is the on-disk shape of the caller's app-specific CardDAV
-// password (a scrypt hash, never the raw secret — the raw value is shown
+// password (an Argon2id hash, never the raw secret — the raw value is shown
 // exactly once at generation time).
 type davPasswordFile struct {
 	Hash      string `json:"hash"`
@@ -463,10 +463,10 @@ func (s *Server) handleContactsDAVPassword(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "failed to generate password", http.StatusInternalServerError)
 			return
 		}
-		// Under the shared derivation slots, like every other scrypt on a
-		// request path. This one was the clearest hole: any authenticated
+		// Under the shared derivation slots, like every other KDF derivation
+		// on a request path. This one was the clearest hole: any authenticated
 		// session could POST here in a loop with no lockout and no cost, and
-		// each call allocated 128 MiB outside the ceiling that was supposed to
+		// each call allocated memory outside the ceiling that was supposed to
 		// bound exactly that.
 		hash, err := users.HashPassword(r.Context(), raw)
 		if errors.Is(err, users.ErrKDFBusy) {

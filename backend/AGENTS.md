@@ -223,7 +223,7 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 | File | Purpose |
 |------|---------|
 | `$CONFIG_DIR/config.yaml` | Global system config (admin-editable) |
-| `$CONFIG_DIR/users.json` | User accounts, roles, scrypt password hashes (version-marked) |
+| `$CONFIG_DIR/users.json` | User accounts, roles, Argon2id password hashes; scrypt hashes from older installs verify and are rehashed on next login |
 | `$CONFIG_DIR/users/<userID>/imap-config.json` | User's encrypted IMAP credentials (master key encrypted) |
 | `$CONFIG_DIR/users/<userID>/tuning.md` | User's classification prompt |
 | `$CONFIG_DIR/users/<userID>/config.yaml` | User's notification delivery preferences |
@@ -237,7 +237,7 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 | `$STATE_DIR/users/<userID>/state.json`, `decisions.json` | Pre-SQLite formats. Imported into `state.db` on first start after upgrade and renamed `.migrated`; never read afterwards |
 | `$STATE_DIR/users/<userID>/contacts.json` | User's address book (contacts, revisions, tombstones) |
 | `$STATE_DIR/users/<userID>/mailcache.json` | User's mail metadata cache, per mailbox (not full message bodies except where opportunistically warmed) |
-| `$CONFIG_DIR/users/<userID>/carddav-auth.json` | Scrypt hash of the user's app-specific CardDAV password (never the raw secret) |
+| `$CONFIG_DIR/users/<userID>/carddav-auth.json` | Argon2id hash (scrypt until regenerated) of the user's app-specific CardDAV password (never the raw secret) |
 
 ### Log Files
 

@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +128,88 @@ func TestLoginMeLogoutFlow(t *testing.T) {
 	}
 	if meResp["authenticated"] != false {
 		t.Fatalf("expected deactivated user's session to be rejected, got %+v", meResp)
+	}
+}
+
+// TestHandleLoginRehashesLegacyScryptPassword covers the upgrade path wired
+// into the login handler (server_auth_session.go, around the
+// users.NeedsRehash / RehashPassword call): a stored scrypt hash must still
+// authenticate, and the successful login must be the trigger that rewrites it
+// as Argon2id — the one moment the plaintext is legitimately in hand to
+// re-derive from.
+func TestHandleLoginRehashesLegacyScryptPassword(t *testing.T) {
+	srv := newTestServer(t)
+	const pw = "correct-horse-battery-staple"
+	u, err := srv.users.Create(context.Background(), "legacy-login", pw, users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Plant a legacy scrypt hash directly in users.json, the way an existing
+	// install's file actually looks; there is no exported Store method for
+	// writing an arbitrary hash, on purpose.
+	legacyHash, err := users.LegacyScryptHashForTest(context.Background(), pw)
+	if err != nil {
+		t.Fatalf("LegacyScryptHashForTest: %v", err)
+	}
+	usersPath := filepath.Join(srv.configDir, "users.json")
+	raw, err := os.ReadFile(usersPath)
+	if err != nil {
+		t.Fatalf("read users.json: %v", err)
+	}
+	var file struct {
+		Version int                      `json:"version"`
+		Users   []map[string]interface{} `json:"users"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatalf("unmarshal users.json: %v", err)
+	}
+	planted := false
+	for _, entry := range file.Users {
+		if entry["id"] == u.ID {
+			entry["passwordHash"] = legacyHash
+			planted = true
+		}
+	}
+	if !planted {
+		t.Fatalf("user %q not found in users.json", u.ID)
+	}
+	out, err := json.Marshal(file)
+	if err != nil {
+		t.Fatalf("marshal users.json: %v", err)
+	}
+	if err := os.WriteFile(usersPath, out, 0o600); err != nil {
+		t.Fatalf("write users.json: %v", err)
+	}
+
+	before, err := srv.users.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get before login: %v", err)
+	}
+	if !users.NeedsRehash(before.PasswordHash) {
+		t.Fatal("planted hash does not report as needing a rehash")
+	}
+
+	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login", map[string]string{
+		"username": u.Username,
+		"password": pw,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login with legacy scrypt hash: status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	after, err := srv.users.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get after login: %v", err)
+	}
+	if !strings.HasPrefix(after.PasswordHash, "$argon2id$") {
+		t.Fatalf("PasswordHash after login = %q, want an Argon2id hash", after.PasswordHash)
+	}
+	if users.NeedsRehash(after.PasswordHash) {
+		t.Error("hash still reports needing a rehash after login upgraded it")
+	}
+	if ok, _ := users.VerifyPassword(context.Background(), after, pw); !ok {
+		t.Error("the password no longer verifies after the login-triggered rehash")
 	}
 }
 

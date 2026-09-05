@@ -66,6 +66,13 @@ func TestEveryDerivationEntryPointSharesTheOneLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
+	// ConsumeRecoveryCode's legacy branch only recognizes scrypt$ hashes (the
+	// format recovery codes were stored in before digests existed); it needs
+	// its own fixture in that exact format, not the Argon2id hash above.
+	legacyRecoveryHash, err := LegacyScryptHashForTest(context.Background(), "correct-horse-battery-staple")
+	if err != nil {
+		t.Fatalf("LegacyScryptHashForTest: %v", err)
+	}
 	legacyUser := User{ID: "u1", Username: "legacy", PasswordHash: hash}
 	derivedUser := User{
 		ID: "u2", Username: "derived", PasswordHash: hash,
@@ -81,7 +88,7 @@ func TestEveryDerivationEntryPointSharesTheOneLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FirstAdmin: %v", err)
 	}
-	if _, err := store.ReplaceRecoveryCodes(bootstrap.ID, []string{hash}); err != nil {
+	if _, err := store.ReplaceRecoveryCodes(bootstrap.ID, []string{legacyRecoveryHash}); err != nil {
 		t.Fatalf("ReplaceRecoveryCodes: %v", err)
 	}
 

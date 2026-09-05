@@ -31,6 +31,7 @@ import (
 	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 	"github.com/Busness-app/kypost-server/backend/internal/mfa"
 
+	"github.com/Busness-app/ky-primitives/password"
 	"github.com/Busness-app/ky-primitives/recoverycode"
 	"golang.org/x/crypto/scrypt"
 )
@@ -1888,15 +1889,14 @@ func VerifyPassword(ctx context.Context, u User, candidate string) (bool, error)
 	if u.UsesDerivedAuth() {
 		return false, nil
 	}
-	return verifyScryptHash(ctx, u.PasswordHash, candidate)
+	return verifyHash(ctx, u.PasswordHash, candidate)
 }
 
-// VerifySecretHash checks a candidate secret against a scrypt-encoded hash
-// produced by HashPassword — the generic counterpart to VerifyPassword, for
-// secrets other than a User's login password (e.g. an app-specific CardDAV
-// password).
+// VerifySecretHash checks a candidate secret against a hash produced by
+// HashPassword — the generic counterpart to VerifyPassword, for secrets other
+// than a User's login password (e.g. an app-specific CardDAV password).
 func VerifySecretHash(ctx context.Context, encoded, candidate string) (bool, error) {
-	return verifyScryptHash(ctx, encoded, candidate)
+	return verifyHash(ctx, encoded, candidate)
 }
 
 // deviceSecretPrefix tags the SHA-256 device-secret format so
@@ -1930,7 +1930,7 @@ func HashDeviceSecret(secret string) string {
 func VerifyDeviceSecret(ctx context.Context, stored, candidate string) (bool, error) {
 	encoded, ok := strings.CutPrefix(stored, deviceSecretPrefix)
 	if !ok {
-		return verifyScryptHash(ctx, stored, candidate)
+		return verifyHash(ctx, stored, candidate)
 	}
 	want, err := hex.DecodeString(encoded)
 	if err != nil || len(want) != sha256.Size {
@@ -1965,6 +1965,62 @@ const (
 	scryptKeyLen = 32
 )
 
+// hashParams are the Argon2id cost parameters for every new hash. RFC 9106's
+// second option (64 MiB, t=3, p=4); the library's budget bounds how many run
+// at once and kdfSlots bounds it again inside this process.
+var hashParams = password.DefaultParams()
+
+// SetHashParamsForTest lowers the Argon2id cost so a test suite that mints
+// hundreds of hashes finishes. Refuses outside a test binary and refuses
+// parameters the library would not verify.
+func SetHashParamsForTest(p password.Params) (restore func()) {
+	if !testing.Testing() { // same guard SetHashCostForTest uses
+		panic("users.SetHashParamsForTest called outside a test binary")
+	}
+	if err := p.Validate(); err != nil {
+		panic(fmt.Sprintf("users.SetHashParamsForTest: %v", err))
+	}
+	previous := hashParams
+	hashParams = p
+	return func() { hashParams = previous }
+}
+
+// mapBusy turns the library's admission error into this package's, so every
+// caller keeps one error to check.
+func mapBusy(err error) error {
+	if errors.Is(err, password.ErrBusy) {
+		return fmt.Errorf("%w: %v", ErrKDFBusy, err)
+	}
+	return err
+}
+
+// verifyHash checks candidate against whichever format encoded is in. Argon2id
+// is what this package writes now; scrypt$ is what it wrote before and stays
+// verifiable until the account rehashes on its next login. Anything else is
+// false, never an error: an unreadable stored hash is a wrong credential, not
+// an unchecked one.
+func verifyHash(ctx context.Context, encoded, candidate string) (bool, error) {
+	switch {
+	case strings.HasPrefix(encoded, "$argon2id$"):
+		var (
+			ok  bool
+			err error
+		)
+		if slotErr := withKDFSlot(ctx, func() {
+			ok, err = password.Verify(candidate, encoded)
+		}); slotErr != nil {
+			return false, slotErr
+		}
+		if errors.Is(err, password.ErrMalformed) {
+			return false, nil
+		}
+		return ok, mapBusy(err)
+	case strings.HasPrefix(encoded, "scrypt$"):
+		return verifyScryptHash(ctx, encoded, candidate)
+	}
+	return false, nil
+}
+
 // hashCostN is the N that new hashes are written with, and the floor NeedsRehash
 // measures stored hashes against. It is scryptN everywhere except under
 // SetHashCostForTest. Verification never reads it: verifyScryptHash takes the
@@ -1987,9 +2043,10 @@ const MinVerifiableScryptN = 1 << 14
 // test helper stops meaning "production" the moment scryptN is raised.
 const ProductionScryptN = scryptN
 
-// SetHashCostForTest lowers the write-side scrypt cost and returns a function
-// that restores it: 128 MiB and ~200 ms per derivation is right for a login and
-// ruinous for a test suite.
+// SetHashCostForTest lowers the cost of the legacy scrypt hashes tests mint
+// through LegacyScryptHashForTest, and returns a function that restores it:
+// 128 MiB and ~200 ms per derivation is ruinous for a test suite that mints
+// one to prove the old format still verifies.
 //
 // It panics outside a test binary. It weakens password hashing and is exported
 // from a package production code imports, so a dev-only flag or fixture loader
@@ -2018,10 +2075,20 @@ func SetHashCostForTest(n int) (restore func()) {
 	return func() { hashCostN = previous }
 }
 
-// HashPassword produces a scrypt-encoded hash string in the same format
-// used historically by admin.env's ADMIN_PASS_HASH field.
-func HashPassword(ctx context.Context, password string) (string, error) {
-	return hashScrypt(ctx, password)
+// HashPassword derives an Argon2id PHC hash for a human-chosen secret. Holds
+// one derivation slot for the duration (kdf.go) and returns ErrKDFBusy when
+// none comes free.
+func HashPassword(ctx context.Context, secret string) (string, error) {
+	var (
+		hash string
+		err  error
+	)
+	if slotErr := withKDFSlot(ctx, func() {
+		hash, err = password.HashWith(secret, hashParams)
+	}); slotErr != nil {
+		return "", slotErr
+	}
+	return hash, mapBusy(err)
 }
 
 // LegacyScryptHashForTest mints a scrypt hash so tests can prove the legacy
@@ -2130,35 +2197,34 @@ func verifyScryptHash(ctx context.Context, encoded, candidate string) (bool, err
 	return subtle.ConstantTimeCompare(derived, expected) == 1, nil
 }
 
-// NeedsRehash reports whether a stored scrypt hash was written with cost
-// parameters below the current ones, so a caller holding the verified plaintext
-// can upgrade it. Raising scryptN otherwise protects only new accounts, and
-// immediately after a successful verification is the one moment the plaintext is
-// legitimately available to re-derive from.
+// NeedsRehash reports whether a stored hash should be re-derived from the
+// verified plaintext: every scrypt hash (the format is retired), and an
+// Argon2id hash below the currently configured cost. Malformed or foreign is
+// false; rehashing something this package did not write is a guess.
 //
-// An unparseable or foreign-format hash returns false: rehashing something this
-// package did not write is a guess, not an upgrade.
+// This compares the embedded cost against hashParams itself rather than
+// delegating to password.NeedsRehash: that library call measures against its
+// own baked-in default, not whatever this process is actually configured to
+// write, so it disagrees with reality whenever hashParams differs from
+// password.DefaultParams() — which in production it never does, but under
+// SetHashParamsForTest it always does. Verified empirically against v0.5.0:
+// a hash minted with HashWith at a lowered Params is reported stale by
+// password.NeedsRehash even though it exactly matches the cost this process
+// currently writes.
 func NeedsRehash(encoded string) bool {
+	if strings.HasPrefix(encoded, "scrypt$") {
+		return true
+	}
 	parts := strings.Split(encoded, "$")
-	if len(parts) != 6 || parts[0] != "scrypt" {
+	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
 		return false
 	}
-	n, err := strconv.Atoi(parts[1])
-	if err != nil {
+	var mem, t uint32
+	var threads uint8
+	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &mem, &t, &threads); err != nil {
 		return false
 	}
-	r, err := strconv.Atoi(parts[2])
-	if err != nil {
-		return false
-	}
-	p, err := strconv.Atoi(parts[3])
-	if err != nil {
-		return false
-	}
-	// Only ever upgrade. A hash stored with a HIGHER cost than the current
-	// default must be left alone — an operator may have deliberately raised it,
-	// and "rehashing" it would silently weaken the account.
-	return n < hashCostN || r < scryptR || p < scryptP
+	return mem < hashParams.Memory || t < hashParams.Time || threads != hashParams.Threads
 }
 
 // RehashPassword re-derives id's password hash at the current cost parameters,
@@ -2263,7 +2329,7 @@ func VerifyAuthSecret(ctx context.Context, u User, candidate string) (bool, erro
 	if !u.UsesDerivedAuth() {
 		return false, nil
 	}
-	return verifyScryptHash(ctx, u.PasswordHash, candidate)
+	return verifyHash(ctx, u.PasswordHash, candidate)
 }
 
 // SetDerivedAuth replaces id's credential with a client-derived auth secret,

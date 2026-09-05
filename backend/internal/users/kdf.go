@@ -8,7 +8,7 @@
 // every password-confirm flow, recovery-code generation (ten derivations in a
 // single request), CardDAV app-password generation (authenticated, no lockout,
 // no cost to repeat), the hash and PGP rewrap at the end of a password change,
-// and administrative create/reset all reached scrypt.Key without passing
+// and administrative create/reset all reached the KDF without passing
 // through it. A ceiling that half the callers walk around is not a ceiling, and
 // the memory it was sized to bound is the thing that OOM-kills a container and
 // takes every in-memory session with it.
@@ -25,11 +25,12 @@ import (
 )
 
 // MaxConcurrentKDF bounds simultaneous memory-hard derivations process-wide.
-// Each scrypt at N=1<<17 holds 128 MiB, so this caps peak KDF memory at roughly
-// MaxConcurrentKDF*128 MiB regardless of how many callers arrive at once. The
-// per-IP lockouts bound how many attempts an address may make; nothing bounded
-// how many could be in flight together, which is what turns an auth endpoint
-// into an OOM primitive on a memory-limited container.
+// Each Argon2id derivation holds 64 MiB (legacy scrypt verifies hold 128 MiB),
+// so this caps peak KDF memory at roughly MaxConcurrentKDF times that,
+// regardless of how many callers arrive at once. The per-IP lockouts bound
+// how many attempts an address may make; nothing bounded how many could be in
+// flight together, which is what turns an auth endpoint into an OOM primitive
+// on a memory-limited container.
 const MaxConcurrentKDF = 4
 
 // ErrKDFBusy means the derivation slots were saturated for longer than
