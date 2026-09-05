@@ -8,7 +8,38 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Busness-app/ky-primitives/password"
 )
+
+// TestMaxConcurrentKDFFitsWithinLibraryMemoryBudget pins the relationship
+// MaxConcurrentKDF's doc comment describes: this package's own admission gate
+// must not admit more Argon2id memory than ky-primitives/password's
+// independent budget (password.MaxMemoryKiB) allows process-wide. If it did,
+// every kypost slot would still have to queue AGAIN inside the library's own
+// budget, turning one wait into two instead of bounding it once — and since
+// MaxMemoryKiB is a process-wide budget shared with the daemon process (which
+// also links this package), leaving no headroom here would let this process's
+// own worst case queue against itself.
+func TestMaxConcurrentKDFFitsWithinLibraryMemoryBudget(t *testing.T) {
+	used := MaxConcurrentKDF * int(password.DefaultParams().Memory)
+	if used > password.MaxMemoryKiB {
+		t.Fatalf("MaxConcurrentKDF (%d) * Argon2id memory (%d KiB) = %d KiB, exceeds "+
+			"password.MaxMemoryKiB (%d KiB): slots will queue a second time inside the library",
+			MaxConcurrentKDF, password.DefaultParams().Memory, used, password.MaxMemoryKiB)
+	}
+	// The lanes axis is a second, independent dimension of the same library
+	// budget (see password.MaxLanes' doc comment: memory and lanes are taken
+	// together under one acquirer). MaxConcurrentKDF concurrent derivations at
+	// hashParams' thread count must fit inside it too, or slots queue a second
+	// time on this axis even while the memory axis has headroom.
+	lanesUsed := MaxConcurrentKDF * int(password.DefaultParams().Threads)
+	if lanesUsed > password.MaxLanes {
+		t.Fatalf("MaxConcurrentKDF (%d) * Argon2id threads (%d) = %d lanes, exceeds "+
+			"password.MaxLanes (%d): slots will queue a second time inside the library",
+			MaxConcurrentKDF, password.DefaultParams().Threads, lanesUsed, password.MaxLanes)
+	}
+}
 
 // withSaturatedKDF fills every derivation slot and returns a release func. The
 // slots stay held until release is called, so anything that asks for one during
@@ -66,6 +97,13 @@ func TestEveryDerivationEntryPointSharesTheOneLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
+	// ConsumeRecoveryCode's legacy branch only recognizes scrypt$ hashes (the
+	// format recovery codes were stored in before digests existed); it needs
+	// its own fixture in that exact format, not the Argon2id hash above.
+	legacyRecoveryHash, err := LegacyScryptHashForTest(context.Background(), "correct-horse-battery-staple")
+	if err != nil {
+		t.Fatalf("LegacyScryptHashForTest: %v", err)
+	}
 	legacyUser := User{ID: "u1", Username: "legacy", PasswordHash: hash}
 	derivedUser := User{
 		ID: "u2", Username: "derived", PasswordHash: hash,
@@ -81,7 +119,7 @@ func TestEveryDerivationEntryPointSharesTheOneLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FirstAdmin: %v", err)
 	}
-	if _, err := store.ReplaceRecoveryCodes(bootstrap.ID, []string{hash}); err != nil {
+	if _, err := store.ReplaceRecoveryCodes(bootstrap.ID, []string{legacyRecoveryHash}); err != nil {
 		t.Fatalf("ReplaceRecoveryCodes: %v", err)
 	}
 
@@ -134,7 +172,7 @@ func TestEveryDerivationEntryPointSharesTheOneLimit(t *testing.T) {
 			return err
 		}},
 		{"Store.ConsumeRecoveryCode", func() error {
-			_, _, err := store.ConsumeRecoveryCode(ctx, bootstrap.ID, "correct-horse-battery-staple")
+			_, _, err := store.ConsumeRecoveryCode(ctx, bootstrap.ID, "correct-horse-battery-staple", testRecoveryDigest(t))
 			return err
 		}},
 		{"Store.RehashPassword", func() error {

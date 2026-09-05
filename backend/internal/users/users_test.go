@@ -171,8 +171,9 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 	}
 
 	// Confirm enables and stores recovery hashes.
-	h1, _ := HashPassword(context.Background(), "aaaa-bbbb-cccc")
-	h2, _ := HashPassword(context.Background(), "dddd-eeee-ffff")
+	digest := testRecoveryDigest(t)
+	h1 := digest("aaaa-bbbb-cccc")
+	h2 := digest("dddd-eeee-ffff")
 	if _, err := store.EnableTOTP(u.ID, "sealed-secret-json", "2026-07-09T00:00:00Z", []string{h1, h2}); err != nil {
 		t.Fatalf("EnableTOTP: %v", err)
 	}
@@ -182,7 +183,7 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 	}
 
 	// Consume a recovery code removes exactly one matching hash.
-	_, matched, err := store.ConsumeRecoveryCode(context.Background(), u.ID, "aaaa-bbbb-cccc")
+	_, matched, err := store.ConsumeRecoveryCode(context.Background(), u.ID, "aaaa-bbbb-cccc", digest)
 	if err != nil || !matched {
 		t.Fatalf("ConsumeRecoveryCode good = (%v, %v)", matched, err)
 	}
@@ -191,7 +192,7 @@ func TestTOTPEnrollmentLifecycle(t *testing.T) {
 		t.Fatalf("after consume: %d hashes left, want 1", len(got.RecoveryCodesHash))
 	}
 	// A non-matching / already-used code does not match and does not write.
-	_, matched, err = store.ConsumeRecoveryCode(context.Background(), u.ID, "aaaa-bbbb-cccc")
+	_, matched, err = store.ConsumeRecoveryCode(context.Background(), u.ID, "aaaa-bbbb-cccc", digest)
 	if err != nil || matched {
 		t.Fatalf("ConsumeRecoveryCode reused = (%v, %v), want (false, nil)", matched, err)
 	}

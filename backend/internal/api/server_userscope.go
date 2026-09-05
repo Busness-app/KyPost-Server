@@ -822,7 +822,14 @@ func (s *Server) revokeAllUserCredentialsExcept(u users.User, keepSessionToken s
 	// so readDAVPassword loaded it again on the next request and minted a fresh
 	// AuthContext. A stolen app password therefore survived admin reset-password,
 	// admin clear-MFA and the self-service password change.
-	if err := os.Remove(s.userCardDAVAuthPath(u.ID)); err != nil && !os.IsNotExist(err) {
+	// Under rehashDAVAppPassword's file lock: an in-flight hash upgrade that
+	// re-read the file before this delete would otherwise write it back.
+	if err := fsutil.WithFileLock(s.userCardDAVAuthPath(u.ID), func() error {
+		if err := os.Remove(s.userCardDAVAuthPath(u.ID)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}); err != nil {
 		s.logger.Error("failed to revoke carddav credential", "user_id", u.ID, "error", err.Error())
 		errs = append(errs, fmt.Errorf("remove CardDAV credential: %w", err))
 	}

@@ -10,14 +10,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
 // davCredentialTTL bounds how long a verified Basic Auth credential is
-// trusted before re-checking scrypt. Native CardDAV clients (macOS/iOS
-// Contacts, Nextcloud) commonly re-authenticate on every PROPFIND/REPORT
-// within a sync session; without this cache each of those would pay
-// scrypt's cost (N=16384) again.
+// trusted before re-checking against the password KDF. Native CardDAV clients
+// (macOS/iOS Contacts, Nextcloud) commonly re-authenticate on every
+// PROPFIND/REPORT within a sync session; without this cache each of those
+// would pay the password KDF's cost again.
 const davCredentialTTL = 90 * time.Second
 
 type davCredentialCacheEntry struct {
@@ -47,8 +48,8 @@ func newDAVCredentialCache() davCredentialCache {
 
 // davCredentialCacheKey folds the username the same way GetByUsername resolves
 // it, so the two spellings of one account share one cache entry rather than
-// silently paying scrypt again per spelling — and so nothing here re-learns the
-// lesson handleLogin's lockout key did (see users.NormalizeUsername).
+// silently paying the password KDF again per spelling — and so nothing here
+// re-learns the lesson handleLogin's lockout key did (see users.NormalizeUsername).
 func davCredentialCacheKey(username, password string) string {
 	sum := sha256.Sum256([]byte(users.NormalizeUsername(username) + "\x00" + password))
 	return hex.EncodeToString(sum[:])
@@ -119,10 +120,10 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		}
 
 		// Per-IP lockout: unlike login, every failed DAV attempt below pays a
-		// full scrypt verification, so an uncapped attacker is a CPU-exhaustion
-		// vector even though guessing the server-generated password is
-		// hopeless. Checked before the credential cache so a locked-out IP is
-		// refused outright.
+		// full password KDF verification, so an uncapped attacker is a
+		// CPU-exhaustion vector even though guessing the server-generated
+		// password is hopeless. Checked before the credential cache so a
+		// locked-out IP is refused outright.
 		lockKey := lockoutKeyForIP(clientIP(r))
 		if allowed, retryAfter := s.davLockout.tryAttempt(lockKey); !allowed {
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
@@ -141,7 +142,7 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			// Active==true just before the deactivation can still `put` just
 			// after that clear — so the cache alone left a deactivated account
 			// with full CardDAV read/write for up to davCredentialTTL. This is a
-			// map lookup and a scrypt-free field read; the scrypt verification
+			// map lookup and a KDF-free field read; the password KDF verification
 			// the cache exists to skip is still skipped.
 			u, err := s.users.Get(ac.UserID)
 			if err != nil || !u.Active {
@@ -166,31 +167,42 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		// davCredentialCache).
 		gen := s.davCredentials.currentGeneration()
 
+		// Every outcome below is padded to the same wall clock. The dummy is
+		// always Argon2id while a real check may still reach scrypt, so
+		// matching the WORK cannot equalize the CLOCK here — that skew is the
+		// enumeration oracle, not a defence against it. See
+		// credentialTimingFloor. Only the cache MISS is floored: a hit runs no
+		// credential check at all, and it is reachable only with a password
+		// this server already verified.
+		credentialStart := time.Now()
+
 		u, err := s.users.GetByUsername(username)
 		if err != nil || !u.Active {
-			// Pay the same scrypt cost a real password check would, so
-			// response timing doesn't reveal whether the username exists —
-			// mirrors equalizeLoginTiming's use on the login endpoint. Under
-			// the shared KDF slot: this is unauthenticated, and 128 MiB per
-			// concurrent attempt is otherwise an OOM primitive.
-			if err := equalizeLoginTiming(r.Context(), password); err != nil {
+			// Do the same derivation work a real password check would, so slot
+			// contention doesn't reveal whether the username exists — mirrors
+			// equalizeLoginTiming's use on the login endpoint. Under the shared
+			// KDF slot: this is unauthenticated, and 64 MiB per concurrent
+			// attempt is otherwise an OOM primitive.
+			if err := s.equalizeLoginTiming(r.Context(), password); err != nil {
 				s.davLockout.cancelAttempt(lockKey)
 				writeKDFBusy(w)
 				return
 			}
+			s.settleCredentialTiming(r.Context(), credentialStart)
 			s.requireDAVAuth(w)
 			return
 		}
 		passFile, exists, err := s.readDAVPassword(u.ID)
 		if err != nil || !exists {
 			// No CardDAV app-password configured for this account: still pay
-			// the scrypt cost so this path isn't distinguishable by timing
+			// the password KDF cost so this path isn't distinguishable by timing
 			// from a wrong-password attempt against a configured account.
-			if err := equalizeLoginTiming(r.Context(), password); err != nil {
+			if err := s.equalizeLoginTiming(r.Context(), password); err != nil {
 				s.davLockout.cancelAttempt(lockKey)
 				writeKDFBusy(w)
 				return
 			}
+			s.settleCredentialTiming(r.Context(), credentialStart)
 			s.requireDAVAuth(w)
 			return
 		}
@@ -205,6 +217,7 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 			writeKDFBusy(w)
 			return
 		}
+		s.settleCredentialTiming(r.Context(), credentialStart)
 		if !verified {
 			s.requireDAVAuth(w)
 			return
@@ -212,12 +225,77 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 
 		s.davLockout.recordSuccess(lockKey)
 		ac := AuthContext{UserID: u.ID, Username: u.Username, Role: u.Role}
+		// Cache BEFORE the rehash. A native client opens several connections
+		// and re-authenticates per PROPFIND/REPORT — the whole reason this
+		// cache exists — so on the first sync after an upgrade every one of
+		// those parallel requests would otherwise miss the cache, pay a scrypt
+		// verify AND an Argon2id derivation, and only then publish the result.
+		// A rehash that fails to persist must still leave the credential
+		// cached: the write is an optimisation, the verification is the answer.
 		s.davCredentials.put(gen, username, password, ac)
+
+		// The credential just verified, so a stale hash format (legacy scrypt,
+		// or an Argon2id hash below the current cost) is upgraded now — the
+		// only moment the plaintext is legitimately in hand. See
+		// rehashDAVAppPassword for why this is guarded rather than an
+		// unconditional write.
+		if users.NeedsRehash(passFile.Hash) {
+			s.rehashDAVAppPassword(r.Context(), u.ID, passFile.Hash, password, gen)
+		}
+
 		if !s.meterAccountWrite(w, r, ac.UserID) {
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	})
+}
+
+// rehashDAVAppPassword re-derives an app password's hash at the current cost
+// and persists it, but only if nothing has revoked or replaced the credential
+// since gen was snapshotted (before the file was read) and verifiedHash was
+// read from it. Best-effort and silent on every abort: the caller's request
+// already has its answer, and the next successful auth against whatever
+// credential is current retries the upgrade.
+//
+// The guard exists because this runs after TWO derivations queue for up to
+// KDFMaxQueueWait each (VerifySecretHash in the caller, then HashPassword
+// here) — long enough for the credential this is about to persist to have
+// been revoked or replaced underneath it. Three writers race this: DELETE and
+// POST-regenerate in contacts_handlers.go, and revokeAllUserCredentialsExcept
+// in server_userscope.go (password reset, MFA clear). Skipping the generation
+// or hash check would let a rehash that started before one of them finished
+// resurrect a deleted credential, or clobber a freshly regenerated one with a
+// re-derivation of the OLD password.
+//
+// The generation check catches a writer that finished BEFORE the re-read. What
+// closes the rest is fsutil.WithFileLock: the re-read and the write are one
+// critical section, and all three writers take the same lock, so there is no
+// longer a window between "the file still holds the hash I verified" and the
+// rename that replaces it. That window was not microseconds — writeDAVPassword
+// is an AtomicWriteFile, which fsyncs the temp file and the directory — and a
+// DELETE landing inside it resurrected a revoked credential permanently, since
+// nothing would ever delete it again. Same shape users.Store.RehashPassword
+// uses on the login password; the lock this file "has none of" was a choice,
+// not a constraint.
+func (s *Server) rehashDAVAppPassword(ctx context.Context, userID, verifiedHash, password string, gen uint64) {
+	hash, err := users.HashPassword(ctx, password)
+	if err != nil {
+		s.logger.Error("carddav app-password hash upgrade failed", "user_id", userID, "error", err.Error())
+		return
+	}
+	if s.davCredentials.currentGeneration() != gen {
+		return
+	}
+	err = fsutil.WithFileLock(s.userCardDAVAuthPath(userID), func() error {
+		current, exists, err := s.readDAVPassword(userID)
+		if err != nil || !exists || current.Hash != verifiedHash {
+			return nil
+		}
+		return s.writeDAVPassword(userID, davPasswordFile{Hash: hash, CreatedAt: current.CreatedAt})
+	})
+	if err != nil {
+		s.logger.Error("carddav app-password hash upgrade failed to persist", "user_id", userID, "error", err.Error())
+	}
 }
 
 func (s *Server) requireDAVAuth(w http.ResponseWriter) {

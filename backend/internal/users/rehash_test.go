@@ -9,51 +9,112 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Busness-app/ky-primitives/password"
 	"golang.org/x/crypto/scrypt"
 )
 
-// TestHashPasswordUsesCurrentCost pins the cost parameters new hashes are
-// written with. 16384 was scrypt's 2009 interactive figure — the floor of
-// current guidance, not a target.
+// TestHashPasswordUsesCurrentCost pins the format AND the cost new hashes are
+// written with under production params: Argon2id at hashParams, which starts
+// as password.DefaultParams() and is changed only by SetHashParamsForTest —
+// so a test that never calls it (this one) runs at real production strength.
 func TestHashPasswordUsesCurrentCost(t *testing.T) {
+	if hashParams != password.DefaultParams() {
+		t.Fatalf("hashParams = %+v, want the production default %+v — some other test in this "+
+			"package leaked an override", hashParams, password.DefaultParams())
+	}
 	hash, err := HashPassword(context.Background(), "correct-horse-battery-staple")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
-	if !strings.HasPrefix(hash, "scrypt$131072$8$1$") {
-		t.Errorf("hash prefix = %q, want scrypt$131072$8$1$ (N=2^17)", hash[:min(len(hash), 24)])
+	if !strings.HasPrefix(hash, "$argon2id$") {
+		t.Errorf("hash prefix = %q, want $argon2id$", hash[:min(len(hash), 24)])
 	}
-	if scryptN != 1<<17 {
-		t.Errorf("scryptN = %d, want %d", scryptN, 1<<17)
+	wantCost := fmt.Sprintf("$%s$m=%d,t=%d,p=%d$", argon2VersionSegment, hashParams.Memory, hashParams.Time, hashParams.Threads)
+	if !strings.Contains(hash, wantCost) {
+		t.Errorf("hash = %q, does not carry the production cost segment %q", hash, wantCost)
 	}
-	// And it must still verify.
-	if ok, _ := verifyScryptHash(context.Background(), hash, "correct-horse-battery-staple"); !ok {
+	if ok, _ := VerifySecretHash(context.Background(), hash, "correct-horse-battery-staple"); !ok {
 		t.Error("a freshly written hash does not verify")
 	}
 }
 
-// TestNeedsRehashOnlyUpgrades is the safety property: this must never report
-// true for a hash stored at a HIGHER cost, or an operator who deliberately
-// raised it would have their accounts silently weakened on next login.
+// mintArgon2 mints a real Argon2id hash at p, so a NeedsRehash fixture that is
+// supposed to look like something this package or the library actually wrote
+// is exactly that — not a hand-assembled string with a salt too short for
+// password.Verify to accept.
+func mintArgon2(t *testing.T, p password.Params) string {
+	t.Helper()
+	h, err := password.HashWith("needs-rehash-fixture", p)
+	if err != nil {
+		t.Fatalf("password.HashWith(%+v): %v", p, err)
+	}
+	return h
+}
+
+// withSegment replaces the $-delimited segment of hash at index (0 is the
+// empty segment before the leading $, 2 is the version, 3 is the params),
+// for fixtures that need to corrupt exactly one field of an otherwise-real
+// hash.
+func withSegment(hash string, index int, replacement string) string {
+	parts := strings.Split(hash, "$")
+	parts[index] = replacement
+	return strings.Join(parts, "$")
+}
+
+// TestNeedsRehashOnlyUpgrades is the safety property: every scrypt hash is
+// retired regardless of the cost it was stored at, but an Argon2id hash that
+// is not strictly weaker than the current cost on some axis must never report
+// true. That must hold per axis — memory, time, AND thread count — or an
+// operator who deliberately raised only one of them would have it silently
+// downgraded back down on the next login.
 func TestNeedsRehashOnlyUpgrades(t *testing.T) {
+	atCurrent := mintArgon2(t, password.DefaultParams())
 	cases := []struct {
 		name    string
 		encoded string
 		want    bool
 	}{
-		{"old N", "scrypt$16384$8$1$c2FsdA==$aGFzaA==", true},
-		{"old r", "scrypt$131072$4$1$c2FsdA==$aGFzaA==", true},
-		{"old p", "scrypt$131072$8$0$c2FsdA==$aGFzaA==", true},
-		{"current", "scrypt$131072$8$1$c2FsdA==$aGFzaA==", false},
-		// Deliberately stronger than the current default: leave it alone.
-		{"stronger N", "scrypt$1048576$8$1$c2FsdA==$aGFzaA==", false},
-		{"stronger r", "scrypt$131072$16$1$c2FsdA==$aGFzaA==", false},
+		// Every scrypt hash is retired, regardless of the cost it carries.
+		{"scrypt old N", "scrypt$16384$8$1$c2FsdA==$aGFzaA==", true},
+		{"scrypt current cost", "scrypt$131072$8$1$c2FsdA==$aGFzaA==", true},
+		{"scrypt stronger than default", "scrypt$1048576$8$1$c2FsdA==$aGFzaA==", true},
+		// Argon2id follows the currently configured cost (production default:
+		// 64 MiB, t=3, p=4).
+		{"argon2id below current", mintArgon2(t, password.Params{Memory: 8 * 1024, Time: 1, Threads: 1}), true},
+		{"argon2id at current", atCurrent, false},
+		// Deliberately stronger than the current default on every axis: leave
+		// it alone.
+		{"argon2id stronger", mintArgon2(t, password.Params{Memory: 131072, Time: 5, Threads: 4}), false},
+		// Stronger ONLY on the thread axis: the axis most likely to regress if
+		// the comparison were symmetric ("!=" instead of "<") rather than
+		// directional. Must not report true either.
+		{"argon2id more threads is not a downgrade", mintArgon2(t, password.Params{Memory: 65536, Time: 3, Threads: 8}), false},
+		// Stronger on memory, WEAKER on time. Rehashed, and the doc comment
+		// says so: "weaker on any axis" is not the negation of "stronger on
+		// any axis", and 256 MiB at one pass is not stronger than 64 MiB at
+		// three in the direction that matters.
+		{"argon2id 256 MiB but t=1 is weaker on time", mintArgon2(t, password.Params{Memory: 262144, Time: 1, Threads: 4}), true},
+		// A hash this package's own dependency would refuse to read is not
+		// ours to rehash on a guess.
+		{"argon2id wrong version segment", withSegment(atCurrent, 2, "v=13"), false},
+		{"argon2id non-canonical params (leading zero)", withSegment(atCurrent, 3, "m=65536,t=3,p=04"), false},
+		// Well-formed but outside password.Params.Validate's band, so
+		// password.Verify calls it malformed. Reporting "upgrade me" would make
+		// an account that cannot authenticate look like one due for a rehash —
+		// the state parseArgon2Params' doc comment forbids, and which held for
+		// m and p but not t before Validate was called.
+		{"argon2id memory below the library band", withSegment(atCurrent, 3, "m=1024,t=3,p=4"), false},
+		{"argon2id threads zero", withSegment(atCurrent, 3, "m=65536,t=3,p=0"), false},
+		// p does not fit a uint8. Refused by the parse itself, not by a
+		// range check downstream of it — a narrowing conversion whose bound
+		// lives in a separate `if` is one a reader (and CodeQL) has to
+		// connect, and 256 truncates to 0, which reads as a plausible cost.
+		{"argon2id threads overflow a uint8", withSegment(atCurrent, 3, "m=65536,t=3,p=256"), false},
+		{"argon2id time above the library band", withSegment(atCurrent, 3, "m=65536,t=99,p=4"), false},
 		// Not ours to rehash.
 		{"foreign format", "argon2id$v=19$m=65536,t=3,p=4$abc$def", false},
 		{"garbage", "not-a-hash", false},
 		{"empty", "", false},
-		{"wrong field count", "scrypt$131072$8$1$c2FsdA==", false},
-		{"non-numeric N", "scrypt$abc$8$1$c2FsdA==$aGFzaA==", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

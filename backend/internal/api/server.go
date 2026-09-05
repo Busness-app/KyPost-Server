@@ -74,16 +74,21 @@ type Server struct {
 	// not delete devices and rotate the subscriber between those two operations.
 	pairingMu sync.Mutex
 
-	logger              *logging.Logger
-	health              *health.Service
-	users               *users.Store
-	configDir           string
-	stateDir            string
-	configPath          string
-	logPath             string
-	imapConfigKeyPath   string
-	totpSecretKeyPath   string
-	pgpPrivateKeyPath   string
+	logger            *logging.Logger
+	health            *health.Service
+	users             *users.Store
+	configDir         string
+	stateDir          string
+	configPath        string
+	logPath           string
+	imapConfigKeyPath string
+	totpSecretKeyPath string
+	pgpPrivateKeyPath string
+	// recoveryCodeDigest is the keyed digest a recovery code is stored and
+	// redeemed under. Held here, built once in NewServer, because its key is a
+	// file in SECRET_DIR and neither users.Store nor a per-request path should
+	// be reading one — see mfa.NewRecoveryCodeDigester.
+	recoveryCodeDigest  func(string) string
 	sessions            map[string]Session
 	mfaChallenges       *mfa.Store
 	pairingSecret       string
@@ -254,11 +259,24 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 	pairingSecretKeyPath := config.SecretFile("PAIRING_SECRET_FILE", "pairing.key")
 	pairingSecret := resolvePairingSecret(pairingSecretKeyPath, logger)
 
+	// Same key file the TOTP secrets are sealed under, and for the same reason:
+	// both are second-factor material that must not be usable from a copy of
+	// the config volume alone. HKDF's info string keeps the two uses apart.
+	recoveryCodeDigest, err := mfa.NewRecoveryCodeDigester(totpSecretKeyPath)
+	if err != nil {
+		// Refusing to start is the honest answer. Without the key, a recovery
+		// code can neither be minted nor redeemed, and the only alternative to
+		// stopping is storing them unkeyed — which is the state this key exists
+		// to end. Unreachable in practice: SECRET_DIR is the volume the process
+		// already needs to write for TOTP, PGP and pickup.
+		panic("cannot load the recovery-code digest key: " + err.Error())
+	}
+
 	warnOnRetiredProxyEnv(logger)
 
 	// Pay the login timing-equalization derivation here, in the api process,
 	// before anything can serve — see warmLoginTimingHash.
-	warmLoginTimingHash()
+	warmLoginTimingHash(logger)
 
 	captchaProvider := resolveCaptchaProvider(os.Getenv("CAPTCHA_PROVIDER"))
 	warnIfPoWDefaultMayLockOutPlainHTTP(logger, captchaProvider, os.Getenv("CAPTCHA_PROVIDER"))
@@ -313,6 +331,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		imapConfigKeyPath:        imapConfigKeyPath,
 		totpSecretKeyPath:        totpSecretKeyPath,
 		pgpPrivateKeyPath:        pgpPrivateKeyPath,
+		recoveryCodeDigest:       recoveryCodeDigest,
 		sessions:                 map[string]Session{},
 		mfaChallenges:            mfa.NewStore(),
 		pairingSecret:            pairingSecret,
