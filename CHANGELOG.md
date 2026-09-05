@@ -12,6 +12,8 @@ non-prerelease version.
 
 ## Unreleased
 
+- Compact the Backup page with an at-a-glance status row and expandable setup, schedule and history. Explain why actions require a password and show stored failure reasons in activity history.
+
 ### Added
 
 - KyRecovery/local sealed backups with key pinning, admin scheduling, downloads, restore drills and an offline custodian-share restore CLI, using ky-primitives v0.5.1.
