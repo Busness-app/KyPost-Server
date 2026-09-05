@@ -99,8 +99,9 @@ type NativeDevice struct {
 	// nothing, so the device restates it on every registration call.
 	EncryptionEnrolled bool `json:"encryptionEnrolled"`
 	// SecretHash is the hash of this device's own pairing secret, minted once
-	// at registration — users.HashDeviceSecret format, or the older
-	// users.HashPassword scrypt format for devices paired before that existed.
+	// at registration — users.HashDeviceSecret format, or the legacy scrypt
+	// format users.HashPassword used to write, for devices paired before
+	// HashDeviceSecret existed.
 	// Verify only through users.VerifyDeviceSecret, which accepts both. The raw
 	// secret is never stored, and this must never reach an API response — see
 	// Redacted().

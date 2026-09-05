@@ -4,13 +4,17 @@
 package mfa
 
 import (
+	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/recoverycode"
 	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
 )
 
@@ -367,27 +371,47 @@ func (s *Store) ConsumePushApproval(id, secret string) (string, error) {
 	return ch.UserID, nil
 }
 
-// recoveryAlphabet has exactly 32 characters so a random byte modulo 32 is
-// unbiased. It does not avoid visually ambiguous characters (e.g. i/l/o vs
-// 1/0) since codes are copy/pasted, not transcribed by hand.
-const recoveryAlphabet = "0123456789abcdefghijklmnopqrstuv"
-
-// GenerateRecoveryCodes returns n one-time recovery codes formatted
-// xxxx-xxxx-xxxx using crypto/rand.
+// GenerateRecoveryCodes returns n one-time codes formatted xxxx-xxxx-xxxx.
 func GenerateRecoveryCodes(n int) ([]string, error) {
-	codes := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		raw := make([]byte, 12) // 3 groups of 4 chars
-		if _, err := rand.Read(raw); err != nil {
-			return nil, err
-		}
-		chars := make([]byte, 12)
-		for j, b := range raw {
-			chars[j] = recoveryAlphabet[int(b)%len(recoveryAlphabet)]
-		}
-		codes = append(codes, string(chars[0:4])+"-"+string(chars[4:8])+"-"+string(chars[8:12]))
+	return recoverycode.Generate(n)
+}
+
+// recoveryCodeDigestInfo domain-separates the recovery-code MAC key from every
+// other use of the master key it is derived from.
+const recoveryCodeDigestInfo = "kypost:recovery-code:v1"
+
+// NewRecoveryCodeDigester reads the master key at keyPath ONCE and returns what
+// turns a recovery code into the entry the store keeps: HMAC-SHA256 of the
+// normalised code under an HKDF-SHA256 subkey of that master key, hex.
+// Normalising first means what the user types and what was stored cannot
+// disagree on case or dashes.
+//
+// Keyed, not bare. A code is 60 bits (twelve symbols over recoverycode.Alphabet),
+// which is out of reach ONLINE — mfaLockout caps that at ten attempts per
+// account per fifteen minutes — and squarely within reach offline: an unsalted
+// SHA-256 over that space is GPU-days against one account's ten digests, and a
+// redeemed code is a full second-factor bypass. The key lives in SECRET_DIR,
+// a different volume from users.json, so a copy of the config volume alone
+// still contains no usable second factor. That is the property a password KDF
+// was buying here, at none of its cost — the ten 128 MiB derivations per
+// regeneration are still gone.
+//
+// The key is read once per process, not per call: this is the redeem path.
+// Callers hold the returned function for the process's life.
+func NewRecoveryCodeDigester(keyPath string) (func(string) string, error) {
+	master, err := cryptutil.LoadOrCreateKey(keyPath)
+	if err != nil {
+		return nil, err
 	}
-	return codes, nil
+	key, err := hkdf.Key(sha256.New, master, nil, recoveryCodeDigestInfo, sha256.Size)
+	if err != nil {
+		return nil, err
+	}
+	return func(code string) string {
+		m := hmac.New(sha256.New, key)
+		m.Write([]byte(recoverycode.Normalize(code)))
+		return hex.EncodeToString(m.Sum(nil))
+	}, nil
 }
 
 // SealTOTPSecret AES-GCM seals base32Secret with the key at keyPath (creating

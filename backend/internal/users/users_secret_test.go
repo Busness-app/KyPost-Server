@@ -27,9 +27,9 @@ func TestVerifyDeviceSecretStillAcceptsLegacyScryptHashes(t *testing.T) {
 	// Rejecting those would silently unpair every phone on every existing
 	// install on upgrade.
 	const secret = "legacy-device-secret"
-	legacy, err := HashPassword(context.Background(), secret)
+	legacy, err := LegacyScryptHashForTest(context.Background(), secret)
 	if err != nil {
-		t.Fatalf("HashPassword: %v", err)
+		t.Fatalf("LegacyScryptHashForTest: %v", err)
 	}
 	if ok, _ := VerifyDeviceSecret(context.Background(), legacy, secret); !ok {
 		t.Fatal("VerifyDeviceSecret rejected a legacy scrypt hash; every already-paired device would be unpaired by the upgrade")
@@ -67,11 +67,11 @@ func TestVerifyScryptHashRejectsAbsurdCostParameters(t *testing.T) {
 }
 
 func TestVerifyScryptHashStillAcceptsTheHashesWeMint(t *testing.T) {
-	h, err := HashPassword(context.Background(), "correct horse battery staple")
+	h, err := LegacyScryptHashForTest(context.Background(), "correct horse battery staple")
 	if err != nil {
-		t.Fatalf("HashPassword: %v", err)
+		t.Fatalf("LegacyScryptHashForTest: %v", err)
 	}
 	if ok, _ := verifyScryptHash(context.Background(), h, "correct horse battery staple"); !ok {
-		t.Fatal("the cost bounds rejected a hash HashPassword just produced")
+		t.Fatal("the cost bounds rejected a hash LegacyScryptHashForTest just produced")
 	}
 }

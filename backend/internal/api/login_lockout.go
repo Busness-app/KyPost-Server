@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/password"
+	"github.com/Busness-app/kypost-server/backend/internal/logging"
 	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
@@ -23,8 +25,8 @@ const (
 
 	// davMaxFailures/davLockoutFor guard the CardDAV Basic Auth surface, keyed by
 	// client IP: usernames there are fixed account names and the password is
-	// server-generated, so the realistic abuse is one host burning CPU with scrypt
-	// verifications. Looser than login's because sync clients legitimately retry a
+	// server-generated, so the realistic abuse is one host burning CPU with
+	// password-KDF verifications. Looser than login's because sync clients legitimately retry a
 	// stale password several times before surfacing an error.
 	davMaxFailures = 10
 	davLockoutFor  = 15 * time.Minute
@@ -41,7 +43,7 @@ const (
 	// current-credential check on POST /api/auth/password — see
 	// handleChangePassword. A session is not proof of the password, so a stolen
 	// cookie must not buy unlimited guesses at an endpoint that answers definitively
-	// and pays a full scrypt per attempt. Looser than login's three strikes because
+	// and pays a full password-KDF derivation per attempt. Looser than login's three strikes because
 	// mistyping the current password while changing it is ordinary.
 	//
 	// Keyed on the acting account AND the client IP: on the user ID alone, a thief
@@ -327,39 +329,43 @@ func (l *failureLockout) recordSuccess(username string) {
 	delete(l.entries, username)
 }
 
-// timingDummyHash is a scrypt hash used only to equalize login timing, whether
-// or not the account exists. Its plaintext is irrelevant — the verification is
-// only ever expected to fail, and only its COST matters.
+// timingDummyHash is an Argon2id hash used only to equalize login timing,
+// whether or not the account exists. Its plaintext is irrelevant — the
+// verification is only ever expected to fail, and only its COST matters.
 //
-// Derived at run time from the CURRENT cost parameters. As a hardcoded
-// scrypt$16384$... literal it became cheaper than a real account's hash the
-// instant N was raised to 2^17, returning in ~22 ms against ~224 ms and
-// reopening the account-enumeration oracle it exists to close. Pinned by
+// Derived at run time from the CURRENT Argon2id parameters (users.HashParams),
+// and cached against exactly that — not users.HashCostN, which is the
+// unrelated legacy-scrypt fixture cost LegacyScryptHashForTest mints at. A
+// value cached against the wrong variable goes stale the moment the real cost
+// changes without that variable changing, reopening the account-enumeration
+// oracle this exists to close: the scrypt-era version of this exact bug made
+// a hardcoded scrypt$16384$... dummy cheaper than a real account's hash the
+// instant N was raised to 2^17, returning in ~22 ms against ~224 ms. Pinned by
 // TestLoginTimingDoesNotRevealUnknownUsernames.
 //
 // Computed on demand rather than at package init, so the daemon process — the
-// same binary — does not pay a 128 MiB / ~200 ms derivation for a value it never
-// uses. warmLoginTimingHash forces it during server construction so no request
-// pays the first-call penalty; a slower first response discloses "no such
-// account" just as well as a faster one. Cached against the cost it was derived
-// at, since a value memoized across a cost change equalizes against the wrong
+// same binary — does not pay an Argon2id derivation for a value it never uses.
+// warmLoginTimingHash forces it during server construction so no request pays
+// the first-call penalty; a slower first response discloses "no such account"
+// just as well as a faster one. Cached against the params it was derived at,
+// since a value memoized across a cost change equalizes against the wrong
 // figure.
 var (
-	timingHashMu   sync.RWMutex
-	timingHashVal  string
-	timingHashCost int
+	timingHashMu     sync.RWMutex
+	timingHashVal    string
+	timingHashParams password.Params
 )
 
-func timingDummyHash() string {
-	cost := users.HashCostN()
+func timingDummyHash() (string, error) {
+	params := users.HashParams()
 	timingHashMu.RLock()
-	cached, cachedCost := timingHashVal, timingHashCost
+	cached, cachedParams := timingHashVal, timingHashParams
 	timingHashMu.RUnlock()
-	if cached != "" && cachedCost == cost {
-		return cached
+	if cached != "" && cachedParams == params {
+		return cached, nil
 	}
 
-	// Derived outside the lock: holding it across a 128 MiB scrypt would
+	// Derived outside the lock: holding it across an Argon2id derivation would
 	// serialize every concurrent unknown-username login behind one derivation.
 	// Two callers racing here both produce a valid hash at the same cost.
 	// context.Background(), not a request's: this hash is process-wide state
@@ -367,25 +373,116 @@ func timingDummyHash() string {
 	// away would make the next caller pay for it again.
 	h, err := users.HashPassword(context.Background(), "kypost-timing-equalization-dummy")
 	if err != nil {
-		// HashPassword only fails on a crypto/rand failure or invalid cost
-		// parameters, neither of which is recoverable or reachable in practice.
-		// An empty string would make VerifySecretHash return immediately and
-		// silently restore the timing oracle, so refuse to start instead.
-		panic("users.HashPassword failed while deriving the login timing hash: " + err.Error())
+		// HashPassword fails on a crypto/rand failure, invalid cost parameters,
+		// or every KDF slot being held (users.ErrKDFBusy, wrapping
+		// password.ErrBusy). It used to panic here, on the theory that no
+		// fallback was safe: an empty string would make VerifySecretHash return
+		// immediately and restore the timing oracle. That is no longer the only
+		// thing standing between this and the oracle — settleCredentialTiming
+		// floors the whole check regardless of what work was done — so the
+		// caller logs and skips the equalization for one request rather than
+		// aborting a goroutine inside an auth handler, which is what
+		// backend/AGENTS.md's ErrKDFBusy contract asks of every other site.
+		return "", err
 	}
 	timingHashMu.Lock()
-	timingHashVal, timingHashCost = h, cost
+	timingHashVal, timingHashParams = h, params
 	timingHashMu.Unlock()
-	return h
+	return h, nil
 }
 
-// warmLoginTimingHash forces the derivation during server construction, so the
-// api process pays it before it can serve and the daemon process never does.
-// Synchronous on purpose: a goroutine would leave a race in which a login
-// arriving during the warm-up derives the hash itself and reintroduces the
-// first-call skew this exists to prevent.
-func warmLoginTimingHash() {
-	_ = timingDummyHash()
+// credentialTimingFloor is the wall clock every credential check on an
+// unauthenticated endpoint is padded out to, and it exists because equalizing
+// by MATCHING WORK stopped working the moment two hash formats coexisted.
+// timingDummyHash is always Argon2id; an account still holding a scrypt$ hash
+// is checked by verifyScryptHash at ProductionScryptN, ~7x more. So login
+// answered an unknown username in ~37 ms and a known-but-dormant one in
+// ~263 ms — measured end to end — and "the skew drains as accounts sign in" is
+// backwards about who it fails, because the accounts that never sign in are
+// the ones it marks permanently.
+//
+// A floor does not care how many formats exist or which one an account holds:
+// pad every outcome to the most expensive one and there is nothing left to
+// compare. The equalization derivation stays as well, so slot contention still
+// behaves the same on both paths.
+//
+// The floor is one legacy scrypt verification, MEASURED — the figure belongs
+// to the machine, and a constant that reads low on a slow host closes nothing.
+// Cached against users.HashCostN() for the same reason timingDummyHash caches
+// against users.HashParams(): a value memoized across a cost change floors at
+// the wrong figure. That is also the test hook. internal/api's TestMain lowers
+// the cost with SetHashCostForTest, so the suite floors at that cost's verify
+// (tens of ms) instead of ~265 ms, with no second override to keep in sync.
+var (
+	timingFloorMu   sync.RWMutex
+	timingFloorVal  time.Duration
+	timingFloorCost int
+)
+
+func credentialTimingFloor() (time.Duration, error) {
+	cost := users.HashCostN()
+	timingFloorMu.RLock()
+	cached, cachedCost := timingFloorVal, timingFloorCost
+	timingFloorMu.RUnlock()
+	if cachedCost == cost {
+		return cached, nil
+	}
+	// context.Background(), not a request's: this is process-wide state derived
+	// once per cost setting, and abandoning it because one caller went away
+	// would make the next caller pay for it again.
+	measured, err := users.MeasureLegacyVerifyCost(context.Background())
+	if err != nil {
+		return 0, err
+	}
+	timingFloorMu.Lock()
+	timingFloorVal, timingFloorCost = measured, cost
+	timingFloorMu.Unlock()
+	return measured, nil
+}
+
+// settleCredentialTiming blocks until the floor has elapsed since start, so
+// every outcome of a credential check leaves at the same moment: unknown
+// account, Argon2id account, not-yet-rehashed scrypt account, right password
+// or wrong. Call it around the CHECK only — the reservation the instance login
+// budget settles must still meter the derivation, not this sleep.
+//
+// A failed measurement is logged and NOT slept through. The only way to
+// measure the floor is to derive, and refusing to answer because a measurement
+// was shed would turn a load spike into an outage on the sign-in endpoint;
+// warmCredentialTimingFloor takes it at construction, so this is unreachable
+// short of a cost change under live traffic.
+func (s *Server) settleCredentialTiming(ctx context.Context, start time.Time) {
+	floor, err := credentialTimingFloor()
+	if err != nil {
+		s.logger.Error("could not measure the credential timing floor; this attempt is not equalized", "error", err.Error())
+		return
+	}
+	remaining := floor - time.Since(start)
+	if remaining <= 0 {
+		return
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+}
+
+// warmLoginTimingHash forces the equalization derivation and the floor
+// measurement during server construction, so the api process pays both before
+// it can serve and the daemon process never does. Synchronous on purpose: a
+// goroutine would leave a race in which a login arriving during the warm-up
+// pays them itself and reintroduces the first-call skew this exists to
+// prevent. Neither failure is fatal — the floor and the dummy back each other
+// up, and refusing to boot over a shed derivation is worse than a loud log.
+func warmLoginTimingHash(logger *logging.Logger) {
+	if _, err := timingDummyHash(); err != nil {
+		logger.Error("could not derive the login timing-equalization hash at startup", "error", err.Error())
+	}
+	if _, err := credentialTimingFloor(); err != nil {
+		logger.Error("could not measure the credential timing floor at startup; login and CardDAV timing are not equalized until it succeeds", "error", err.Error())
+	}
 }
 
 // chargeLoginKDF runs a password-derivation step under a KDF slot and bills what
@@ -500,24 +597,38 @@ func (b *loginBudget) settle(delta float64) {
 // unconditionally on every return path.
 func (b *loginBudget) refund() { b.settle(-loginKDFReserveSeconds) }
 
-// equalizeLoginTiming verifies candidate against a throwaway scrypt hash so
-// the unknown-username (and inactive-account) login path costs the same as a
-// real wrong-password check. The result is discarded — it is the COST that
-// matters — but a shed slot is not: returning without deriving is the one
-// outcome the caller has to be able to tell apart, or the unknown-username
-// path becomes measurably cheaper than the known one under load.
-func equalizeLoginTiming(ctx context.Context, candidate string) error {
-	_, err := users.VerifySecretHash(ctx, timingDummyHash(), candidate)
+// equalizeLoginTiming verifies candidate against a throwaway Argon2id hash so
+// the unknown-username (and inactive-account) login path does the same WORK as
+// a real wrong-password check. settleCredentialTiming is what equalizes the
+// clock; this is what equalizes slot contention, so a saturated instance does
+// not answer one path promptly while the other queues.
+//
+// The result is discarded — it is the COST that matters — but a shed slot is
+// not: returning without deriving is the one outcome the caller has to be able
+// to tell apart, so it still reserves and refunds correctly under load.
+func (s *Server) equalizeLoginTiming(ctx context.Context, candidate string) error {
+	dummy, err := timingDummyHash()
+	if err != nil {
+		// No hash to burn. Skipping costs this request its slot contention
+		// match; the floor still covers the disclosure, which is why this is a
+		// log rather than the panic it used to be.
+		s.logger.Error("login timing equalization skipped: no dummy hash", "error", err.Error())
+		return nil
+	}
+	_, err = users.VerifySecretHash(ctx, dummy, candidate)
 	return err
 }
 
 // Instance-wide login throttle and the per-IP lockout, both added because the
 // username+IP lockout above bounds the wrong thing: the username comes from the
 // request body, so a caller who never repeats one never trips it, while every
-// attempt against an unknown account runs scrypt on purpose
+// attempt against an unknown account runs an Argon2id derivation on purpose
 // (equalizeLoginTiming, so timing does not reveal whether the account exists) —
 // tens of milliseconds for a 200-byte request, on a host whose other job is
-// running an LLM.
+// running an LLM. An account still holding a scrypt hash (see users.NeedsRehash)
+// costs several times that per real attempt, which is why every attempt is also
+// padded to credentialTimingFloor: the skew does NOT simply drain as accounts
+// sign in, because an account that never signs in never rehashes.
 const (
 	// The instance-wide login budget is denominated in SECONDS OF KEY-DERIVATION
 	// WORK, not in requests.
@@ -532,10 +643,16 @@ const (
 	// Instance-wide rather than per-IP because the CPU being protected is shared,
 	// and a per-IP limit is defeated by using more IPs.
 
-	// loginKDFReserve is what one attempt is assumed to cost when it starts:
-	// one scrypt at HashPassword's parameters, roughly 200 ms of a core at
-	// N=2^17. It is only the opening reservation — what an attempt finally pays
-	// is what it actually took, reconciled by settleCost.
+	// loginKDFReserve is what one attempt is assumed to cost when it starts.
+	// Deliberately between the two costs that actually exist rather than equal
+	// to either: an Argon2id derivation at HashPassword's parameters (the RFC
+	// 9106 64 MiB/t=3/p=4 profile) measures ~38 ms on a 20-core box, and an
+	// account still holding a scrypt hash costs ~265 ms until it rehashes on
+	// its next successful login. It is only the opening reservation — what an
+	// attempt finally pays is what it actually took, reconciled by settleCost,
+	// which is why a figure between the two is not a correctness problem in
+	// either direction. It does NOT include settleCredentialTiming's sleep;
+	// the budget meters derivation work, not wall time on the handler.
 	loginKDFReserve        = 200 * time.Millisecond
 	loginKDFReserveSeconds = float64(loginKDFReserve) / float64(time.Second)
 

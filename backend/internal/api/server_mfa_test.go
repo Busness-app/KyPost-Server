@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
@@ -490,6 +491,56 @@ func TestRecoveryCodeSingleUse(t *testing.T) {
 		map[string]string{"challengeId": l2.ChallengeID, "code": code})
 	if rec2.Code != http.StatusUnauthorized {
 		t.Fatalf("recovery reuse: status=%d, want 401", rec2.Code)
+	}
+}
+
+// TestRegeneratedRecoveryCodeRedeems drives the whole keyed-digest round trip
+// through the handlers: regenerate mints codes under the server's digest key,
+// the store keeps only the digests, and one of them redeems at login. A digest
+// keyed on a file the store cannot read is exactly the kind of change that
+// compiles, stores fine, and never matches.
+func TestRegeneratedRecoveryCodeRedeems(t *testing.T) {
+	srv := newTestServer(t)
+	const password = "pw-nadia-testpassword"
+	u, err := srv.users.Create(context.Background(), "nadia", password, users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	enrollTOTP(t, srv, u.ID)
+
+	rec := regenerateFrom(t, srv, u.ID, "198.51.100.7", password)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("regenerate: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var regen struct {
+		RecoveryCodes []string `json:"recoveryCodes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &regen); err != nil {
+		t.Fatalf("unmarshal regenerate: %v", err)
+	}
+	if len(regen.RecoveryCodes) != recoveryCodeCount {
+		t.Fatalf("got %d codes, want %d", len(regen.RecoveryCodes), recoveryCodeCount)
+	}
+	stored, err := srv.users.Get(u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	for _, h := range stored.RecoveryCodesHash {
+		if slices.Contains(regen.RecoveryCodes, h) {
+			t.Fatal("a raw recovery code was stored")
+		}
+	}
+
+	login := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login",
+		map[string]string{"username": "nadia", "password": password})
+	var l struct {
+		ChallengeID string `json:"challengeId"`
+	}
+	_ = json.Unmarshal(login.Body.Bytes(), &l)
+	redeem := doJSON(srv, srv.handleMFARecoveryCode, http.MethodPost, "/api/auth/mfa/recovery-code",
+		map[string]string{"challengeId": l.ChallengeID, "code": regen.RecoveryCodes[0]})
+	if redeem.Code != http.StatusOK {
+		t.Fatalf("redeem a freshly regenerated code: status=%d body=%s", redeem.Code, redeem.Body.String())
 	}
 }
 
