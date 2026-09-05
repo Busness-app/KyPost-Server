@@ -8,7 +8,27 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Busness-app/ky-primitives/password"
 )
+
+// TestMaxConcurrentKDFFitsWithinLibraryMemoryBudget pins the relationship
+// MaxConcurrentKDF's doc comment describes: this package's own admission gate
+// must not admit more Argon2id memory than ky-primitives/password's
+// independent budget (password.MaxMemoryKiB) allows process-wide. If it did,
+// every kypost slot would still have to queue AGAIN inside the library's own
+// budget, turning one wait into two instead of bounding it once — and since
+// MaxMemoryKiB is a process-wide budget shared with the daemon process (which
+// also links this package), leaving no headroom here would let this process's
+// own worst case queue against itself.
+func TestMaxConcurrentKDFFitsWithinLibraryMemoryBudget(t *testing.T) {
+	used := MaxConcurrentKDF * int(password.DefaultParams().Memory)
+	if used > password.MaxMemoryKiB {
+		t.Fatalf("MaxConcurrentKDF (%d) * Argon2id memory (%d KiB) = %d KiB, exceeds "+
+			"password.MaxMemoryKiB (%d KiB): slots will queue a second time inside the library",
+			MaxConcurrentKDF, password.DefaultParams().Memory, used, password.MaxMemoryKiB)
+	}
+}
 
 // withSaturatedKDF fills every derivation slot and returns a release func. The
 // slots stay held until release is called, so anything that asks for one during

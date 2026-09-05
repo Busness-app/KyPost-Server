@@ -31,6 +31,17 @@ import (
 // how many attempts an address may make; nothing bounded how many could be in
 // flight together, which is what turns an auth endpoint into an OOM primitive
 // on a memory-limited container.
+//
+// This is not the only admission gate an Argon2id derivation passes through.
+// ky-primitives/password enforces its own independent budget below this one —
+// password.MaxMemoryKiB (total memory across every derivation the library is
+// running, in ANY process that links it), password.MaxLanes, and its own ~2 s
+// wait — and a caller that already holds a kypost slot then queues inside
+// that budget too. MaxConcurrentKDF*int(password.DefaultParams().Memory) must
+// stay within password.MaxMemoryKiB, or this package will hand out slots the
+// library then makes callers queue for anyway, doubling the wait instead of
+// bounding it once; see TestMaxConcurrentKDFFitsWithinLibraryMemoryBudget in
+// kdf_test.go.
 const MaxConcurrentKDF = 4
 
 // ErrKDFBusy means the derivation slots were saturated for longer than
@@ -56,6 +67,11 @@ var ErrKDFBusy = errors.New("users: no key-derivation slot available")
 // Shedding is the honest answer — the server cannot currently afford to check
 // this credential, which is a 503, not a 401. Sized at roughly ten derivations'
 // worth of queue.
+//
+// This is only the FIRST of two waits a caller can pay before getting a slot.
+// ky-primitives/password admits behind this one with its own ~2 s wait (see
+// MaxConcurrentKDF's comment), so the worst case before a caller finally sees
+// ErrKDFBusy is the SUM of the two waits, not just this one.
 var KDFMaxQueueWait = 2 * time.Second
 
 // kdfSlots is the semaphore itself: package-level, because the bound it
