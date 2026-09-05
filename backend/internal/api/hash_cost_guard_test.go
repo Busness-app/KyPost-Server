@@ -105,15 +105,26 @@ func TestProductionHashCostHelperRestoresTheTestCost(t *testing.T) {
 		t.Fatalf("TestMain should have lowered the cost to %d, got %d", users.MinVerifiableScryptN, lowered)
 	}
 
+	loweredParams := users.HashParams()
+	if loweredParams != (password.Params{Memory: 8 * 1024, Time: 1, Threads: 1}) {
+		t.Fatalf("TestMain should have lowered hashParams to {8192,1,1}, got %+v", loweredParams)
+	}
+
 	t.Run("raised inside", func(t *testing.T) {
 		withProductionHashCost(t)
 		if got := users.HashCostN(); got != users.ProductionScryptN {
 			t.Fatalf("inside the helper's scope: got cost %d, want %d", got, users.ProductionScryptN)
 		}
+		if got := users.HashParams(); got != password.DefaultParams() {
+			t.Fatalf("inside the helper's scope: got Argon2id params %+v, want the production default %+v", got, password.DefaultParams())
+		}
 	})
 
 	if got := users.HashCostN(); got != lowered {
 		t.Fatalf("after the subtest returned: got cost %d, want the lowered %d — the helper leaked", got, lowered)
+	}
+	if got := users.HashParams(); got != loweredParams {
+		t.Fatalf("after the subtest returned: got Argon2id params %+v, want the lowered %+v — the helper leaked", got, loweredParams)
 	}
 }
 

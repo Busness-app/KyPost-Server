@@ -196,10 +196,6 @@ func (s *Server) handleMFAConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	codes, hashes, err := s.newRecoveryCodes(r.Context())
-	if errors.Is(err, users.ErrKDFBusy) {
-		writeKDFBusy(w)
-		return
-	}
 	if err != nil {
 		http.Error(w, "failed to generate recovery codes", http.StatusInternalServerError)
 		return
@@ -241,10 +237,6 @@ func (s *Server) handleMFARecoveryCodesRegenerate(w http.ResponseWriter, r *http
 		return
 	}
 	codes, hashes, err := s.newRecoveryCodes(r.Context())
-	if errors.Is(err, users.ErrKDFBusy) {
-		writeKDFBusy(w)
-		return
-	}
 	if err != nil {
 		http.Error(w, "failed to generate recovery codes", http.StatusInternalServerError)
 		return
