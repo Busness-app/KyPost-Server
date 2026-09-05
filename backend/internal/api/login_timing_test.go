@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -144,6 +145,44 @@ func TestLoginTimingDoesNotRevealUnknownUsernames(t *testing.T) {
 		"argon2id account":      fastest(t, "argon2id account", wrongPassword(modern.Username)),
 		"legacy scrypt account": fastest(t, "legacy scrypt account", wrongPassword(legacy.Username)),
 		"unknown username":      fastest(t, "unknown username", wrongPassword("no-such-user-anywhere")),
+	})
+}
+
+// TestReviewPairingTimingDoesNotRevealTheConfiguredAccount is the third
+// unauthenticated credential check in the tree. It is bounded — the endpoint
+// 404s unless an operator sets REVIEW_PAIRING_USERNAME — but on an install that
+// does set it, the same always-Argon2id dummy against a possibly-scrypt account
+// says which name was configured.
+func TestReviewPairingTimingDoesNotRevealTheConfiguredAccount(t *testing.T) {
+	t.Setenv("REVIEW_PAIRING_USERNAME", "review-*")
+	srv := newTestServer(t)
+	const pw = "correct-horse-battery-staple"
+	modern, err := srv.users.Create(context.Background(), "review-argon2id", pw, users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	legacy, err := srv.users.Create(context.Background(), "review-legacy", pw, users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	plantLegacyPasswordHash(t, srv, legacy.ID, pw)
+
+	wrongPassword := func(username string) func(string) {
+		return func(addr string) {
+			body, _ := json.Marshal(map[string]string{"username": username, "password": "wrong-password"})
+			req := httptest.NewRequest(http.MethodPost, "/api/notifications/review-pairing", bytes.NewReader(body))
+			req.RemoteAddr = addr
+			rec := httptest.NewRecorder()
+			srv.handleReviewPairing(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s: status = %d, want 401", username, rec.Code)
+			}
+		}
+	}
+	assertTimingSpread(t, map[string]time.Duration{
+		"argon2id review account": fastest(t, "argon2id review account", wrongPassword(modern.Username)),
+		"legacy review account":   fastest(t, "legacy review account", wrongPassword(legacy.Username)),
+		"unmatched username":      fastest(t, "unmatched username", wrongPassword("no-such-user-anywhere")),
 	})
 }
 
