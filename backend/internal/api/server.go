@@ -43,7 +43,8 @@ import (
 // Server holds the HTTP surface and its process-wide state.
 //
 // LOCK ORDER: cfgMu before sessMu before pairingMu before userMu before ollamaMu before serverMu before
-// linuxClientMu. Never the reverse. Enforced by TestLockOrderIsRespected, which reads this package's
+// pinProbeMu before linuxClientMu before backupDrainMu. Never the reverse.
+// Enforced by TestLockOrderIsRespected, which reads this package's
 // source and fails on a function that takes one while holding a higher-ranked
 // one — directly, or through any call chain inside this package. Adding a mutex
 // here means adding it to lockRank in lock_order_test.go; one that is missing
@@ -64,6 +65,7 @@ import (
 // lock held, which is safe only because Prepare is called synchronously before
 // any goroutine can reach the others — see Prepare's doc comment.
 type Server struct {
+	// backupDrainMu is innermost: never acquire another Server mutex while held.
 	backupDrainMu   sync.Mutex
 	backupRuns      sync.WaitGroup
 	backupStopping  bool
