@@ -105,6 +105,11 @@ func TestNeedsRehashOnlyUpgrades(t *testing.T) {
 		// m and p but not t before Validate was called.
 		{"argon2id memory below the library band", withSegment(atCurrent, 3, "m=1024,t=3,p=4"), false},
 		{"argon2id threads zero", withSegment(atCurrent, 3, "m=65536,t=3,p=0"), false},
+		// p does not fit a uint8. Refused by the parse itself, not by a
+		// range check downstream of it — a narrowing conversion whose bound
+		// lives in a separate `if` is one a reader (and CodeQL) has to
+		// connect, and 256 truncates to 0, which reads as a plausible cost.
+		{"argon2id threads overflow a uint8", withSegment(atCurrent, 3, "m=65536,t=3,p=256"), false},
 		{"argon2id time above the library band", withSegment(atCurrent, 3, "m=65536,t=99,p=4"), false},
 		// Not ours to rehash.
 		{"foreign format", "argon2id$v=19$m=65536,t=3,p=4$abc$def", false},

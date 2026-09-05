@@ -2320,18 +2320,21 @@ func parseArgon2Params(segment string) (mem, t uint32, threads uint8, ok bool) {
 		return 0, 0, 0, false
 	}
 	var values [3]uint64
+	// Each field is parsed at the bit size of the type it lands in, so the
+	// conversions below cannot truncate. p used to be parsed at 32 bits and
+	// range-checked afterwards, which is the same behaviour and was flagged as
+	// an unchecked narrowing — a bound the parser enforces is one no reader or
+	// analyzer has to connect to a separate `if`.
+	bits := [3]int{32, 32, 8}
 	for i, prefix := range [3]string{"m=", "t=", "p="} {
 		if !strings.HasPrefix(fields[i], prefix) {
 			return 0, 0, 0, false
 		}
-		v, err := strconv.ParseUint(strings.TrimPrefix(fields[i], prefix), 10, 32)
+		v, err := strconv.ParseUint(strings.TrimPrefix(fields[i], prefix), 10, bits[i])
 		if err != nil {
 			return 0, 0, 0, false
 		}
 		values[i] = v
-	}
-	if values[2] > 255 {
-		return 0, 0, 0, false
 	}
 	mem, t, threads = uint32(values[0]), uint32(values[1]), uint8(values[2])
 	if canonical := fmt.Sprintf("m=%d,t=%d,p=%d", mem, t, threads); canonical != segment {
