@@ -224,7 +224,7 @@ func runServer(ctx context.Context, d runDeps) error {
 	select {
 	case <-ctx.Done():
 		cancelSweepers()
-		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 16*time.Minute)
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancelShutdown()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			d.logger.Error("api server shutdown error", "error", err.Error())
@@ -236,11 +236,8 @@ func runServer(ctx context.Context, d runDeps) error {
 	}
 }
 
-// shutdownTimeout bounds how long a graceful shutdown waits for the HTTP
-// server to drain in-flight requests (via api.Server.Shutdown) before
-// giving up and letting the process exit anyway. 20s comfortably covers the
-// slowest handlers (e.g. IMAP round-trips) without risking an orchestrator's
-// own SIGKILL timeout (typically 30s) firing first.
+// shutdownTimeout bounds ordinary HTTP draining and classifier warmup cleanup.
+// Detached backup handlers are drained separately, including their audit writes.
 const shutdownTimeout = 20 * time.Second
 
 func runAll(ctx context.Context, d runDeps) error {
@@ -294,7 +291,7 @@ func runAll(ctx context.Context, d runDeps) error {
 	// context.Background()-based contexts. Stop is non-blocking, so its position
 	// relative to Shutdown does not affect correctness.
 	cancelSweepers()
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 16*time.Minute)
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		d.logger.Error("api server shutdown error", "error", err.Error())

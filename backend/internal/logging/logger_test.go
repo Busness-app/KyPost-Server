@@ -61,3 +61,14 @@ func TestSuiteJSONLogger(t *testing.T) {
 		t.Fatal("invalid level accepted")
 	}
 }
+
+func TestAdmittedFieldsStillRedactCorrespondence(t *testing.T) {
+	for _, key := range []string{"raw_label", "addr", "username"} {
+		if got := redactValue(key, "person@example.com"); got != "[REDACTED]" {
+			t.Fatalf("%s disclosed correspondence", key)
+		}
+	}
+	if got := redactValue("addr", "127.0.0.1:5866"); got != "127.0.0.1:5866" {
+		t.Fatal("server bind address lost")
+	}
+}

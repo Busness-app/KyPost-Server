@@ -16,7 +16,8 @@ A backup seals once, then attempts local delivery and the paired KyRecovery depo
 Inspect the result and receipt; a remote failure can leave a successful local copy,
 and a local failure does not cancel the remote attempt. Uploads are bounded to 16
 minutes. Browser disconnects do not cancel uploads; deployment shutdown allows them
-to drain. Reverse proxies may need a matching response timeout. The process lock
+to drain separately after the normal 20-second HTTP grace; unrelated requests do
+not get the extended backup deadline. Reverse proxies may need a matching response timeout. The process lock
 rejects competing operations rather than queueing them behind an upload.
 
 For a LAN destination, explicitly set `KYPOST_BACKUP_ALLOW_PRIVATE_RECOVERY=true`.

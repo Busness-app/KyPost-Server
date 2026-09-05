@@ -113,6 +113,11 @@ func (s *Server) handleBackupRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.beginBackupRun() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "server is shutting down; retry the backup after restart"})
+		return
+	}
+	defer s.backupRuns.Done()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), depositBudget)
 	defer cancel()
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(depositBudget))
@@ -292,4 +297,32 @@ func (s *Server) handleBackupSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"intervalSec": interval})
+}
+
+// Guard Add against Wait so a request still verifying credentials cannot start
+// a detached deposit after shutdown has decided that backups are drained.
+func (s *Server) beginBackupRun() bool {
+	s.backupDrainMu.Lock()
+	defer s.backupDrainMu.Unlock()
+	if s.backupStopping {
+		return false
+	}
+	s.backupRuns.Add(1)
+	return true
+}
+
+// waitForBackups drains the entire handler, including its completion audit.
+// It is separate from HTTP shutdown: ordinary requests get only the short grace.
+func (s *Server) waitForBackups(ctx context.Context) error {
+	s.backupDrainMu.Lock()
+	s.backupStopping = true
+	s.backupDrainMu.Unlock()
+	done := make(chan struct{})
+	go func() { s.backupRuns.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

@@ -233,16 +233,12 @@ func (c *HTTPClient) Warmup(ctx context.Context) error {
 	return c.ensureWarm(ctx)
 }
 
-// Close releases the three diagnostic log file handles opened by
-// NewHTTPClient. Callers that construct a short-lived HTTPClient (e.g. an
-// admin connectivity-test request) should defer Close() immediately after
-// construction; the long-lived shared classifier instance used by the
-// poller is intentionally never closed — it lives for the process.
+// Close preserves the client lifecycle API; the process owns the slog handler.
 func (c *HTTPClient) Close() error { return nil }
 
 func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sender, subject, body, tuning string) (string, error) {
 	if err := c.ensureWarm(ctx); err != nil {
-		c.logError(err.Error())
+		c.logError("warmup: " + err.Error())
 		return "", err
 	}
 
@@ -282,7 +278,7 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 	classifyAttempt := func(attempt int) (string, error, bool) {
 		result, err := c.classifyOnce(ctx, prompt, allowedLabels)
 		if err != nil {
-			c.logError(err.Error())
+			c.logError("classify: " + err.Error())
 			return "", err, false
 		}
 
@@ -292,7 +288,7 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 		if strings.Contains(strings.ToLower(normalized), "you've reached your weekly chat limit") {
 			c.logError("AI credits exhausted: weekly chat limit response from model")
 			c.logServer("[CLASSIFY FAILED] AI credits exhausted (weekly chat limit reached)")
-			return "", fmt.Errorf("%s\nuser has run out of ai credits", normalized), false
+			return "", fmt.Errorf("user has run out of ai credits"), false
 		}
 
 		if isToolsOnlyResponse(normalized) {
@@ -393,10 +389,6 @@ func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string, allowedLab
 		return "", fmt.Errorf("ollama classify: read response: %w", err)
 	}
 	if resp.StatusCode >= 300 {
-		body := clipErrorBody(string(bodyBytes))
-		if body != "" {
-			return "", fmt.Errorf("ollama classify failed: status %d body: %s", resp.StatusCode, body)
-		}
 		return "", fmt.Errorf("ollama classify failed: status %d", resp.StatusCode)
 	}
 
@@ -408,8 +400,8 @@ func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string, allowedLab
 	if err := json.Unmarshal(bodyBytes, &out); err != nil {
 		return strings.TrimSpace(string(bodyBytes)), nil
 	}
-	if clipped := clipErrorBody(out.Error); clipped != "" {
-		return "", fmt.Errorf("ollama classify failed: %s", clipped)
+	if strings.TrimSpace(out.Error) != "" {
+		return "", fmt.Errorf("ollama classify failed: upstream reported an error")
 	}
 	// Safety net for a reasoning model that ignores think=false: an empty
 	// response alongside a populated reasoning channel means the answer was
@@ -553,8 +545,7 @@ func (c *HTTPClient) pullModel(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		body, _ := readBoundedBody(resp.Body)
-		return fmt.Errorf("ollama pull failed: status %d body: %s", resp.StatusCode, clipErrorBody(string(body)))
+		return fmt.Errorf("ollama pull failed: status %d", resp.StatusCode)
 	}
 	c.logServer("[OLLAMA WARMUP] model pulled")
 	return nil
@@ -947,5 +938,7 @@ func LoadTuningText() string {
 func (c *HTTPClient) logOutput(result string) {
 	slog.Debug("classifier output received", "bytes", len(result))
 }
-func (c *HTTPClient) logServer(message string) { slog.Debug(message) }
-func (c *HTTPClient) logError(_ string)        { slog.Error("classifier request failed") }
+func (c *HTTPClient) logServer(message string) { slog.Info(message) }
+func (c *HTTPClient) logError(message string) {
+	slog.Error("classifier request failed", "reason", clipErrorBody(message))
+}

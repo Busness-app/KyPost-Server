@@ -127,7 +127,7 @@ Default section order:
 
 - **KyRecovery backup contract** lives in `kyrecovery-server/zero_code_pairing_handoff_spec.md` (v2.0.0) and the suite `AGENTS.md` "KyRecovery integration"; the shipped product adapter uses `ky-primitives/recoveryclient` v0.5.1, with operator procedures in `docs/RESTORE.md`. Do not copy the spec into this repo.
 
-- **Backup shutdown drains active deposits for up to 16 minutes.** Supervisor waits 1000 seconds for API/daemon; compose waits 17 minutes. Change these together. Optional `docker-compose.lan-dns.yml` requires explicit `KYPOST_DNS`; base compose retains host DNS.
+- **Shutdown gives ordinary HTTP requests 20 seconds, then drains only active backups for up to 16 minutes.** Supervisor waits 1000 seconds for API/daemon; compose waits 17 minutes. Change these together. Optional `docker-compose.lan-dns.yml` requires explicit `KYPOST_DNS`; base compose retains host DNS.
 
 ## User Preferences
 

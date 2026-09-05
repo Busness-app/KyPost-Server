@@ -64,6 +64,9 @@ import (
 // lock held, which is safe only because Prepare is called synchronously before
 // any goroutine can reach the others — see Prepare's doc comment.
 type Server struct {
+	backupDrainMu   sync.Mutex
+	backupRuns      sync.WaitGroup
+	backupStopping  bool
 	cfgMu           sync.RWMutex
 	cfg             config.Config
 	onConfigUpdated func(config.Config)
@@ -825,7 +828,8 @@ func (s *Server) Run() error {
 }
 
 // Shutdown gracefully stops the HTTP server: it stops accepting new connections
-// immediately and waits for active requests to finish, up to ctx's deadline.
+// immediately and drains ordinary requests up to ctx's deadline, then waits
+// separately for detached backups (including audit) for at most depositBudget.
 // Safe to call even if Prepare was never invoked (a no-op) or before Serve's
 // goroutine has started — the eventual Serve call observes the server is
 // already shutting down and returns promptly instead of blocking on Accept.
@@ -833,7 +837,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpServer == nil {
 		return nil
 	}
-	return s.httpServer.Shutdown(ctx)
+	httpErr := s.httpServer.Shutdown(ctx)
+	backupCtx, cancel := context.WithTimeout(context.Background(), depositBudget)
+	defer cancel()
+	return errors.Join(httpErr, s.waitForBackups(backupCtx))
 }
 
 // StartPickupSweeper runs PickupStore.Sweep on an interval for the process

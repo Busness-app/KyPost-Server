@@ -19,6 +19,9 @@ non-prerelease version.
 
 ### Changed
 
+- Preserve declared security/operational log fields and classifier failure context without logging upstream response content; enforce field coverage against production call sites.
+- Restrict the extended shutdown drain to active backups, retaining the 20-second grace for ordinary HTTP requests.
+
 - Application and classifier logs use shared JSON stderr; supervisor owns rotation. `KY_LOG_LEVEL` controls verbosity. Raw classifier output is no longer logged.
 - Container shutdown allows active backup deposits up to 16 minutes to finish.
 

@@ -10,7 +10,7 @@ characters. Undeclared fields are dropped and counted in `dropped_fields`. KyPos
 existing flat-string logger retains its sensitive-field redaction before this filter.
 The allowlist bounds field names, not the meaning of values: callers must keep
 passwords, tokens, private keys, CAPTCHA answers and correspondence out of messages
-and diagnostic errors too. Raw classifier output is no longer logged.
+and diagnostic errors too. A source-harvesting regression test checks all production log keys against the declarations. Raw classifier output and upstream error bodies are never logged; warmup, retries and failures retain operation/status context at the default level.
 
 The process opens no application log files or log-shipping sockets. Supervisord
 captures and rotates `api.err.log` and `daemon.err.log`; the existing admin log
