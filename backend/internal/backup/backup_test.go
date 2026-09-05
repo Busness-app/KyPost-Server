@@ -46,6 +46,8 @@ func pinTestKey(t *testing.T, s *Service) recoverykey.PrivateKey {
 }
 func TestBackupLocalRestoreAndDrill(t *testing.T) {
 	s := validService(t)
+	// Compose configures this optional path even when only the bundled prompt exists.
+	t.Setenv("TUNING_FILE", filepath.Join(s.dirs.Config, "TUNING.md"))
 	key := pinTestKey(t, s)
 	res, err := s.Run(context.Background())
 	if err != nil {

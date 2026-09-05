@@ -118,3 +118,49 @@ func TestCollectRefusesOversizedFile(t *testing.T) {
 		t.Fatalf("want an error naming the file and the cap, got %v", err)
 	}
 }
+
+func TestCollectOptionalTuningOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		present, external bool
+		wantErr           bool
+	}{
+		{name: "missing compose default"},
+		{name: "present collected override", present: true},
+		{name: "present external override", present: true, external: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := fixtureDirs(t)
+			path := filepath.Join(d.Config, "TUNING.md")
+			if tc.external {
+				path = filepath.Join(t.TempDir(), "TUNING.md")
+			}
+			if tc.present {
+				if err := os.WriteFile(path, []byte("custom prompt"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("TUNING_FILE", path)
+			svc := openService(t, d, config.BackupConfig{})
+			payload, err := svc.Collect()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "TUNING_FILE") {
+					t.Fatalf("expected unsupported override error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, f := range payload.Files {
+				if f.Path == "config/TUNING.md" {
+					found = string(f.Data) == "custom prompt"
+				}
+			}
+			if found != tc.present {
+				t.Fatalf("custom prompt included = %v, want %v", found, tc.present)
+			}
+		})
+	}
+}

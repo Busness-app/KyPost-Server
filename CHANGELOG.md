@@ -12,6 +12,8 @@ non-prerelease version.
 
 ## Unreleased
 
+- Allow sealed backups when the optional TUNING_FILE override is absent, as in the default container layout; existing external overrides and missing required keys remain refused.
+
 ### Added
 
 - KyRecovery/local sealed backups with key pinning, admin scheduling, downloads, restore drills and an offline custodian-share restore CLI, using ky-primitives v0.5.1.

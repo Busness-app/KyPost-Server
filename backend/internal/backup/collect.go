@@ -155,7 +155,13 @@ func (s *Service) collect(ctx context.Context) (recoveryclient.Payload, error) {
 			}
 		}
 	}
-	for label, path := range map[string]string{"VAPID private key": cfg.Notifications.PrivateKeyPath, "TUNING_FILE": os.Getenv("TUNING_FILE")} {
+	tuningPath := strings.TrimSpace(os.Getenv("TUNING_FILE"))
+	// The classifier skips a missing optional override and uses its bundled
+	// prompt. Compose sets this path even when no override has been created.
+	if _, err := os.Stat(tuningPath); os.IsNotExist(err) {
+		tuningPath = ""
+	}
+	for label, path := range map[string]string{"VAPID private key": cfg.Notifications.PrivateKeyPath, "TUNING_FILE": tuningPath} {
 		if path == "" {
 			continue
 		}
