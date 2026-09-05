@@ -2106,6 +2106,42 @@ func HashPassword(ctx context.Context, secret string) (string, error) {
 	return hash, mapBusy(err)
 }
 
+// MeasureLegacyVerifyCost times ONE legacy scrypt verification at the cost
+// this process mints legacy hashes at — ProductionScryptN in production, and
+// whatever SetHashCostForTest lowered it to in a test binary.
+//
+// It exists so the api layer can floor every credential check at the most
+// expensive stored format instead of trying to match its work: an account that
+// has not signed in since the Argon2id migration still verifies through
+// verifyScryptHash, which costs several times what an Argon2id dummy does, and
+// that difference is an account-enumeration oracle on an unauthenticated
+// endpoint. Measured rather than declared, because the figure is a property of
+// the machine and a constant that reads low on a slow host closes nothing.
+//
+// The mint and the verify share ONE slot, so the returned duration is the
+// derivation and not the queue in front of it. Callers memoize; this is a
+// startup cost, not a per-request one.
+func MeasureLegacyVerifyCost(ctx context.Context) (time.Duration, error) {
+	const probe = "kypost-timing-floor-probe"
+	var (
+		measured time.Duration
+		err      error
+	)
+	slotErr := WithKDFSlot(ctx, func(ctx context.Context) {
+		var hash string
+		if hash, err = hashScrypt(ctx, probe); err != nil {
+			return
+		}
+		start := time.Now()
+		_, err = verifyScryptHash(ctx, hash, probe)
+		measured = time.Since(start)
+	})
+	if slotErr != nil {
+		return 0, slotErr
+	}
+	return measured, err
+}
+
 // LegacyScryptHashForTest mints a scrypt hash so tests can prove the legacy
 // verify path still redeems what older installs stored.
 func LegacyScryptHashForTest(ctx context.Context, secret string) (string, error) {

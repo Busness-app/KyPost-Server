@@ -276,7 +276,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 
 	// Pay the login timing-equalization derivation here, in the api process,
 	// before anything can serve — see warmLoginTimingHash.
-	warmLoginTimingHash()
+	warmLoginTimingHash(logger)
 
 	captchaProvider := resolveCaptchaProvider(os.Getenv("CAPTCHA_PROVIDER"))
 	warnIfPoWDefaultMayLockOutPlainHTTP(logger, captchaProvider, os.Getenv("CAPTCHA_PROVIDER"))

@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -145,50 +143,7 @@ func TestHandleLoginRehashesLegacyScryptPassword(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// Plant a legacy scrypt hash directly in users.json, the way an existing
-	// install's file actually looks; there is no exported Store method for
-	// writing an arbitrary hash, on purpose.
-	legacyHash, err := users.LegacyScryptHashForTest(context.Background(), pw)
-	if err != nil {
-		t.Fatalf("LegacyScryptHashForTest: %v", err)
-	}
-	usersPath := filepath.Join(srv.configDir, "users.json")
-	raw, err := os.ReadFile(usersPath)
-	if err != nil {
-		t.Fatalf("read users.json: %v", err)
-	}
-	var file struct {
-		Version int                      `json:"version"`
-		Users   []map[string]interface{} `json:"users"`
-	}
-	if err := json.Unmarshal(raw, &file); err != nil {
-		t.Fatalf("unmarshal users.json: %v", err)
-	}
-	planted := false
-	for _, entry := range file.Users {
-		if entry["id"] == u.ID {
-			entry["passwordHash"] = legacyHash
-			planted = true
-		}
-	}
-	if !planted {
-		t.Fatalf("user %q not found in users.json", u.ID)
-	}
-	out, err := json.Marshal(file)
-	if err != nil {
-		t.Fatalf("marshal users.json: %v", err)
-	}
-	if err := os.WriteFile(usersPath, out, 0o600); err != nil {
-		t.Fatalf("write users.json: %v", err)
-	}
-
-	before, err := srv.users.Get(u.ID)
-	if err != nil {
-		t.Fatalf("Get before login: %v", err)
-	}
-	if !users.NeedsRehash(before.PasswordHash) {
-		t.Fatal("planted hash does not report as needing a rehash")
-	}
+	plantLegacyPasswordHash(t, srv, u.ID, pw)
 
 	rec := doJSON(srv, srv.handleLogin, http.MethodPost, "/api/auth/login", map[string]string{
 		"username": u.Username,

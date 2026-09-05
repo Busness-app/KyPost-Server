@@ -38,7 +38,7 @@ func (s *Server) handleReviewPairing(w http.ResponseWriter, r *http.Request) {
 	u, err := s.users.GetByUsername(requestedUsername)
 	if err != nil || !u.Active || !reviewUsernameMatches(reviewPattern, requestedUsername) {
 		// Keep the configured-account failure indistinguishable from a bad password.
-		if err := equalizeLoginTiming(r.Context(), req.Password); err != nil {
+		if err := s.equalizeLoginTiming(r.Context(), req.Password); err != nil {
 			s.loginLockout.cancelAttempt(lockKey)
 			writeKDFBusy(w)
 			return
