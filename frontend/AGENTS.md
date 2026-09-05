@@ -10,6 +10,8 @@ All code under `frontend/`. Produces a static bundle under `frontend/dist/` cons
 
 ## Local Contracts
 
+- Backup stays compact: keep credentials and routine capsule actions visible; collapse scheduling, recovery setup, manual key entry and history. Open initial pairing setup only when no key is pinned. Preserve per-action credential checks. Render stored audit failure reasons as text in history.
+
 - React 19.2, React Router 8.3, TypeScript 7, Vite 8, Quill (WYSIWYG compose editor), qrcode (mobile pairing QR)
 - All HTTP calls go through `src/api/client.ts` (`getJSON`, `postJSON`, `putJSON`, `deleteJSON`, `postFormData`) — `client.ts` is the only file in `src/` that may call `fetch`, and that includes the `src/api/*.ts` modules, not just page components. Bypassing it costs the 401 session recovery, `credentials: "include"`, the CSRF header, and the `HttpError` carrying the backend's status and error body — which is exactly what the two multipart uploads (contact import, contact photo) lost until `postFormData` existed
 - Auth state is owned by `App.tsx` and published through `AuthContext` (`src/auth.tsx`); pages read `{authenticated, userId, username, role, mustChangePassword}` via `useAuth()`, not via direct `/api/auth/me` calls
