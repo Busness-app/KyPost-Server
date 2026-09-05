@@ -2328,17 +2328,35 @@ func parseArgon2Params(segment string) (mem, t uint32, threads uint8, ok bool) {
 // re-checking under the lock is what makes a bug at the call site fail closed
 // instead of setting the account's password to whatever string was passed in.
 //
+// The NEW hash is derived first, outside mutate. s.mu is the same mutex the
+// read cache takes, and mutateGuarded holds a cross-process flock on top of it,
+// so everything in that closure stalls api.currentUser — i.e. every
+// authenticated request in both processes. Two derivations in there was ~330 ms
+// of whole-store stall per rehash, and this path now fires for every account on
+// its first sign-in after the Argon2id migration, which is a herd. One
+// derivation still runs under the lock, because the fail-closed re-verify has
+// to read the hash it is about to replace.
+//
 // MustChangePassword and every other field are left untouched: this is not a
 // password change, and it must be invisible to the user.
 func (s *Store) RehashPassword(ctx context.Context, id, verifiedCredential string) error {
-	_, err := s.mutate(id, func(u *User) error {
-		// Whichever credential form this account stores. VerifyPassword refuses
-		// derived-auth accounts by design, so branching here is required, not
-		// defensive — without it the rehash upgrade would silently never run for a
-		// converted account.
-		ok, err := VerifyPassword(ctx, *u, verifiedCredential)
+	hash, err := HashPassword(ctx, verifiedCredential)
+	if err != nil {
+		return err
+	}
+	_, err = s.mutate(id, func(u *User) error {
+		// Whichever credential form this account stores, chosen explicitly.
+		// VerifyPassword refuses derived-auth accounts by design, so the branch
+		// is required rather than defensive — and written as if/else so the
+		// correctness is local instead of resting on that refusal.
+		var (
+			ok  bool
+			err error
+		)
 		if u.UsesDerivedAuth() {
 			ok, err = VerifyAuthSecret(ctx, *u, verifiedCredential)
+		} else {
+			ok, err = VerifyPassword(ctx, *u, verifiedCredential)
 		}
 		if err != nil {
 			return err
@@ -2348,10 +2366,6 @@ func (s *Store) RehashPassword(ctx context.Context, id, verifiedCredential strin
 		}
 		if !NeedsRehash(u.PasswordHash) {
 			return nil
-		}
-		hash, err := HashPassword(ctx, verifiedCredential)
-		if err != nil {
-			return err
 		}
 		u.PasswordHash = hash
 		return nil
