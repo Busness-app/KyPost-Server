@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	github.com/BrianLeishman/go-imap v0.1.28
+	github.com/Busness-app/ky-primitives v0.5.0
 	github.com/ProtonMail/go-crypto v1.4.1
 	github.com/ProtonMail/gopenpgp/v3 v3.4.1
 	github.com/SherClockHolmes/webpush-go v1.4.0
@@ -20,7 +21,6 @@ require (
 )
 
 require (
-	github.com/Busness-app/ky-primitives v0.5.0 // indirect
 	github.com/StirlingMarketingGroup/go-retry v0.0.0-20190512160921-94a8eb23e893 // indirect
 	github.com/cention-sany/utf7 v0.0.0-20170124080048-26cad61bd60a // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
