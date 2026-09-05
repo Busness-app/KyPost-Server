@@ -159,7 +159,7 @@ export function Backup() {
     <div className="config-section backup-section">
       <h3>Sealed backups</h3>
       <p>Encrypted server backups, recoverable only by your custodians.</p>
-      <p>IMAP mail is excluded; encrypted pickup messages are included.</p>
+      {status && <p>{status.excluded}</p>}
       {error && (
         <p className="notice notice-error" role="alert">
           {error}
@@ -245,7 +245,6 @@ export function Backup() {
               Includes configuration, deployment keys, accounts and metadata
               databases.
             </p>
-            <p>{status?.excluded}</p>
             <p>
               A drill uses a disposable key. Test your real custodian cards
               separately with an offline restore.

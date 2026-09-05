@@ -112,6 +112,7 @@ it("shows the pinned fingerprint after pairing collapses setup", async () => {
     localCopies: [],
     intervalSec: 0,
     recent: [],
+    excluded: "server exclusion sentinel",
   };
   vi.mocked(getJSON)
     .mockResolvedValueOnce(initial)
@@ -145,11 +146,7 @@ it("shows the pinned fingerprint after pairing collapses setup", async () => {
     ),
   );
   expect(
-    screen
-      .getByText(
-        "IMAP mail is excluded; encrypted pickup messages are included.",
-      )
-      .closest("details"),
+    screen.getByText("server exclusion sentinel").closest("details"),
   ).toBeNull();
 });
 
@@ -184,4 +181,11 @@ it("renders stored failure reasons as text without breaking on malformed details
   await screen.findByText("collect failed <img src=x>");
   expect(document.querySelector("img")).toBeNull();
   expect(document.querySelectorAll("li")).toHaveLength(3);
+});
+
+it("does not claim exclusions when status is unavailable", async () => {
+  vi.mocked(getJSON).mockRejectedValue(new Error("status unavailable"));
+  render(<Backup />);
+  await screen.findByRole("alert");
+  expect(screen.queryByText(/IMAP mail is excluded/)).toBeNull();
 });
