@@ -15,6 +15,9 @@ non-prerelease version.
 ### Changed
 
 - The backend now uses its public GitHub module path so other modules can import it.
+- Passwords are hashed with Argon2id (ky-primitives). Existing scrypt hashes keep working and are upgraded on the next successful login. CardDAV app passwords and legacy device secrets verify the same way.
+- TOTP and recovery codes come from ky-primitives. Recovery codes are stored as SHA-256 digests; regenerating them no longer costs ten scrypt derivations. Codes issued before this release still redeem.
+- Removed the stale v1 copy of the KyRecovery pairing spec; the contract lives in kyrecovery-server.
 
 ## 0.3.0 — 2026-08-25
 
