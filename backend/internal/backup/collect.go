@@ -155,7 +155,9 @@ func (s *Service) collect(ctx context.Context) (recoveryclient.Payload, error) {
 			}
 		}
 	}
-	for label, path := range map[string]string{"VAPID private key": cfg.Notifications.PrivateKeyPath, "TUNING_FILE": os.Getenv("TUNING_FILE")} {
+	tuningPath := strings.TrimSpace(os.Getenv("TUNING_FILE"))
+	_, tuningErr := os.Stat(tuningPath)
+	for label, path := range map[string]string{"VAPID private key": cfg.Notifications.PrivateKeyPath, "TUNING_FILE": tuningPath} {
 		if path == "" {
 			continue
 		}
@@ -164,6 +166,9 @@ func (s *Service) collect(ctx context.Context) (recoveryclient.Payload, error) {
 			rel, err := filepath.Rel(root.path, path)
 			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				included = included || have[root.prefix+"/"+filepath.ToSlash(rel)]
+				// Compose's optional prompt may be absent, but only a path
+				// inside collected roots qualifies for that exemption.
+				included = included || (label == "TUNING_FILE" && os.IsNotExist(tuningErr))
 			}
 		}
 		if !included {

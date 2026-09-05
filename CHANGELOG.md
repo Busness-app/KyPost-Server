@@ -12,6 +12,7 @@ non-prerelease version.
 
 ## Unreleased
 
+- Allow sealed backups when the optional TUNING_FILE override inside a collected root is absent, as in the default container layout; all external overrides and missing required keys remain refused.
 - Compact the Backup page with an at-a-glance status row and expandable setup, schedule and history. Explain why actions require a password and show stored failure reasons in activity history.
 
 ### Added

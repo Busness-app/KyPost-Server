@@ -49,7 +49,10 @@ For a quiescent recovery point, stop services and use the CLI export.
 The collector refuses missing keys needed by stored encrypted data, symlinks,
 unsupported special files, files over 64 MiB or a total payload over 256 MiB.
 Secret-file overrides must use their canonical SECRET_DIR locations; VAPID and
-TUNING_FILE must be inside collected roots. Restore into the original configured
+TUNING_FILE overrides must be inside collected roots, even when missing. A missing
+optional TUNING_FILE inside CONFIG_DIR, SECRET_DIR or STATE_DIR does not block
+backup: the default container falls back to its bundled prompt.
+Restore into the original configured
 root paths or update embedded paths before starting.
 
 Keep a separate protected copy of the operator's `.env`, compose overrides and
