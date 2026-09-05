@@ -62,7 +62,9 @@ owner's password/recovery material; a capsule does not bypass that protection.
 1. Stop the deployment and retain its existing volumes. Take a separate copy before
    replacing anything. Download the capsule using a KyRecovery operator session, or
    use a local `.kycap`. Record its expected capsule ID, digest, time and key ID from
-   the receipt; successful decryption alone does not prove freshness.
+   the receipt; successful decryption alone does not prove freshness. Run
+   `sha256sum backup.kycap` and compare it with the receipt digest before restoring.
+   The manifest payload hash printed by restore is a different hash.
 2. Run the same or a newer compatible KyPost binary against an empty staging path:
 
    ```sh
@@ -72,11 +74,13 @@ owner's password/recovery material; a capsule does not bypass that protection.
 
    Enter at least k custodian shares on stdin, one per line, then EOF (Ctrl-D).
    Never put shares in argv, chat or shared notes. Docker has no ENTRYPOINT; name
-   the executable explicitly, use `-i` for stdin and mount a writable staging root:
+   the executable explicitly, use `-i` for stdin and mount a writable staging root.
+   Set `KYPOST_RESTORE_IMAGE` to the recorded compatible image digest reference
+   (`ghcr.io/busness-app/kypost-server@sha256:…`), then run:
 
    ```sh
    docker run --rm -i --user "$(id -u):$(id -g)" \
-     -v "$PWD:/restore" ghcr.io/busness-app/kypost-server:stable \
+     -v "$PWD:/restore" "${KYPOST_RESTORE_IMAGE:?set the recorded image digest reference}" \
      /usr/local/bin/kypost-server restore /restore/backup.kycap /restore/recovered
    ```
 
