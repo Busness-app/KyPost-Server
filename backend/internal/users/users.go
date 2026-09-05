@@ -1470,7 +1470,7 @@ func (s *Store) SetPendingTOTPSecret(id, secretEnc string) (User, error) {
 	})
 }
 
-// EnableTOTP marks TOTP confirmed and stores the scrypt-hashed recovery codes.
+// EnableTOTP marks TOTP confirmed and stores the recovery codes' digests.
 // It errors if no pending secret has been staged.
 // expectSecretEnc is the secret the caller actually VALIDATED a code against,
 // compared here inside mutate — the same compare-and-swap shape

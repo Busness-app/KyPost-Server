@@ -162,8 +162,8 @@ for the full analysis. In short:
 The prerequisite that would change this calculus is rewrapping the envelope
 under a **separate PGP passphrase** instead of the account password. That is a
 browser change (`frontend/src/lib/keyVault.ts`) plus a server flag, not server
-cryptography — the server holds only a scrypt hash and cannot derive the
-wrapping key. It is worth doing on its own merits regardless of any client:
+cryptography — the server holds only an Argon2id (or, for an account not yet
+rehashed, scrypt) hash and cannot derive the wrapping key. It is worth doing on its own merits regardless of any client:
 `E2E_PGP.md` lists "admin password reset destroys the key" as inherent to the
 model, and it is inherent only because the wrapping secret *is* the account
 password.
