@@ -29,7 +29,9 @@ import (
 	"time"
 
 	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
+	"github.com/Busness-app/kypost-server/backend/internal/mfa"
 
+	"github.com/Busness-app/ky-primitives/recoverycode"
 	"golang.org/x/crypto/scrypt"
 )
 
@@ -1806,11 +1808,12 @@ var errRecoveryCodeNoMatch = errors.New("recovery code no match")
 // hashes; on the first match it removes that hash (one-time use) and persists.
 // It returns matched=false with a nil error and no write when nothing matches.
 //
-// The scrypt comparisons run OUTSIDE the store lock, against a snapshot: holding
-// s.mu and the file lock across up to ten 128 MiB derivations (~3s) stalls every
-// authenticated request, which takes s.mu.RLock via currentUser -> Get. Matching
-// on the hash string rather than an index keeps the removal correct if the list
-// changed while we were deriving.
+// Digest matching is a hash compare; the legacy scrypt comparisons run OUTSIDE
+// the store lock, against a snapshot: holding s.mu and the file lock across up
+// to ten 128 MiB derivations (~3s) stalls every authenticated request, which
+// takes s.mu.RLock via currentUser -> Get. Matching on the hash string rather
+// than an index keeps the removal correct if the list changed while we were
+// deriving.
 //
 // Each comparison takes and releases a derivation slot INDIVIDUALLY, which is
 // why ctx is passed straight through to verifyScryptHash rather than the whole
@@ -1829,17 +1832,22 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, id, candidate string) (
 		return User{}, false, err
 	}
 	matched := ""
+	if i, ok := recoverycode.MatchCode(candidate, snapshot.RecoveryCodesHash, mfa.RecoveryCodeDigest); ok {
+		matched = snapshot.RecoveryCodesHash[i]
+	}
+	// Codes stored before digests existed are scrypt hashes; they drain as
+	// users regenerate. Each comparison takes its own derivation slot (see the
+	// comment above) and a busy slot is "not checked", never "wrong".
 	for _, h := range snapshot.RecoveryCodesHash {
+		if matched != "" || !strings.HasPrefix(h, "scrypt$") {
+			continue
+		}
 		hit, err := verifyScryptHash(ctx, h, candidate)
 		if err != nil {
 			return User{}, false, err
 		}
-		// Short-circuit on the first match: the remaining hashes cannot also
-		// match a one-time code, and deriving against them anyway would make a
-		// correct code the most expensive request on the endpoint.
 		if hit {
 			matched = h
-			break
 		}
 	}
 	if matched == "" {
@@ -2012,11 +2020,26 @@ func SetHashCostForTest(n int) (restore func()) {
 
 // HashPassword produces a scrypt-encoded hash string in the same format
 // used historically by admin.env's ADMIN_PASS_HASH field.
+func HashPassword(ctx context.Context, password string) (string, error) {
+	return hashScrypt(ctx, password)
+}
+
+// LegacyScryptHashForTest mints a scrypt hash so tests can prove the legacy
+// verify path still redeems what older installs stored.
+func LegacyScryptHashForTest(ctx context.Context, secret string) (string, error) {
+	if !testing.Testing() {
+		panic("users.LegacyScryptHashForTest called outside a test binary")
+	}
+	return hashScrypt(ctx, secret)
+}
+
+// hashScrypt produces a scrypt-encoded hash string in the same format used
+// historically by admin.env's ADMIN_PASS_HASH field.
 //
 // Holds one of the process-wide derivation slots for the duration, and returns
 // ErrKDFBusy if none comes free (see kdf.go). ctx is honoured while queueing,
 // so a caller whose client has gone away stops occupying the queue.
-func HashPassword(ctx context.Context, password string) (string, error) {
+func hashScrypt(ctx context.Context, password string) (string, error) {
 	var (
 		n      = hashCostN
 		r      = scryptR

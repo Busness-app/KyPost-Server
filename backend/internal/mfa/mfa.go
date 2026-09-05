@@ -5,12 +5,14 @@ package mfa
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"sync"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/recoverycode"
 	"github.com/Busness-app/kypost-server/backend/internal/cryptutil"
 )
 
@@ -367,27 +369,19 @@ func (s *Store) ConsumePushApproval(id, secret string) (string, error) {
 	return ch.UserID, nil
 }
 
-// recoveryAlphabet has exactly 32 characters so a random byte modulo 32 is
-// unbiased. It does not avoid visually ambiguous characters (e.g. i/l/o vs
-// 1/0) since codes are copy/pasted, not transcribed by hand.
-const recoveryAlphabet = "0123456789abcdefghijklmnopqrstuv"
-
-// GenerateRecoveryCodes returns n one-time recovery codes formatted
-// xxxx-xxxx-xxxx using crypto/rand.
+// GenerateRecoveryCodes returns n one-time codes formatted xxxx-xxxx-xxxx.
 func GenerateRecoveryCodes(n int) ([]string, error) {
-	codes := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		raw := make([]byte, 12) // 3 groups of 4 chars
-		if _, err := rand.Read(raw); err != nil {
-			return nil, err
-		}
-		chars := make([]byte, 12)
-		for j, b := range raw {
-			chars[j] = recoveryAlphabet[int(b)%len(recoveryAlphabet)]
-		}
-		codes = append(codes, string(chars[0:4])+"-"+string(chars[4:8])+"-"+string(chars[8:12]))
-	}
-	return codes, nil
+	return recoverycode.Generate(n)
+}
+
+// RecoveryCodeDigest is what the store keeps for a recovery code: SHA-256 of
+// the normalised code, hex. The code is 60 bits from crypto/rand, so a
+// password KDF prices nothing here and cost ten 128 MiB derivations per
+// regeneration. Normalising first means what the user types and what was
+// stored cannot disagree on case or dashes.
+func RecoveryCodeDigest(code string) string {
+	sum := sha256.Sum256([]byte(recoverycode.Normalize(code)))
+	return hex.EncodeToString(sum[:])
 }
 
 // SealTOTPSecret AES-GCM seals base32Secret with the key at keyPath (creating

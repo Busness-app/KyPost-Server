@@ -313,28 +313,16 @@ func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) 
 	return u, true
 }
 
-// newRecoveryCodes generates fresh plaintext recovery codes plus their scrypt
-// hashes for storage. The plaintext is returned to the caller exactly once.
-//
-// recoveryCodeCount derivations in ONE request — by far the most expensive
-// thing an authenticated session can ask this server to do, and for a long
-// time the loop ran entirely outside the concurrency ceiling that exists to
-// bound it. Each hash now takes and releases a slot individually (deliberately
-// NOT one slot across all ten: holding a slot for ten derivations' worth of
-// wall clock is how a handful of these stall every login), and a saturated
-// slot abandons the batch with users.ErrKDFBusy rather than queueing behind it.
-func (s *Server) newRecoveryCodes(ctx context.Context) (plaintext []string, hashes []string, err error) {
+// newRecoveryCodes mints recoveryCodeCount codes and their digests. No KDF:
+// see mfa.RecoveryCodeDigest.
+func (s *Server) newRecoveryCodes(_ context.Context) (plaintext []string, hashes []string, err error) {
 	plaintext, err = mfa.GenerateRecoveryCodes(recoveryCodeCount)
 	if err != nil {
 		return nil, nil, err
 	}
 	hashes = make([]string, 0, len(plaintext))
 	for _, c := range plaintext {
-		h, err := users.HashPassword(ctx, c)
-		if err != nil {
-			return nil, nil, err
-		}
-		hashes = append(hashes, h)
+		hashes = append(hashes, mfa.RecoveryCodeDigest(c))
 	}
 	return plaintext, hashes, nil
 }

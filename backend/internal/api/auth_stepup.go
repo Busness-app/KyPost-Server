@@ -37,7 +37,7 @@ import (
 
 // totpCodeShape distinguishes a TOTP code from a recovery code by shape, so a
 // mistyped six-digit code is never run through ConsumeRecoveryCode. That call
-// is up to recoveryCodeCount scrypt derivations against a miss, and an
+// still derives scrypt for every legacy-format code an account holds, and an
 // authenticated caller should not be able to spend that by fat-fingering a
 // digit. Recovery codes are xxxx-xxxx-xxxx (see mfa.GenerateRecoveryCodes) and
 // can never collide with this.
