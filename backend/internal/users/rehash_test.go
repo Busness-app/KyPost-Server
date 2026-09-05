@@ -89,10 +89,23 @@ func TestNeedsRehashOnlyUpgrades(t *testing.T) {
 		// the comparison were symmetric ("!=" instead of "<") rather than
 		// directional. Must not report true either.
 		{"argon2id more threads is not a downgrade", mintArgon2(t, password.Params{Memory: 65536, Time: 3, Threads: 8}), false},
+		// Stronger on memory, WEAKER on time. Rehashed, and the doc comment
+		// says so: "weaker on any axis" is not the negation of "stronger on
+		// any axis", and 256 MiB at one pass is not stronger than 64 MiB at
+		// three in the direction that matters.
+		{"argon2id 256 MiB but t=1 is weaker on time", mintArgon2(t, password.Params{Memory: 262144, Time: 1, Threads: 4}), true},
 		// A hash this package's own dependency would refuse to read is not
 		// ours to rehash on a guess.
 		{"argon2id wrong version segment", withSegment(atCurrent, 2, "v=13"), false},
 		{"argon2id non-canonical params (leading zero)", withSegment(atCurrent, 3, "m=65536,t=3,p=04"), false},
+		// Well-formed but outside password.Params.Validate's band, so
+		// password.Verify calls it malformed. Reporting "upgrade me" would make
+		// an account that cannot authenticate look like one due for a rehash —
+		// the state parseArgon2Params' doc comment forbids, and which held for
+		// m and p but not t before Validate was called.
+		{"argon2id memory below the library band", withSegment(atCurrent, 3, "m=1024,t=3,p=4"), false},
+		{"argon2id threads zero", withSegment(atCurrent, 3, "m=65536,t=3,p=0"), false},
+		{"argon2id time above the library band", withSegment(atCurrent, 3, "m=65536,t=99,p=4"), false},
 		// Not ours to rehash.
 		{"foreign format", "argon2id$v=19$m=65536,t=3,p=4$abc$def", false},
 		{"garbage", "not-a-hash", false},

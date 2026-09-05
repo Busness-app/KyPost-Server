@@ -2256,12 +2256,17 @@ var argon2VersionSegment = fmt.Sprintf("v=%d", argon2.Version)
 
 // NeedsRehash reports whether a stored hash should be re-derived from the
 // verified plaintext: every scrypt hash (the format is retired), and an
-// Argon2id hash below the currently configured cost on any axis. A hash
-// stronger on any axis — memory, time, or threads — is left alone: an
-// operator who deliberately raised one of them must not have it silently
-// downgraded because the other two still read "current". Malformed or
-// foreign is false; rehashing something this package did not write is a
-// guess.
+// Argon2id hash WEAKER THAN hashParams ON ANY AXIS — memory, time, or threads.
+// A hash stronger on EVERY axis is left alone. Read the two together: a hash at
+// four times the configured memory but one pass instead of three is weaker on
+// an axis and is re-derived at the current parameters, which is deliberate and
+// is not the same statement as "stronger on any axis is left alone".
+//
+// There is no overall-strength comparison, because the axes do not trade off
+// linearly and nothing in this deployment sets them independently anyway
+// (hashParams is a package variable only SetHashParamsForTest writes).
+// Malformed or foreign is false; rehashing something this package did not
+// write is a guess.
 //
 // This compares the embedded cost against hashParams itself rather than
 // delegating to password.NeedsRehash: that library call measures against its
@@ -2284,6 +2289,15 @@ func NeedsRehash(encoded string) bool {
 	if !ok {
 		return false
 	}
+	// Out-of-band costs are refused by the library's own band, so a hash
+	// carrying one is not a hash password.Verify would read — reporting
+	// "upgrade me" about it would make an account that already fails to
+	// authenticate look like a working one due for a rehash. Validate() rather
+	// than a second copy of the bounds, so this cannot drift from what the
+	// library accepts.
+	if (password.Params{Memory: mem, Time: t, Threads: threads}).Validate() != nil {
+		return false
+	}
 	return mem < hashParams.Memory || t < hashParams.Time || threads < hashParams.Threads
 }
 
@@ -2296,6 +2310,10 @@ func NeedsRehash(encoded string) bool {
 // password.Verify would call malformed makes a broken hash look like a
 // working account due for an upgrade rather than one that already fails to
 // authenticate.
+//
+// This is only the SHAPE. The library's parseParams also enforces the accepted
+// band, and NeedsRehash calls Params.Validate for that; a well-formed
+// "m=1024,t=3,p=4" parses here and is refused there.
 func parseArgon2Params(segment string) (mem, t uint32, threads uint8, ok bool) {
 	fields := strings.Split(segment, ",")
 	if len(fields) != 3 {
