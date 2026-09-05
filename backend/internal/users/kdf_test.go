@@ -172,7 +172,7 @@ func TestEveryDerivationEntryPointSharesTheOneLimit(t *testing.T) {
 			return err
 		}},
 		{"Store.ConsumeRecoveryCode", func() error {
-			_, _, err := store.ConsumeRecoveryCode(ctx, bootstrap.ID, "correct-horse-battery-staple")
+			_, _, err := store.ConsumeRecoveryCode(ctx, bootstrap.ID, "correct-horse-battery-staple", testRecoveryDigest(t))
 			return err
 		}},
 		{"Store.RehashPassword", func() error {

@@ -667,7 +667,7 @@ func (s *Server) handleMFARecoveryCode(w http.ResponseWriter, r *http.Request) {
 	// the request context is passed straight through rather than wrapped in
 	// users.WithKDFSlot, and why it must stay that way.
 	var matched bool
-	_, matched, err = s.users.ConsumeRecoveryCode(r.Context(), u.ID, strings.TrimSpace(req.Code))
+	_, matched, err = s.users.ConsumeRecoveryCode(r.Context(), u.ID, strings.TrimSpace(req.Code), s.recoveryCodeDigest)
 	switch {
 	case errors.Is(err, errKDFBusy), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// Shed mid-check. No verdict was reached on this code, so refund the

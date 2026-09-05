@@ -45,6 +45,12 @@ func newTestServer(t *testing.T) *Server {
 	})
 
 	configDir := t.TempDir()
+	// Every key NewServer resolves through config.SecretFile lands here rather
+	// than in the process default /kypost/private, which this binary cannot
+	// write: the pairing secret and the PoW key silently degraded, and the
+	// recovery-code digest key refuses to start without one. configDir, not a
+	// fourth temp dir, so this agrees with the totpSecretKeyPath override below.
+	t.Setenv("SECRET_DIR", configDir)
 	usersStore, err := users.LoadOrMigrate(context.Background(), configDir, filepath.Join(configDir, "admin.env"))
 	if err != nil {
 		t.Fatalf("users.LoadOrMigrate: %v", err)

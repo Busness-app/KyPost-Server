@@ -161,7 +161,7 @@ func (s *Server) confirmSecondFactor(w http.ResponseWriter, r *http.Request, u u
 	// recoveryCodeCount derivations at 128 MiB each, and holding one slot
 	// across all of them parks a large share of the instance's derivation
 	// capacity. The request context passes straight through.
-	_, matched, err := s.users.ConsumeRecoveryCode(r.Context(), u.ID, code)
+	_, matched, err := s.users.ConsumeRecoveryCode(r.Context(), u.ID, code, s.recoveryCodeDigest)
 	switch {
 	case errors.Is(err, errKDFBusy), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// Shed mid-check: no verdict was reached, so the strike goes back.

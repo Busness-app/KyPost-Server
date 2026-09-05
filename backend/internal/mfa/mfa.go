@@ -4,6 +4,8 @@
 package mfa
 
 import (
+	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -374,14 +376,42 @@ func GenerateRecoveryCodes(n int) ([]string, error) {
 	return recoverycode.Generate(n)
 }
 
-// RecoveryCodeDigest is what the store keeps for a recovery code: SHA-256 of
-// the normalised code, hex. The code is 60 bits from crypto/rand, so a
-// password KDF prices nothing here and cost ten 128 MiB derivations per
-// regeneration. Normalising first means what the user types and what was
-// stored cannot disagree on case or dashes.
-func RecoveryCodeDigest(code string) string {
-	sum := sha256.Sum256([]byte(recoverycode.Normalize(code)))
-	return hex.EncodeToString(sum[:])
+// recoveryCodeDigestInfo domain-separates the recovery-code MAC key from every
+// other use of the master key it is derived from.
+const recoveryCodeDigestInfo = "kypost:recovery-code:v1"
+
+// NewRecoveryCodeDigester reads the master key at keyPath ONCE and returns what
+// turns a recovery code into the entry the store keeps: HMAC-SHA256 of the
+// normalised code under an HKDF-SHA256 subkey of that master key, hex.
+// Normalising first means what the user types and what was stored cannot
+// disagree on case or dashes.
+//
+// Keyed, not bare. A code is 60 bits (twelve symbols over recoverycode.Alphabet),
+// which is out of reach ONLINE — mfaLockout caps that at ten attempts per
+// account per fifteen minutes — and squarely within reach offline: an unsalted
+// SHA-256 over that space is GPU-days against one account's ten digests, and a
+// redeemed code is a full second-factor bypass. The key lives in SECRET_DIR,
+// a different volume from users.json, so a copy of the config volume alone
+// still contains no usable second factor. That is the property a password KDF
+// was buying here, at none of its cost — the ten 128 MiB derivations per
+// regeneration are still gone.
+//
+// The key is read once per process, not per call: this is the redeem path.
+// Callers hold the returned function for the process's life.
+func NewRecoveryCodeDigester(keyPath string) (func(string) string, error) {
+	master, err := cryptutil.LoadOrCreateKey(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	key, err := hkdf.Key(sha256.New, master, nil, recoveryCodeDigestInfo, sha256.Size)
+	if err != nil {
+		return nil, err
+	}
+	return func(code string) string {
+		m := hmac.New(sha256.New, key)
+		m.Write([]byte(recoverycode.Normalize(code)))
+		return hex.EncodeToString(m.Sum(nil))
+	}, nil
 }
 
 // SealTOTPSecret AES-GCM seals base32Secret with the key at keyPath (creating

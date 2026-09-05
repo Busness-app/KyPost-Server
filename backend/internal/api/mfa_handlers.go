@@ -306,7 +306,8 @@ func (s *Server) requirePasswordConfirm(w http.ResponseWriter, r *http.Request) 
 }
 
 // newRecoveryCodes mints recoveryCodeCount codes and their digests. No KDF:
-// see mfa.RecoveryCodeDigest.
+// the digest is one HMAC under a key from SECRET_DIR — see
+// mfa.NewRecoveryCodeDigester.
 func (s *Server) newRecoveryCodes(_ context.Context) (plaintext []string, hashes []string, err error) {
 	plaintext, err = mfa.GenerateRecoveryCodes(recoveryCodeCount)
 	if err != nil {
@@ -314,7 +315,7 @@ func (s *Server) newRecoveryCodes(_ context.Context) (plaintext []string, hashes
 	}
 	hashes = make([]string, 0, len(plaintext))
 	for _, c := range plaintext {
-		hashes = append(hashes, mfa.RecoveryCodeDigest(c))
+		hashes = append(hashes, s.recoveryCodeDigest(c))
 	}
 	return plaintext, hashes, nil
 }

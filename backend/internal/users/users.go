@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
-	"github.com/Busness-app/kypost-server/backend/internal/mfa"
 
 	"github.com/Busness-app/ky-primitives/password"
 	"github.com/Busness-app/ky-primitives/recoverycode"
@@ -1810,6 +1809,12 @@ var errRecoveryCodeNoMatch = errors.New("recovery code no match")
 // hashes; on the first match it removes that hash (one-time use) and persists.
 // It returns matched=false with a nil error and no write when nothing matches.
 //
+// digest is the caller's keyed digest function (mfa.NewRecoveryCodeDigester,
+// held by api.Server). It is a parameter rather than something this package
+// calls, because it is keyed on a file in SECRET_DIR and this store owns
+// CONFIG_DIR: reading that key here would put the pepper and the peppered
+// value on one volume, which is the whole thing the key is for.
+//
 // Digest matching is a hash compare; the legacy scrypt comparisons run OUTSIDE
 // the store lock, against a snapshot: holding s.mu and the file lock across up
 // to ten 128 MiB derivations (~3s) stalls every authenticated request, which
@@ -1828,13 +1833,13 @@ var errRecoveryCodeNoMatch = errors.New("recovery code no match")
 //
 // A slot error abandons the remaining comparisons and surfaces unchanged, so an
 // overloaded server sheds rather than queues.
-func (s *Store) ConsumeRecoveryCode(ctx context.Context, id, candidate string) (User, bool, error) {
+func (s *Store) ConsumeRecoveryCode(ctx context.Context, id, candidate string, digest func(string) string) (User, bool, error) {
 	snapshot, err := s.Get(id)
 	if err != nil {
 		return User{}, false, err
 	}
 	matched := ""
-	if i, ok := recoverycode.MatchCode(candidate, snapshot.RecoveryCodesHash, mfa.RecoveryCodeDigest); ok {
+	if i, ok := recoverycode.MatchCode(candidate, snapshot.RecoveryCodesHash, digest); ok {
 		matched = snapshot.RecoveryCodesHash[i]
 	}
 	// Codes stored before digests existed are scrypt hashes; they drain as
