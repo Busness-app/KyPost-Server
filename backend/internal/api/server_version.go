@@ -156,3 +156,6 @@ func (s *Server) notifyAdminServerUpdateAvailable(latest string) error {
 		),
 	)
 }
+
+// Version identifies the binary in recovery manifests.
+func Version() string { return serverVersion }

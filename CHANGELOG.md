@@ -12,7 +12,18 @@ non-prerelease version.
 
 ## Unreleased
 
+### Added
+
+- KyRecovery/local sealed backups with key pinning, admin scheduling, downloads, restore drills and an offline custodian-share restore CLI, using ky-primitives v0.5.1.
+- Optional explicit LAN DNS compose override for private KyRecovery deployments.
+
 ### Changed
+
+- Preserve declared security/operational log fields and classifier failure context without logging upstream response content; enforce field coverage against production call sites.
+- Restrict the extended shutdown drain to active backups, retaining the 20-second grace for ordinary HTTP requests.
+
+- Application and classifier logs use shared JSON stderr; supervisor owns rotation. `KY_LOG_LEVEL` controls verbosity. Raw classifier output is no longer logged.
+- Container shutdown allows active backup deposits up to 16 minutes to finish.
 
 - The backend now uses its public GitHub module path so other modules can import it.
 - Passwords are hashed with Argon2id (ky-primitives). Existing scrypt hashes keep working and are upgraded on the next successful login. CardDAV app passwords and legacy device secrets verify the same way. This is the ky-primitives suite-wide RFC 9106 profile (64 MiB, 3 passes, 4 lanes); per-guess cost is lower than the previous scrypt setting in both wall time and memory, a deliberate choice so every product in the suite shares one password policy under one memory budget.

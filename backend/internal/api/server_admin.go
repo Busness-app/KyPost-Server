@@ -24,10 +24,10 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	logDir := config.LogDir()
-	// Resolve requested file — default to app.log, allow any *.log in logDir
+	// Resolve requested file — default to api.err.log, allow any *.log in logDir
 	filename := filepath.Base(r.URL.Query().Get("file"))
 	if filename == "" || filename == "." {
-		filename = "app.log"
+		filename = "api.err.log"
 	}
 	// Security: only allow .log files, no path traversal
 	if filepath.Ext(filename) != ".log" || strings.Contains(filename, "/") || strings.Contains(filename, "..") {

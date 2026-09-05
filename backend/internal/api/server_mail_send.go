@@ -821,11 +821,11 @@ func (s *Server) sendPickupNotifications(userID, envelopeFrom string, recipients
 // to report partial pickup-notification failures the caller would otherwise
 // never see; every other caller passes "".
 func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, smtpHost string, smtpPort int, addr, smtpUsername, smtpPassword, from string, toList, ccList, bccList, recipients []string, msg []byte, req mailRequest, sentCopy []byte, extraWarning string, afterPrimary func() string) bool {
-	s.logger.Info("mail send requested", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "recipientCount", strconv.Itoa(len(recipients)))
+	s.logger.Info("mail send requested", "smtp_host", smtpHost, "smtp_port", strconv.Itoa(smtpPort), "recipient_count", strconv.Itoa(len(recipients)))
 
 	if len(recipients) > 0 {
 		if sendErr := mailmsg.SMTPDeliver(smtpHost, smtpPort, addr, smtpUsername, smtpPassword, from, recipients, msg); sendErr != nil {
-			s.logger.Error("mail send failed", "smtpHost", smtpHost, "smtpPort", strconv.Itoa(smtpPort), "error", sendErr.Error())
+			s.logger.Error("mail send failed", "smtp_host", smtpHost, "smtp_port", strconv.Itoa(smtpPort), "error", sendErr.Error())
 			http.Error(w, fmt.Sprintf("failed to send email: %s", sendErr.Error()), http.StatusBadGateway)
 			return false
 		}
@@ -877,7 +877,7 @@ func (s *Server) finishMailSend(w http.ResponseWriter, r *http.Request, userID, 
 		warning += "email sent but could not be saved to Sent folder"
 		s.logger.Error("mail sent but save-sent failed", "error", err.Error())
 	}
-	s.logger.Info("mail send completed", "sentSaved", strconv.FormatBool(sentSaved))
+	s.logger.Info("mail send completed", "sent_saved", strconv.FormatBool(sentSaved))
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sentSaved": sentSaved, "warning": warning})
 	return true

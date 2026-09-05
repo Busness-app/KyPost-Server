@@ -21,14 +21,10 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/Busness-app/kypost-server/backend/internal/logging"
 	"github.com/Busness-app/kypost-server/backend/internal/retry"
 
 	"github.com/Busness-app/kypost-server/backend/internal/config"
 )
-
-const diagnosticLogMaxSize = 16 * 1024 * 1024
-const diagnosticLogMaxFiles = 8
 
 // DefaultModel is the fallback when OLLAMA_MODEL is unset. It must agree with
 // Dockerfile, docker-compose.yml, scripts/pull-ollama-model.sh and .env.example.
@@ -140,10 +136,6 @@ type HTTPClient struct {
 	paceInterval time.Duration
 	paceMu       sync.Mutex
 	lastClassify time.Time
-
-	outputLog io.WriteCloser
-	serverLog io.WriteCloser
-	errorLog  io.WriteCloser
 }
 
 func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) *HTTPClient {
@@ -164,20 +156,6 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 	tuningTemplate := strings.TrimSpace(tuning)
 	concurrency, pace := classifyAdmission()
 
-	logDir := config.LogDir()
-
-	// These three are diagnostics, not evidence: a classifier that cannot
-	// write its transcript should still classify mail, so an open failure is
-	// reported rather than fatal. The writer reopens on demand, so it starts
-	// working again if the operator fixes the directory.
-	openDiagnosticLog := func(name string) io.WriteCloser {
-		w, err := logging.NewRotatingWriter(filepath.Join(logDir, name), diagnosticLogMaxSize, diagnosticLogMaxFiles)
-		if err != nil {
-			slog.Error("classifier diagnostic log unavailable", "file", name, "error", err.Error())
-		}
-		return w
-	}
-
 	return &HTTPClient{
 		baseURL:        strings.TrimRight(baseURL, "/"),
 		apiKey:         strings.TrimSpace(apiKey),
@@ -187,9 +165,6 @@ func NewHTTPClient(baseURL, apiKey, path, tuning string, timeout time.Duration) 
 		tuningTemplate: tuningTemplate,
 		classifySem:    make(chan struct{}, concurrency),
 		paceInterval:   pace,
-		outputLog:      openDiagnosticLog("classifier.log"),
-		serverLog:      openDiagnosticLog("classifier-server.log"),
-		errorLog:       openDiagnosticLog("classifier.err.log"),
 	}
 }
 
@@ -258,27 +233,12 @@ func (c *HTTPClient) Warmup(ctx context.Context) error {
 	return c.ensureWarm(ctx)
 }
 
-// Close releases the three diagnostic log file handles opened by
-// NewHTTPClient. Callers that construct a short-lived HTTPClient (e.g. an
-// admin connectivity-test request) should defer Close() immediately after
-// construction; the long-lived shared classifier instance used by the
-// poller is intentionally never closed — it lives for the process.
-func (c *HTTPClient) Close() error {
-	var firstErr error
-	for _, w := range []io.WriteCloser{c.outputLog, c.serverLog, c.errorLog} {
-		if w == nil {
-			continue
-		}
-		if err := w.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
+// Close preserves the client lifecycle API; the process owns the slog handler.
+func (c *HTTPClient) Close() error { return nil }
 
 func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sender, subject, body, tuning string) (string, error) {
 	if err := c.ensureWarm(ctx); err != nil {
-		c.logError(err.Error())
+		c.logError("warmup: " + err.Error())
 		return "", err
 	}
 
@@ -318,7 +278,7 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 	classifyAttempt := func(attempt int) (string, error, bool) {
 		result, err := c.classifyOnce(ctx, prompt, allowedLabels)
 		if err != nil {
-			c.logError(err.Error())
+			c.logError("classify: " + err.Error())
 			return "", err, false
 		}
 
@@ -328,7 +288,7 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 		if strings.Contains(strings.ToLower(normalized), "you've reached your weekly chat limit") {
 			c.logError("AI credits exhausted: weekly chat limit response from model")
 			c.logServer("[CLASSIFY FAILED] AI credits exhausted (weekly chat limit reached)")
-			return "", fmt.Errorf("%s\nuser has run out of ai credits", normalized), false
+			return "", fmt.Errorf("user has run out of ai credits"), false
 		}
 
 		if isToolsOnlyResponse(normalized) {
@@ -352,7 +312,7 @@ func (c *HTTPClient) Classify(ctx context.Context, allowedLabels []string, sende
 		}
 
 		searchText := stripTransientNoise(labelSearchScope(normalized))
-		c.logServer(fmt.Sprintf("[CLASSIFY RESPONSE] %s", strings.SplitN(searchText, "\n", 2)[0]))
+		c.logServer("classifier response received")
 
 		// With no allowlist configured there is nothing to bound the answer
 		// to, so the model's own output is all a caller can get.
@@ -429,10 +389,6 @@ func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string, allowedLab
 		return "", fmt.Errorf("ollama classify: read response: %w", err)
 	}
 	if resp.StatusCode >= 300 {
-		body := clipErrorBody(string(bodyBytes))
-		if body != "" {
-			return "", fmt.Errorf("ollama classify failed: status %d body: %s", resp.StatusCode, body)
-		}
 		return "", fmt.Errorf("ollama classify failed: status %d", resp.StatusCode)
 	}
 
@@ -444,8 +400,8 @@ func (c *HTTPClient) classifyOnce(ctx context.Context, prompt string, allowedLab
 	if err := json.Unmarshal(bodyBytes, &out); err != nil {
 		return strings.TrimSpace(string(bodyBytes)), nil
 	}
-	if clipped := clipErrorBody(out.Error); clipped != "" {
-		return "", fmt.Errorf("ollama classify failed: %s", clipped)
+	if strings.TrimSpace(out.Error) != "" {
+		return "", fmt.Errorf("ollama classify failed: upstream reported an error")
 	}
 	// Safety net for a reasoning model that ignores think=false: an empty
 	// response alongside a populated reasoning channel means the answer was
@@ -589,8 +545,7 @@ func (c *HTTPClient) pullModel(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		body, _ := readBoundedBody(resp.Body)
-		return fmt.Errorf("ollama pull failed: status %d body: %s", resp.StatusCode, clipErrorBody(string(body)))
+		return fmt.Errorf("ollama pull failed: status %d", resp.StatusCode)
 	}
 	c.logServer("[OLLAMA WARMUP] model pulled")
 	return nil
@@ -979,47 +934,11 @@ func LoadTuningText() string {
 	return ""
 }
 
-func (c *HTTPClient) logLine(w io.Writer, prefix, message string) {
-	// NewHTTPClient always sets the three writers, but a client assembled any
-	// other way leaves them nil, and fmt.Fprintf to a nil Writer panics — in
-	// the middle of classifying, on the daemon's poll path. Diagnostic logging
-	// is not worth taking the process down for.
-	if w == nil {
-		return
-	}
-	trimmed := strings.TrimSpace(message)
-	if trimmed == "" {
-		return
-	}
-	ts := time.Now().Format("2006-01-02 15:04:05")
-	for _, line := range strings.Split(trimmed, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// Bound every emitted line, whatever the caller passed. The three
-		// writers here carry model output and upstream error bodies, both
-		// bounded only by maxOllamaResponse (1 MiB) — and GET /api/logs reads
-		// these files with a bufio.Scanner, which fails the whole file on a
-		// token larger than its buffer. One oversized reply must not cost the
-		// admin the entire log.
-		line = clipErrorBody(line)
-		if prefix != "" {
-			_, _ = fmt.Fprintf(w, "[%s] %s %s\n", ts, prefix, line)
-		} else {
-			_, _ = fmt.Fprintf(w, "[%s] %s\n", ts, line)
-		}
-	}
-}
-
+// Model output may contain correspondence. Emit its size, never its text.
 func (c *HTTPClient) logOutput(result string) {
-	c.logLine(c.outputLog, "[OLLAMA OUTPUT]", result)
+	slog.Debug("classifier output received", "bytes", len(result))
 }
-
-func (c *HTTPClient) logServer(message string) {
-	c.logLine(c.serverLog, "", message)
-}
-
+func (c *HTTPClient) logServer(message string) { slog.Info(message) }
 func (c *HTTPClient) logError(message string) {
-	c.logLine(c.errorLog, "[CLASSIFIER ERROR]", message)
+	slog.Error("classifier request failed", "reason", clipErrorBody(message))
 }

@@ -331,3 +331,13 @@ Security-sensitive PRs should include:
 - [Reverse Proxy Networking](docs/Reverse_Proxy_Networking.md) — Setting up a proxy on `kypost-net`
 - [Quick Start TLS Notes](README.md#quick-start) — TLS termination and proxy configuration
 - OWASP guidelines on secure development practices
+
+## Sealed server backups
+
+KyRecovery receives sealed capsules; KyPost retains only the suite public key and never accepts custodian shares through HTTP. Only the offline `restore` CLI combines shares from stdin. Drills use a disposable key, never the suite private key. A source guard enforces this boundary.
+
+Pairing tokens are sealed under the existing TOTP master key with a dedicated label. Key pins survive unpairing; remote token revocation requires a KyRecovery administrator. Backup changes require an admin session, CSRF and fresh account-credential verification, with durable intent audit before side effects. HTTPS and public destinations are required by default; private addresses need explicit operator opt-in.
+
+Capsules contain deployment keys and encrypted pickup messages as well as account metadata. They exclude IMAP mail, mail cache, logs and external environment/TLS configuration. Payload bounds are 64 MiB per file and 256 MiB total. SQLite databases are snapshotted individually, not as a global transaction with account files; quiesce account/key changes for a coordinated recovery point. Follow [RESTORE.md](docs/RESTORE.md).
+
+Application logs use shared JSON stderr with fixed field declarations and redaction; raw model output is excluded. Supervisord captures these as `api.err.log` and `daemon.err.log`.

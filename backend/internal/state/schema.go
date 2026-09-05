@@ -60,6 +60,11 @@ func dsn(path string) string {
 // schema is applied on every open. Every statement is IF NOT EXISTS, so this
 // doubles as the migration path for a new table.
 const schema = `
+CREATE TABLE IF NOT EXISTS backup_audit (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, action TEXT NOT NULL,
+ actor TEXT NOT NULL, target TEXT NOT NULL, outcome TEXT NOT NULL, details TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL

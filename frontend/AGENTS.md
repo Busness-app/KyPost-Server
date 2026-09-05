@@ -62,7 +62,7 @@ calls. `settings/sections/` is per-user, `admin/sections/` is admin-only.
 | `AutomationPanel` (`/settings/automation`, Config group — per-user only) | `MyLabels`, `PromptTuning`, `Decisions` | `GET /api/labels`, `GET/PUT /api/labels/preferences` (always through `saveLabelPrefsPatch` in `settings/sections/labelPrefs.ts`); `GET/PUT /api/tuning`, `GET /api/ollama/version`; `GET /api/decisions?limit=10` (the ten newest decisions only) |
 | `NotificationsPanel` (`/settings/notifications`) | `NotificationPrefs` | `GET/PUT /api/notifications/preferences`, `GET /api/notifications/vapid-public-key`, `POST/DELETE /api/notifications/subscriptions`, `POST /api/notifications/test`, `GET /api/config`, `GET /api/labels` |
 | `StatusPanel` (`/settings/status`, non-admin only) | `SystemHealth` (`full={false}`) | `GET /api/health` (via `pages/health/fetchHealth.ts` — reads the BODY of a 503), `GET /api/status` (includes `emailsProcessedLastHour`), `POST /api/admin/mail/poll-now` |
-| `ServerPanel` (`/admin/server`, admin only) | `ApplicationRuntime`, `LabelRules`, `Users`, `SSOConfig`, `WkdDomains` | `GET/PUT /api/config` (instance-wide, including the HOUSE label list that seeds new accounts), `GET /api/server/version` (update card), `GET /api/labels`; `GET/POST /api/users`, `PUT /api/users/{id}`, `POST /api/users/{id}/{reset-password,deactivate,reactivate}` (via `api/users.ts`); `GET/PUT /api/admin/sso`; `GET/POST/DELETE /api/pgp/wkd/domains`, `POST /api/pgp/wkd/domains/{domain}/verify` (via `api/pgp.ts`) |
+| `ServerPanel` (`/admin/server`, admin only) | `ApplicationRuntime`, `Backup`, `LabelRules`, `Users`, `SSOConfig`, `WkdDomains` | `GET/PUT /api/config` (instance-wide, including the HOUSE label list that seeds new accounts), `GET /api/server/version` (update card), `GET /api/labels`; `GET/POST /api/users`, `PUT /api/users/{id}`, `POST /api/users/{id}/{reset-password,deactivate,reactivate}` (via `api/users.ts`); `GET/PUT /api/admin/sso`; `GET/POST/DELETE /api/pgp/wkd/domains`, `POST /api/pgp/wkd/domains/{domain}/verify` (via `api/pgp.ts`) |
 | `DiagnosticsPanel` (`/admin/diagnostics`, admin only) | `Logs`, `SystemHealth` (`full={true}`) | `GET /api/logs?file=<name>.log&lines=<n>`, `GET /api/logs/list`; the same health endpoints as `StatusPanel` |
 
 `SSOConfig` carries two of its five fields as inline security warnings, and that
@@ -97,6 +97,9 @@ reading its handler first.
 2. 401 → redirect to `LoginPage`. On any endpoint outside `/api/auth/`, `client.ts` reloads the page and throws `SessionExpiredError`. It must *throw*, not hang: it used to return a never-settling promise so no caller acted on a dead session, which also meant no caller's `finally` ran — loading flags stayed set and cleanup never happened whenever the reload was blocked, deferred, or stubbed. Callers that must not render an expiry as an ordinary failure check for the type
 3. Successful login → session cookie set → redirect to `ReadPage`
 4. First login with temporary password → `mustChangePassword` flag → redirect to password-change form
+
+- Server includes `admin/sections/Backup.tsx`: status, run, sealed download, drill, remote pairing, unpair, key pin and schedule under `/api/admin/backup/`. Each mutation derives the current account credential through `api/auth.ts` and clears the password; shares never enter the browser. Binary downloads use `postBlob` through the same CSRF/error boundary as JSON.
+- Diagnostics defaults to `api.err.log` and `daemon.err.log` for shared JSON events; historical application logs remain readable.
 
 ## Work Guidance
 

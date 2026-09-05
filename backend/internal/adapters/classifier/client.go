@@ -14,7 +14,7 @@ type NoAllowedLabelError struct {
 }
 
 func (e *NoAllowedLabelError) Error() string {
-	return "classifier returned no allowed label: " + e.Output
+	return "classifier returned no allowed label"
 }
 
 func SelectLabelFromText(allowedLabels []string, output string) string {

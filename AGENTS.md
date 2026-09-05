@@ -125,15 +125,17 @@ Default section order:
 - **Non-loopback cleartext requires `ALLOW_INSECURE_HTTP=true`.** The entrypoint receives `KYPOST_BIND` and refuses a remote cleartext publish unless inbound TLS is configured or the operator explicitly accepts the risk. Keep loopback HTTP available for a local TLS proxy. Unset refuses too — the entrypoint cannot see the real publish address, so this is an acknowledgement gate and an operator who never says how the port is reached is who it is for. Anything starting the image outside compose must therefore pass `KYPOST_BIND` (the CI smoke test does); do not add an empty-string arm to quieten a bare `docker run`.
 - **Bounded `startretries`, and FATAL exits the container.** `supervisord` has no backoff between restart attempts, so a large `startretries` is a hot loop rather than resilience; its default of 3 leaves PID 1 healthy in front of a dead service, because Docker restart policies react to a container exiting and never to a healthcheck. The pair that works is 20 retries plus the `crashexit` event listener taking PID 1 down, letting `restart: unless-stopped` (which does back off) restart the container. Changing either half alone reintroduces one of the two failure modes.
 
-- **KyRecovery backup contract** lives in `kyrecovery-server/zero_code_pairing_handoff_spec.md` (v2.0.0) and the suite `AGENTS.md` "KyRecovery integration"; the product side is planned in `docs/superpowers/plans/2026-09-04-kyrecovery-deposit.md`. Do not copy the spec into this repo.
+- **KyRecovery backup contract** lives in `kyrecovery-server/zero_code_pairing_handoff_spec.md` (v2.0.0) and the suite `AGENTS.md` "KyRecovery integration"; the shipped product adapter uses `ky-primitives/recoveryclient` v0.5.1, with operator procedures in `docs/RESTORE.md`. Do not copy the spec into this repo.
+
+- **Shutdown gives ordinary HTTP requests 20 seconds, then drains only active backups for up to 16 minutes.** Supervisor waits 1000 seconds for API/daemon; compose waits 17 minutes. Change these together. Optional `docker-compose.lan-dns.yml` requires explicit `KYPOST_DNS`; base compose retains host DNS.
 
 ## User Preferences
 
-When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
+- Use the shared JSON logger from ky-primitives. No audit-chain service is part of this integration; supervisord owns stderr capture/rotation (see `LOGGING.md`).
 
 ## Child DOX Index
 
-- `backend/` — Go 1.26.6 classification engine, HTTP API, IMAP adapter, Ollama adapter, poller, config, state, health, logging, redaction; produces the `kypost-server` binary. See [backend/AGENTS.md](backend/AGENTS.md). Contains nested children: `backend/internal/adapters/`, `backend/internal/contacts/`, `backend/internal/groups/`, `backend/internal/mailcache/`.
+- `backend/` — Go 1.26.6 classification engine, HTTP API, IMAP adapter, Ollama adapter, poller, config, state, health, logging, redaction, sealed backups; produces the `kypost-server` binary. See [backend/AGENTS.md](backend/AGENTS.md). Contains nested children: `backend/internal/backup/`, `backend/internal/adapters/`, `backend/internal/contacts/`, `backend/internal/groups/`, `backend/internal/mailcache/`.
 - `frontend/` — React 19 / TypeScript SPA for config, monitoring, decision audit, and log streaming. See [frontend/AGENTS.md](frontend/AGENTS.md).
 - `scripts/` — Container initialization, process orchestration (supervisord), Ollama model management, and host-side image updates. See [scripts/AGENTS.md](scripts/AGENTS.md).
 - `share/` — Persistent Ollama model blob cache bind-mounted from the host; never committed to git. See [share/AGENTS.md](share/AGENTS.md).

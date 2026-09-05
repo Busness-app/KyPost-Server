@@ -8,6 +8,9 @@ KyPost polls unread mail, classifies each message, and applies IMAP keywords. It
 
 ## Features
 
+- Sealed configuration/state backups to KyRecovery or a local directory, with admin scheduling and restore drills. Custodian shares are used only by the offline restore command; see [sealed backup and restore](docs/RESTORE.md).
+- Shared JSON application logs on stderr, controlled by `KY_LOG_LEVEL`; see [logging](LOGGING.md).
+
 - Single-container Docker runtime. supervisord manages the processes.
 - Multi-user with two roles. Admins manage users and system settings. Each user connects their own IMAP mailbox.
 - IMAP inbox reader with background body preloading, folder management, and drag-and-drop move actions
@@ -343,6 +346,12 @@ directories.
 
 ## Environment Variables
 
+- `KY_LOG_LEVEL`: `info` by default (`debug`, `warn`, `error` supported).
+- `KYPOST_BACKUP_DEPOSIT_INTERVAL`: `24h`; `0` disables, otherwise 15 minutes–366 days.
+- `KYPOST_BACKUP_DIR`: empty disables local copies; `/kypost/state/backups` or outside the data roots.
+- `KYPOST_BACKUP_KEEP`: `7` local copies.
+- `KYPOST_BACKUP_ALLOW_PRIVATE_RECOVERY`: `false`; explicit private-network opt-in.
+
 Common variables:
 
 - `WEB_PORT` (default `5866`)
@@ -571,6 +580,8 @@ Important files:
 
 ## Backup and Restore
 
+For sealed capsules, pairing, scheduling and offline recovery, follow [docs/RESTORE.md](docs/RESTORE.md). The manual volume procedure below produces an unencrypted archive and requires secure storage.
+
 Back up with the container **stopped**. This is not caution for its own sake:
 
 - `state.db` is SQLite in WAL mode. Copying `state.db` while KyPost is writing
@@ -689,6 +700,8 @@ silent until someone needs them:
 Only once that passes should you upgrade to a newer version, as a separate step.
 
 ## API Highlights
+
+- Admin backup routes: `GET /api/admin/backup/status`; `POST` to `run`, `export-capsule`, `drill`, `pair-remote`, `pin-key`; `DELETE pairing`; `PUT schedule` under `/api/admin/backup/`. Mutations require the current account credential and CSRF protection.
 
 Auth:
 
@@ -1003,7 +1016,7 @@ inside the container. On systems without systemd, schedule
 
 - Verify the host, port, username, password, and mailbox in Config.
 - Run IMAP Test in Config.
-- Check `daemon.log` and `app.log` for authentication, TLS, and keyword failures.
+- Check `daemon.err.log` and `api.err.log` for authentication, TLS, and keyword failures.
 
 ### SMTP send issues
 
@@ -1015,7 +1028,7 @@ inside the container. On systems without systemd, schedule
   message and password in the clear. Fix the relay, or, for a plaintext relay on
   a network you trust, set `ALLOW_INSECURE_SMTP=true` and understand what you
   are giving up.
-- Check `app.log` for `mail send failed` details.
+- Check `api.err.log` for `mail send failed` details.
 
 ### KyPost does not apply labels
 
@@ -1030,6 +1043,9 @@ inside the container. On systems without systemd, schedule
 - KyPost still provides a service worker and a manifest. The installation flow differs by browser.
 
 ## Project Structure
+
+- `backend/internal/backup/`: KyRecovery adapter, collection and drill checks.
+- `docs/RESTORE.md`: operator backup and offline restore procedure.
 
 - `backend/`: Go API, poller, adapters, config, state, health
 - `frontend/`: React and Vite UI

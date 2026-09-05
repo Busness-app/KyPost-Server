@@ -59,6 +59,11 @@ services:
     #  - "127.0.0.1:11434:11434"  #Uncomment to expose Ollama API
     environment:
       WEB_PORT: 5866
+      KY_LOG_LEVEL: ${KY_LOG_LEVEL:-info}
+      KYPOST_BACKUP_DEPOSIT_INTERVAL: ${KYPOST_BACKUP_DEPOSIT_INTERVAL:-24h}
+      KYPOST_BACKUP_DIR: ${KYPOST_BACKUP_DIR:-}
+      KYPOST_BACKUP_KEEP: ${KYPOST_BACKUP_KEEP:-7}
+      KYPOST_BACKUP_ALLOW_PRIVATE_RECOVERY: ${KYPOST_BACKUP_ALLOW_PRIVATE_RECOVERY:-false}
       # Peers whose X-Forwarded-For/Proto/Host may be believed: a comma-separated
       # list of CIDRs or bare IPs (not hostnames). Empty trusts nothing and uses
       # the connection's own address.
@@ -125,21 +130,9 @@ services:
       - ${OLLAMA_MODELS_HOST_DIR:-./share/ollama/models}:/kypost/ollama-models
     restart: unless-stopped
 
-    # Docker's default is 10 seconds from SIGTERM to SIGKILL, and this container
-    # has four supervised processes to unwind behind one signal: supervisord
-    # stops the API (which drains in-flight HTTP for up to 20s — app.go's
-    # shutdownTimeout) and the daemon (which cancels the poll tick and waits for
-    # the IMAP, SMTP and state writes underneath it to return) before Ollama
-    # unloads a model. Ten seconds cut across all of that, so an ordinary
-    # `docker compose up -d` on a new image could SIGKILL a state write —
-    # duplicate sends and half-written bookkeeping from a routine update.
-    #
-    # 90s is a ceiling, not a delay: a clean stop takes seconds, and this is
-    # only what Docker is willing to wait before losing patience. It has to
-    # exceed supervisord's own stopwaitsecs (supervisord.conf) plus the time
-    # supervisord takes to walk its programs, or the outer deadline fires first
-    # and the inner ones never get to matter.
-    stop_grace_period: 90s
+    # Active backups drain for up to 16 minutes. This exceeds supervisor's
+    # 1000s stopwaitsecs plus teardown. Idle services still stop promptly.
+    stop_grace_period: 17m
 
     # This container runs an LLM in-process with the mail server. Without a
     # cap, the kernel's OOM killer arbitrates between Ollama and the API under

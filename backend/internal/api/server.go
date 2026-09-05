@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Busness-app/kypost-server/backend/internal/adapters/classifier"
+	"github.com/Busness-app/kypost-server/backend/internal/backup"
 	"github.com/Busness-app/kypost-server/backend/internal/captcha"
 	"github.com/Busness-app/kypost-server/backend/internal/config"
 	"github.com/Busness-app/kypost-server/backend/internal/contacts"
@@ -42,7 +43,8 @@ import (
 // Server holds the HTTP surface and its process-wide state.
 //
 // LOCK ORDER: cfgMu before sessMu before pairingMu before userMu before ollamaMu before serverMu before
-// linuxClientMu. Never the reverse. Enforced by TestLockOrderIsRespected, which reads this package's
+// pinProbeMu before linuxClientMu before backupDrainMu. Never the reverse.
+// Enforced by TestLockOrderIsRespected, which reads this package's
 // source and fails on a function that takes one while holding a higher-ranked
 // one — directly, or through any call chain inside this package. Adding a mutex
 // here means adding it to lockRank in lock_order_test.go; one that is missing
@@ -63,6 +65,10 @@ import (
 // lock held, which is safe only because Prepare is called synchronously before
 // any goroutine can reach the others — see Prepare's doc comment.
 type Server struct {
+	// backupDrainMu is innermost: never acquire another Server mutex while held.
+	backupDrainMu   sync.Mutex
+	backupRuns      sync.WaitGroup
+	backupStopping  bool
 	cfgMu           sync.RWMutex
 	cfg             config.Config
 	onConfigUpdated func(config.Config)
@@ -175,6 +181,7 @@ type Server struct {
 	// rooted at the same state directory.
 	classifier   *classifier.HTTPClient
 	globalStore  *state.Store
+	backup       *backup.Service
 	ssoStore     *sso.Store
 	ollamaMu     sync.Mutex
 	ollamaStatus ollamaVersionStatus
@@ -318,7 +325,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		globalStore = nil
 	}
 
-	return &Server{
+	s := &Server{
 		cfg:                      cfg,
 		onConfigUpdated:          onConfigUpdated,
 		logger:                   logger,
@@ -376,6 +383,17 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		wkdStore:                 wkdStore,
 		ssoStore:                 sso.NewStore(configDir),
 	}
+	if globalStore != nil {
+		bc, err := config.LoadBackupConfig()
+		if err != nil {
+			panic(fmt.Errorf("backup config: %w", err))
+		}
+		s.backup, err = backup.New(backup.Dirs{Config: configDir, State: stateDir, Secret: config.SecretDir()}, bc, globalStore, serverVersion)
+		if err != nil {
+			panic(err)
+		}
+	}
+	return s
 }
 
 // misconfiguredCaptchaVerifier stands in for a Verifier that failed to
@@ -480,6 +498,14 @@ func (s *Server) routesAuth(mux *http.ServeMux) {
 // health, users, config, logs, tuning, the classifier/Ollama controls, and
 // the pre-login setup hint.
 func (s *Server) routesAdmin(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/admin/backup/status", s.withAdmin(s.handleBackupStatus))
+	mux.HandleFunc("POST /api/admin/backup/run", s.withAdmin(s.handleBackupRun))
+	mux.HandleFunc("POST /api/admin/backup/drill", s.withAdmin(s.handleBackupDrill))
+	mux.HandleFunc("POST /api/admin/backup/export-capsule", s.withAdmin(s.handleBackupExport))
+	mux.HandleFunc("POST /api/admin/backup/pair-remote", s.withAdmin(s.handleBackupPair))
+	mux.HandleFunc("DELETE /api/admin/backup/pairing", s.withAdmin(s.handleBackupUnpair))
+	mux.HandleFunc("POST /api/admin/backup/pin-key", s.withAdmin(s.handleBackupPinKey))
+	mux.HandleFunc("PUT /api/admin/backup/schedule", s.withAdmin(s.handleBackupSchedule))
 	mux.HandleFunc("/api/health", withPublicRoute(s.handleHealth))
 	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
 	mux.HandleFunc("POST /api/admin/mail/poll-now", s.withAdmin(s.handlePollNow))
@@ -804,7 +830,8 @@ func (s *Server) Run() error {
 }
 
 // Shutdown gracefully stops the HTTP server: it stops accepting new connections
-// immediately and waits for active requests to finish, up to ctx's deadline.
+// immediately and drains ordinary requests up to ctx's deadline, then waits
+// separately for detached backups (including audit) for at most depositBudget.
 // Safe to call even if Prepare was never invoked (a no-op) or before Serve's
 // goroutine has started — the eventual Serve call observes the server is
 // already shutting down and returns promptly instead of blocking on Accept.
@@ -812,7 +839,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.httpServer == nil {
 		return nil
 	}
-	return s.httpServer.Shutdown(ctx)
+	httpErr := s.httpServer.Shutdown(ctx)
+	backupCtx, cancel := context.WithTimeout(context.Background(), depositBudget)
+	defer cancel()
+	return errors.Join(httpErr, s.waitForBackups(backupCtx))
 }
 
 // StartPickupSweeper runs PickupStore.Sweep on an interval for the process

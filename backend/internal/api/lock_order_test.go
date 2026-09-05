@@ -34,6 +34,7 @@ var lockRank = map[string]int{
 	"serverMu":      6,
 	"pinProbeMu":    7,
 	"linuxClientMu": 8,
+	"backupDrainMu": 9,
 }
 
 // TestEveryServerMutexIsRanked closes the hole that made the ordering check

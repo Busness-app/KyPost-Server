@@ -1,7 +1,6 @@
 package classifier
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -87,16 +86,3 @@ func TestClipErrorBody(t *testing.T) {
 // caller: model output reaches classifier.log by a different path than an
 // error body reaches classifier.err.log, and both are bounded only by
 // maxOllamaResponse before this.
-func TestLogLineBoundsEveryWrite(t *testing.T) {
-	var buf bytes.Buffer
-	c := &HTTPClient{}
-	c.logLine(&buf, "[OLLAMA OUTPUT]", strings.Repeat("B", 1<<20))
-
-	out := buf.String()
-	if n := strings.Count(out, "\n"); n != 1 {
-		t.Fatalf("wrote %d lines, want exactly 1", n)
-	}
-	if len(out) > maxErrorBodyBytes+256 {
-		t.Fatalf("wrote a %d-byte line; the writer did not bound it", len(out))
-	}
-}
