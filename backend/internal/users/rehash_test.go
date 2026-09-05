@@ -9,12 +9,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Busness-app/ky-primitives/password"
 	"golang.org/x/crypto/scrypt"
 )
 
-// TestHashPasswordUsesCurrentCost pins the format new hashes are written in:
-// Argon2id, and it must verify.
+// TestHashPasswordUsesCurrentCost pins the format AND the cost new hashes are
+// written with under production params: Argon2id at hashParams, which starts
+// as password.DefaultParams() and is changed only by SetHashParamsForTest —
+// so a test that never calls it (this one) runs at real production strength.
 func TestHashPasswordUsesCurrentCost(t *testing.T) {
+	if hashParams != password.DefaultParams() {
+		t.Fatalf("hashParams = %+v, want the production default %+v — some other test in this "+
+			"package leaked an override", hashParams, password.DefaultParams())
+	}
 	hash, err := HashPassword(context.Background(), "correct-horse-battery-staple")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
@@ -22,17 +29,46 @@ func TestHashPasswordUsesCurrentCost(t *testing.T) {
 	if !strings.HasPrefix(hash, "$argon2id$") {
 		t.Errorf("hash prefix = %q, want $argon2id$", hash[:min(len(hash), 24)])
 	}
+	wantCost := fmt.Sprintf("$%s$m=%d,t=%d,p=%d$", argon2VersionSegment, hashParams.Memory, hashParams.Time, hashParams.Threads)
+	if !strings.Contains(hash, wantCost) {
+		t.Errorf("hash = %q, does not carry the production cost segment %q", hash, wantCost)
+	}
 	if ok, _ := VerifySecretHash(context.Background(), hash, "correct-horse-battery-staple"); !ok {
 		t.Error("a freshly written hash does not verify")
 	}
 }
 
+// mintArgon2 mints a real Argon2id hash at p, so a NeedsRehash fixture that is
+// supposed to look like something this package or the library actually wrote
+// is exactly that — not a hand-assembled string with a salt too short for
+// password.Verify to accept.
+func mintArgon2(t *testing.T, p password.Params) string {
+	t.Helper()
+	h, err := password.HashWith("needs-rehash-fixture", p)
+	if err != nil {
+		t.Fatalf("password.HashWith(%+v): %v", p, err)
+	}
+	return h
+}
+
+// withSegment replaces the $-delimited segment of hash at index (0 is the
+// empty segment before the leading $, 2 is the version, 3 is the params),
+// for fixtures that need to corrupt exactly one field of an otherwise-real
+// hash.
+func withSegment(hash string, index int, replacement string) string {
+	parts := strings.Split(hash, "$")
+	parts[index] = replacement
+	return strings.Join(parts, "$")
+}
+
 // TestNeedsRehashOnlyUpgrades is the safety property: every scrypt hash is
-// retired regardless of the cost it was stored at, but an Argon2id hash at or
-// above the current cost must never report true, or an operator who
-// deliberately raised it would have their accounts silently weakened on next
-// login.
+// retired regardless of the cost it was stored at, but an Argon2id hash that
+// is not strictly weaker than the current cost on some axis must never report
+// true. That must hold per axis — memory, time, AND thread count — or an
+// operator who deliberately raised only one of them would have it silently
+// downgraded back down on the next login.
 func TestNeedsRehashOnlyUpgrades(t *testing.T) {
+	atCurrent := mintArgon2(t, password.DefaultParams())
 	cases := []struct {
 		name    string
 		encoded string
@@ -44,10 +80,19 @@ func TestNeedsRehashOnlyUpgrades(t *testing.T) {
 		{"scrypt stronger than default", "scrypt$1048576$8$1$c2FsdA==$aGFzaA==", true},
 		// Argon2id follows the currently configured cost (production default:
 		// 64 MiB, t=3, p=4).
-		{"argon2id below current", "$argon2id$v=19$m=8192,t=1,p=1$c2FsdA==$aGFzaA==", true},
-		{"argon2id at current", "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA==$aGFzaA==", false},
-		// Deliberately stronger than the current default: leave it alone.
-		{"argon2id stronger", "$argon2id$v=19$m=131072,t=5,p=4$c2FsdA==$aGFzaA==", false},
+		{"argon2id below current", mintArgon2(t, password.Params{Memory: 8 * 1024, Time: 1, Threads: 1}), true},
+		{"argon2id at current", atCurrent, false},
+		// Deliberately stronger than the current default on every axis: leave
+		// it alone.
+		{"argon2id stronger", mintArgon2(t, password.Params{Memory: 131072, Time: 5, Threads: 4}), false},
+		// Stronger ONLY on the thread axis: the axis most likely to regress if
+		// the comparison were symmetric ("!=" instead of "<") rather than
+		// directional. Must not report true either.
+		{"argon2id more threads is not a downgrade", mintArgon2(t, password.Params{Memory: 65536, Time: 3, Threads: 8}), false},
+		// A hash this package's own dependency would refuse to read is not
+		// ours to rehash on a guess.
+		{"argon2id wrong version segment", withSegment(atCurrent, 2, "v=13"), false},
+		{"argon2id non-canonical params (leading zero)", withSegment(atCurrent, 3, "m=65536,t=3,p=04"), false},
 		// Not ours to rehash.
 		{"foreign format", "argon2id$v=19$m=65536,t=3,p=4$abc$def", false},
 		{"garbage", "not-a-hash", false},

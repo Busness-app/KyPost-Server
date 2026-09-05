@@ -33,6 +33,7 @@ import (
 
 	"github.com/Busness-app/ky-primitives/password"
 	"github.com/Busness-app/ky-primitives/recoverycode"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/scrypt"
 )
 
@@ -1970,6 +1971,12 @@ const (
 // at once and kdfSlots bounds it again inside this process.
 var hashParams = password.DefaultParams()
 
+// HashParams reports the Argon2id cost parameters new hashes are currently
+// written with. Callers that cache a derived value whose cost has to match a
+// real account's — see api.timingDummyHash — key that cache on this, not on
+// HashCostN: that reports the unrelated legacy-scrypt fixture cost.
+func HashParams() password.Params { return hashParams }
+
 // SetHashParamsForTest lowers the Argon2id cost so a test suite that mints
 // hundreds of hashes finishes. Refuses outside a test binary and refuses
 // parameters the library would not verify.
@@ -2021,16 +2028,17 @@ func verifyHash(ctx context.Context, encoded, candidate string) (bool, error) {
 	return false, nil
 }
 
-// hashCostN is the N that new hashes are written with, and the floor NeedsRehash
-// measures stored hashes against. It is scryptN everywhere except under
-// SetHashCostForTest. Verification never reads it: verifyScryptHash takes the
-// parameters from the stored hash, so lowering it cannot weaken anything already
-// on disk.
+// hashCostN is the N that LegacyScryptHashForTest mints scrypt fixtures at
+// (via hashScrypt). It is scryptN everywhere except under SetHashCostForTest.
+// New hashes are written by HashPassword, which uses hashParams (Argon2id),
+// not this, and NeedsRehash no longer reads it either: every scrypt hash now
+// reports true unconditionally, since the format itself is retired rather
+// than compared against a live cost floor.
 var hashCostN = scryptN
 
-// HashCostN reports the N new hashes are currently written with. Callers that
-// cache a derived value whose cost has to match a real account's — see
-// api.timingDummyHash — key that cache on this.
+// HashCostN reports the N LegacyScryptHashForTest currently mints scrypt
+// fixtures at. It has nothing to do with the cost of a real account's hash —
+// see HashParams for that.
 func HashCostN() int { return hashCostN }
 
 // MinVerifiableScryptN is the weakest N verifyScryptHash will accept. A hash
@@ -2048,10 +2056,12 @@ const ProductionScryptN = scryptN
 // 128 MiB and ~200 ms per derivation is ruinous for a test suite that mints
 // one to prove the old format still verifies.
 //
-// It panics outside a test binary. It weakens password hashing and is exported
-// from a package production code imports, so a dev-only flag or fixture loader
-// calling it would drop every credential written afterwards to 16 MiB, with
-// NeedsRehash measuring against hashCostN too and never flagging them.
+// It panics outside a test binary. hashCostN only ever feeds hashScrypt, which
+// only LegacyScryptHashForTest calls — HashPassword does not touch it, so this
+// no longer weakens a real account's hash the way it once did. It is exported
+// from a package production code imports regardless, so a stray call from
+// non-test code cannot mint a legacy-format fixture weaker than
+// MinVerifiableScryptN allows.
 //
 // It panics below MinVerifiableScryptN, which verifyScryptHash rejects — a lower
 // setting mints hashes that can never verify.
@@ -2197,10 +2207,20 @@ func verifyScryptHash(ctx context.Context, encoded, candidate string) (bool, err
 	return subtle.ConstantTimeCompare(derived, expected) == 1, nil
 }
 
+// argon2VersionSegment is the version segment a hash this package's Argon2id
+// dependency actually produced must carry — built from the same
+// golang.org/x/crypto/argon2 constant ky-primitives derives with, rather than
+// a hardcoded "v=19", so this cannot drift from what the library accepts.
+var argon2VersionSegment = fmt.Sprintf("v=%d", argon2.Version)
+
 // NeedsRehash reports whether a stored hash should be re-derived from the
 // verified plaintext: every scrypt hash (the format is retired), and an
-// Argon2id hash below the currently configured cost. Malformed or foreign is
-// false; rehashing something this package did not write is a guess.
+// Argon2id hash below the currently configured cost on any axis. A hash
+// stronger on any axis — memory, time, or threads — is left alone: an
+// operator who deliberately raised one of them must not have it silently
+// downgraded because the other two still read "current". Malformed or
+// foreign is false; rehashing something this package did not write is a
+// guess.
 //
 // This compares the embedded cost against hashParams itself rather than
 // delegating to password.NeedsRehash: that library call measures against its
@@ -2216,15 +2236,49 @@ func NeedsRehash(encoded string) bool {
 		return true
 	}
 	parts := strings.Split(encoded, "$")
-	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
+	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" || parts[2] != argon2VersionSegment {
 		return false
 	}
-	var mem, t uint32
-	var threads uint8
-	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &mem, &t, &threads); err != nil {
+	mem, t, threads, ok := parseArgon2Params(parts[3])
+	if !ok {
 		return false
 	}
-	return mem < hashParams.Memory || t < hashParams.Time || threads != hashParams.Threads
+	return mem < hashParams.Memory || t < hashParams.Time || threads < hashParams.Threads
+}
+
+// parseArgon2Params reads "m=<n>,t=<n>,p=<n>" strictly, mirroring
+// ky-primitives' unexported parseParams: every field is parsed with strconv,
+// then re-rendered in canonical form and compared byte-for-byte against
+// segment. A lenient fmt.Sscanf here would accept exactly what the library
+// documents rejecting — trailing garbage, a fourth field, leading zeros, a
+// leading sign — and NeedsRehash reporting true about a string
+// password.Verify would call malformed makes a broken hash look like a
+// working account due for an upgrade rather than one that already fails to
+// authenticate.
+func parseArgon2Params(segment string) (mem, t uint32, threads uint8, ok bool) {
+	fields := strings.Split(segment, ",")
+	if len(fields) != 3 {
+		return 0, 0, 0, false
+	}
+	var values [3]uint64
+	for i, prefix := range [3]string{"m=", "t=", "p="} {
+		if !strings.HasPrefix(fields[i], prefix) {
+			return 0, 0, 0, false
+		}
+		v, err := strconv.ParseUint(strings.TrimPrefix(fields[i], prefix), 10, 32)
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		values[i] = v
+	}
+	if values[2] > 255 {
+		return 0, 0, 0, false
+	}
+	mem, t, threads = uint32(values[0]), uint32(values[1]), uint8(values[2])
+	if canonical := fmt.Sprintf("m=%d,t=%d,p=%d", mem, t, threads); canonical != segment {
+		return 0, 0, 0, false
+	}
+	return mem, t, threads, true
 }
 
 // RehashPassword re-derives id's password hash at the current cost parameters,

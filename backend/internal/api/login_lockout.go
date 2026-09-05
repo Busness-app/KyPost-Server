@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Busness-app/ky-primitives/password"
 	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
@@ -327,39 +328,43 @@ func (l *failureLockout) recordSuccess(username string) {
 	delete(l.entries, username)
 }
 
-// timingDummyHash is a scrypt hash used only to equalize login timing, whether
-// or not the account exists. Its plaintext is irrelevant — the verification is
-// only ever expected to fail, and only its COST matters.
+// timingDummyHash is an Argon2id hash used only to equalize login timing,
+// whether or not the account exists. Its plaintext is irrelevant — the
+// verification is only ever expected to fail, and only its COST matters.
 //
-// Derived at run time from the CURRENT cost parameters. As a hardcoded
-// scrypt$16384$... literal it became cheaper than a real account's hash the
-// instant N was raised to 2^17, returning in ~22 ms against ~224 ms and
-// reopening the account-enumeration oracle it exists to close. Pinned by
+// Derived at run time from the CURRENT Argon2id parameters (users.HashParams),
+// and cached against exactly that — not users.HashCostN, which is the
+// unrelated legacy-scrypt fixture cost LegacyScryptHashForTest mints at. A
+// value cached against the wrong variable goes stale the moment the real cost
+// changes without that variable changing, reopening the account-enumeration
+// oracle this exists to close: the scrypt-era version of this exact bug made
+// a hardcoded scrypt$16384$... dummy cheaper than a real account's hash the
+// instant N was raised to 2^17, returning in ~22 ms against ~224 ms. Pinned by
 // TestLoginTimingDoesNotRevealUnknownUsernames.
 //
 // Computed on demand rather than at package init, so the daemon process — the
-// same binary — does not pay a 128 MiB / ~200 ms derivation for a value it never
-// uses. warmLoginTimingHash forces it during server construction so no request
-// pays the first-call penalty; a slower first response discloses "no such
-// account" just as well as a faster one. Cached against the cost it was derived
-// at, since a value memoized across a cost change equalizes against the wrong
+// same binary — does not pay an Argon2id derivation for a value it never uses.
+// warmLoginTimingHash forces it during server construction so no request pays
+// the first-call penalty; a slower first response discloses "no such account"
+// just as well as a faster one. Cached against the params it was derived at,
+// since a value memoized across a cost change equalizes against the wrong
 // figure.
 var (
-	timingHashMu   sync.RWMutex
-	timingHashVal  string
-	timingHashCost int
+	timingHashMu     sync.RWMutex
+	timingHashVal    string
+	timingHashParams password.Params
 )
 
 func timingDummyHash() string {
-	cost := users.HashCostN()
+	params := users.HashParams()
 	timingHashMu.RLock()
-	cached, cachedCost := timingHashVal, timingHashCost
+	cached, cachedParams := timingHashVal, timingHashParams
 	timingHashMu.RUnlock()
-	if cached != "" && cachedCost == cost {
+	if cached != "" && cachedParams == params {
 		return cached
 	}
 
-	// Derived outside the lock: holding it across a 128 MiB scrypt would
+	// Derived outside the lock: holding it across an Argon2id derivation would
 	// serialize every concurrent unknown-username login behind one derivation.
 	// Two callers racing here both produce a valid hash at the same cost.
 	// context.Background(), not a request's: this hash is process-wide state
@@ -367,14 +372,17 @@ func timingDummyHash() string {
 	// away would make the next caller pay for it again.
 	h, err := users.HashPassword(context.Background(), "kypost-timing-equalization-dummy")
 	if err != nil {
-		// HashPassword only fails on a crypto/rand failure or invalid cost
-		// parameters, neither of which is recoverable or reachable in practice.
-		// An empty string would make VerifySecretHash return immediately and
-		// silently restore the timing oracle, so refuse to start instead.
+		// HashPassword fails on a crypto/rand failure, invalid cost parameters,
+		// or every KDF slot being held (users.ErrKDFBusy, wrapping
+		// password.ErrBusy) — the last of which is now a real possibility under
+		// load, not just a theoretical one. There is still no good fallback: an
+		// empty string would make VerifySecretHash return immediately and
+		// silently restore the timing oracle, so this refuses to start (or,
+		// off the warm-up path, to keep serving) rather than degrade quietly.
 		panic("users.HashPassword failed while deriving the login timing hash: " + err.Error())
 	}
 	timingHashMu.Lock()
-	timingHashVal, timingHashCost = h, cost
+	timingHashVal, timingHashParams = h, params
 	timingHashMu.Unlock()
 	return h
 }
@@ -500,7 +508,7 @@ func (b *loginBudget) settle(delta float64) {
 // unconditionally on every return path.
 func (b *loginBudget) refund() { b.settle(-loginKDFReserveSeconds) }
 
-// equalizeLoginTiming verifies candidate against a throwaway scrypt hash so
+// equalizeLoginTiming verifies candidate against a throwaway Argon2id hash so
 // the unknown-username (and inactive-account) login path costs the same as a
 // real wrong-password check. The result is discarded — it is the COST that
 // matters — but a shed slot is not: returning without deriving is the one

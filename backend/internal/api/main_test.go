@@ -23,8 +23,8 @@ import (
 // every request that touches auth.
 //
 // Production strength is pinned elsewhere: users' TestHashPasswordUsesCurrentCost
-// asserts the written hash prefix directly, in a package that does not apply
-// this override.
+// asserts the actual Argon2id cost parameters the written hash carries, in a
+// package that does not apply this override.
 // Lowering that cost is also what makes the instance-wide login budget
 // meaningless here, so the two overrides belong together. The budget meters
 // SECONDS OF DERIVATION, and a second measured in this binary is a cheap hash
