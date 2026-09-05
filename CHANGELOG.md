@@ -12,7 +12,7 @@ non-prerelease version.
 
 ## Unreleased
 
-- Compact the Backup page with an at-a-glance status row and expandable setup, schedule and history. Explain why actions require a password.
+- Compact the Backup page with an at-a-glance status row and expandable setup, schedule and history. Explain why actions require a password and show stored failure reasons in activity history.
 
 ### Added
 

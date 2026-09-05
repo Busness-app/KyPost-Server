@@ -29,9 +29,24 @@ type Status = {
     action: string;
     outcome: string;
     target: string;
+    details?: string;
   }[];
 };
 const base = "/api/admin/backup/";
+
+function activityError(raw: string | undefined): string | null {
+  try {
+    const details: unknown = JSON.parse(raw || "{}");
+    return typeof details === "object" &&
+      details !== null &&
+      "error" in details &&
+      typeof details.error === "string"
+      ? details.error
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export function Backup() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -392,6 +407,9 @@ export function Backup() {
           {status?.recent.map((row) => (
             <li key={row.id}>
               {row.at} — {row.action}: {row.outcome} {row.target}
+              {activityError(row.details) && (
+                <p>{activityError(row.details)}</p>
+              )}
             </li>
           ))}
         </ul>

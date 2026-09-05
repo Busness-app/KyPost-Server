@@ -152,3 +152,36 @@ it("shows the pinned fingerprint after pairing collapses setup", async () => {
       .closest("details"),
   ).toBeNull();
 });
+
+it("renders stored failure reasons as text without breaking on malformed details", async () => {
+  vi.mocked(getJSON).mockResolvedValue({
+    paired: true,
+    keyId: "key",
+    localCopies: [],
+    intervalSec: 0,
+    recent: [
+      {
+        id: 1,
+        action: "admin.backup_run",
+        outcome: "failure",
+        details: JSON.stringify({ error: "collect failed <img src=x>" }),
+      },
+      {
+        id: 2,
+        action: "admin.backup_run",
+        outcome: "failure",
+        details: "invalid JSON",
+      },
+      {
+        id: 3,
+        action: "admin.backup_run",
+        outcome: "failure",
+        details: '{"error":{}}',
+      },
+    ],
+  });
+  render(<Backup />);
+  await screen.findByText("collect failed <img src=x>");
+  expect(document.querySelector("img")).toBeNull();
+  expect(document.querySelectorAll("li")).toHaveLength(3);
+});
