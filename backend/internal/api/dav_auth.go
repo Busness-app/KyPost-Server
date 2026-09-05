@@ -168,11 +168,15 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 
 		u, err := s.users.GetByUsername(username)
 		if err != nil || !u.Active {
-			// Pay the same password KDF cost a real password check would, so
+			// Pay the same Argon2id cost a real password check would, so
 			// response timing doesn't reveal whether the username exists —
 			// mirrors equalizeLoginTiming's use on the login endpoint. Under
-			// the shared KDF slot: this is unauthenticated, and 128 MiB per
-			// concurrent attempt is otherwise an OOM primitive.
+			// the shared KDF slot: this is unauthenticated, and 64 MiB per
+			// concurrent attempt is otherwise an OOM primitive. An account
+			// still holding a scrypt hash costs more to check for real until
+			// its next successful login or app-password use rehashes it; the
+			// dummy here is always Argon2id at the current parameters, so that
+			// skew never leaks into this comparison.
 			if err := equalizeLoginTiming(r.Context(), password); err != nil {
 				s.davLockout.cancelAttempt(lockKey)
 				writeKDFBusy(w)
@@ -208,6 +212,20 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		if !verified {
 			s.requireDAVAuth(w)
 			return
+		}
+
+		// The credential just verified, so a stale hash format (legacy scrypt,
+		// or an Argon2id hash below the current cost) is upgraded now — the
+		// only moment the plaintext is legitimately in hand. Best-effort: a
+		// failure here (including users.ErrKDFBusy under load) must not fail a
+		// request whose credential already checked out; the file just keeps
+		// its current hash and gets another chance on the next successful use.
+		if users.NeedsRehash(passFile.Hash) {
+			if hash, herr := users.HashPassword(r.Context(), password); herr != nil {
+				s.logger.Error("carddav app-password hash upgrade failed", "user_id", u.ID, "error", herr.Error())
+			} else if werr := s.writeDAVPassword(u.ID, davPasswordFile{Hash: hash, CreatedAt: passFile.CreatedAt}); werr != nil {
+				s.logger.Error("carddav app-password hash upgrade failed to persist", "user_id", u.ID, "error", werr.Error())
+			}
 		}
 
 		s.davLockout.recordSuccess(lockKey)

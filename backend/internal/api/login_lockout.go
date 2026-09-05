@@ -374,11 +374,14 @@ func timingDummyHash() string {
 	if err != nil {
 		// HashPassword fails on a crypto/rand failure, invalid cost parameters,
 		// or every KDF slot being held (users.ErrKDFBusy, wrapping
-		// password.ErrBusy) — the last of which is now a real possibility under
-		// load, not just a theoretical one. There is still no good fallback: an
-		// empty string would make VerifySecretHash return immediately and
-		// silently restore the timing oracle, so this refuses to start (or,
-		// off the warm-up path, to keep serving) rather than degrade quietly.
+		// password.ErrBusy). The last is not expected to fire here in practice:
+		// warmLoginTimingHash forces this derivation synchronously during server
+		// construction, before the process serves any traffic to contend with it
+		// for a slot, and hashParams never changes again in production. There is
+		// still no good fallback: an empty string would make VerifySecretHash
+		// return immediately and silently restore the timing oracle, so this
+		// refuses to start (or, off the warm-up path, to keep serving) rather
+		// than degrade quietly.
 		panic("users.HashPassword failed while deriving the login timing hash: " + err.Error())
 	}
 	timingHashMu.Lock()
@@ -522,10 +525,12 @@ func equalizeLoginTiming(ctx context.Context, candidate string) error {
 // Instance-wide login throttle and the per-IP lockout, both added because the
 // username+IP lockout above bounds the wrong thing: the username comes from the
 // request body, so a caller who never repeats one never trips it, while every
-// attempt against an unknown account runs scrypt on purpose
+// attempt against an unknown account runs an Argon2id derivation on purpose
 // (equalizeLoginTiming, so timing does not reveal whether the account exists) —
 // tens of milliseconds for a 200-byte request, on a host whose other job is
-// running an LLM.
+// running an LLM. An account still holding a scrypt hash (see users.NeedsRehash)
+// costs more than that per real attempt until its next successful login
+// rehashes it; the skew drains as accounts sign in.
 const (
 	// The instance-wide login budget is denominated in SECONDS OF KEY-DERIVATION
 	// WORK, not in requests.
@@ -541,9 +546,12 @@ const (
 	// and a per-IP limit is defeated by using more IPs.
 
 	// loginKDFReserve is what one attempt is assumed to cost when it starts:
-	// one scrypt at HashPassword's parameters, roughly 200 ms of a core at
-	// N=2^17. It is only the opening reservation — what an attempt finally pays
-	// is what it actually took, reconciled by settleCost.
+	// one Argon2id derivation at HashPassword's parameters (users.HashParams,
+	// the RFC 9106 64 MiB/t=3/p=4 profile), roughly 200 ms of a core. An
+	// account still holding a scrypt hash costs more than this reservation
+	// until it rehashes on its next successful login. It is only the opening
+	// reservation — what an attempt finally pays is what it actually took,
+	// reconciled by settleCost.
 	loginKDFReserve        = 200 * time.Millisecond
 	loginKDFReserveSeconds = float64(loginKDFReserve) / float64(time.Second)
 
