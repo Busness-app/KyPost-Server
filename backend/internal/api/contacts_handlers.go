@@ -478,14 +478,25 @@ func (s *Server) handleContactsDAVPassword(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		now := time.Now().UTC().Format(time.RFC3339)
-		if err := s.writeDAVPassword(ac.UserID, davPasswordFile{Hash: hash, CreatedAt: now}); err != nil {
+		// Under the same file lock rehashDAVAppPassword takes, so an in-flight
+		// hash upgrade of the OLD password cannot land on top of this one.
+		if err := fsutil.WithFileLock(s.userCardDAVAuthPath(ac.UserID), func() error {
+			return s.writeDAVPassword(ac.UserID, davPasswordFile{Hash: hash, CreatedAt: now})
+		}); err != nil {
 			http.Error(w, "failed to persist carddav password", http.StatusInternalServerError)
 			return
 		}
 		s.davCredentials.invalidateUser(ac.Username)
 		writeJSON(w, http.StatusOK, map[string]any{"password": raw, "createdAt": now})
 	case http.MethodDelete:
-		if err := os.Remove(s.userCardDAVAuthPath(ac.UserID)); err != nil && !os.IsNotExist(err) {
+		// Same lock: a revoke that lands between an in-flight rehash's re-read
+		// and its write was the resurrection bug — see rehashDAVAppPassword.
+		if err := fsutil.WithFileLock(s.userCardDAVAuthPath(ac.UserID), func() error {
+			if err := os.Remove(s.userCardDAVAuthPath(ac.UserID)); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}); err != nil {
 			http.Error(w, "failed to revoke carddav password", http.StatusInternalServerError)
 			return
 		}

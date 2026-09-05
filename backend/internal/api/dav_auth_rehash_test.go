@@ -6,9 +6,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
@@ -129,6 +131,94 @@ func TestDAVAppPasswordRehashSkipsWhenRevocationRacesIt(t *testing.T) {
 		t.Fatalf("readDAVPassword: %v", err)
 	} else if exists {
 		t.Fatal("a revoked carddav app password was resurrected by a racing rehash")
+	}
+}
+
+// TestDAVAppPasswordWritersSerializeOnTheFileLock is the half the two
+// generation tests cannot reach. Both of them invalidate BEFORE calling the
+// rehash, so they only exercise the case the generation check trivially
+// catches. The window that stayed open was between the rehash's re-read and
+// its write — an AtomicWriteFile, so a file fsync and a directory fsync wide,
+// not "microseconds" — and a revoke landing inside it resurrected the
+// credential permanently.
+//
+// Holding the lock from outside stands in for whichever writer is mid-write.
+// Both the rehash and the DELETE handler must wait for it, which is what makes
+// read-verify-write and revoke mutually exclusive rather than merely narrow.
+func TestDAVAppPasswordWritersSerializeOnTheFileLock(t *testing.T) {
+	srv := newTestServer(t)
+	u, err := srv.users.Create(context.Background(), "dav-rehash-lock", "dav-rehash-lock-password", users.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	const appPassword = "app-specific-password-9012"
+	legacy, err := users.LegacyScryptHashForTest(context.Background(), appPassword)
+	if err != nil {
+		t.Fatalf("LegacyScryptHashForTest: %v", err)
+	}
+	if err := srv.writeDAVPassword(u.ID, davPasswordFile{
+		Hash:      legacy,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDAVPassword: %v", err)
+	}
+
+	// blockedUntilUnlocked runs work while the credential file's lock is held
+	// elsewhere, and fails if it finishes anyway.
+	blockedUntilUnlocked := func(what string, work func()) {
+		t.Helper()
+		release, err := fsutil.LockFile(srv.userCardDAVAuthPath(u.ID))
+		if err != nil {
+			t.Fatalf("LockFile: %v", err)
+		}
+		var once sync.Once
+		unlock := func() { once.Do(release) }
+		defer unlock()
+
+		done := make(chan struct{})
+		go func() {
+			work()
+			close(done)
+		}()
+		select {
+		case <-done:
+			t.Fatalf("%s completed while another writer held the credential file's lock", what)
+		case <-time.After(200 * time.Millisecond):
+		}
+		unlock()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s never completed after the lock was released", what)
+		}
+	}
+
+	gen := srv.davCredentials.currentGeneration()
+	blockedUntilUnlocked("the app-password rehash", func() {
+		srv.rehashDAVAppPassword(context.Background(), u.ID, legacy, appPassword, gen)
+	})
+	f, exists, err := srv.readDAVPassword(u.ID)
+	if err != nil || !exists {
+		t.Fatalf("readDAVPassword after the rehash: exists=%v err=%v", exists, err)
+	}
+	if !strings.HasPrefix(f.Hash, "$argon2id$") {
+		t.Fatalf("stored hash = %q, want it upgraded once the lock was free", f.Hash)
+	}
+
+	blockedUntilUnlocked("the DELETE handler", func() {
+		req := httptest.NewRequest(http.MethodDelete, "/api/contacts/dav-password", nil)
+		req = req.WithContext(context.WithValue(req.Context(), authContextKey{},
+			AuthContext{UserID: u.ID, Username: u.Username, Role: users.RoleUser}))
+		rec := httptest.NewRecorder()
+		srv.handleContactsDAVPassword(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("DELETE dav-password: status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+	if _, exists, err := srv.readDAVPassword(u.ID); err != nil {
+		t.Fatalf("readDAVPassword after DELETE: %v", err)
+	} else if exists {
+		t.Fatal("the credential survived a DELETE that waited for the lock")
 	}
 }
 

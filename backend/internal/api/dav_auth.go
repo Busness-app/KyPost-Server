@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Busness-app/kypost-server/backend/internal/fsutil"
 	"github.com/Busness-app/kypost-server/backend/internal/users"
 )
 
@@ -264,11 +265,18 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 // in server_userscope.go (password reset, MFA clear). Skipping the generation
 // or hash check would let a rehash that started before one of them finished
 // resurrect a deleted credential, or clobber a freshly regenerated one with a
-// re-derivation of the OLD password. All three call
-// davCredentials.invalidateUser, which bumps the generation this compares
-// against, and the re-read closes the remaining window between that bump and
-// this write — see users.Store.RehashPassword for the same shape applied to
-// the login password, verifying inside a lock this file has none of.
+// re-derivation of the OLD password.
+//
+// The generation check catches a writer that finished BEFORE the re-read. What
+// closes the rest is fsutil.WithFileLock: the re-read and the write are one
+// critical section, and all three writers take the same lock, so there is no
+// longer a window between "the file still holds the hash I verified" and the
+// rename that replaces it. That window was not microseconds — writeDAVPassword
+// is an AtomicWriteFile, which fsyncs the temp file and the directory — and a
+// DELETE landing inside it resurrected a revoked credential permanently, since
+// nothing would ever delete it again. Same shape users.Store.RehashPassword
+// uses on the login password; the lock this file "has none of" was a choice,
+// not a constraint.
 func (s *Server) rehashDAVAppPassword(ctx context.Context, userID, verifiedHash, password string, gen uint64) {
 	hash, err := users.HashPassword(ctx, password)
 	if err != nil {
@@ -278,11 +286,14 @@ func (s *Server) rehashDAVAppPassword(ctx context.Context, userID, verifiedHash,
 	if s.davCredentials.currentGeneration() != gen {
 		return
 	}
-	current, exists, err := s.readDAVPassword(userID)
-	if err != nil || !exists || current.Hash != verifiedHash {
-		return
-	}
-	if err := s.writeDAVPassword(userID, davPasswordFile{Hash: hash, CreatedAt: current.CreatedAt}); err != nil {
+	err = fsutil.WithFileLock(s.userCardDAVAuthPath(userID), func() error {
+		current, exists, err := s.readDAVPassword(userID)
+		if err != nil || !exists || current.Hash != verifiedHash {
+			return nil
+		}
+		return s.writeDAVPassword(userID, davPasswordFile{Hash: hash, CreatedAt: current.CreatedAt})
+	})
+	if err != nil {
 		s.logger.Error("carddav app-password hash upgrade failed to persist", "user_id", userID, "error", err.Error())
 	}
 }
