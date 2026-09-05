@@ -15,7 +15,7 @@ non-prerelease version.
 ### Changed
 
 - The backend now uses its public GitHub module path so other modules can import it.
-- Passwords are hashed with Argon2id (ky-primitives). Existing scrypt hashes keep working and are upgraded on the next successful login. CardDAV app passwords and legacy device secrets verify the same way.
+- Passwords are hashed with Argon2id (ky-primitives). Existing scrypt hashes keep working and are upgraded on the next successful login. CardDAV app passwords and legacy device secrets verify the same way. This is the ky-primitives suite-wide RFC 9106 profile (64 MiB, 3 passes, 4 lanes); per-guess cost is lower than the previous scrypt setting in both wall time and memory, a deliberate choice so every product in the suite shares one password policy under one memory budget.
 - TOTP and recovery codes come from ky-primitives. Recovery codes are stored as SHA-256 digests; regenerating them no longer costs ten scrypt derivations. Codes issued before this release still redeem.
 - Removed the stale v1 copy of the KyRecovery pairing spec; the contract lives in kyrecovery-server.
 
