@@ -28,6 +28,17 @@ func TestMaxConcurrentKDFFitsWithinLibraryMemoryBudget(t *testing.T) {
 			"password.MaxMemoryKiB (%d KiB): slots will queue a second time inside the library",
 			MaxConcurrentKDF, password.DefaultParams().Memory, used, password.MaxMemoryKiB)
 	}
+	// The lanes axis is a second, independent dimension of the same library
+	// budget (see password.MaxLanes' doc comment: memory and lanes are taken
+	// together under one acquirer). MaxConcurrentKDF concurrent derivations at
+	// hashParams' thread count must fit inside it too, or slots queue a second
+	// time on this axis even while the memory axis has headroom.
+	lanesUsed := MaxConcurrentKDF * int(password.DefaultParams().Threads)
+	if lanesUsed > password.MaxLanes {
+		t.Fatalf("MaxConcurrentKDF (%d) * Argon2id threads (%d) = %d lanes, exceeds "+
+			"password.MaxLanes (%d): slots will queue a second time inside the library",
+			MaxConcurrentKDF, password.DefaultParams().Threads, lanesUsed, password.MaxLanes)
+	}
 }
 
 // withSaturatedKDF fills every derivation slot and returns a release func. The

@@ -216,16 +216,11 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 
 		// The credential just verified, so a stale hash format (legacy scrypt,
 		// or an Argon2id hash below the current cost) is upgraded now — the
-		// only moment the plaintext is legitimately in hand. Best-effort: a
-		// failure here (including users.ErrKDFBusy under load) must not fail a
-		// request whose credential already checked out; the file just keeps
-		// its current hash and gets another chance on the next successful use.
+		// only moment the plaintext is legitimately in hand. See
+		// rehashDAVAppPassword for why this is guarded rather than an
+		// unconditional write.
 		if users.NeedsRehash(passFile.Hash) {
-			if hash, herr := users.HashPassword(r.Context(), password); herr != nil {
-				s.logger.Error("carddav app-password hash upgrade failed", "user_id", u.ID, "error", herr.Error())
-			} else if werr := s.writeDAVPassword(u.ID, davPasswordFile{Hash: hash, CreatedAt: passFile.CreatedAt}); werr != nil {
-				s.logger.Error("carddav app-password hash upgrade failed to persist", "user_id", u.ID, "error", werr.Error())
-			}
+			s.rehashDAVAppPassword(r.Context(), u.ID, passFile.Hash, password, gen)
 		}
 
 		s.davLockout.recordSuccess(lockKey)
@@ -236,6 +231,44 @@ func (s *Server) withDAVBasicAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey{}, ac)))
 	})
+}
+
+// rehashDAVAppPassword re-derives an app password's hash at the current cost
+// and persists it, but only if nothing has revoked or replaced the credential
+// since gen was snapshotted (before the file was read) and verifiedHash was
+// read from it. Best-effort and silent on every abort: the caller's request
+// already has its answer, and the next successful auth against whatever
+// credential is current retries the upgrade.
+//
+// The guard exists because this runs after TWO derivations queue for up to
+// KDFMaxQueueWait each (VerifySecretHash in the caller, then HashPassword
+// here) — long enough for the credential this is about to persist to have
+// been revoked or replaced underneath it. Three writers race this: DELETE and
+// POST-regenerate in contacts_handlers.go, and revokeAllUserCredentialsExcept
+// in server_userscope.go (password reset, MFA clear). Skipping the generation
+// or hash check would let a rehash that started before one of them finished
+// resurrect a deleted credential, or clobber a freshly regenerated one with a
+// re-derivation of the OLD password. All three call
+// davCredentials.invalidateUser, which bumps the generation this compares
+// against, and the re-read closes the remaining window between that bump and
+// this write — see users.Store.RehashPassword for the same shape applied to
+// the login password, verifying inside a lock this file has none of.
+func (s *Server) rehashDAVAppPassword(ctx context.Context, userID, verifiedHash, password string, gen uint64) {
+	hash, err := users.HashPassword(ctx, password)
+	if err != nil {
+		s.logger.Error("carddav app-password hash upgrade failed", "user_id", userID, "error", err.Error())
+		return
+	}
+	if s.davCredentials.currentGeneration() != gen {
+		return
+	}
+	current, exists, err := s.readDAVPassword(userID)
+	if err != nil || !exists || current.Hash != verifiedHash {
+		return
+	}
+	if err := s.writeDAVPassword(userID, davPasswordFile{Hash: hash, CreatedAt: current.CreatedAt}); err != nil {
+		s.logger.Error("carddav app-password hash upgrade failed to persist", "user_id", userID, "error", err.Error())
+	}
 }
 
 func (s *Server) requireDAVAuth(w http.ResponseWriter) {
