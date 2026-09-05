@@ -1,0 +1,6 @@
+# Opt-in resolver for a private KyRecovery hostname. This resolver also sees
+# IMAP, SMTP and WKD lookups; use only an operator-controlled resolver.
+services:
+  kypost-server:
+    dns:
+      - ${KYPOST_DNS:?set KYPOST_DNS to the LAN resolver}

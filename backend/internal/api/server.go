@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Busness-app/kypost-server/backend/internal/adapters/classifier"
+	"github.com/Busness-app/kypost-server/backend/internal/backup"
 	"github.com/Busness-app/kypost-server/backend/internal/captcha"
 	"github.com/Busness-app/kypost-server/backend/internal/config"
 	"github.com/Busness-app/kypost-server/backend/internal/contacts"
@@ -175,6 +176,7 @@ type Server struct {
 	// rooted at the same state directory.
 	classifier   *classifier.HTTPClient
 	globalStore  *state.Store
+	backup       *backup.Service
 	ssoStore     *sso.Store
 	ollamaMu     sync.Mutex
 	ollamaStatus ollamaVersionStatus
@@ -318,7 +320,7 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		globalStore = nil
 	}
 
-	return &Server{
+	s := &Server{
 		cfg:                      cfg,
 		onConfigUpdated:          onConfigUpdated,
 		logger:                   logger,
@@ -376,6 +378,17 @@ func NewServer(cfg config.Config, logger *logging.Logger, healthSvc *health.Serv
 		wkdStore:                 wkdStore,
 		ssoStore:                 sso.NewStore(configDir),
 	}
+	if globalStore != nil {
+		bc, err := config.LoadBackupConfig()
+		if err != nil {
+			panic(fmt.Errorf("backup config: %w", err))
+		}
+		s.backup, err = backup.New(backup.Dirs{Config: configDir, State: stateDir, Secret: config.SecretDir()}, bc, globalStore, serverVersion)
+		if err != nil {
+			panic(err)
+		}
+	}
+	return s
 }
 
 // misconfiguredCaptchaVerifier stands in for a Verifier that failed to
@@ -480,6 +493,14 @@ func (s *Server) routesAuth(mux *http.ServeMux) {
 // health, users, config, logs, tuning, the classifier/Ollama controls, and
 // the pre-login setup hint.
 func (s *Server) routesAdmin(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/admin/backup/status", s.withAdmin(s.handleBackupStatus))
+	mux.HandleFunc("POST /api/admin/backup/run", s.withAdmin(s.handleBackupRun))
+	mux.HandleFunc("POST /api/admin/backup/drill", s.withAdmin(s.handleBackupDrill))
+	mux.HandleFunc("POST /api/admin/backup/export-capsule", s.withAdmin(s.handleBackupExport))
+	mux.HandleFunc("POST /api/admin/backup/pair-remote", s.withAdmin(s.handleBackupPair))
+	mux.HandleFunc("DELETE /api/admin/backup/pairing", s.withAdmin(s.handleBackupUnpair))
+	mux.HandleFunc("POST /api/admin/backup/pin-key", s.withAdmin(s.handleBackupPinKey))
+	mux.HandleFunc("PUT /api/admin/backup/schedule", s.withAdmin(s.handleBackupSchedule))
 	mux.HandleFunc("/api/health", withPublicRoute(s.handleHealth))
 	mux.HandleFunc("POST /api/health/repair", s.withAdmin(s.handleRepair))
 	mux.HandleFunc("POST /api/admin/mail/poll-now", s.withAdmin(s.handlePollNow))

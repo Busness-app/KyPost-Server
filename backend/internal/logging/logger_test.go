@@ -1,8 +1,9 @@
 package logging
 
 import (
-	"os"
-	"path/filepath"
+	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -34,23 +35,29 @@ func TestStringsToArgsDropsUnpairedArgument(t *testing.T) {
 	}
 }
 
-// TestNewFailsWhenLogFileCannotBeOpened pins the difference between "logging
-// initialized" and "a Logger value exists". app.log being an unwritable path is
-// the realistic shape of this (a stale directory left by a bad mount, a
-// permission change on the volume), and because slog discards write errors,
-// returning success here would mean the process runs with no durable log and no
-// symptom.
-func TestNewFailsWhenLogFileCannotBeOpened(t *testing.T) {
-	logDir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(logDir, "app.log"), 0o755); err != nil {
-		t.Fatalf("mkdir app.log: %v", err)
+func TestSuiteJSONLogger(t *testing.T) {
+	t.Setenv("KY_LOG_LEVEL", "info")
+	var out bytes.Buffer
+	logger, err := NewWithOutput(&out)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	logger, err := New(logDir)
-	if err == nil {
-		if logger != nil {
-			logger.Close()
-		}
-		t.Fatal("New reported success with an unopenable app.log; startup would proceed with no durable log")
+	logger.Info("hello\nforged", "user_id", "u1", "password", "never-emit", "unknown", "never-emit")
+	var line map[string]any
+	if err := json.Unmarshal(out.Bytes(), &line); err != nil {
+		t.Fatal(err)
+	}
+	if line["app"] != "kypost" || line["facility"] != float64(16) || line["severity"] != float64(6) || line["user_id"] != "u1" {
+		t.Fatalf("%v", line)
+	}
+	if strings.Contains(out.String(), "never-emit") || strings.Count(out.String(), "\n") != 1 {
+		t.Fatal(out.String())
+	}
+	if line["dropped_fields"] != float64(2) {
+		t.Fatalf("%v", line)
+	}
+	t.Setenv("KY_LOG_LEVEL", "invalid")
+	if _, err := New(""); err == nil {
+		t.Fatal("invalid level accepted")
 	}
 }

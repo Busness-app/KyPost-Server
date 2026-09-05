@@ -30,6 +30,9 @@ import (
 
 // Run dispatches the process mode and blocks until shutdown for long-running modes.
 func Run(args []string) error {
+	if name, rest, ok := backupSubcommand(args); ok {
+		return runBackupCommand(name, rest, os.Stdin, os.Stdout)
+	}
 	fs := flag.NewFlagSet("kypost-server", flag.ContinueOnError)
 	mode := fs.String("mode", "all", "process mode: daemon, server, all, bootstrap-admin")
 	if err := fs.Parse(args); err != nil {
@@ -43,6 +46,9 @@ func Run(args []string) error {
 		return BootstrapAdmin()
 	}
 
+	if _, err := config.LoadBackupConfig(); err != nil {
+		return err
+	}
 	paths := config.Paths{
 		ConfigFile: filepath.Join(config.ConfigDir(), "config.yaml"),
 		StateDir:   config.StateDir(),
@@ -154,6 +160,11 @@ func runDaemon(ctx context.Context, d runDeps) error {
 	}
 	poller.SetConfigPath(d.configPath)
 	warmupDone := warmupClassifierOnStartup(ctx, d.logger, classifierClient, poller)
+	backupDone, err := startBackupLoop(ctx, d)
+	if err != nil {
+		return err
+	}
+	defer func() { <-backupDone }()
 	poller.Start()
 	d.logger.Info("poller goroutine started")
 	go monitorHealth(ctx, d.logger, d.health)
@@ -213,7 +224,7 @@ func runServer(ctx context.Context, d runDeps) error {
 	select {
 	case <-ctx.Done():
 		cancelSweepers()
-		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 16*time.Minute)
 		defer cancelShutdown()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			d.logger.Error("api server shutdown error", "error", err.Error())
@@ -258,6 +269,11 @@ func runAll(ctx context.Context, d runDeps) error {
 	sweeperCtx, cancelSweepers := context.WithCancel(ctx)
 	defer cancelSweepers()
 
+	backupDone, err := startBackupLoop(ctx, d)
+	if err != nil {
+		return err
+	}
+	defer func() { <-backupDone }()
 	poller.Start()
 	d.logger.Info("poller goroutine started")
 	startBackgroundSweepers(sweeperCtx, srv)
@@ -278,7 +294,7 @@ func runAll(ctx context.Context, d runDeps) error {
 	// context.Background()-based contexts. Stop is non-blocking, so its position
 	// relative to Shutdown does not affect correctness.
 	cancelSweepers()
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 16*time.Minute)
 	defer cancelShutdown()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		d.logger.Error("api server shutdown error", "error", err.Error())

@@ -547,8 +547,8 @@ func TestHandleMessage_StopRuleShortCircuitsClassification(t *testing.T) {
 // the message again — a failed IMAP command silently discarded the user's rule.
 // An earlier version of this test asserted that retirement as correct.
 func TestHandleMessage_StopRuleActionFailureDefersInsteadOfClaimingSuccess(t *testing.T) {
-	logDir := t.TempDir()
-	logger, err := logging.New(logDir)
+	var logs bytes.Buffer
+	logger, err := logging.NewWithOutput(&logs)
 	if err != nil {
 		t.Fatalf("logging.New: %v", err)
 	}
@@ -612,11 +612,7 @@ func TestHandleMessage_StopRuleActionFailureDefersInsteadOfClaimingSuccess(t *te
 		t.Fatalf("expected no decision claiming the rule was applied, got %+v", decisions)
 	}
 
-	logBytes, err := os.ReadFile(filepath.Join(logDir, "app.log"))
-	if err != nil {
-		t.Fatalf("reading app.log: %v", err)
-	}
-	logText := string(logBytes)
+	logText := logs.String()
 	if !strings.Contains(logText, "rule action failed") {
 		t.Fatalf("expected an ERROR log line for the failed action, got log:\n%s", logText)
 	}

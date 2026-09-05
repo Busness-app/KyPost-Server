@@ -48,7 +48,7 @@ function readCsrfToken(): string {
   return match ? decodeURIComponent(match[1]) : "";
 }
 
-async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
+async function requestResponse(path: string, init?: RequestInit): Promise<Response> {
   const method = (init?.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = { ...(init?.headers as Record<string, string> | undefined) };
   if (method !== "GET" && method !== "HEAD") {
@@ -109,7 +109,12 @@ async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
     const message = detail ? `request failed: ${response.status} - ${detail}` : `request failed: ${response.status}`;
     throw new HttpError(message, response.status, body);
   }
-  if (response.status === 204) {
+  return response;
+}
+
+async function requestJSON<T>(path: string, init?: RequestInit): Promise<T> {
+ const response = await requestResponse(path, init);
+ if (response.status === 204) {
     // No body to parse (e.g. DELETE endpoints that answer 204 No Content).
     // response.json() would throw on the empty body, so short-circuit here.
     return undefined as T;
@@ -157,4 +162,10 @@ export async function deleteJSON<T>(path: string, body?: unknown): Promise<T> {
     method: "DELETE",
     ...(body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {})
   });
+}
+
+// Capsule downloads share authentication, CSRF and error handling with JSON calls.
+export async function postBlob(path: string, body: unknown): Promise<Blob> {
+ const response = await requestResponse(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+ return response.blob();
 }

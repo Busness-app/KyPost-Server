@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -96,8 +97,8 @@ func TestMigrateLegacySingleUserData(t *testing.T) {
 // TestCopyIfMissing_MissingSourceStaysSilent verifies that a genuinely-missing source file
 // doesn't produce a log error (expected condition).
 func TestCopyIfMissing_MissingSourceStaysSilent(t *testing.T) {
-	logDir := t.TempDir()
-	logger, err := logging.New(logDir)
+	var logOutput bytes.Buffer
+	logger, err := logging.NewWithOutput(&logOutput)
 	if err != nil {
 		t.Fatalf("logging.New: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestCopyIfMissing_MissingSourceStaysSilent(t *testing.T) {
 	}
 
 	// Check logs: should have no error logs (expected condition).
-	logBytes, err := os.ReadFile(filepath.Join(logDir, "app.log"))
+	logBytes, err := logOutput.Bytes(), error(nil)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unexpected error reading log: %v", err)
 	}
@@ -128,8 +129,8 @@ func TestCopyIfMissing_MissingSourceStaysSilent(t *testing.T) {
 // TestCopyIfMissing_ReadErrorLogged verifies that unexpected read errors (not os.ErrNotExist)
 // are logged appropriately.
 func TestCopyIfMissing_ReadErrorLogged(t *testing.T) {
-	logDir := t.TempDir()
-	logger, err := logging.New(logDir)
+	var logOutput bytes.Buffer
+	logger, err := logging.NewWithOutput(&logOutput)
 	if err != nil {
 		t.Fatalf("logging.New: %v", err)
 	}
@@ -156,7 +157,7 @@ func TestCopyIfMissing_ReadErrorLogged(t *testing.T) {
 	}
 
 	// Check logs: should have an error log for this unexpected condition.
-	logBytes, err := os.ReadFile(filepath.Join(logDir, "app.log"))
+	logBytes, err := logOutput.Bytes(), error(nil)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unexpected error reading log: %v", err)
 	}

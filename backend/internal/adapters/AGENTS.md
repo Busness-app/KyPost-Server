@@ -30,6 +30,8 @@ All code under `backend/internal/adapters/`. Owned by the backend team. Changes 
 - `client.go` — high-level interface: accepts prompt + email text, returns raw model output string
 - `http_client.go` — low-level transport: request construction, admission control, retry loop, `Stats()` for queue depth
 
+- Classifier diagnostics use the process slog handler (shared JSON stderr). Never log model output, prompts or response snippets; report byte counts and generic failure messages only. The adapter owns no log files.
+
 ### Shared Rules
 
 - Adapters do not read or write application state (`STATE_DIR`)

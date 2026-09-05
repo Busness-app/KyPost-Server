@@ -14,7 +14,7 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 - Module path: `github.com/Busness-app/kypost-server/backend`
 - Entry point: `cmd/main.go` → `app.Run(os.Args)`
 - All business logic lives under `internal/`; `cmd/` contains only the entry point
-- Binary output: `kypost-server`, deployed to `/app/bin/kypost-server` in the container
+- Binary output: `kypost-server`, deployed to `/usr/local/bin/kypost-server` in the container
 - HTTP API listens on `WEB_PORT` (default 5866)
 - Three runtime modes: `daemon` (poller only), `server` (API only), `all` (both)
 - In Docker `server` and `daemon` run as separate processes that share no memory; all cross-process coordination happens through disk. Any store mutated by both processes must re-read from disk before mutating and write atomically (see `state.Store` and `users.Store`)
@@ -75,8 +75,9 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 - **The attachment endpoints serve the message's OUTER MIME parts and nothing else, at exactly one IMAP fetch per request.** There is no server-side decrypt-and-re-index path: for a PGP/MIME message the outer part IS the armored ciphertext, the browser unwraps it and resolves indexes inside it. `serveAttachmentList` used to probe part 0 and `serveAttachmentDownload` used to re-probe on `ErrAttachmentNotFound`, both to feed `pgpInnerAttachments` — which, once server custody was retired, could never succeed: every return site of `decryptPGPPayload` sets `KeepPayload` or a non-empty `DecryptError`, and that function gated on exactly those. So each of those endpoints paid a second full `GetEmails` download and MIME parse (bounded only by `mailmsg.MaxInboundMessageBytes`) to ask a question guaranteed to answer "no". Neither `go vet` nor staticcheck's `unused` can see this, because the dead functions were called — `TestEncryptedAttachmentRequestsCostOneFetch` is what pins it instead. Restoring any such path means proving `decryptPGPPayload` can succeed first
 - Contact photos (`api/contacts_photo.go`): 5 MiB per photo, 200 MiB per account, content-hashed filenames, reference-counted sweep. **Every content type in `contentTypeExt` must have a decoder registered by a blank import in that file** — the upload path gates on `image.DecodeConfig`, so an advertised type with no decoder behind it is rejected 100% of the time with "file is not a decodable image". `image/webp` was exactly that (Go's stdlib has no webp decoder as of 1.26) and has been removed; restoring it means adding `golang.org/x/image/webp`, not a map entry. **The FILENAME is content-hashed; the URL is not.** `GET /api/contacts/{id}/photo` is keyed by contact UID, so replacing or deleting a photo leaves the URL unchanged — which makes it ineligible for `immutable` (a browser then never revalidates, not even on an explicit reload, and paints a replaced or deleted photo for up to a year). It answers `private, no-cache`, which still costs one conditional request rather than a re-download because `http.ServeFile` emits `Last-Modified` and honours `If-Modified-Since`. A `?ref=` cache-buster is not the fix: the route is `withMailAuth`, so paired native devices build this URL themselves outside this repo. Only `assets/` (hashed filenames) is `immutable`
 - Secrets (IMAP passwords) are encrypted at rest with the single master key `$SECRET_DIR/imap-config.key`
-- Logs are structured JSON, written to stdout and a rotating file (16 MB max × 8 backups) under `LOG_DIR`
-- **`logging.New` fails closed when it cannot open `app.log`.** `slog` discards write errors, so a rotating writer whose initial `open` failed produced a process that ran with no durable log and no symptom — the security and incident record simply was not there when someone went looking. `newRotatingWriter`/`NewRotatingWriter` return that error; startup refuses. The classifier's three diagnostic logs (`classifier*.log`) are the deliberate exception: they report the failure and keep the writer, which reopens on demand, because a classifier that cannot write its transcript should still classify mail
+- Application logs use `ky-primitives/logging` JSON on stderr; `KY_LOG_LEVEL` defaults to info and invalid values refuse startup. The adapter retains redaction and declares a fixed field vocabulary; unknown fields are dropped and counted. Supervisord captures/rotates stderr; no application-owned log files remain. Classifier diagnostics never include model text.
+- Backups use `ky-primitives/recoveryclient` v0.5.1. `internal/backup/` owns collection, token sealing, locking and drill checks; the library owns capsule cryptography and transport. API mutations require admin session, CSRF and the current account credential. The daemon owns scheduling; both processes drain an active backup for up to 16 minutes on shutdown.
+
 
 ### Internal Package Layout
 
@@ -108,7 +109,8 @@ All code under `backend/`. Produces the `kypost-server` binary consumed by the c
 | `mailcache/` | Per-user, per-mailbox mail metadata cache (`mailcache.json`); not permanent like `contacts/` — represents only the current top-N window, warmed by both `api/` (live-fetch fallback) and `processor/` (opportunistic, INBOX-only); instantiated per user directory in both processes |
 | `fsutil/` | Shared atomic file write + UUIDv4 helpers. Directories are created `0700` to match the `0600` secrets written into them; an already-existing directory keeps its mode |
 | `health/` | Health status; sticky flags that are reported but deliberately do NOT flip `Healthy`: `aiCreditsExhausted`, `nativePushFailing`, `classifierFailing`. `Healthy` drives container restarts, and none of these are fixed by one — a missing Ollama model in particular is reported here rather than by restarting the container that failed to pull it |
-| `logging/` | Structured logger; rotating file writer |
+| `logging/` | Shared JSON stderr logger adapter and field redaction |
+| `backup/` | Sealed backup collection, pairing, schedule, audit and restore drills |
 | `redaction/` | Regex-based PII masking applied to sender, subject, and body before prompting Ollama (shared engine, rebuilt on pattern change) |
 
 ### Classification Loop (daemon mode)
@@ -246,14 +248,10 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 
 | File | Written by | Content |
 |------|------------|--------|
-| `app.log` | Go backend Logger | Structured API/app events |
 | `api.log` / `api.err.log` | supervisord | stdout/stderr of the `api` process |
 | `daemon.log` / `daemon.err.log` | supervisord | stdout/stderr of the `daemon` process |
 | `ollama.log` / `ollama.err.log` | supervisord | Ollama runtime output |
 | `ollama-model.log` / `ollama-model.err.log` | supervisord | Model installer output, including pull retries. Separate files because two supervised programs sharing one rotate it out from under each other |
-| `classifier.log` | classifier adapter | Ollama raw output |
-| `classifier-server.log` | classifier adapter | Classify/warmup trace lines |
-| `classifier.err.log` | classifier adapter | Classifier error lines |
 | `bootstrap.log` / `bootstrap.err.log` | supervisord | Bootstrap script output |
 | `supervisord.log` | supervisord | Process manager events |
 
@@ -267,7 +265,7 @@ Auth values: `no` (public), `yes` (any signed-in user), `admin` (admin role requ
 - PII redaction must be applied before any text is sent to Ollama
 - User-scoped filesystem paths must pass user IDs through `fsutil.SafePathComponent`; malformed or legacy IDs must never become path components that can escape the configured users directory.
 - The shared Logger redacts sensitive key/value fields before writing structured logs; pairing-secret failures must log only the safe remediation message, never secret-store paths or raw error text
-- **Correspondence metadata never reaches `app.log`.** `GET /api/logs` serves that file to any admin, and an admin has no mailbox access to other users. The forbidden field list is machine-checked by `log_privacy_test.go` in both `api/` and `processor/` — it names `sender`, `subject`, `body`, `snippet` and `recipient`, and a field missing from it is simply not checked, which is how four send-failure lines came to log recipient addresses. Log an index or a count instead
+- **Correspondence metadata never reaches application logs.** `GET /api/logs` serves captured logs to any admin, and an admin has no mailbox access to other users. The forbidden field list is machine-checked by `log_privacy_test.go` in both `api/` and `processor/` — it names `sender`, `subject`, `body`, `snippet` and `recipient`, and a field missing from it is simply not checked, which is how four send-failure lines came to log recipient addresses. Log an index or a count instead
 - Do not add dependencies outside the go.mod without explicit approval
 - **Cutting a release**: bump `serverVersion` in `internal/api/server_version.go` AND `frontend/package.json` (plus its lockfile) to the same value, in the same commit as the tag, add the release notes to `CHANGELOG.md`, and publish the GitHub release with a dotted-numeric tag (`v0.2.0`, not `v0.2-alpha`). `release-image.yml` now enforces the agreement rather than trusting it: it refuses to publish a tag that disagrees with either version source, and refuses a commit CI never passed. It then publishes the immutable `0.2.0` image, attests it, verifies the attestation, and only then promotes that exact digest to `stable` — never backward, and one release at a time. The host updater resolves stable to a digest and verifies the GitHub attestation before deployment. Every install polls this repo's releases hourly, emails its admin once per newly-seen release, and shows the cached result in Settings; a tag that is not dotted-numeric fails the comparison closed and no one is told, and a `serverVersion` left behind mails everyone about a release they are already running
 
@@ -283,6 +281,8 @@ This list is the CI gate, in the order `ci-backend-api` and `ci-backend-other` r
 - `go test -race -count=1 -timeout=20m ./...` must pass. The `-timeout` is not optional: `internal/api` alone exceeds Go's default 600s under `-race`, which is why CI splits it into its own job and passes `-timeout=20m`. Running plain `go test -race ./...` locally reports a timeout that CI would not see
 
 ## Child DOX Index
+
+- `internal/backup/` — KyRecovery adapter and verification recipe; see [internal/backup/AGENTS.md](internal/backup/AGENTS.md)
 
 - `internal/adapters/` — external protocol clients (IMAP + Ollama); see [internal/adapters/AGENTS.md](internal/adapters/AGENTS.md)
 - `internal/contacts/` — per-user address book storage; see [internal/contacts/AGENTS.md](internal/contacts/AGENTS.md)

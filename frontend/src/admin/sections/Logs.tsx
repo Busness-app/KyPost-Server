@@ -11,7 +11,7 @@ const REFRESH_OPTIONS = [
 const HIDDEN_LOG_FILES = ["classifier.log"];
 
 // Files that should always appear first, in this order.
-const PINNED_LOG_ORDER = ["app.log", "classifier.log", "classifier-error.log"];
+const PINNED_LOG_ORDER = ["api.err.log", "daemon.err.log", "ollama.log"];
 
 
 function sortLogFiles(files: string[]): string[] {
@@ -122,7 +122,7 @@ function LogViewer({ filename }: { filename: string }) {
 
 export function Logs() {
   const [files, setFiles]   = useState<string[]>([]);
-  const [active, setActive] = useState<string>("app.log");
+  const [active, setActive] = useState<string>("api.err.log");
   // "The list could not be read" and "there are no logs" are the same picture
   // to an administrator, and the first one is most likely during exactly the
   // incident they opened this page to investigate.

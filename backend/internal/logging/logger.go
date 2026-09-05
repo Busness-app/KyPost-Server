@@ -1,40 +1,51 @@
 package logging
 
 import (
+	kylog "github.com/Busness-app/ky-primitives/logging"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
-type Logger struct {
-	logger *slog.Logger
-	writer *rotatingWriter
-}
+// Logger adapts existing flat string fields to the suite's filtering handler.
+type Logger struct{ logger *slog.Logger }
 
-func New(logDir string) (*Logger, error) {
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return nil, err
-	}
-	// A logger that cannot open its file is a failed dependency, not a
-	// degraded one: this is the log operators read after an incident, and
-	// slog silently discards write errors, so nothing downstream would ever
-	// notice the absence.
-	w, err := newRotatingWriter(filepath.Join(logDir, "app.log"), 16*1024*1024, 8)
+// New retains its directory argument for existing callers; the process writes
+// only JSON to stderr. The supervisor owns capture and rotation.
+func New(_ string) (*Logger, error) { return NewWithOutput(nil) }
+func NewWithOutput(out io.Writer) (*Logger, error) {
+	cfg, err := kylog.FromEnv()
 	if err != nil {
 		return nil, err
 	}
-	mw := io.MultiWriter(os.Stdout, w)
-	return &Logger{
-		logger: slog.New(slog.NewTextHandler(mw, nil)),
-		writer: w,
-	}, nil
+	cfg.App = "kypost"
+	cfg.Out = out
+	logger, err := kylog.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Logger{logger: slog.New(logger.Handler())}, nil
 }
+func (l *Logger) Handler() slog.Handler { return l.logger.Handler() }
+func (l *Logger) Close() error          { return nil }
 
-func (l *Logger) Close() error {
-	return l.writer.Close()
-}
+// Explicit product vocabulary. Unknown keys are dropped and counted by the
+// library; declarations never come from a request or a call site's key string.
+var (
+	_ = kylog.DeclareString("error")
+	_ = kylog.DeclareString("reason")
+	_ = kylog.DeclareString("file")
+	_ = kylog.DeclareString("path")
+	_ = kylog.DeclareString("model")
+	_ = kylog.DeclareString("mode")
+	_ = kylog.DeclareString("port")
+	_ = kylog.DeclareString("label")
+	_ = kylog.DeclareString("attempt")
+	_ = kylog.DeclareString("devices")
+	_ = kylog.DeclareString("digest")
+	_ = kylog.DeclareString("key_id")
+	_ = kylog.DeclareString("message_id")
+)
 
 func (l *Logger) Info(msg string, kv ...string) {
 	l.logger.Info(msg, stringsToArgs(kv)...)
