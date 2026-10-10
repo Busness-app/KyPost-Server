@@ -27,6 +27,14 @@ describe("applyInboxDelta", () => {
     expect(next.Primary.map((e) => e.messageId)).toEqual(["1"]);
   });
 
+  it("drops messages that aged out of the window", () => {
+    const next = applyInboxDelta(
+      { Primary: [email("1"), email("2")] },
+      { tabs: ["Primary"], byTab: { Primary: [] }, agedOut: ["1"] }
+    );
+    expect(next.Primary.map((e) => e.messageId)).toEqual(["2"]);
+  });
+
   it("inserts new messages", () => {
     const next = applyInboxDelta(
       { Primary: [email("1")] },

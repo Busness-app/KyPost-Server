@@ -208,6 +208,11 @@ func TestNativeMailboxClientAPI(t *testing.T) {
 	if len(emails) != 1 || emails[0].Status != "read" || !strings.Contains(emails[0].Body, "owner body") {
 		t.Fatalf("changed body/flags: %+v", emails)
 	}
+	requireOK(request("POST", "/api/inbox/actions", map[string]any{"action": "unread", "mailbox": "INBOX", "messageIds": []string{id}}, true, owner))
+	if got := allEmails(decodeInboxResponse(t, request("GET", "/api/inbox?mailbox=INBOX&since=0&bodies=0", nil, false, owner))); len(got) != 1 || got[0].Status != "unread" {
+		t.Fatalf("unread action: %+v", got)
+	}
+	requireOK(request("POST", "/api/inbox/actions", map[string]any{"action": "read", "mailbox": "INBOX", "messageIds": []string{id}}, true, owner))
 	requireOK(request("POST", "/api/inbox/folders", map[string]string{"parent": "INBOX", "name": "Work"}, true, owner))
 	requireOK(request("POST", "/api/inbox/actions", map[string]any{"action": "move", "mailbox": "INBOX", "targetMailbox": "INBOX/Work", "messageIds": []string{id}}, true, owner))
 	if rec := request("GET", "/api/mail/body"+query, nil, true, owner); rec.Code != 404 {

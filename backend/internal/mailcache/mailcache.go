@@ -22,6 +22,7 @@ package mailcache
 import (
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // Entry is one cached message's metadata (and, opportunistically, body) for
@@ -219,10 +220,21 @@ type SyncResult struct {
 	// Removed is messages that left the window, filtered by the caller's
 	// cursor exactly like New/Updated: every removal stamped with a Rev
 	// greater than `since`, not merely the ones this particular call
-	// observed. See Removal and Store.Sync.
+	// observed. See Removal and Store.Sync. Messages that only aged out of
+	// the bottom of a full window are in AgedOut instead.
 	Removed []Removal
+	// AgedOut is messages pushed below a full window by newer mail. They
+	// still exist; a client keeps them. Same cursor filtering as Removed.
+	AgedOut []Removal
 	// Cursor is the window's new high-water Rev.
 	Cursor int64
+	// Reset means `since` was not a cursor this window issued, so the result
+	// was computed as for since=0: a full window, not a delta.
+	Reset bool
+	// HasMore means the oldest message in a full window is new to the caller,
+	// so newer-than-cursor mail may lie below the window: page it with
+	// before= from the oldest live message.
+	HasMore bool
 }
 
 // Removal is a message that left the window, retained so it can be reported to
@@ -239,6 +251,24 @@ type Removal struct {
 	// Rev is the window sequence value at which the removal was observed,
 	// which is what makes it comparable against a caller's cursor.
 	Rev int64 `json:"rev"`
+	// AgedOut marks a message that fell below a full window rather than one
+	// that left the mailbox.
+	AgedOut bool `json:"agedOut,omitempty"`
+}
+
+// WindowKey is the Sync window for mailboxKey at a non-default limit. Each
+// limit keeps its own window and cursor, so a 50-message client and a
+// 500-message client no longer reset each other's comparison state. The NUL
+// separator cannot occur in a mailbox name (ValidateMailboxName refuses
+// control characters).
+func WindowKey(mailboxKey string, limit int) string {
+	return mailboxKey + "\x00" + strconv.Itoa(limit)
+}
+
+// windowMailbox strips a WindowKey suffix.
+func windowMailbox(key string) string {
+	mailbox, _, _ := strings.Cut(key, "\x00")
+	return mailbox
 }
 
 // entryMeta is the subset of fields Entry and Overview share, used to

@@ -37,7 +37,7 @@ func TestServeInboxBodiesOff(t *testing.T) {
 			t.Fatalf("Upsert: %v", err)
 		}
 		rec := httptest.NewRecorder()
-		srv.serveInbox(rec, context.Background(), userID, &fakeMailClient{}, cache, config.Default(), "", 1, 0, false, false)
+		srv.serveInbox(rec, context.Background(), userID, &fakeMailClient{}, cache, config.Default(), "", 1, 0, false, false, false)
 		assertNoBodies(t, rec)
 	})
 
@@ -48,7 +48,7 @@ func TestServeInboxBodiesOff(t *testing.T) {
 				AtUTC: "2026-01-01T00:00:00Z", Body: "body-1", BodyMode: "plain"},
 		}}
 		rec := httptest.NewRecorder()
-		srv.serveInbox(rec, context.Background(), userID, fake, testInboxCache(t), config.Default(), "", 10, 0, false, false)
+		srv.serveInbox(rec, context.Background(), userID, fake, testInboxCache(t), config.Default(), "", 10, 0, false, false, false)
 		assertNoBodies(t, rec)
 	})
 
@@ -61,7 +61,7 @@ func TestServeInboxBodiesOff(t *testing.T) {
 			bodies: map[int]string{1: "body-1"},
 		}
 		rec := httptest.NewRecorder()
-		srv.serveInbox(rec, context.Background(), userID, fake, testInboxCache(t), config.Default(), "", 10, 0, true, false)
+		srv.serveInbox(rec, context.Background(), userID, fake, testInboxCache(t), config.Default(), "", 10, 0, true, false, false)
 		assertNoBodies(t, rec)
 	})
 }
@@ -97,7 +97,7 @@ func TestServeInboxBodiesOffStillWarmsTheCache(t *testing.T) {
 			AtUTC: "2026-01-01T00:00:00Z", Body: "body-1", BodyMode: "plain"},
 	}}
 	rec := httptest.NewRecorder()
-	srv.serveInbox(rec, context.Background(), userID, fake, cache, config.Default(), "", 1, 0, false, false)
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, config.Default(), "", 1, 0, false, false, false)
 
 	entries, warmed, err := cache.Snapshot("INBOX", 1)
 	if err != nil {
@@ -121,7 +121,7 @@ func TestInboxKeepsBodiesByDefault(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 	rec := httptest.NewRecorder()
-	srv.serveInbox(rec, context.Background(), all[0].ID, &fakeMailClient{}, cache, config.Default(), "", 1, 0, false, true)
+	srv.serveInbox(rec, context.Background(), all[0].ID, &fakeMailClient{}, cache, config.Default(), "", 1, 0, false, true, false)
 
 	emails := allEmails(decodeInboxResponse(t, rec))
 	if len(emails) != 1 || emails[0].Body != "body-1" || emails[0].BodyMode != "plain" {

@@ -62,7 +62,7 @@ func TestInboxPayloadSize(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/api/inbox?limit=500", nil)
 			req.Header.Set("Accept-Encoding", acceptEncoding)
 			withGzip(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				srv.serveInbox(w, context.Background(), userID, &fakeMailClient{}, cache, cfg, "", count, 0, false, withBodies)
+				srv.serveInbox(w, context.Background(), userID, &fakeMailClient{}, cache, cfg, "", count, 0, false, withBodies, false)
 			})).ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
@@ -109,12 +109,12 @@ func TestInboxDeltaPayloadSize(t *testing.T) {
 	fake := &fakeMailClient{overviews: overviewsFromEntries(entries)}
 
 	rec1 := httptest.NewRecorder()
-	srv.serveInbox(rec1, context.Background(), userID, fake, cache, cfg, "", count, 0, true, false)
+	srv.serveInbox(rec1, context.Background(), userID, fake, cache, cfg, "", count, 0, true, false, false)
 	first := decodeInboxResponse(t, rec1)
 	t.Logf("delta since=0 (cold client), bodies=0: %s", human(int64(rec1.Body.Len())))
 
 	rec2 := httptest.NewRecorder()
-	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", count, first.Cursor, true, false)
+	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", count, first.Cursor, true, false, false)
 	t.Logf("delta since=%d (warm client, nothing changed): %s", first.Cursor, human(int64(rec2.Body.Len())))
 }
 
@@ -150,7 +150,7 @@ func TestInboxWarmPathReachability(t *testing.T) {
 			}
 			fake := &fakeMailClient{}
 			rec := httptest.NewRecorder()
-			srv.serveInbox(rec, context.Background(), all[0].ID, fake, cache, config.Default(), "", 500, 0, false, true)
+			srv.serveInbox(rec, context.Background(), all[0].ID, fake, cache, config.Default(), "", 500, 0, false, true, false)
 			t.Logf("cached=%d classified=%v -> live IMAP body fetches: %d (0 = served from cache)",
 				tc.cached, tc.classified, fake.unreadCalls)
 		})

@@ -64,7 +64,7 @@ func TestServeInbox_SmallMailboxNeverWarmsAtClientLimit(t *testing.T) {
 	const clientLimit = 500
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()
-		srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", clientLimit, 0, false, false)
+		srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", clientLimit, 0, false, false, false)
 		if rec.Code != 200 {
 			t.Fatalf("call %d: status = %d, body=%s", i, rec.Code, rec.Body.String())
 		}
@@ -96,7 +96,7 @@ func TestServeInbox_CursorReloadCostsNoBodyFetch(t *testing.T) {
 
 	// First load: since=0, a full snapshot. Bodies are fetched once.
 	rec := httptest.NewRecorder()
-	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", clientLimit, 0, true, false)
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", clientLimit, 0, true, false, false)
 	if rec.Code != 200 {
 		t.Fatalf("snapshot: status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -113,7 +113,7 @@ func TestServeInbox_CursorReloadCostsNoBodyFetch(t *testing.T) {
 
 	// The reload after a delete, carrying the cursor. Nothing is new.
 	rec2 := httptest.NewRecorder()
-	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", clientLimit, first.Cursor, true, false)
+	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", clientLimit, first.Cursor, true, false, false)
 	if rec2.Code != 200 {
 		t.Fatalf("delta: status = %d, body=%s", rec2.Code, rec2.Body.String())
 	}
@@ -139,14 +139,14 @@ func TestServeInbox_CursorReloadReportsTheDeletedMessage(t *testing.T) {
 	fake := &fakeMailClient{overviews: inboxTestOverviews(3), bodies: map[int]string{1: "b", 2: "b", 3: "b"}}
 
 	rec := httptest.NewRecorder()
-	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 500, 0, true, false)
+	srv.serveInbox(rec, context.Background(), userID, fake, cache, cfg, "", 500, 0, true, false, false)
 	cursor := decodeInboxResponse(t, rec).Cursor
 
 	// UID 2 is deleted: it is gone from the next overview fetch.
 	fake.overviews = []imapadapter.Overview{inboxTestOverviews(3)[0], inboxTestOverviews(3)[2]}
 
 	rec2 := httptest.NewRecorder()
-	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", 500, cursor, true, false)
+	srv.serveInbox(rec2, context.Background(), userID, fake, cache, cfg, "", 500, cursor, true, false, false)
 	resp := decodeInboxResponse(t, rec2)
 
 	found := false

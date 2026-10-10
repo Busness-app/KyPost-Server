@@ -36,7 +36,20 @@ All code under `backend/internal/mailcache/`. Consumed by both `api/`
   cached signature verdicts, so a window served after a failed re-read is a
   stale body and a badge this process cannot check, presented as current.
 - A `Store` holds one independent window per mailbox key (`map[string]*mailboxWindow`)
-  — a user can poll several folders, each with its own cursor.
+  — a user can poll several folders, each with its own cursor. `Sync` callers at a
+  non-default limit use `WindowKey(mailbox, limit)` (NUL-separated), so limits do not
+  reset each other (native snapshots keep the base window). At most `maxLimitWindows` (3)
+  limit windows per mailbox, LRU by `LastUsed`; a cursor at or below a window's `Base` resets.
+  Limit windows never persist bodies (`persistLocked` strips them); `withBaseWarmth` lends the
+  base window's body/classification to returned entries (sender/time guarded), and the API warms
+  the base window;
+  `Remove` and `warmBody`'s Sent check strip the suffix. A new
+  window starts at a random `windowEpoch` (2^40..2^52, kept as `Base`) and a `since` above
+  `Seq` or at/below `Base` sets `Reset` (full window), so a cursor from another, evicted or
+  lost window is never trusted.
+- A departure below the oldest live UID of a full window is retained as
+  `Removal{AgedOut: true}` and returned in `SyncResult.AgedOut`, never `Removed`.
+  `HasMore` is set when a full window's oldest entry is new to the caller.
 - **Not a permanent store, unlike `contacts`.** A window represents "the
   current top-N view," which churns by nature. `Sync` (the live-IMAP-backed
   path) replaces the window's contents wholesale each call; there is no
@@ -102,6 +115,7 @@ All code under `backend/internal/mailcache/`. Consumed by both `api/`
   window-fallout removal, cursor monotonicity, the multi-poller
   `since`-filtering case (a lower `since` caller still sees changes bumped
   by a different caller's intervening `Sync`), limit-change window reset,
+  aged-out vs removed, `HasMore`, foreign-cursor `Reset`, per-limit windows,
   persistence round-trip, independent per-mailbox windows, `Upsert`'s
   no-removal-inference and window-cap trimming, and `Snapshot`'s
   `fullyWarmed` boundary conditions.

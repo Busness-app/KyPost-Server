@@ -561,8 +561,8 @@ func (c *Client) ApplyInboxAction(ctx context.Context, id, action, folder, targe
 		return ErrNotFound
 	}
 	switch action {
-	case "read":
-		seen := true
+	case "read", "unread":
+		seen := action == "read"
 		return c.store.editFlags(ctx, folder, uid, &seen, "", false)
 	case "archive":
 		m, err := c.store.metadata(ctx, folder, uid)

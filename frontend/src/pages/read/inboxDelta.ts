@@ -11,6 +11,9 @@ export type InboxDeltaResponse = {
   delta?: boolean;
   cursor?: number;
   removed?: string[];
+  // Fell below the server's window but still exist. This page shows only
+  // the window, so it drops them like removals.
+  agedOut?: string[];
 };
 
 // applyInboxDelta returns the next byTab for a delta response. The server sends
@@ -28,7 +31,7 @@ export function applyInboxDelta(
     items.forEach((item) => previous.set(item.messageId, item));
   });
 
-  const gone = new Set(delta.removed ?? []);
+  const gone = new Set([...(delta.removed ?? []), ...(delta.agedOut ?? [])]);
   const incoming = new Map<string, { tab: string; email: InboxEmail }>();
   Object.entries(delta.byTab ?? {}).forEach(([tab, items]) => {
     items.forEach((email) => incoming.set(email.messageId, { tab, email }));

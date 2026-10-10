@@ -17,10 +17,10 @@ import (
 // unfolded header line whose field name matches one of fields
 // (case-insensitive), each still carrying its "Field-Name: value" prefix.
 //
-// Every UID actually fetched has an entry, empty when none of the fields are
-// present. A UID absent from the result was NOT fetched — larger than
-// mailmsg.MaxInboundMessageBytes, or past the running byte budget — so callers
-// must treat its headers as unknown, not absent. The bounds are the body
+// Every UID the server returned has an entry, empty when none of the fields
+// are present. A UID absent from the result was NOT fetched — larger than
+// mailmsg.MaxInboundMessageBytes, past the running byte budget, or no longer
+// in the mailbox — so callers must treat its headers as unknown, not absent. The bounds are the body
 // fetch's: header size is sender-controlled and HEADER.FIELDS has no cap.
 func (c *APIClient) FetchHeaderFields(ctx context.Context, mailbox string, uids []int, fields ...string) (map[int][]string, error) {
 	c.opMu.Lock()
@@ -56,9 +56,10 @@ func (c *APIClient) FetchHeaderFields(ctx context.Context, mailbox string, uids 
 		}
 		sizes := make(map[int]int64, len(page))
 		for _, uid := range page {
-			lines := got[uid]
-			if lines == nil {
-				lines = []string{}
+			// No FETCH record means the message is gone: leave it absent.
+			lines, ok := got[uid]
+			if !ok {
+				continue
 			}
 			out[uid] = lines
 			for _, l := range lines {
@@ -224,9 +225,15 @@ func parseHeaderFieldsRecords(records [][]*goimap.Token, fields []string) (map[i
 		}
 
 		// A UID whose header-fields value is empty/NIL (no requested field
-		// present) is simply absent from the result — that is the normal,
-		// common case, not an error.
-		if !valueFound || value == "" {
+		// present) maps to an empty slice: the message exists, it just has
+		// none of the fields. Absence is reserved for "no record at all".
+		if !valueFound {
+			continue
+		}
+		if _, seen := result[uid]; !seen {
+			result[uid] = []string{}
+		}
+		if value == "" {
 			continue
 		}
 

@@ -3,6 +3,7 @@ package mailcache
 import (
 	"encoding/hex"
 	"errors"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Busnes-app/kypost-server/backend/internal/fsutil"
 )
@@ -42,7 +44,25 @@ type mailboxWindow struct {
 	// maxRemovals. Retained so a removal can be reported to every caller whose
 	// cursor predates it — see Store.Sync.
 	Removals []Removal `json:"removals,omitempty"`
+	// Base is Seq when a limit window was created; a cursor at or below it
+	// was issued by another (possibly evicted) window. LastUsed orders limit
+	// windows for eviction.
+	Base     int64 `json:"base,omitempty"`
+	LastUsed int64 `json:"lastUsed,omitempty"`
 }
+
+// windowEpoch is a new window's starting sequence. Random, so a cursor issued
+// by any other window — another limit, an evicted one, or one in a cache file
+// that was lost — is at or below Base or above Seq of this one, and resets,
+// except with negligible probability. Below 2^52 so cursors stay exact as
+// JavaScript numbers with room to grow.
+func windowEpoch() int64 {
+	return 1<<40 + rand.Int64N(1<<52-1<<41)
+}
+
+// maxLimitWindows caps the WindowKey windows kept per mailbox; the least
+// recently synced is evicted, and its clients get a full window next time.
+const maxLimitWindows = 3
 
 // Store is one user's mail metadata cache, persisted as mailcache.json
 // alongside contacts.json/state.json/decisions.json in the user's state
@@ -180,8 +200,9 @@ func (s *Store) refreshFromDiskLocked() error {
 }
 
 func (s *Store) persistLocked() error {
-	if s.omitBodies {
-		for _, win := range s.mailboxes {
+	for key, win := range s.mailboxes {
+		// Bodies live once, in the base window; limit windows borrow them.
+		if s.omitBodies || windowMailbox(key) != key {
 			for i := range win.Entries {
 				win.Entries[i].Body = ""
 				win.Entries[i].PGPProtectedSubject = ""
@@ -262,6 +283,15 @@ func (s *Store) Snapshot(mailboxKey string, limit int) ([]Entry, bool, error) {
 // at maxRemovals), and Removed is every retained removal with Rev > since. A UID
 // that returns to the window drops its retained removal.
 //
+// A departure below the oldest live UID of a full window aged out (AgedOut);
+// any other departure left the mailbox (Removed). A message deleted in the same
+// poll that pushes it out of a full window is reported as aged out.
+//
+// A since above the window's Seq or at/below its Base was not issued by it (a
+// new WindowKey, an evicted window, a lost cache file): Reset is set and the
+// result is computed as for since=0. A new window starts at a random
+// windowEpoch, so a cursor from any other window cannot look current to it.
+//
 // If limit differs from the window's stored Limit, the prior window is discarded
 // without computing Removed (a limit change invalidates window comparability)
 // and every live entry is reported as New.
@@ -278,9 +308,21 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 	}
 
 	win := s.mailboxes[mailboxKey]
+	limitWindow := windowMailbox(mailboxKey) != mailboxKey
 	if win == nil {
-		win = &mailboxWindow{}
+		win = &mailboxWindow{Seq: windowEpoch()}
+		win.Base = win.Seq
+		if limitWindow {
+			s.evictLimitWindowLocked(windowMailbox(mailboxKey))
+		}
 		s.mailboxes[mailboxKey] = win
+	}
+	if limitWindow {
+		win.LastUsed = time.Now().UnixNano()
+	}
+	reset := since > win.Seq || (since > 0 && since <= win.Base)
+	if reset {
+		since = 0
 	}
 
 	resetWindow := win.Limit != 0 && win.Limit != limit
@@ -295,9 +337,14 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 
 	next := make([]Entry, 0, len(live))
 	liveUIDs := make(map[int]bool, len(live))
+	full := len(live) >= limit
+	minLive := 0
 
 	for _, ov := range live {
 		liveUIDs[ov.UID] = true
+		if minLive == 0 || ov.UID < minLive {
+			minLive = ov.UID
+		}
 		prev, existed := prevByUID[ov.UID]
 		switch {
 		case !existed:
@@ -377,7 +424,7 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 			// Stamped with its own Rev so it can be compared against a caller's
 			// cursor. Identity only: see Removal.
 			win.Seq++
-			win.Removals = append(win.Removals, Removal{UID: e.UID, MessageID: e.MessageID, Rev: win.Seq})
+			win.Removals = append(win.Removals, Removal{UID: e.UID, MessageID: e.MessageID, Rev: win.Seq, AgedOut: full && e.UID < minLive})
 		}
 	}
 	if len(win.Removals) > maxRemovals {
@@ -390,17 +437,24 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 		return SyncResult{}, err
 	}
 
-	var removed []Removal
+	result := SyncResult{Cursor: win.Seq, Reset: reset}
 	for _, r := range win.Removals {
-		if r.Rev > since {
-			removed = append(removed, r)
+		switch {
+		case r.Rev <= since:
+		case r.AgedOut:
+			result.AgedOut = append(result.AgedOut, r)
+		default:
+			result.Removed = append(result.Removed, r)
 		}
 	}
-
-	result := SyncResult{Cursor: win.Seq, Removed: removed}
+	// next is UID-ascending, so next[0] is the oldest live message.
+	result.HasMore = since > 0 && full && len(next) > 0 && next[0].FirstRev > since
 	for _, e := range next {
 		if e.Rev <= since {
 			continue
+		}
+		if limitWindow {
+			e = withBaseWarmth(s.mailboxes, mailboxKey, e)
 		}
 		if e.FirstRev > since {
 			result.New = append(result.New, e)
@@ -409,6 +463,47 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 		}
 	}
 	return result, nil
+}
+
+// withBaseWarmth fills a limit-window entry's body and classification from
+// the base window, which holds each body once (the poller and API warm it), so
+// a limit window neither stores nor re-fetches bodies. The sender/timestamp
+// guard keeps a reused UID from borrowing another message's state.
+func withBaseWarmth(mailboxes map[string]*mailboxWindow, key string, e Entry) Entry {
+	base := mailboxes[windowMailbox(key)]
+	if base == nil {
+		return e
+	}
+	i, found := slices.BinarySearchFunc(base.Entries, e.UID, func(b Entry, uid int) int { return b.UID - uid })
+	if !found || base.Entries[i].Sender != e.Sender || base.Entries[i].AtUTC != e.AtUTC {
+		return e
+	}
+	b := base.Entries[i]
+	e.Body, e.BodyMode, e.HasAttachments, e.PGPProtectedSubject = b.Body, b.BodyMode, b.HasAttachments, b.PGPProtectedSubject
+	e.PGPEncrypted, e.PGPSigned, e.PGPVerified, e.PGPSignerFingerprint = b.PGPEncrypted, b.PGPSigned, b.PGPVerified, b.PGPSignerFingerprint
+	e.PGPClassified, e.PGPBodyOmitted, e.PGPVerdictSchemaVersion, e.ContactKeyGen = b.PGPClassified, b.PGPBodyOmitted, b.PGPVerdictSchemaVersion, b.ContactKeyGen
+	return e
+}
+
+// evictLimitWindowLocked drops the least recently synced limit window of
+// mailbox once it holds maxLimitWindows, to make room for a new one.
+func (s *Store) evictLimitWindowLocked(mailbox string) {
+	var keys []string
+	for key := range s.mailboxes {
+		if key != mailbox && windowMailbox(key) == mailbox {
+			keys = append(keys, key)
+		}
+	}
+	for len(keys) >= maxLimitWindows {
+		oldest := 0
+		for i, key := range keys {
+			if s.mailboxes[key].LastUsed < s.mailboxes[keys[oldest]].LastUsed {
+				oldest = i
+			}
+		}
+		delete(s.mailboxes, keys[oldest])
+		keys = append(keys[:oldest], keys[oldest+1:]...)
+	}
 }
 
 // warmBody is the Body to persist for in.
@@ -440,7 +535,7 @@ func (s *Store) Sync(mailboxKey string, limit int, live []Overview, since int64)
 // caller cannot bypass it, and so the caller's own response entry keeps the body
 // it just fetched.
 func warmBody(mailboxKey string, in Entry) string {
-	if in.PGPEncrypted || isSentMailbox(mailboxKey) {
+	if in.PGPEncrypted || isSentMailbox(windowMailbox(mailboxKey)) {
 		return ""
 	}
 	return redactPickupLinkFragments(in.Body)
@@ -666,7 +761,8 @@ func (s *Store) OmitBodies() error {
 	return s.persistLocked()
 }
 
-// Remove drops a replaced UID and retains its removal for delta clients.
+// Remove drops a replaced UID from every limit window of mailbox and retains
+// its removal for delta clients.
 func (s *Store) Remove(mailbox string, uid int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -678,22 +774,28 @@ func (s *Store) Remove(mailbox string, uid int) error {
 	if err := s.refreshFromDiskLocked(); err != nil {
 		return err
 	}
-	win := s.mailboxes[mailbox]
-	if win == nil {
-		return nil
-	}
-	for i, e := range win.Entries {
-		if e.UID == uid {
-			win.Seq++
-			win.Removals = append(win.Removals, Removal{UID: uid, MessageID: strconv.Itoa(uid), Rev: win.Seq})
-			if len(win.Removals) > maxRemovals {
-				win.Removals = win.Removals[len(win.Removals)-maxRemovals:]
+	changed := false
+	for key, win := range s.mailboxes {
+		if win == nil || windowMailbox(key) != mailbox {
+			continue
+		}
+		for i, e := range win.Entries {
+			if e.UID == uid {
+				win.Seq++
+				win.Removals = append(win.Removals, Removal{UID: uid, MessageID: strconv.Itoa(uid), Rev: win.Seq})
+				if len(win.Removals) > maxRemovals {
+					win.Removals = win.Removals[len(win.Removals)-maxRemovals:]
+				}
+				win.Entries = append(win.Entries[:i], win.Entries[i+1:]...)
+				changed = true
+				break
 			}
-			win.Entries = append(win.Entries[:i], win.Entries[i+1:]...)
-			return s.persistLocked()
 		}
 	}
-	return nil
+	if !changed {
+		return nil
+	}
+	return s.persistLocked()
 }
 
 // ErrMailSource refuses cache reuse across mail source identities. The binding

@@ -306,6 +306,17 @@ A client that handles mail must, at minimum:
 See [`docs/E2E_PGP.md`](E2E_PGP.md) for the full model, and
 [`docs/WKD_Publishing.md`](WKD_Publishing.md) for key discovery.
 
+**Reply threading.** `POST /api/mail/send` accepts optional
+`replyToMessageId` (the list `messageId` of the message being answered) and
+`replyToMailbox` (its folder; default the account's inbox). The server reads
+that message's `Message-ID`, `References` and `In-Reply-To` and writes
+`In-Reply-To` and `References` (root plus newest, at most 20) itself; clients
+cannot supply header text. A malformed/stale reference answers 400, a missing
+message 404, a mailbox read failure 502 — all before anything is sent; drop
+the field to send unthreaded. An original with no usable `Message-ID` is sent
+unthreaded. Client-encrypted sends (`/api/mail/send-pgp`) build their own MIME
+and are not covered.
+
 **Calendar invites.** `GET /api/mail/attachments` lists every `text/calendar`
 part. An iMIP invite carried as an undisposed `multipart/alternative` part
 (Google, Outlook) is listed after the real attachments as
@@ -392,6 +403,13 @@ Responses from `writeJSON` are gzipped when the client sends `Accept-Encoding:
 gzip` and the payload is at least 1 KiB (`backend/internal/api/gzip.go`). A
 client that does not send the header gets identical bytes to before.
 
+**Preview.** Add `preview=1` to get `preview`: at most 200 characters of
+single-line plain text (HTML flattened, control characters and line breaks
+turned into spaces), taken from the first 32 KiB of a body the server already
+has for that row. It works with `bodies=0`. It is absent on rows the server has
+no body for: `changeType:"updated"` delta rows (keep your stored preview),
+`before=` pages, search results, and any encrypted message (including one the server decrypted). Render it as text, never markup.
+
 **Older mail.** `GET /api/inbox?mailbox=<path>&limit=N&before=<messageId>`
 returns the next `limit` messages older than `messageId` (exactly as a list row
 gave it), newest first, as `{tabs, byTab, hasMore, nextBefore}`. Rows are
@@ -401,6 +419,26 @@ message through `/api/mail/body`. `hasMore` says older mail remains;
 `nextBefore` (absent on an empty page) is the `before` for the next page. The
 page has no `cursor`/`delta`/`removed`, ignores `since`, and never changes the
 cursor window. A malformed or stale reference answers 400; refresh the window.
+
+**Cursor deltas (`since=<cursor>`, external IMAP).** Each `limit` keeps its own
+window and cursor, so clients asking for different limits do not reset each
+other; a client must keep using the limit its cursor came from. Delta fields:
+
+- `removed` — the message left the mailbox; delete it.
+- `agedOut` — newer mail pushed it below a full window; it still exists. Keep
+  it (or drop it from a view that shows only the window). A message deleted in
+  the same poll that pushes it out is reported here, not in `removed`.
+- `hasMore: true` + `nextBefore` — more mail arrived than the window holds.
+  Page `before=nextBefore` (then each page's `nextBefore`) until a page
+  contains a message you already hold or `hasMore` is false; commit the
+  response `cursor` only after that, or the skipped mail is lost.
+- `delta: false` on a request with `since > 0` — the cursor was not issued by
+  this window (new limit, lost cache, or a window the server evicted: it keeps
+  at most 3 non-500 limits per mailbox, least recently used first out); the
+  response is a full window: replace.
+- Cursors are opaque non-negative integers below 2^53 (new windows start at a
+  random value around 2^40–2^52). Store and send them back exactly; never do
+  arithmetic on them or assume they start small.
 
 [`docs/INBOX_PAYLOAD_HANDOFF.md`](INBOX_PAYLOAD_HANDOFF.md) is the porting
 guide: what each client has to change, and the three things that break if you

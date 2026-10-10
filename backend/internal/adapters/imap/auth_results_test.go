@@ -76,30 +76,27 @@ func TestParseHeaderFieldsRecords(t *testing.T) {
 		}
 	})
 
-	t.Run("NIL value is absent, not an error", func(t *testing.T) {
+	t.Run("NIL value is present and empty, not an error", func(t *testing.T) {
 		raw := "* 1 FETCH (UID 400 " + arItem + " NIL)\r\n"
 		records := parseRecords(t, raw)
 		got, err := parseHeaderFieldsRecords(records, []string{"Authentication-Results"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if _, ok := got[400]; ok {
-			t.Fatalf("expected UID 400 absent, got %#v", got)
-		}
-		if len(got) != 0 {
-			t.Fatalf("expected empty map, got %#v", got)
+		if lines, ok := got[400]; !ok || len(lines) != 0 {
+			t.Fatalf("expected UID 400 present with no lines, got %#v", got)
 		}
 	})
 
-	t.Run("empty literal value is absent, not an error", func(t *testing.T) {
+	t.Run("empty literal value is present and empty, not an error", func(t *testing.T) {
 		raw := "* 1 FETCH (UID 450 " + arItem + " {0}\r\n)\r\n"
 		records := parseRecords(t, raw)
 		got, err := parseHeaderFieldsRecords(records, []string{"Authentication-Results"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if _, ok := got[450]; ok {
-			t.Fatalf("expected UID 450 absent, got %#v", got)
+		if lines, ok := got[450]; !ok || len(lines) != 0 {
+			t.Fatalf("expected UID 450 present with no lines, got %#v", got)
 		}
 	})
 

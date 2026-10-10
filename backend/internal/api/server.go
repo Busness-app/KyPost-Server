@@ -1362,6 +1362,8 @@ type mailRequest struct {
 	// the clear, so it is a downgrade the sender has to choose out loud.
 	AllowPickupFallback bool
 	From                string
+	ReplyToMessageID    string
+	ReplyToMailbox      string
 }
 
 // Size limits for one outgoing message.

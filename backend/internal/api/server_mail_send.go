@@ -88,6 +88,10 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 		// PGPDraft is a complete PGP/MIME message the browser encrypted to
 		// the sender's own key. Drafts only; see handleMailDraft.
 		PGPDraft string `json:"pgpDraft"`
+		// ReplyToMessageID is the list messageId of the message being
+		// answered; the server reads its threading headers itself.
+		ReplyToMessageID string `json:"replyToMessageId"`
+		ReplyToMailbox   string `json:"replyToMailbox"`
 	}
 	// Check the declared size before reading, so an oversized send says so.
 	// Without this the LimitReader below just truncates the JSON mid-value and
@@ -165,6 +169,8 @@ func decodeMailRequest(r *http.Request) (mailRequest, string, error) {
 		AllowPickupFallback: raw.AllowPickupFallback,
 		PGPDraft:            strings.TrimSpace(raw.PGPDraft),
 		From:                raw.From,
+		ReplyToMessageID:    strings.TrimSpace(raw.ReplyToMessageID),
+		ReplyToMailbox:      strings.TrimSpace(raw.ReplyToMailbox),
 	}, "", nil
 }
 
@@ -481,6 +487,35 @@ func composeSend(m mailmsg.Message, bcc []string) (wire, sent []byte, recipients
 	return wire, m.Build(), append(append(append([]string{}, m.To...), m.CC...), bcc...)
 }
 
+// replyThreading reads the threading headers of the message being answered,
+// so a client names the message rather than supplying header text. A message
+// without a usable Message-ID threads nothing; a reference the mailbox cannot
+// resolve refuses the send before anything is delivered.
+func replyThreading(ctx context.Context, mailClient imapadapter.Client, reference, mailbox string) (string, []string, int, string) {
+	internalID, err := imapadapter.ResolveMessageReference(mailClient, reference)
+	uid, convErr := strconv.Atoi(internalID)
+	if err != nil || convErr != nil || uid <= 0 || strconv.Itoa(uid) != internalID {
+		return "", nil, http.StatusBadRequest, "invalid replyToMessageId; refresh the mailbox"
+	}
+	if mailbox != "" {
+		if err := imapadapter.ValidateMailboxName(mailbox); err != nil {
+			return "", nil, http.StatusBadRequest, "invalid replyToMailbox"
+		}
+	}
+	lines, err := mailClient.FetchHeaderFields(ctx, mailbox, []int{uid}, "Message-ID", "References", "In-Reply-To")
+	if err != nil {
+		return "", nil, http.StatusBadGateway, "could not read the message being replied to; nothing was sent"
+	}
+	got, ok := lines[uid]
+	if !ok {
+		return "", nil, http.StatusNotFound, "the message being replied to was not found; nothing was sent"
+	}
+	h := imapadapter.HeaderMap(got)
+	all := func(key string) string { return strings.Join(h[key], " ") }
+	inReplyTo, references := mailmsg.ReplyThreading(all("Message-Id"), all("References"), all("In-Reply-To"))
+	return inReplyTo, references, 0, ""
+}
+
 func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	req, errMsg, err := decodeMailRequest(r)
 	if err != nil {
@@ -550,6 +585,22 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	}
 	autocryptHeader := s.outboundAutocryptHeader(ac.UserID, envelopeFrom)
 
+	var inReplyTo string
+	var references []string
+	if req.ReplyToMessageID != "" {
+		mailClient, err := s.mailFor(r)
+		if err != nil {
+			http.Error(w, "could not open the mailbox holding the message being replied to", http.StatusServiceUnavailable)
+			return
+		}
+		var status int
+		var msg string
+		if inReplyTo, references, status, msg = replyThreading(r.Context(), mailClient, req.ReplyToMessageID, req.ReplyToMailbox); status != 0 {
+			http.Error(w, msg, status)
+			return
+		}
+	}
+
 	msg, sentCopySource, recipients := composeSend(mailmsg.Message{
 		From:        headerFrom,
 		To:          toList,
@@ -559,6 +610,8 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		Mode:        req.Mode,
 		Attachments: req.Attachments,
 		Autocrypt:   autocryptHeader,
+		InReplyTo:   inReplyTo,
+		References:  references,
 	}, bccList)
 
 	// Signing on the user's behalf needs a private key this server can open, and
