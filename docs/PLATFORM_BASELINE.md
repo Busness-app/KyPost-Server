@@ -321,6 +321,21 @@ attachment), so a client may fetch attachments only when it is true. Rows
 cached before the server had this keep their old value until re-warmed; a
 server without it reports `false` for invite-only mail.
 
+**RSVP.** `POST /api/mail/send` accepts `calendarReply: {"ics": "<iCalendar>"}`
+and sends it as a `text/calendar; method=REPLY; charset=UTF-8` part in
+`multipart/alternative` beside the body (inside `multipart/mixed` when there
+are attachments). The object must be ≤64 KiB UTF-8 with no control
+characters, one `VCALENDAR` with exactly one top-level `METHOD:REPLY` and
+exactly one `VEVENT`; line endings are normalised to CRLF. The server does
+not check UID/SEQUENCE/ATTENDEE — copy them from the invite. A refusal is 400
+with the reason; `encrypt` or `sign` with `calendarReply` is 400 (an
+organizer's calendar cannot read a PGP-wrapped reply). Address it to the
+invite's ORGANIZER; drafts ignore the field. A successful send that carried
+the part answers `"calendarReply": true` beside `ok`/`sentSaved`/`warning`.
+A server without RSVP support ignores the field and sends a plain email with
+no `calendarReply` in the response: treat a 200 without it as "RSVP not
+delivered" and tell the user.
+
 ---
 
 ## 7. Inbox listing and message bodies

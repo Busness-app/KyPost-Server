@@ -884,7 +884,7 @@ IMAP and inbox:
 
 Mail:
 
-- `POST /api/mail/send`. Optional `attachments: [{name, mimeType, dataBase64}]`, 25 MB in total. Optional `encrypt` and `sign`. If `encrypt` is true and a recipient has no usable key, the call fails with 409. To allow the pickup-link fallback instead, set `allowPickupFallback`. See [Where your PGP private key lives](#where-your-pgp-private-key-lives).
+- `POST /api/mail/send`. Optional `attachments: [{name, mimeType, dataBase64}]`, 25 MB in total. Optional `encrypt` and `sign`. If `encrypt` is true and a recipient has no usable key, the call fails with 409. To allow the pickup-link fallback instead, set `allowPickupFallback`. See [Where your PGP private key lives](#where-your-pgp-private-key-lives). Optional `calendarReply: {ics}` sends a calendar RSVP (iTIP REPLY) alongside the body.
 - `POST /api/mail/draft` (the same optional `attachments` shape)
 - `GET /api/mail/body?mailbox=&messageId=` (one message's body and its `bodyMode`, for clients that list with `bodies=0`; 422 if an adapter reports malformed MIME, preserving original mail)
 - `GET /api/mail/attachments?mailbox=&messageId=` (lists the attachment metadata of a message; a calendar invite sent as a message body part appears as `invite.ics` with `calendarMethod`)

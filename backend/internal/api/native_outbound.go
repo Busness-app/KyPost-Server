@@ -82,7 +82,7 @@ func (s *Server) finishNativeSend(w http.ResponseWriter, r *http.Request, ac Aut
 	if !first.SentSaved && len(sent) > 0 {
 		warning = joinWarnings(warning, "email accepted but Sent filing remains pending; sending it again will not repair Sent")
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sentSaved": first.SentSaved, "warning": warning, "outboxId": id})
+	writeJSON(w, http.StatusOK, withCalendarReplyAck(r, map[string]any{"ok": true, "sentSaved": first.SentSaved, "warning": warning, "outboxId": id}))
 }
 
 // nativeFrom resolves the requested From to an active ledger address of the

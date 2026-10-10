@@ -50,6 +50,9 @@ type Message struct {
 	// they share one identity.
 	MessageID string
 	Date      time.Time
+	// CalendarReply, when set, is an iTIP REPLY from CalendarReply. Build
+	// sends it as a text/calendar; method=REPLY alternative to the body.
+	CalendarReply []byte
 }
 
 // Stamp fills an empty Date and Message-ID. The Message-ID domain is the From
@@ -192,7 +195,7 @@ func (m Message) Build() []byte {
 		msg.WriteString("Autocrypt: " + FoldHeaderValue(SanitizeHeaderValue(m.Autocrypt)) + "\r\n")
 	}
 
-	if len(m.Attachments) == 0 {
+	if len(m.Attachments) == 0 && len(m.CalendarReply) == 0 {
 		msg.WriteString("Content-Type: " + m.ContentType() + "\r\n")
 		msg.WriteString("Content-Transfer-Encoding: base64\r\n")
 		msg.WriteString("\r\n")
@@ -201,14 +204,25 @@ func (m Message) Build() []byte {
 	}
 
 	w := multipart.NewWriter(&msg)
+	if len(m.Attachments) == 0 {
+		msg.WriteString("Content-Type: multipart/alternative; boundary=" + w.Boundary() + "\r\n\r\n")
+		m.writeBodyParts(w, bodyEncoded)
+		_ = w.Close()
+		return msg.Bytes()
+	}
 	msg.WriteString("Content-Type: multipart/mixed; boundary=" + w.Boundary() + "\r\n")
 	msg.WriteString("\r\n")
 
-	text, _ := w.CreatePart(textproto.MIMEHeader{
-		"Content-Type":              {m.ContentType()},
-		"Content-Transfer-Encoding": {"base64"},
-	})
-	writeWrappedBase64(text, bodyEncoded)
+	if len(m.CalendarReply) == 0 {
+		m.writeBodyParts(w, bodyEncoded)
+	} else {
+		boundary := multipart.NewWriter(io.Discard).Boundary()
+		alt, _ := w.CreatePart(textproto.MIMEHeader{"Content-Type": {"multipart/alternative; boundary=" + boundary}})
+		inner := multipart.NewWriter(alt)
+		_ = inner.SetBoundary(boundary)
+		m.writeBodyParts(inner, bodyEncoded)
+		_ = inner.Close()
+	}
 
 	for _, a := range m.Attachments {
 		// Sanitized like every other header value here. mime/multipart writes
@@ -241,6 +255,24 @@ func (m Message) Build() []byte {
 	}
 	_ = w.Close()
 	return msg.Bytes()
+}
+
+// writeBodyParts writes the text body and, for an iTIP reply, its
+// text/calendar alternative (RFC 6047 §2.4: method parameter required).
+func (m Message) writeBodyParts(w *multipart.Writer, bodyEncoded string) {
+	text, _ := w.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {m.ContentType()},
+		"Content-Transfer-Encoding": {"base64"},
+	})
+	writeWrappedBase64(text, bodyEncoded)
+	if len(m.CalendarReply) == 0 {
+		return
+	}
+	cal, _ := w.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {"text/calendar; method=REPLY; charset=UTF-8"},
+		"Content-Transfer-Encoding": {"base64"},
+	})
+	writeBase64Wrapped(cal, m.CalendarReply)
 }
 
 // writeBase64Wrapped writes base64 content in RFC 2045 76-character lines.
